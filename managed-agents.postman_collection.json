@@ -4,10 +4,22 @@
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
-    { "key": "base_url", "value": "http://localhost:8000" },
-    { "key": "api_key",  "value": "change-me-to-a-random-secret" },
-    { "key": "agent_id",  "value": "" },
-    { "key": "session_id", "value": "" }
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000"
+    },
+    {
+      "key": "api_key",
+      "value": "change-me-to-a-random-secret"
+    },
+    {
+      "key": "agent_id",
+      "value": ""
+    },
+    {
+      "key": "session_id",
+      "value": ""
+    }
   ],
   "item": [
     {
@@ -30,8 +42,14 @@
           "request": {
             "method": "POST",
             "header": [
-              { "key": "X-API-Key",     "value": "{{api_key}}" },
-              { "key": "Content-Type",  "value": "application/json" }
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "url": "{{base_url}}/v1/agents",
             "body": {
@@ -45,15 +63,29 @@
           "request": {
             "method": "GET",
             "header": [
-              { "key": "X-API-Key", "value": "{{api_key}}" }
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
             ],
             "url": {
               "raw": "{{base_url}}/v1/agents?limit=20&offset=0",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "agents"],
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "agents"
+              ],
               "query": [
-                { "key": "limit",  "value": "20" },
-                { "key": "offset", "value": "0" }
+                {
+                  "key": "limit",
+                  "value": "20"
+                },
+                {
+                  "key": "offset",
+                  "value": "0"
+                }
               ]
             }
           }
@@ -63,7 +95,10 @@
           "request": {
             "method": "GET",
             "header": [
-              { "key": "X-API-Key", "value": "{{api_key}}" }
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}"
           }
@@ -73,8 +108,14 @@
           "request": {
             "method": "PATCH",
             "header": [
-              { "key": "X-API-Key",    "value": "{{api_key}}" },
-              { "key": "Content-Type", "value": "application/json" }
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}",
             "body": {
@@ -88,7 +129,10 @@
           "request": {
             "method": "DELETE",
             "header": [
-              { "key": "X-API-Key", "value": "{{api_key}}" }
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}"
           }
@@ -103,8 +147,14 @@
           "request": {
             "method": "POST",
             "header": [
-              { "key": "X-API-Key",    "value": "{{api_key}}" },
-              { "key": "Content-Type", "value": "application/json" }
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}/sessions",
             "body": {
@@ -123,8 +173,14 @@
           "request": {
             "method": "POST",
             "header": [
-              { "key": "X-API-Key",    "value": "{{api_key}}" },
-              { "key": "Content-Type", "value": "application/json" }
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}/sessions/{{session_id}}/messages",
             "body": {
@@ -143,9 +199,194 @@
           "request": {
             "method": "GET",
             "header": [
-              { "key": "X-API-Key", "value": "{{api_key}}" }
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
             ],
             "url": "{{base_url}}/v1/sessions/{{session_id}}/history"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Memory (M2)",
+      "item": [
+        {
+          "name": "GET /v1/agents/:agent_id/memory — List semua memory",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/memory"
+          }
+        },
+        {
+          "name": "POST /v1/agents/:agent_id/memory — Upsert memory entry",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/memory",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"key\": \"user_name\",\n  \"value\": \"Bagas\"\n}"
+            }
+          }
+        },
+        {
+          "name": "DELETE /v1/agents/:agent_id/memory/:key — Hapus memory entry",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/memory/user_name"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Skills (M2)",
+      "item": [
+        {
+          "name": "GET /v1/agents/:agent_id/skills — List semua skill",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/skills"
+          }
+        },
+        {
+          "name": "POST /v1/agents/:agent_id/skills — Buat/update skill",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/skills",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"csv_analysis\",\n  \"description\": \"Panduan menganalisis file CSV dengan Python pandas\",\n  \"content_md\": \"## CSV Analysis Skill\\n\\n1. Load file dengan `pd.read_csv()`\\n2. Tampilkan `.info()` dan `.describe()`\\n3. Cek missing values dengan `.isnull().sum()`\\n4. Plot distribusi kolom numerik\"\n}"
+            }
+          }
+        },
+        {
+          "name": "GET /v1/agents/:agent_id/skills/:name — Detail skill",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/skills/csv_analysis"
+          }
+        },
+        {
+          "name": "DELETE /v1/agents/:agent_id/skills/:name — Hapus skill",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/skills/csv_analysis"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Custom Tools (M2)",
+      "item": [
+        {
+          "name": "GET /v1/agents/:agent_id/custom-tools — List semua custom tool",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/custom-tools"
+          }
+        },
+        {
+          "name": "POST /v1/agents/:agent_id/custom-tools — Buat/update custom tool",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/custom-tools",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"fibonacci\",\n  \"description\": \"Hitung deret Fibonacci ke-n\",\n  \"code\": \"def fibonacci(n: int) -> int:\\n    if n <= 1:\\n        return n\\n    a, b = 0, 1\\n    for _ in range(2, n + 1):\\n        a, b = b, a + b\\n    return b\"\n}"
+            }
+          }
+        },
+        {
+          "name": "GET /v1/agents/:agent_id/custom-tools/:name — Detail custom tool",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/custom-tools/fibonacci"
+          }
+        },
+        {
+          "name": "DELETE /v1/agents/:agent_id/custom-tools/:name — Hapus custom tool",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/custom-tools/fibonacci"
           }
         }
       ]

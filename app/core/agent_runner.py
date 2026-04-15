@@ -1,10 +1,11 @@
 """
-Agent runner: wires OpenRouter LLM + sandbox tools + LangGraph ReAct agent,
-loads session history, runs the agent, persists all steps to DB.
+Agent runner: wires OpenRouter LLM + sandbox tools + memory/skill/custom-tool
+tools + LangGraph ReAct agent, loads session history, runs the agent,
+persists all steps to DB.
 
 DeepAgents swap-in note
 -----------------------
-This uses LangGraph's `create_react_agent` for Milestone 1.
+This uses LangGraph's `create_react_agent` for Milestone 1/2.
 When LangChain DeepAgents API is confirmed, replace the agent build block with:
 
     from deepagents import create_deep_agent
@@ -37,7 +38,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.core.custom_tool_service import list_custom_tools
+from app.core.memory_service import build_memory_context, upsert_memory, get_memory, list_memories, delete_memory
 from app.core.sandbox import DockerSandbox
+from app.core.skill_service import create_or_update_skill, get_skill, list_skills as _list_skills
+from app.core.custom_tool_service import create_or_update_custom_tool, list_custom_tools
 from app.models.message import Message
 from app.models.session import Session
 
@@ -73,6 +78,170 @@ def build_sandbox_tools(sandbox: DockerSandbox) -> list:
         return sandbox.list_files(directory)
 
     return [bash, write_file, read_file, list_files]
+
+
+# ---------------------------------------------------------------------------
+# Memory tools (async closures bound to agent_id + db session)
+# ---------------------------------------------------------------------------
+
+def build_memory_tools(agent_id: uuid.UUID, db: AsyncSession) -> list:
+    """Return LangChain tools for long-term memory, bound to this agent."""
+
+    @tool
+    async def remember(key: str, value: str) -> str:
+        """Store or update a fact in long-term memory. Args: key (short label), value (text to remember)."""
+        await upsert_memory(agent_id, key, value, db)
+        return f"Remembered: {key} = {value}"
+
+    @tool
+    async def recall(query: str) -> str:
+        """Retrieve a memory entry by its key. Args: query (the key to look up)."""
+        mem = await get_memory(agent_id, query, db)
+        if mem:
+            return f"{mem.key}: {mem.value_data}"
+        # fallback: list all keys so agent knows what's available
+        all_mems = await list_memories(agent_id, db)
+        if not all_mems:
+            return "No memories stored yet."
+        keys = ", ".join(m.key for m in all_mems)
+        return f"No memory found for '{query}'. Available keys: {keys}"
+
+    @tool
+    async def forget(key: str) -> str:
+        """Delete a memory entry by key. Args: key (the key to remove)."""
+        deleted = await delete_memory(agent_id, key, db)
+        return f"Forgotten: {key}" if deleted else f"No memory found for key '{key}'"
+
+    return [remember, recall, forget]
+
+
+# ---------------------------------------------------------------------------
+# Skill tools
+# ---------------------------------------------------------------------------
+
+def build_skill_tools(agent_id: uuid.UUID, db: AsyncSession) -> list:
+    """Return LangChain tools for skill management."""
+
+    @tool
+    async def create_skill(name: str, description: str, content_md: str) -> str:
+        """Save a reusable skill (instruction/prompt block) to the skill library.
+        Args: name (unique short identifier), description (what it does), content_md (full instructions in markdown)."""
+        skill = await create_or_update_skill(agent_id, name, description, content_md, db)
+        return f"Skill '{skill.name}' saved successfully."
+
+    @tool
+    async def list_skills() -> str:
+        """List all available skills for this agent."""
+        skills = await _list_skills(agent_id, db)
+        if not skills:
+            return "No skills saved yet."
+        lines = [f"- **{s.name}**: {s.description}" for s in skills]
+        return "Available skills:\n" + "\n".join(lines)
+
+    @tool
+    async def use_skill(name: str) -> str:
+        """Load and return the full content of a skill by name to use in current context.
+        Args: name (the skill identifier)."""
+        skill = await get_skill(agent_id, name, db)
+        if not skill:
+            return f"No skill found with name '{name}'"
+        return f"# Skill: {skill.name}\n\n{skill.content_md}"
+
+    return [create_skill, list_skills, use_skill]
+
+
+# ---------------------------------------------------------------------------
+# Custom Tool Creator tools
+# ---------------------------------------------------------------------------
+
+def build_tool_creator_tools(agent_id: uuid.UUID, db: AsyncSession, sandbox: DockerSandbox) -> list:
+    """Return LangChain tools that let the agent create and run its own Python tools."""
+
+    @tool
+    async def create_tool(name: str, description: str, python_code: str) -> str:
+        """Save a new Python tool for this agent. The code must define a function with the same name as `name`.
+        Args: name (function name, snake_case), description (what it does), python_code (valid Python code)."""
+        ct, err = await create_or_update_custom_tool(agent_id, name, description, python_code, db)
+        if err:
+            return f"[error] Could not save tool: {err}"
+        return f"Tool '{name}' saved successfully. It will be available in future sessions."
+
+    @tool
+    async def list_tools() -> str:
+        """List all custom tools created by this agent."""
+        tools = await list_custom_tools(agent_id, db)
+        if not tools:
+            return "No custom tools created yet."
+        lines = [f"- **{t.name}**: {t.description}" for t in tools]
+        return "Custom tools:\n" + "\n".join(lines)
+
+    @tool
+    async def run_custom_tool(name: str, args_json: str = "{}") -> str:
+        """Execute a saved custom tool by running its Python code in the sandbox.
+        IMPORTANT: If you just created a new tool using create_tool, it won't be available as a direct LangChain tool until the next session.
+        In the current session, you MUST use this run_custom_tool to execute your newly created tool.
+        Args: name (tool name), args_json (JSON string of keyword arguments for the function)."""
+        tools = await list_custom_tools(agent_id, db)
+        tool_map = {t.name: t for t in tools}
+        if name not in tool_map:
+            return f"[error] No custom tool named '{name}'. Use list_tools() to see available tools."
+
+        ct = tool_map[name]
+        # Write the tool code + a __main__ runner to a temp file and execute in sandbox
+        try:
+            args = json.loads(args_json)
+        except json.JSONDecodeError as e:
+            return f"[error] Invalid args_json: {e}"
+
+        args_repr = ", ".join(f"{k}={repr(v)}" for k, v in args.items())
+        runner_code = f"""{ct.code}
+
+# Auto-generated runner
+if __name__ == "__main__":
+    import json
+    result = {name}({args_repr})
+    print(json.dumps({{"result": result}}) if result is not None else "null")
+"""
+        sandbox.write_file(f"_custom_tool_{name}.py", runner_code)
+        output = sandbox.bash(f"python /workspace/_custom_tool_{name}.py")
+        return output
+
+    return [create_tool, list_tools, run_custom_tool]
+
+
+# ---------------------------------------------------------------------------
+# Dynamic custom tool LangChain wrappers (load saved tools as proper LC tools)
+# ---------------------------------------------------------------------------
+
+def build_loaded_custom_tools(custom_tools_db: list, sandbox: DockerSandbox) -> list:
+    """
+    For each saved custom tool, create a LangChain @tool that executes it in the sandbox.
+    Called at agent boot so that previously created tools are available immediately.
+    """
+    lc_tools = []
+    for ct in custom_tools_db:
+        # Capture loop variables via default args to avoid closure bugs.
+        def _make_runner(ct_name: str, ct_code: str, ct_desc: str):
+            @tool(ct_name, description=ct_desc)
+            def _runner(args_json: str = "{}") -> str:
+                """Execute a saved custom tool in the sandbox."""
+                try:
+                    args = json.loads(args_json)
+                except json.JSONDecodeError as e:
+                    return f"[error] Invalid args_json: {e}"
+                args_repr = ", ".join(f"{k}={repr(v)}" for k, v in args.items())
+                runner_code = f"""{ct_code}
+
+if __name__ == "__main__":
+    import json
+    result = {ct_name}({args_repr})
+    print(json.dumps({{"result": result}}) if result is not None else "null")
+"""
+                sandbox.write_file(f"_custom_tool_{ct_name}.py", runner_code)
+                return sandbox.bash(f"python /workspace/_custom_tool_{ct_name}.py")
+            return _runner
+        lc_tools.append(_make_runner(ct.name, ct.code, ct.description))
+    return lc_tools
 
 
 # ---------------------------------------------------------------------------
@@ -119,10 +288,11 @@ async def run_agent(
     db: AsyncSession,
 ) -> dict[str, Any]:
     run_id = uuid.uuid4()
+    agent_id: uuid.UUID = session.agent_id
     log = logger.bind(
         run_id=str(run_id),
         session_id=str(session.id),
-        agent_id=str(session.agent_id),
+        agent_id=str(agent_id),
         model=agent_model.model,
     )
     log.info("agent_run.start")
@@ -137,13 +307,42 @@ async def run_agent(
 
     # --- Sandbox + tools ---
     sandbox = DockerSandbox(session.id)
-    tools = build_sandbox_tools(sandbox)
 
-    # --- System prompt ---
-    system_prompt = agent_model.instructions or "You are a helpful assistant."
+    # --- Gather all tools ---
+    tools: list = []
+    # 1. Core sandbox tools
+    tools.extend(build_sandbox_tools(sandbox))
+    # 2. Memory tools
+    tools.extend(build_memory_tools(agent_id, db))
+    # 3. Skill tools
+    tools.extend(build_skill_tools(agent_id, db))
+    # 4. Tool creator tools
+    tools.extend(build_tool_creator_tools(agent_id, db, sandbox))
+    # 5. Previously saved custom tools (so they're callable by name directly)
+    saved_custom_tools = await list_custom_tools(agent_id, db)
+    tools.extend(build_loaded_custom_tools(saved_custom_tools, sandbox))
+
+    # --- System prompt = instructions + saved memories ---
+    base_prompt = agent_model.instructions or "You are a helpful assistant."
+    memory_block = await build_memory_context(agent_id, db)
+    system_prompt = base_prompt
+    if memory_block:
+        system_prompt += f"\n\n{memory_block}"
     if agent_model.safety_policy:
         policy_text = json.dumps(agent_model.safety_policy, indent=2)
         system_prompt += f"\n\n## Safety Policy\n{policy_text}"
+    system_prompt += (
+        "\n\n## Self-Extending Capabilities\n"
+        "You have access to memory tools (remember/recall/forget), "
+        "skill tools (create_skill/list_skills/use_skill), "
+        "and tool creator tools (create_tool/list_tools/run_custom_tool). "
+        "Use them proactively to remember important facts, build reusable skills, "
+        "and extend your own capabilities.\n"
+        "CRITICAL RULES:\n"
+        "1. If a user asks you to 'use a skill' or apply it (e.g., 'pakai skill X'), you MUST physically call the `use_skill(name='X')` tool FIRST to retrieve its instructions. Do NOT guess the instruction.\n"
+        "2. If you create a new custom tool with `create_tool`, you cannot call it directly as a normal tool in this exact session. "
+        "Instead, immediately after creation, you must use `run_custom_tool(name, args_json)` to execute it."
+    )
 
     # --- Load conversation history ---
     history_rows = await _load_history(session.id, db)
@@ -162,7 +361,6 @@ async def run_agent(
     await db.flush()
 
     # --- Build agent graph ---
-    # swap create_react_agent for DeepAgents when ready (see module docstring)
     graph = create_react_agent(
         llm,
         tools=tools,

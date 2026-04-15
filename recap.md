@@ -7,3 +7,5 @@
 
   -  Platform managed agent Milestone 1 selesai dan berjalan penuh. PRD Milestone 2 sudah diupdate dengan memory system dan
      skill/tool creator. Next: mulai implementasi fitur-fitur Milestone 2.    
+
+  - Milestone 2 selesai diimplementasi. Fitur baru: Memory System (remember/recall/forget + inject ke system prompt), Skill Library (create_skill/list_skills/use_skill), Self-Extending Tool Creator (create_tool/list_tools/run_custom_tool + dynamic load), API endpoints baru (/memory, /skills, /custom-tools per agent), dan Alembic migration (agent_memories, skills, custom_tools tables). Next: Milestone 3 — API key auth, basic web admin, LangSmith.
