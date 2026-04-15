@@ -365,7 +365,7 @@ Model yang didukung (contoh):
 #### Memory System
 
 - [ ] **Short-term memory** — auto-summarize history ketika jumlah token mendekati batas context window LLM, sehingga session panjang tidak overflow.
-- [ ] **Long-term memory** — tabel `agent_memories` (per-agent, key-value + timestamp). Tools yang dikasih ke agent:
+- [x] **Long-term memory** — tabel `agent_memories` (per-agent, key-value + timestamp). Tools yang dikasih ke agent:
   - `remember(key, value)` — simpan fakta/preferensi lintas session.
   - `recall(query)` — ambil memory yang relevan (exact match dulu, semantic search fase berikutnya).
   - `forget(key)` — hapus memory entry.
@@ -373,12 +373,12 @@ Model yang didukung (contoh):
 
 #### Self-Extending Agent (Skill & Tool Creator)
 
-- [ ] **Skill Creator** — agent bisa membuat dan menyimpan "skill" (instruksi/prompt reusable) ke DB. Tabel `skills` (per-agent: `id`, `agent_id`, `name`, `description`, `content_md`, `created_at`). Tools:
+- [x] **Skill Creator** — agent bisa membuat dan menyimpan "skill" (instruksi/prompt reusable) ke DB. Tabel `skills` (per-agent: `id`, `agent_id`, `name`, `description`, `content_md`, `created_at`). Tools:
   - `create_skill(name, description, content_md)` — tulis skill baru.
   - `list_skills()` — lihat semua skill milik agent ini.
   - `use_skill(name)` — load isi skill ke dalam context aktif.
 
-- [ ] **Tool Creator** — agent bisa menulis kode Python untuk tool baru, disimpan ke DB, dan otomatis tersedia di session berikutnya. Tabel `custom_tools` (per-agent: `id`, `agent_id`, `name`, `description`, `code`, `created_at`). Tools:
+- [x] **Tool Creator** — agent bisa menulis kode Python untuk tool baru, disimpan ke DB, dan otomatis tersedia di session berikutnya. Tabel `custom_tools` (per-agent: `id`, `agent_id`, `name`, `description`, `code`, `created_at`). Tools:
   - `create_tool(name, description, python_code)` — simpan tool baru (kode divalidasi syntax dulu).
   - `list_tools()` — lihat semua custom tool yang tersedia.
   - Saat agent run, custom tools di-load dinamis dan diregistrasi sebagai LangChain tool di samping built-in tools.
