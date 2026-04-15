@@ -1,0 +1,154 @@
+{
+  "info": {
+    "name": "Managed Agent Platform",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8000" },
+    { "key": "api_key",  "value": "change-me-to-a-random-secret" },
+    { "key": "agent_id",  "value": "" },
+    { "key": "session_id", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "GET /health",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/health"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Agents",
+      "item": [
+        {
+          "name": "POST /v1/agents — Buat agent baru",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-API-Key",     "value": "{{api_key}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "url": "{{base_url}}/v1/agents",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Coding Agent\",\n  \"description\": \"Agent untuk menulis dan menjalankan kode Python\",\n  \"instructions\": \"Kamu adalah coding assistant. Tulis kode Python yang bersih, jalankan untuk verifikasi, dan jelaskan hasilnya.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"sandbox_config\": {\n    \"memory\": \"512m\",\n    \"cpu\": \"1.0\"\n  },\n  \"safety_policy\": {}\n}"
+            }
+          }
+        },
+        {
+          "name": "GET /v1/agents — List semua agent",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-API-Key", "value": "{{api_key}}" }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/agents?limit=20&offset=0",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "agents"],
+              "query": [
+                { "key": "limit",  "value": "20" },
+                { "key": "offset", "value": "0" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "GET /v1/agents/:agent_id — Detail agent",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-API-Key", "value": "{{api_key}}" }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}"
+          }
+        },
+        {
+          "name": "PATCH /v1/agents/:agent_id — Update agent",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "X-API-Key",    "value": "{{api_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"openai/gpt-4.1-mini\"\n}"
+            }
+          }
+        },
+        {
+          "name": "DELETE /v1/agents/:agent_id — Hapus agent (soft delete)",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "X-API-Key", "value": "{{api_key}}" }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Sessions",
+      "item": [
+        {
+          "name": "POST /v1/agents/:agent_id/sessions — Buat session",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-API-Key",    "value": "{{api_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/sessions",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"external_user_id\": \"user-123\",\n  \"metadata\": {\n    \"channel\": \"postman\"\n  }\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Messages",
+      "item": [
+        {
+          "name": "POST /v1/agents/:agent_id/sessions/:session_id/messages — Kirim pesan",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-API-Key",    "value": "{{api_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/sessions/{{session_id}}/messages",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"Hitung berapa 17 pangkat 13 dengan Python.\"\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "History",
+      "item": [
+        {
+          "name": "GET /v1/sessions/:session_id/history — Riwayat percakapan",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-API-Key", "value": "{{api_key}}" }
+            ],
+            "url": "{{base_url}}/v1/sessions/{{session_id}}/history"
+          }
+        }
+      ]
+    }
+  ]
+}

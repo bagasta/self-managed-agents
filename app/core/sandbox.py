@@ -1,0 +1,133 @@
+"""
+Docker sandbox manager.
+
+Design: ephemeral container per message + persistent workspace directory per session.
+
+Each call to sandbox.bash() starts a fresh Docker container with
+{SANDBOX_BASE_DIR}/{session_id}/ mounted at /workspace, runs the command,
+captures output, then removes the container.
+
+Files written in one turn are visible in the next because the directory
+lives on the host between message calls.
+
+For gVisor isolation in dev: install gVisor (runsc), configure Docker daemon.json,
+then set DOCKER_RUNTIME=runsc. Default is the standard Docker runtime.
+"""
+from __future__ import annotations
+
+import os
+import uuid
+from pathlib import Path
+
+import docker
+import docker.errors
+import structlog
+
+from app.config import get_settings
+
+logger = structlog.get_logger(__name__)
+
+
+def get_workspace_dir(session_id: str | uuid.UUID) -> Path:
+    settings = get_settings()
+    workspace = Path(settings.sandbox_base_dir) / str(session_id)
+    workspace.mkdir(parents=True, exist_ok=True)
+    return workspace
+
+
+class DockerSandbox:
+    """
+    Manages sandbox operations for one agent session.
+
+    All file operations (write_file, read_file, list_files) act directly on the
+    host workspace directory — no container needed. Only bash() spins up a container.
+    """
+
+    def __init__(self, session_id: str | uuid.UUID) -> None:
+        self.session_id = str(session_id)
+        self.workspace_dir = get_workspace_dir(session_id)
+        self._settings = get_settings()
+        self._client: docker.DockerClient | None = None
+
+    def _get_client(self) -> docker.DockerClient:
+        if self._client is None:
+            self._client = docker.from_env()
+        return self._client
+
+    def bash(self, cmd: str) -> str:
+        """
+        Run a bash command in an ephemeral Docker container.
+        The sandbox workspace is mounted at /workspace inside the container.
+        """
+        client = self._get_client()
+        log = logger.bind(session_id=self.session_id, cmd_preview=cmd[:120])
+        log.debug("sandbox.bash.start")
+
+        run_kwargs: dict = dict(
+            image=self._settings.docker_sandbox_image,
+            command=["bash", "-c", cmd],
+            volumes={
+                str(self.workspace_dir): {"bind": "/workspace", "mode": "rw"}
+            },
+            working_dir="/workspace",
+            mem_limit="512m",
+            nano_cpus=int(1e9),  # 1 CPU
+            network_disabled=False,
+            remove=True,
+            stdout=True,
+            stderr=True,
+        )
+
+        # Optionally enable gVisor runtime (set DOCKER_RUNTIME=runsc in env)
+        runtime = os.getenv("DOCKER_RUNTIME")
+        if runtime:
+            run_kwargs["runtime"] = runtime
+
+        try:
+            raw = client.containers.run(**run_kwargs)
+            output = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+            log.debug("sandbox.bash.done", output_len=len(output))
+            return output or "(no output)"
+        except docker.errors.ContainerError as exc:
+            stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
+            log.warning("sandbox.bash.container_error", exit_status=exc.exit_status)
+            return f"[exit {exc.exit_status}]\n{stderr}"
+        except docker.errors.ImageNotFound:
+            log.error("sandbox.bash.image_not_found", image=self._settings.docker_sandbox_image)
+            return f"[error] Docker image not found: {self._settings.docker_sandbox_image}"
+        except Exception as exc:
+            log.error("sandbox.bash.error", error=str(exc))
+            return f"[sandbox error] {exc}"
+
+    def write_file(self, path: str, content: str) -> str:
+        """Write content to a file in the workspace. Creates parent dirs as needed."""
+        target = self.workspace_dir / path.lstrip("/")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        return f"Written {len(content)} chars to {path}"
+
+    def read_file(self, path: str) -> str:
+        """Read a file from the workspace."""
+        target = self.workspace_dir / path.lstrip("/")
+        if not target.exists():
+            return f"[error] File not found: {path}"
+        if not target.is_file():
+            return f"[error] Not a file: {path}"
+        return target.read_text(encoding="utf-8")
+
+    def list_files(self, directory: str = ".") -> str:
+        """List all files under a workspace directory."""
+        target = self.workspace_dir / directory.lstrip("/")
+        if not target.exists():
+            return f"[error] Directory not found: {directory}"
+        entries = sorted(p for p in target.rglob("*") if p.is_file() and not p.name.startswith("."))
+        lines = [str(p.relative_to(self.workspace_dir)) for p in entries]
+        return "\n".join(lines) if lines else "(empty)"
+
+    def close(self) -> None:
+        if self._client:
+            try:
+                self._client.close()
+            except Exception:
+                pass
+            self._client = None
