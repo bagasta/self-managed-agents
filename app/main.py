@@ -6,7 +6,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import agents, custom_tools, documents, history, memory, messages, models, sessions, skills
+from app.api import agents, custom_tools, documents, history, memory, messages, models, runs, sessions, skills
 from app.config import get_settings
 
 settings = get_settings()
@@ -65,6 +65,7 @@ app.include_router(skills.router)
 app.include_router(custom_tools.router)
 app.include_router(documents.router)
 app.include_router(models.router)
+app.include_router(runs.router)
 
 
 @app.get("/health", tags=["meta"])

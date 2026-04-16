@@ -45,3 +45,14 @@ class DocumentUploadResponse(BaseModel):
     total_chunks: int
     original_filename: str
     extracted_chars: int
+
+
+class DocumentSearchRequest(BaseModel):
+    query: str = Field(..., min_length=1)
+    max_results: int = Field(3, ge=1, le=20)
+
+
+class DocumentSearchResponse(BaseModel):
+    results: list[DocumentResponse]
+    total: int
+    query: str

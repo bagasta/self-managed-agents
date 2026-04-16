@@ -9,8 +9,11 @@ from app.core.document_service import (
     delete_document,
     get_document,
     list_documents,
+    search_documents_keyword,
+    search_documents_vector,
     update_document,
 )
+from app.core.embedding_service import embed_text
 from app.core.file_processor import SUPPORTED_EXTENSIONS, chunk_text, extract_text
 from app.database import get_db
 from app.deps import verify_api_key
@@ -19,6 +22,8 @@ from app.schemas.document import (
     DocumentCreate,
     DocumentListResponse,
     DocumentResponse,
+    DocumentSearchRequest,
+    DocumentSearchResponse,
     DocumentUpdate,
     DocumentUploadResponse,
 )
@@ -79,6 +84,26 @@ async def list_agent_documents(
         total=total,
         limit=limit,
         offset=offset,
+    )
+
+
+@router.post("/search", response_model=DocumentSearchResponse)
+async def search_agent_documents(
+    agent_id: uuid.UUID,
+    body: DocumentSearchRequest,
+    db: AsyncSession = Depends(get_db),
+) -> DocumentSearchResponse:
+    """Semantic search across agent's knowledge base using pgvector cosine similarity."""
+    await _get_agent_or_404(agent_id, db)
+    try:
+        query_embedding = await embed_text(body.query)
+        docs = await search_documents_vector(agent_id, query_embedding, db, max_results=body.max_results)
+    except Exception:
+        docs = await search_documents_keyword(agent_id, body.query, db, max_results=body.max_results)
+    return DocumentSearchResponse(
+        results=[DocumentResponse.model_validate(d) for d in docs],
+        total=len(docs),
+        query=body.query,
     )
 
 
