@@ -37,3 +37,11 @@ class DocumentListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class DocumentUploadResponse(BaseModel):
+    """Returned after a file upload that may produce multiple chunks."""
+    chunks: list[DocumentResponse]
+    total_chunks: int
+    original_filename: str
+    extracted_chars: int

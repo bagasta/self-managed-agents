@@ -504,6 +504,41 @@
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}/documents/{{doc_id}}"
           }
+        },
+        {
+          "name": "POST /v1/agents/:agent_id/documents/upload — Upload file (PDF/DOCX/PPTX/TXT)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/documents/upload",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "description": "PDF, TXT, MD, DOCX, atau PPTX"
+                },
+                {
+                  "key": "title",
+                  "value": "Judul Dokumen",
+                  "type": "text",
+                  "description": "Opsional. Default: nama file."
+                },
+                {
+                  "key": "source",
+                  "value": "notion/handbook",
+                  "type": "text",
+                  "description": "Opsional. Label sumber dokumen."
+                }
+              ]
+            }
+          }
         }
       ]
     },

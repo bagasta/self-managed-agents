@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     # OpenRouter
     openrouter_api_key: str = ""
 
+    # Mistral (used for PDF OCR)
+    mistral_api_key: str = ""
+
     # Sandbox
     sandbox_base_dir: str = "/tmp/agent-sandboxes"
     docker_sandbox_image: str = "python:3.12-slim"

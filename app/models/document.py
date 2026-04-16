@@ -7,7 +7,7 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
-from app.core.embedding_service import EMBEDDING_DIM
+from app.core.embedding_service import EMBEDDING_DIM  # 1536 for text-embedding-3-small
 
 
 class Document(Base):

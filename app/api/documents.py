@@ -1,8 +1,9 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.core.document_service import (
     create_document,
     delete_document,
@@ -10,10 +11,19 @@ from app.core.document_service import (
     list_documents,
     update_document,
 )
+from app.core.file_processor import SUPPORTED_EXTENSIONS, chunk_text, extract_text
 from app.database import get_db
 from app.deps import verify_api_key
 from app.models.agent import Agent
-from app.schemas.document import DocumentCreate, DocumentListResponse, DocumentResponse, DocumentUpdate
+from app.schemas.document import (
+    DocumentCreate,
+    DocumentListResponse,
+    DocumentResponse,
+    DocumentUpdate,
+    DocumentUploadResponse,
+)
+
+settings = get_settings()
 
 router = APIRouter(
     prefix="/v1/agents/{agent_id}/documents",
@@ -116,3 +126,116 @@ async def delete_agent_document(
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
     await db.commit()
+
+
+@router.post(
+    "/upload",
+    response_model=DocumentUploadResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Upload a file (PDF/TXT/DOCX/PPTX) to the knowledge base",
+)
+async def upload_document_file(
+    agent_id: uuid.UUID,
+    file: UploadFile = File(..., description="PDF, TXT, MD, DOCX, or PPTX file"),
+    title: str | None = Form(
+        None,
+        description="Document title. Defaults to the filename.",
+    ),
+    source: str | None = Form(
+        None,
+        description="Optional source label (e.g. 'notion/handbook', 'confluence/dev-guide').",
+    ),
+    db: AsyncSession = Depends(get_db),
+) -> DocumentUploadResponse:
+    """
+    Upload a file and add it to the agent's RAG knowledge base.
+
+    The file is parsed and split into chunks (≤1200 chars each) so each
+    chunk gets its own embedding for fine-grained retrieval.
+
+    PDFs are processed with Mistral OCR (mistral-ocr-latest).
+    DOCX and PPTX are parsed with python-docx / python-pptx.
+    TXT / MD are read directly.
+
+    Returns the list of document chunks created.
+    """
+    await _get_agent_or_404(agent_id, db)
+
+    filename = file.filename or "upload"
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if f".{ext}" not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Unsupported file extension '.{ext}'. "
+                f"Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
+            ),
+        )
+
+    # Read file content
+    raw_bytes = await file.read()
+    if not raw_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Uploaded file is empty.",
+        )
+
+    # Extract text (PDF → Mistral OCR, DOCX/PPTX → lib, TXT → decode)
+    try:
+        full_text = await extract_text(
+            content=raw_bytes,
+            filename=filename,
+            content_type=file.content_type,
+            mistral_api_key=settings.mistral_api_key,
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Text extraction failed: {exc}",
+        )
+
+    if not full_text.strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="No text could be extracted from the file.",
+        )
+
+    doc_title = title or filename
+    doc_source = source or filename
+
+    # Split into chunks for better retrieval granularity
+    chunks = chunk_text(full_text)
+
+    created_docs = []
+    total = len(chunks)
+    for i, chunk_content in enumerate(chunks, 1):
+        chunk_title = doc_title if total == 1 else f"{doc_title} (Part {i}/{total})"
+        doc = await create_document(
+            agent_id=agent_id,
+            title=chunk_title,
+            content=chunk_content,
+            source=doc_source,
+            doc_metadata={
+                "original_filename": filename,
+                "chunk_index": i,
+                "total_chunks": total,
+            },
+            db=db,
+        )
+        created_docs.append(doc)
+
+    await db.commit()
+    for doc in created_docs:
+        await db.refresh(doc)
+
+    return DocumentUploadResponse(
+        chunks=[DocumentResponse.model_validate(d) for d in created_docs],
+        total_chunks=total,
+        original_filename=filename,
+        extracted_chars=len(full_text),
+    )
