@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     agent_max_steps: int = 12
     agent_timeout_seconds: int = 300
 
+    # Memory
+    short_term_memory_turns: int = 10   # conversation turns kept in LLM context
+    ltm_extraction_every: int = 10      # extract LTM every N user messages
+
     # Logging
     log_level: str = "INFO"
 

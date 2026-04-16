@@ -1,17 +1,28 @@
 """
 Memory service: CRUD for agent long-term memory (key-value store).
 Used both by API endpoints and by the memory tools injected into the agent.
+
+Also contains extract_long_term_memory() which is called automatically
+every SHORT_TERM_MEMORY_TURNS user messages to distil conversation
+summaries into persistent memories.
 """
 from __future__ import annotations
 
+import json
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+import structlog
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.memory import Memory
+
+if TYPE_CHECKING:
+    from langchain_openai import ChatOpenAI
+
+logger = structlog.get_logger(__name__)
 
 
 async def upsert_memory(
@@ -72,3 +83,78 @@ async def build_memory_context(agent_id: uuid.UUID, db: AsyncSession) -> str:
     for m in memories:
         lines.append(f"- **{m.key}**: {m.value_data}")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Automatic long-term memory extraction
+# ---------------------------------------------------------------------------
+
+async def extract_long_term_memory(
+    *,
+    agent_id: uuid.UUID,
+    recent_messages: list,           # list of app.models.message.Message ORM rows
+    llm: "ChatOpenAI",
+    db: AsyncSession,
+    log: Any = None,
+) -> None:
+    """
+    Call the LLM to extract important facts from recent_messages and persist
+    them to agent_memories with an 'auto_' prefix on the key.
+
+    Called automatically every N user messages from agent_runner.
+    Failures are caught and logged — never raised to the caller.
+    """
+    if log is None:
+        log = logger
+
+    # Build plain-text conversation
+    lines: list[str] = []
+    for m in recent_messages:
+        if m.role in ("user", "agent") and m.content:
+            speaker = "User" if m.role == "user" else "Assistant"
+            lines.append(f"{speaker}: {m.content[:600]}")
+
+    if not lines:
+        return
+
+    conv_text = "\n".join(lines)
+    prompt = (
+        "Analyze this conversation and extract important facts, preferences, and context "
+        "about the user and their work that are worth remembering long-term. "
+        "Return ONLY a compact JSON object — keys are short snake_case labels, "
+        "values are concise strings.\n\n"
+        "Example: "
+        '{"user_name": "Bagas", "preferred_language": "Python", '
+        '"project": "managed-agent-platform", "coding_style": "modular"}\n\n'
+        f"Conversation:\n{conv_text}\n\nJSON:"
+    )
+
+    try:
+        from langchain_core.messages import HumanMessage
+        response = await llm.ainvoke([HumanMessage(content=prompt)])
+        raw = response.content.strip()
+
+        # Strip optional markdown code fence
+        if "```" in raw:
+            parts = raw.split("```")
+            raw = parts[1] if len(parts) >= 2 else raw
+            if raw.startswith("json"):
+                raw = raw[4:]
+
+        # Extract just the JSON object
+        start, end = raw.find("{"), raw.rfind("}") + 1
+        if start < 0 or end <= start:
+            raise ValueError("No JSON object found in LLM response")
+        facts: dict = json.loads(raw[start:end])
+
+        saved = 0
+        for key, value in facts.items():
+            if isinstance(key, str) and value is not None:
+                safe_key = f"auto_{key[:80]}"
+                await upsert_memory(agent_id, safe_key, str(value)[:1000], db)
+                saved += 1
+
+        log.info("ltm.extraction.complete", facts_saved=saved)
+
+    except Exception as exc:
+        log.warning("ltm.extraction.failed", error=str(exc))

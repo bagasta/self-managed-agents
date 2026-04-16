@@ -1,4 +1,5 @@
 import logging
+from contextlib import asynccontextmanager
 
 import structlog
 import uvicorn
@@ -28,12 +29,23 @@ structlog.configure(
     logger_factory=structlog.PrintLoggerFactory(),
 )
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # Pre-load embedding model so the first request isn't slow.
+    # Downloads model files (~130MB) on first run, cached after that.
+    from app.core.embedding_service import warmup_embedding_model
+    await warmup_embedding_model()
+    yield
+
+
 app = FastAPI(
     title="Managed Agent Platform",
     description="Self-hosted multi-model agent platform powered by LangChain + OpenRouter",
-    version="0.1.0",
+    version="0.2.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
