@@ -13,3 +13,9 @@
   - Perbaikan flow Self-Extending Capabilities: Fix ValueError pada pembuatan docstring dinamis untuk `create_tool`. Peningkatan *System Prompt* secara strict agar Agent diwajibkan menggunakan `use_skill(name="X")` jika diminta memakai skill, dan wajib menggunakan `run_custom_tool()` untuk langsung mengeksekusi tool baru dalam satu sesi yang sama (karena belum diregistrasikan ke LangChain toolkit pada runtime saat ini). Kodingan sudah di-push ke Github.
 
   - Milestone 2 lanjutan: Multi-model diperkuat (temperature per-agent, default model diupdate ke claude-sonnet-4-6). Tambah /v1/models endpoint dengan 15+ model dari Anthropic/OpenAI/Google/Meta/Mistral/DeepSeek/Qwen. HTTP Tool (http_get/http_post dengan allowed_hosts, timeout) dan RAG Tool (search_knowledge_base via PostgreSQL ILIKE) ditambahkan sebagai opt-in di tools_config. Document management API (/v1/agents/{id}/documents) untuk knowledge base RAG. tools_config sekarang benar-benar mengontrol tool mana yang aktif per agent. Migration 003 untuk tabel documents dan kolom temperature.
+
+  Building a managed agent platform. RAG is now working after enabling it on the CV agent. Next: continue testing or move to the next milestone feature.  
+
+  Building a managed agent platform. RAG is now working correctly. Next: continue with anyremaining Milestone 2 features or fixes
+
+
