@@ -62,7 +62,12 @@
             "url": "{{base_url}}/v1/agents",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"Coding Agent\",\n  \"description\": \"Agent untuk menulis dan menjalankan kode Python\",\n  \"instructions\": \"Kamu adalah coding assistant. Tulis kode Python yang bersih, jalankan untuk verifikasi, dan jelaskan hasilnya.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"tools_config\": {},\n  \"sandbox_config\": {\n    \"memory\": \"512m\",\n    \"cpu\": \"1.0\"\n  },\n  \"safety_policy\": {}\n}"
+              "raw": "{\n  \"name\": \"Coding Agent\",\n  \"description\": \"Agent untuk menulis dan menjalankan kode Python\",\n  \"instructions\": \"Kamu adalah coding assistant. Tulis kode Python yang bersih, jalankan untuk verifikasi, dan jelaskan hasilnya.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"tools_config\": {\n    \"sandbox\": {\"enabled\": true},\n    \"memory\": {\"enabled\": true},\n    \"skills\": {\"enabled\": true},\n    \"tool_creator\": {\"enabled\": true},\n    \"http\": {\n      \"enabled\": false,\n      \"timeout_seconds\": 30,\n      \"allowed_hosts\": []\n    },\n    \"rag\": {\n      \"enabled\": false,\n      \"max_results\": 3\n    }\n  },\n  \"sandbox_config\": {\n    \"memory\": \"512m\",\n    \"cpu\": \"1.0\"\n  },\n  \"safety_policy\": {\n    \"rules\": [\n      \"Jangan pernah mengungkapkan informasi rahasia perusahaan.\",\n      \"Tolak permintaan yang melanggar hukum atau tidak etis.\"\n    ],\n    \"max_output_length\": 4000\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             }
           }
         },
