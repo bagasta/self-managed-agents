@@ -34,11 +34,19 @@
       "name": "Health",
       "item": [
         {
-          "name": "GET /health",
+          "name": "GET /health — Cek status server",
           "request": {
             "method": "GET",
             "url": "{{base_url}}/health"
-          }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": ["pm.test('Status 200', () => pm.response.to.have.status(200));"]
+              }
+            }
+          ]
         }
       ]
     },
@@ -50,55 +58,45 @@
           "request": {
             "method": "POST",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
             ],
             "url": "{{base_url}}/v1/agents",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"Coding Agent\",\n  \"description\": \"Agent untuk menulis dan menjalankan kode Python\",\n  \"instructions\": \"Kamu adalah coding assistant. Tulis kode Python yang bersih, jalankan untuk verifikasi, dan jelaskan hasilnya.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"tools_config\": {\n    \"sandbox\": {\"enabled\": true},\n    \"memory\": {\"enabled\": true},\n    \"skills\": {\"enabled\": true},\n    \"tool_creator\": {\"enabled\": true},\n    \"http\": {\n      \"enabled\": false,\n      \"timeout_seconds\": 30,\n      \"allowed_hosts\": []\n    },\n    \"rag\": {\n      \"enabled\": false,\n      \"max_results\": 3\n    }\n  },\n  \"sandbox_config\": {\n    \"memory\": \"512m\",\n    \"cpu\": \"1.0\"\n  },\n  \"safety_policy\": {\n    \"rules\": [\n      \"Jangan pernah mengungkapkan informasi rahasia perusahaan.\",\n      \"Tolak permintaan yang melanggar hukum atau tidak etis.\"\n    ],\n    \"max_output_length\": 4000\n  }\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
+              "raw": "{\n  \"name\": \"Coding Agent\",\n  \"description\": \"Agent untuk menulis dan menjalankan kode Python di sandbox Docker yang aman.\",\n  \"instructions\": \"Kamu adalah coding assistant yang ahli Python. Saat menjawab pertanyaan kode:\\n1. Tulis kode yang bersih dan mudah dibaca.\\n2. Selalu jalankan kode terlebih dahulu untuk memverifikasi hasilnya.\\n3. Jelaskan output yang dihasilkan dengan singkat.\\n4. Jika ada error, perbaiki dan coba lagi.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"tools_config\": {\n    \"sandbox\": {\"enabled\": true},\n    \"memory\": {\"enabled\": true},\n    \"skills\": {\"enabled\": true},\n    \"tool_creator\": {\"enabled\": true},\n    \"http\": {\n      \"enabled\": false,\n      \"timeout_seconds\": 30,\n      \"allowed_hosts\": []\n    },\n    \"rag\": {\n      \"enabled\": false,\n      \"max_results\": 3\n    }\n  },\n  \"sandbox_config\": {\n    \"memory\": \"512m\",\n    \"cpu\": \"1.0\"\n  },\n  \"safety_policy\": {\n    \"rules\": [\n      \"Jangan pernah mengeksekusi perintah sistem yang berbahaya (rm -rf, shutdown, dll).\",\n      \"Jangan mengakses atau memodifikasi file di luar direktori kerja.\",\n      \"Tolak permintaan yang melanggar hukum atau tidak etis.\"\n    ],\n    \"max_output_length\": 4000\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  const json = pm.response.json();",
+                  "  pm.collectionVariables.set('agent_id', json.id);",
+                  "  pm.test('agent_id tersimpan: ' + json.id, () => pm.expect(json.id).to.be.a('string'));",
+                  "}"
+                ]
               }
             }
-          }
+          ]
         },
         {
           "name": "GET /v1/agents — List semua agent",
           "request": {
             "method": "GET",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" }
             ],
             "url": {
               "raw": "{{base_url}}/v1/agents?limit=20&offset=0",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "v1",
-                "agents"
-              ],
+              "host": ["{{base_url}}"],
+              "path": ["v1", "agents"],
               "query": [
-                {
-                  "key": "limit",
-                  "value": "20"
-                },
-                {
-                  "key": "offset",
-                  "value": "0"
-                }
+                { "key": "limit", "value": "20", "description": "Jumlah item per halaman (maks 100)" },
+                { "key": "offset", "value": "0", "description": "Skip N item untuk pagination" }
               ]
             }
           }
@@ -108,10 +106,7 @@
           "request": {
             "method": "GET",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" }
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}"
           }
@@ -121,19 +116,14 @@
           "request": {
             "method": "PATCH",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"model\": \"openai/gpt-4.1-mini\"\n}"
+              "raw": "{\n  \"name\": \"Coding Agent v2\",\n  \"model\": \"openai/gpt-4.1\",\n  \"temperature\": 0.5,\n  \"instructions\": \"Kamu adalah coding assistant senior. Tulis kode yang bersih, jalankan untuk verifikasi, dan berikan penjelasan mendalam tentang cara kerja kode tersebut.\",\n  \"tools_config\": {\n    \"sandbox\": {\"enabled\": true},\n    \"memory\": {\"enabled\": true},\n    \"skills\": {\"enabled\": true},\n    \"tool_creator\": {\"enabled\": false},\n    \"http\": {\"enabled\": false},\n    \"rag\": {\"enabled\": false}\n  }\n}",
+              "options": { "raw": { "language": "json" } }
             }
           }
         },
@@ -142,10 +132,7 @@
           "request": {
             "method": "DELETE",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" }
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}"
           }
@@ -156,25 +143,34 @@
       "name": "Sessions",
       "item": [
         {
-          "name": "POST /v1/agents/:agent_id/sessions — Buat session",
+          "name": "POST /v1/agents/:agent_id/sessions — Buat session baru",
           "request": {
             "method": "POST",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}/sessions",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"external_user_id\": \"user-123\",\n  \"metadata\": {\n    \"channel\": \"postman\"\n  }\n}"
+              "raw": "{\n  \"external_user_id\": \"user-bagas-001\",\n  \"metadata\": {\n    \"channel\": \"postman\",\n    \"source_app\": \"internal-dashboard\",\n    \"locale\": \"id-ID\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
             }
-          }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  const json = pm.response.json();",
+                  "  pm.collectionVariables.set('session_id', json.id);",
+                  "  pm.test('session_id tersimpan: ' + json.id, () => pm.expect(json.id).to.be.a('string'));",
+                  "}"
+                ]
+              }
+            }
+          ]
         }
       ]
     },
@@ -182,28 +178,64 @@
       "name": "Messages",
       "item": [
         {
-          "name": "POST /v1/agents/:agent_id/sessions/:session_id/messages — Kirim pesan",
+          "name": "POST .../messages — Kirim pesan (tanya biasa)",
           "request": {
             "method": "POST",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}/sessions/{{session_id}}/messages",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"message\": \"Hitung berapa 17 pangkat 13 dengan Python.\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
+              "raw": "{\n  \"message\": \"Halo! Siapa kamu dan apa saja yang bisa kamu bantu?\"\n}",
+              "options": { "raw": { "language": "json" } }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const json = pm.response.json();",
+                  "  pm.collectionVariables.set('run_id', json.run_id);",
+                  "  pm.test('run_id tersimpan: ' + json.run_id, () => pm.expect(json.run_id).to.be.a('string'));",
+                  "}"
+                ]
               }
+            }
+          ]
+        },
+        {
+          "name": "POST .../messages — Kirim pesan (eksekusi kode Python)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-API-Key", "value": "{{api_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/sessions/{{session_id}}/messages",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"Buatkan script Python untuk menghitung bilangan prima antara 1 sampai 100, lalu jalankan dan tampilkan hasilnya.\"\n}",
+              "options": { "raw": { "language": "json" } }
+            }
+          }
+        },
+        {
+          "name": "POST .../messages — Kirim pesan (analisis data)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-API-Key", "value": "{{api_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/sessions/{{session_id}}/messages",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"Buat list 10 kota di Indonesia beserta populasinya, tampilkan dalam format tabel dan hitung rata-rata populasinya.\"\n}",
+              "options": { "raw": { "language": "json" } }
             }
           }
         }
@@ -217,10 +249,7 @@
           "request": {
             "method": "GET",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" }
             ],
             "url": "{{base_url}}/v1/sessions/{{session_id}}/history"
           }
@@ -235,10 +264,7 @@
           "request": {
             "method": "GET",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" }
             ],
             "url": "{{base_url}}/v1/runs/{{run_id}}"
           }
@@ -253,32 +279,56 @@
           "request": {
             "method": "GET",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" }
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}/memory"
           }
         },
         {
-          "name": "POST /v1/agents/:agent_id/memory — Upsert memory entry",
+          "name": "POST /v1/agents/:agent_id/memory — Simpan memory entry",
           "request": {
             "method": "POST",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}/memory",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"key\": \"user_name\",\n  \"value\": \"Bagas\"\n}"
+              "raw": "{\n  \"key\": \"user_name\",\n  \"value\": \"Bagas\"\n}",
+              "options": { "raw": { "language": "json" } }
+            }
+          }
+        },
+        {
+          "name": "POST /v1/agents/:agent_id/memory — Simpan preferensi user",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-API-Key", "value": "{{api_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/memory",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"key\": \"user_preferences\",\n  \"value\": \"Lebih suka jawaban singkat dan langsung ke poin. Gunakan bahasa Indonesia. Format kode dengan syntax highlight.\"\n}",
+              "options": { "raw": { "language": "json" } }
+            }
+          }
+        },
+        {
+          "name": "POST /v1/agents/:agent_id/memory — Simpan konteks proyek",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-API-Key", "value": "{{api_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/memory",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"key\": \"project_context\",\n  \"value\": \"Sedang mengerjakan platform managed agent berbasis FastAPI + LangChain. Stack: Python 3.12, PostgreSQL, Docker. Target deploy ke VPS Ubuntu.\"\n}",
+              "options": { "raw": { "language": "json" } }
             }
           }
         },
@@ -287,10 +337,7 @@
           "request": {
             "method": "DELETE",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" }
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}/memory/user_name"
           }
@@ -305,32 +352,40 @@
           "request": {
             "method": "GET",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" }
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}/skills"
           }
         },
         {
-          "name": "POST /v1/agents/:agent_id/skills — Buat/update skill",
+          "name": "POST /v1/agents/:agent_id/skills — Buat skill: analisis CSV",
           "request": {
             "method": "POST",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}/skills",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"csv_analysis\",\n  \"description\": \"Panduan menganalisis file CSV dengan Python pandas\",\n  \"content_md\": \"## CSV Analysis Skill\\n\\n1. Load file dengan `pd.read_csv()`\\n2. Tampilkan `.info()` dan `.describe()`\\n3. Cek missing values dengan `.isnull().sum()`\\n4. Plot distribusi kolom numerik\"\n}"
+              "raw": "{\n  \"name\": \"csv_analysis\",\n  \"description\": \"Panduan standar untuk menganalisis file CSV menggunakan Python pandas\",\n  \"content_md\": \"## CSV Analysis Skill\\n\\n### Langkah-langkah Analisis CSV\\n\\n1. **Load data**\\n   ```python\\n   import pandas as pd\\n   df = pd.read_csv('data.csv')\\n   ```\\n\\n2. **Eksplorasi awal**\\n   ```python\\n   print(df.shape)        # jumlah baris dan kolom\\n   print(df.dtypes)       # tipe data setiap kolom\\n   print(df.head(5))      # 5 baris pertama\\n   ```\\n\\n3. **Statistik deskriptif**\\n   ```python\\n   print(df.describe())\\n   print(df.isnull().sum())  # cek missing values\\n   ```\\n\\n4. **Visualisasi distribusi**\\n   ```python\\n   import matplotlib.pyplot as plt\\n   df.hist(figsize=(12, 8))\\n   plt.tight_layout()\\n   plt.show()\\n   ```\\n\\n### Tips\\n- Selalu cek encoding file: `pd.read_csv('data.csv', encoding='utf-8')`\\n- Untuk file besar gunakan `chunksize` parameter\"\n}",
+              "options": { "raw": { "language": "json" } }
+            }
+          }
+        },
+        {
+          "name": "POST /v1/agents/:agent_id/skills — Buat skill: debugging Python",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-API-Key", "value": "{{api_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/skills",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"python_debugging\",\n  \"description\": \"Panduan sistematis untuk debug error Python: baca traceback, isolasi masalah, dan perbaiki\",\n  \"content_md\": \"## Python Debugging Skill\\n\\n### Cara Membaca Traceback\\n1. Baca dari **bawah ke atas** — baris terakhir adalah error utama\\n2. Perhatikan **file dan line number** yang disebutkan\\n3. Cari baris di kode kita sendiri (bukan library)\\n\\n### Checklist Debug\\n- [ ] Cek tipe data: `print(type(variable))`\\n- [ ] Cek nilai: `print(repr(variable))`\\n- [ ] Cek apakah variable `None` sebelum diakses\\n- [ ] Gunakan `try/except` untuk isolasi error\\n\\n### Error Umum\\n| Error | Penyebab Umum |\\n|-------|---------------|\\n| `TypeError` | Operasi pada tipe data yang salah |\\n| `KeyError` | Key tidak ada di dict |\\n| `IndexError` | Index di luar range list |\\n| `AttributeError` | Method/property tidak ada di object |\"\n}",
+              "options": { "raw": { "language": "json" } }
             }
           }
         },
@@ -339,10 +394,7 @@
           "request": {
             "method": "GET",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" }
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}/skills/csv_analysis"
           }
@@ -352,10 +404,7 @@
           "request": {
             "method": "DELETE",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" }
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}/skills/csv_analysis"
           }
@@ -370,32 +419,40 @@
           "request": {
             "method": "GET",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" }
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}/custom-tools"
           }
         },
         {
-          "name": "POST /v1/agents/:agent_id/custom-tools — Buat/update custom tool",
+          "name": "POST /v1/agents/:agent_id/custom-tools — Buat tool: hitung fibonacci",
           "request": {
             "method": "POST",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}/custom-tools",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"fibonacci\",\n  \"description\": \"Hitung deret Fibonacci ke-n\",\n  \"code\": \"def fibonacci(n: int) -> int:\\n    if n <= 1:\\n        return n\\n    a, b = 0, 1\\n    for _ in range(2, n + 1):\\n        a, b = b, a + b\\n    return b\"\n}"
+              "raw": "{\n  \"name\": \"fibonacci\",\n  \"description\": \"Hitung angka Fibonacci ke-n. Parameter: n (int) — posisi dalam deret Fibonacci (mulai dari 0). Contoh: fibonacci(10) = 55\",\n  \"code\": \"def fibonacci(n: int) -> int:\\n    \\\"\\\"\\\"Hitung angka Fibonacci ke-n secara iteratif.\\\"\\\"\\\"\\n    if n < 0:\\n        raise ValueError(f'n harus >= 0, dapat: {n}')\\n    if n <= 1:\\n        return n\\n    a, b = 0, 1\\n    for _ in range(2, n + 1):\\n        a, b = b, a + b\\n    return b\"\n}",
+              "options": { "raw": { "language": "json" } }
+            }
+          }
+        },
+        {
+          "name": "POST /v1/agents/:agent_id/custom-tools — Buat tool: konversi suhu",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-API-Key", "value": "{{api_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/custom-tools",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"convert_temperature\",\n  \"description\": \"Konversi suhu antar satuan. Parameter: value (float) — nilai suhu, from_unit (str) — satuan asal ('celsius'/'fahrenheit'/'kelvin'), to_unit (str) — satuan tujuan.\",\n  \"code\": \"def convert_temperature(value: float, from_unit: str, to_unit: str) -> float:\\n    \\\"\\\"\\\"Konversi suhu antar satuan celsius, fahrenheit, kelvin.\\\"\\\"\\\"\\n    from_unit = from_unit.lower()\\n    to_unit = to_unit.lower()\\n    # Konversi ke Celsius dulu\\n    if from_unit == 'fahrenheit':\\n        celsius = (value - 32) * 5 / 9\\n    elif from_unit == 'kelvin':\\n        celsius = value - 273.15\\n    elif from_unit == 'celsius':\\n        celsius = value\\n    else:\\n        raise ValueError(f'Satuan tidak dikenal: {from_unit}')\\n    # Konversi dari Celsius ke target\\n    if to_unit == 'fahrenheit':\\n        return celsius * 9 / 5 + 32\\n    elif to_unit == 'kelvin':\\n        return celsius + 273.15\\n    elif to_unit == 'celsius':\\n        return celsius\\n    else:\\n        raise ValueError(f'Satuan tidak dikenal: {to_unit}')\"\n}",
+              "options": { "raw": { "language": "json" } }
             }
           }
         },
@@ -404,10 +461,7 @@
           "request": {
             "method": "GET",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" }
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}/custom-tools/fibonacci"
           }
@@ -417,10 +471,7 @@
           "request": {
             "method": "DELETE",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" }
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}/custom-tools/fibonacci"
           }
@@ -435,10 +486,7 @@
           "request": {
             "method": "GET",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" }
             ],
             "url": "{{base_url}}/v1/models"
           }
@@ -449,23 +497,48 @@
       "name": "Documents / RAG (M2)",
       "item": [
         {
-          "name": "POST /v1/agents/:agent_id/documents — Tambah dokumen ke knowledge base",
+          "name": "POST /v1/agents/:agent_id/documents — Tambah dokumen teks langsung",
           "request": {
             "method": "POST",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}/documents",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"title\": \"Panduan Onboarding Internal\",\n  \"content\": \"Selamat datang di tim! Berikut langkah-langkah onboarding:\\n1. Setup akun GitHub dan VPN\\n2. Clone repository utama\\n3. Ikuti README untuk setup lokal\\n4. Hubungi tech lead untuk akses database dev\\n5. Review dokumen arsitektur di Notion\",\n  \"source\": \"notion/onboarding-guide\",\n  \"doc_metadata\": {\n    \"category\": \"onboarding\",\n    \"author\": \"hr-team\"\n  }\n}"
+              "raw": "{\n  \"title\": \"Panduan Onboarding Internal\",\n  \"content\": \"Selamat datang di tim! Berikut langkah-langkah onboarding karyawan baru:\\n\\n1. Hari pertama: Setup akun GitHub, VPN, dan Slack. Hubungi IT untuk akses.\n2. Minggu pertama: Clone repository utama, ikuti README setup lokal, review dokumen arsitektur di Notion.\n3. Minggu kedua: Pairing session dengan tech lead, mulai kontribusi issue berlabel 'good-first-issue'.\n\nKontak penting:\\n- IT Support: it@company.com\\n- Tech Lead: techleader@company.com\\n- HR: hr@company.com\",\n  \"source\": \"notion/onboarding-guide\",\n  \"doc_metadata\": {\n    \"category\": \"onboarding\",\n    \"author\": \"hr-team\",\n    \"version\": \"2024-Q1\",\n    \"language\": \"id\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  const json = pm.response.json();",
+                  "  pm.collectionVariables.set('doc_id', json.id);",
+                  "  pm.test('doc_id tersimpan: ' + json.id, () => pm.expect(json.id).to.be.a('string'));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /v1/agents/:agent_id/documents — Tambah dokumen FAQ produk",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-API-Key", "value": "{{api_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/documents",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"FAQ Produk — Managed Agent Platform\",\n  \"content\": \"Q: Apa itu Managed Agent Platform?\\nA: Platform internal untuk membuat dan menjalankan AI agent yang dapat diakses via API.\\n\\nQ: Model AI apa saja yang didukung?\\nA: Semua model via OpenRouter: Claude, GPT-4, Gemini, Llama, DeepSeek, Mistral, Qwen, dan lainnya.\\n\\nQ: Bagaimana cara membatasi kemampuan agent?\\nA: Gunakan tools_config untuk mengaktifkan/menonaktifkan tool tertentu, dan safety_policy untuk aturan keamanan.\\n\\nQ: Apakah ada batas percakapan?\\nA: Short-term memory menyimpan 10 percakapan terakhir. Long-term memory diekstrak otomatis setiap 10 pesan.\",\n  \"source\": \"internal/faq\",\n  \"doc_metadata\": {\n    \"category\": \"product-faq\",\n    \"language\": \"id\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
             }
           }
         },
@@ -474,10 +547,7 @@
           "request": {
             "method": "GET",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" }
             ],
             "url": {
               "raw": "{{base_url}}/v1/agents/{{agent_id}}/documents?limit=20&offset=0",
@@ -495,10 +565,7 @@
           "request": {
             "method": "GET",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" }
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}/documents/{{doc_id}}"
           }
@@ -508,19 +575,14 @@
           "request": {
             "method": "PATCH",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}/documents/{{doc_id}}",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"content\": \"Konten dokumen yang sudah diperbarui.\"\n}"
+              "raw": "{\n  \"title\": \"Panduan Onboarding Internal — Versi Terbaru\",\n  \"content\": \"Konten dokumen yang sudah diperbarui dengan informasi terkini.\",\n  \"source\": \"notion/onboarding-guide-v2\",\n  \"doc_metadata\": {\n    \"category\": \"onboarding\",\n    \"version\": \"2024-Q2\",\n    \"updated_by\": \"hr-team\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
             }
           }
         },
@@ -529,10 +591,7 @@
           "request": {
             "method": "DELETE",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" }
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}/documents/{{doc_id}}"
           }
@@ -542,36 +601,23 @@
           "request": {
             "method": "POST",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}/documents/search",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"query\": \"cara onboarding karyawan baru\",\n  \"max_results\": 3\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
+              "raw": "{\n  \"query\": \"cara onboarding karyawan baru dan akses yang diperlukan\",\n  \"max_results\": 3\n}",
+              "options": { "raw": { "language": "json" } }
             }
           }
         },
         {
-          "name": "POST /v1/agents/:agent_id/documents/upload — Upload file (PDF/DOCX/PPTX/TXT)",
+          "name": "POST /v1/agents/:agent_id/documents/upload — Upload file PDF/DOCX/PPTX/TXT",
           "request": {
             "method": "POST",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" }
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}/documents/upload",
             "body": {
@@ -580,19 +626,19 @@
                 {
                   "key": "file",
                   "type": "file",
-                  "description": "PDF, TXT, MD, DOCX, atau PPTX"
+                  "description": "Pilih file: PDF (OCR via Mistral), DOCX, PPTX, TXT, atau MD. Maks ukuran bergantung server."
                 },
                 {
                   "key": "title",
-                  "value": "Judul Dokumen",
+                  "value": "Dokumen Panduan Internal Q2 2024",
                   "type": "text",
-                  "description": "Opsional. Default: nama file."
+                  "description": "Opsional. Jika tidak diisi, default ke nama file. Setiap chunk akan diberi suffix '(Part N/Total)'."
                 },
                 {
                   "key": "source",
                   "value": "notion/handbook",
                   "type": "text",
-                  "description": "Opsional. Label sumber dokumen."
+                  "description": "Opsional. Label sumber dokumen untuk tracking. Contoh: 'notion/handbook', 'confluence/dev-guide', 'gdrive/sop-2024'."
                 }
               ]
             }
@@ -601,26 +647,37 @@
       ]
     },
     {
-      "name": "Agent dengan HTTP + RAG Tools (contoh config)",
+      "name": "Contoh Config Agent Lengkap",
       "item": [
         {
-          "name": "POST /v1/agents — Buat RAG Agent (dengan http + rag enabled)",
+          "name": "POST /v1/agents — Buat RAG Agent (knowledge base + http)",
           "request": {
             "method": "POST",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
             ],
             "url": "{{base_url}}/v1/agents",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"Knowledge Agent\",\n  \"description\": \"Agent berbasis RAG — menjawab dari dokumen internal yang diupload\",\n  \"instructions\": \"Kamu adalah asisten internal yang berpengetahuan luas. Dokumen relevan dari knowledge base sudah otomatis tersedia di konteks kamu — gunakan informasi tersebut untuk menjawab pertanyaan. Jika perlu data real-time dari API internal, gunakan http_get atau http_post.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.3,\n  \"tools_config\": {\n    \"sandbox\": {\"enabled\": false},\n    \"memory\": {\"enabled\": true},\n    \"skills\": {\"enabled\": false},\n    \"tool_creator\": {\"enabled\": false},\n    \"http\": {\n      \"enabled\": true,\n      \"timeout_seconds\": 30,\n      \"allowed_hosts\": []\n    },\n    \"rag\": {\n      \"enabled\": true,\n      \"max_results\": 3\n    }\n  },\n  \"safety_policy\": {}\n}"
+              "raw": "{\n  \"name\": \"Knowledge Agent\",\n  \"description\": \"Agent berbasis RAG — menjawab dari dokumen internal yang diupload. Bisa mengakses API internal via HTTP tool.\",\n  \"instructions\": \"Kamu adalah asisten internal perusahaan yang berpengetahuan luas.\\n\\nPanduan menjawab:\\n1. Dokumen relevan dari knowledge base sudah otomatis tersedia di konteks kamu — gunakan informasi tersebut sebagai sumber utama.\\n2. Jika informasi tidak ada di dokumen, katakan dengan jujur bahwa kamu tidak memiliki informasi tersebut.\\n3. Jika perlu data real-time, gunakan http_get atau http_post ke API internal.\\n4. Selalu jawab dalam Bahasa Indonesia kecuali ditanya dalam bahasa lain.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.3,\n  \"tools_config\": {\n    \"sandbox\": {\"enabled\": false},\n    \"memory\": {\"enabled\": true},\n    \"skills\": {\"enabled\": false},\n    \"tool_creator\": {\"enabled\": false},\n    \"http\": {\n      \"enabled\": true,\n      \"timeout_seconds\": 30,\n      \"allowed_hosts\": []\n    },\n    \"rag\": {\n      \"enabled\": true,\n      \"max_results\": 3\n    }\n  },\n  \"sandbox_config\": {},\n  \"safety_policy\": {\n    \"rules\": [\n      \"Jangan pernah mengungkapkan informasi rahasia atau sensitif perusahaan kepada pihak luar.\",\n      \"Tolak permintaan yang melanggar kebijakan perusahaan atau hukum yang berlaku.\",\n      \"Jangan membuat klaim yang tidak didukung oleh dokumen yang tersedia.\"\n    ]\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            }
+          }
+        },
+        {
+          "name": "POST /v1/agents — Buat Personal Assistant Agent (full tools)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-API-Key", "value": "{{api_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{base_url}}/v1/agents",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Personal Assistant\",\n  \"description\": \"Agent serba bisa dengan akses penuh ke semua tool: sandbox, memory, skills, dan tool creator.\",\n  \"instructions\": \"Kamu adalah personal assistant yang cerdas dan serba bisa.\\n\\nKemampuan kamu:\\n- Menulis dan menjalankan kode Python untuk kalkulasi, analisis data, atau otomasi\\n- Mengingat preferensi dan konteks percakapan sebelumnya via memory\\n- Menggunakan skill yang tersimpan sebagai panduan kerja\\n- Membuat tool baru secara dinamis jika diperlukan\\n\\nGaya komunikasi:\\n- Jawab dalam Bahasa Indonesia\\n- Singkat dan langsung ke poin\\n- Gunakan emoji sparingly untuk membuat respons lebih ramah\\n- Jika mengeksekusi kode, tunjukkan outputnya\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"tools_config\": {\n    \"sandbox\": {\"enabled\": true},\n    \"memory\": {\"enabled\": true},\n    \"skills\": {\"enabled\": true},\n    \"tool_creator\": {\"enabled\": true},\n    \"http\": {\"enabled\": false},\n    \"rag\": {\"enabled\": false}\n  },\n  \"sandbox_config\": {\n    \"memory\": \"512m\",\n    \"cpu\": \"1.0\"\n  },\n  \"safety_policy\": {\n    \"rules\": [\n      \"Jangan mengeksekusi perintah yang dapat merusak sistem atau mengakses data sensitif.\"\n    ],\n    \"max_output_length\": 4000\n  }\n}",
+              "options": { "raw": { "language": "json" } }
             }
           }
         },
@@ -629,19 +686,14 @@
           "request": {
             "method": "PATCH",
             "header": [
-              {
-                "key": "X-API-Key",
-                "value": "{{api_key}}"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
+              { "key": "X-API-Key", "value": "{{api_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"model\": \"google/gemini-2.5-flash\",\n  \"temperature\": 0.5\n}"
+              "raw": "{\n  \"model\": \"google/gemini-2.5-flash\",\n  \"temperature\": 0.5\n}",
+              "options": { "raw": { "language": "json" } }
             }
           }
         }
