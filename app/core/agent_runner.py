@@ -3,6 +3,11 @@ Agent runner: wires OpenRouter LLM + sandbox tools + memory/skill/custom-tool
 tools + LangGraph ReAct agent, loads session history, runs the agent,
 persists all steps to DB.
 
+Tool selection is driven by tools_config (see _is_enabled below).
+Default behaviour if a key is absent:
+  sandbox / memory / skills / tool_creator  → enabled
+  http / rag                                → disabled (opt-in)
+
 DeepAgents swap-in note
 -----------------------
 This uses LangGraph's `create_react_agent` for Milestone 1/2.
@@ -13,7 +18,7 @@ When LangChain DeepAgents API is confirmed, replace the agent build block with:
 
     agent = create_deep_agent(
         llm=llm,
-        tools=extra_tools,           # non-sandbox tools (HTTP, RAG, etc.)
+        tools=extra_tools,
         system_prompt=system_prompt,
         middlewares=[
             TodoListMiddleware(),
@@ -43,11 +48,32 @@ from app.core.memory_service import build_memory_context, upsert_memory, get_mem
 from app.core.sandbox import DockerSandbox
 from app.core.skill_service import create_or_update_skill, get_skill, list_skills as _list_skills
 from app.core.custom_tool_service import create_or_update_custom_tool, list_custom_tools
+from app.core.tools.http_tool import build_http_tools
+from app.core.tools.rag_tool import build_rag_tools
 from app.models.message import Message
 from app.models.session import Session
 
 logger = structlog.get_logger(__name__)
 settings = get_settings()
+
+
+# ---------------------------------------------------------------------------
+# tools_config helpers
+# ---------------------------------------------------------------------------
+
+def _is_enabled(tools_config: dict[str, Any], key: str, default: bool = True) -> bool:
+    """Check whether a tool group is enabled.
+    For 'sandbox', 'memory', 'skills', 'tool_creator': default True (backward compat).
+    For 'http', 'rag': default False (opt-in).
+    """
+    cfg = tools_config.get(key)
+    if cfg is None:
+        return default
+    if isinstance(cfg, bool):
+        return cfg
+    if isinstance(cfg, dict):
+        return bool(cfg.get("enabled", default))
+    return default
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +213,6 @@ def build_tool_creator_tools(agent_id: uuid.UUID, db: AsyncSession, sandbox: Doc
             return f"[error] No custom tool named '{name}'. Use list_tools() to see available tools."
 
         ct = tool_map[name]
-        # Write the tool code + a __main__ runner to a temp file and execute in sandbox
         try:
             args = json.loads(args_json)
         except json.JSONDecodeError as e:
@@ -220,7 +245,6 @@ def build_loaded_custom_tools(custom_tools_db: list, sandbox: DockerSandbox) -> 
     """
     lc_tools = []
     for ct in custom_tools_db:
-        # Capture loop variables via default args to avoid closure bugs.
         def _make_runner(ct_name: str, ct_code: str, ct_desc: str):
             @tool(ct_name, description=ct_desc)
             def _runner(args_json: str = "{}") -> str:
@@ -289,6 +313,7 @@ async def run_agent(
 ) -> dict[str, Any]:
     run_id = uuid.uuid4()
     agent_id: uuid.UUID = session.agent_id
+    tools_config: dict[str, Any] = agent_model.tools_config or {}
     log = logger.bind(
         run_id=str(run_id),
         session_id=str(session.id),
@@ -298,29 +323,52 @@ async def run_agent(
     log.info("agent_run.start")
 
     # --- LLM via OpenRouter (OpenAI-compatible API) ---
+    temperature: float = getattr(agent_model, "temperature", 0.7)
     llm = ChatOpenAI(
         model=agent_model.model,
         api_key=settings.openrouter_api_key,
         base_url="https://openrouter.ai/api/v1",
         max_tokens=4096,
+        temperature=temperature,
     )
 
-    # --- Sandbox + tools ---
+    # --- Sandbox ---
     sandbox = DockerSandbox(session.id)
 
-    # --- Gather all tools ---
+    # --- Gather tools per tools_config ---
     tools: list = []
-    # 1. Core sandbox tools
-    tools.extend(build_sandbox_tools(sandbox))
-    # 2. Memory tools
-    tools.extend(build_memory_tools(agent_id, db))
-    # 3. Skill tools
-    tools.extend(build_skill_tools(agent_id, db))
-    # 4. Tool creator tools
-    tools.extend(build_tool_creator_tools(agent_id, db, sandbox))
-    # 5. Previously saved custom tools (so they're callable by name directly)
-    saved_custom_tools = await list_custom_tools(agent_id, db)
-    tools.extend(build_loaded_custom_tools(saved_custom_tools, sandbox))
+    active_tool_groups: list[str] = []
+
+    if _is_enabled(tools_config, "sandbox"):
+        tools.extend(build_sandbox_tools(sandbox))
+        active_tool_groups.append("sandbox")
+
+    if _is_enabled(tools_config, "memory"):
+        tools.extend(build_memory_tools(agent_id, db))
+        active_tool_groups.append("memory")
+
+    if _is_enabled(tools_config, "skills"):
+        tools.extend(build_skill_tools(agent_id, db))
+        active_tool_groups.append("skills")
+
+    if _is_enabled(tools_config, "tool_creator"):
+        tools.extend(build_tool_creator_tools(agent_id, db, sandbox))
+        active_tool_groups.append("tool_creator")
+
+    if _is_enabled(tools_config, "http", default=False):
+        tools.extend(build_http_tools(tools_config))
+        active_tool_groups.append("http")
+
+    if _is_enabled(tools_config, "rag", default=False):
+        tools.extend(build_rag_tools(agent_id, db, tools_config))
+        active_tool_groups.append("rag")
+
+    # Load previously saved custom tools so they're callable directly
+    if _is_enabled(tools_config, "tool_creator"):
+        saved_custom_tools = await list_custom_tools(agent_id, db)
+        tools.extend(build_loaded_custom_tools(saved_custom_tools, sandbox))
+
+    log.debug("agent_run.tools_ready", groups=active_tool_groups, tool_count=len(tools))
 
     # --- System prompt = instructions + saved memories ---
     base_prompt = agent_model.instructions or "You are a helpful assistant."
@@ -331,18 +379,29 @@ async def run_agent(
     if agent_model.safety_policy:
         policy_text = json.dumps(agent_model.safety_policy, indent=2)
         system_prompt += f"\n\n## Safety Policy\n{policy_text}"
-    system_prompt += (
-        "\n\n## Self-Extending Capabilities\n"
-        "You have access to memory tools (remember/recall/forget), "
-        "skill tools (create_skill/list_skills/use_skill), "
-        "and tool creator tools (create_tool/list_tools/run_custom_tool). "
-        "Use them proactively to remember important facts, build reusable skills, "
-        "and extend your own capabilities.\n"
-        "CRITICAL RULES:\n"
-        "1. If a user asks you to 'use a skill' or apply it (e.g., 'pakai skill X'), you MUST physically call the `use_skill(name='X')` tool FIRST to retrieve its instructions. Do NOT guess the instruction.\n"
-        "2. If you create a new custom tool with `create_tool`, you cannot call it directly as a normal tool in this exact session. "
-        "Instead, immediately after creation, you must use `run_custom_tool(name, args_json)` to execute it."
-    )
+
+    # Describe available self-extending capabilities based on enabled tool groups
+    capability_parts: list[str] = []
+    if "memory" in active_tool_groups:
+        capability_parts.append("memory tools (remember/recall/forget)")
+    if "skills" in active_tool_groups:
+        capability_parts.append("skill tools (create_skill/list_skills/use_skill)")
+    if "tool_creator" in active_tool_groups:
+        capability_parts.append("tool creator tools (create_tool/list_tools/run_custom_tool)")
+    if "http" in active_tool_groups:
+        capability_parts.append("HTTP tools (http_get/http_post)")
+    if "rag" in active_tool_groups:
+        capability_parts.append("knowledge base search (search_knowledge_base)")
+
+    if capability_parts:
+        system_prompt += (
+            "\n\n## Available Tool Capabilities\n"
+            "You have access to: " + ", ".join(capability_parts) + ".\n"
+            "CRITICAL RULES:\n"
+            "1. If a user asks you to 'use a skill' or apply it (e.g., 'pakai skill X'), you MUST physically call the `use_skill(name='X')` tool FIRST to retrieve its instructions. Do NOT guess the instruction.\n"
+            "2. If you create a new custom tool with `create_tool`, you cannot call it directly as a normal tool in this exact session. "
+            "Instead, immediately after creation, you must use `run_custom_tool(name, args_json)` to execute it."
+        )
 
     # --- Load conversation history ---
     history_rows = await _load_history(session.id, db)
@@ -397,7 +456,7 @@ async def run_agent(
     new_messages = all_messages[len(input_messages):]
 
     tool_step = 0
-    pending_tool_records: list[Message] = []  # DB records waiting for their result
+    pending_tool_records: list[Message] = []
 
     for msg in new_messages:
         if isinstance(msg, AIMessage):
@@ -435,7 +494,6 @@ async def run_agent(
 
         elif isinstance(msg, ToolMessage):
             output = msg.content if isinstance(msg.content, str) else str(msg.content)
-            # Back-fill result into the matching steps entry and DB record
             for entry in reversed(steps):
                 if entry["result"] == "":
                     entry["result"] = output[:500]

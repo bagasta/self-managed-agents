@@ -23,6 +23,7 @@ async def create_agent(
         description=payload.description,
         instructions=payload.instructions,
         model=payload.model,
+        temperature=payload.temperature,
         tools_config=payload.tools_config,
         sandbox_config=payload.sandbox_config,
         safety_policy=payload.safety_policy,

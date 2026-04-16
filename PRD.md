@@ -355,10 +355,13 @@ Model yang didukung (contoh):
 
 ### Milestone 2 — Internal Alpha
 
-- [ ] Daytona self-hosted setup sebagai sandbox backend produksi.
-- [ ] Multi-model: agent config bisa pakai model OpenRouter berbeda.
-- [ ] Tools tambahan: HTTP internal, basic RAG retrieval.
-- [ ] Session history endpoint.
+- [ ] Daytona self-hosted setup sebagai sandbox backend produksi (ditunda, fokus ke features lain dulu).
+- [x] Multi-model: agent config bisa pakai model OpenRouter berbeda + `temperature` per-agent.
+- [x] `/v1/models` endpoint: daftar model yang tersedia (Anthropic, OpenAI, Google, Meta, Mistral, DeepSeek, Qwen).
+- [x] Tools tambahan: HTTP tool (`http_get`/`http_post`) + RAG retrieval (`search_knowledge_base`).
+- [x] `tools_config` sekarang benar-benar mengontrol tool mana yang aktif per agent.
+- [x] Document management: `/v1/agents/{id}/documents` CRUD untuk knowledge base RAG.
+- [x] Session history endpoint.
 - [ ] Integrasi ke 1 channel (OpenClaw atau webchat).
 - [ ] Structured logging (structlog) + step trace di response.
 

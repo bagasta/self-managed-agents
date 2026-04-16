@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -18,8 +18,9 @@ class Agent(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     instructions: Mapped[str] = mapped_column(Text, nullable=False, default="")
     model: Mapped[str] = mapped_column(
-        String(255), nullable=False, default="anthropic/claude-sonnet-4-5"
+        String(255), nullable=False, default="anthropic/claude-sonnet-4-6"
     )
+    temperature: Mapped[float] = mapped_column(Float, nullable=False, default=0.7)
     tools_config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     sandbox_config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     safety_policy: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)

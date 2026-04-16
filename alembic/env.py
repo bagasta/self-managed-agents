@@ -9,7 +9,7 @@ load_dotenv()
 
 # Import all models so Alembic sees them for autogenerate
 from app.database import Base
-from app.models import Agent, Message, Session  # noqa: F401
+from app.models import Agent, Document, Message, Session  # noqa: F401
 
 config = context.config
 
