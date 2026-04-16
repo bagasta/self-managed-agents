@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     # Sandbox
     sandbox_base_dir: str = "/tmp/agent-sandboxes"
     docker_sandbox_image: str = "python:3.12-slim"
+    docker_host: str = "unix:///run/docker.sock"
 
     # Agent limits
     agent_max_steps: int = 12

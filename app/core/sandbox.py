@@ -27,6 +27,37 @@ from app.config import get_settings
 
 logger = structlog.get_logger(__name__)
 
+# Socket paths to probe in order when the configured path is unavailable.
+_FALLBACK_SOCKETS = [
+    "unix:///run/docker.sock",
+    "unix:///var/run/docker.sock",
+]
+
+
+def _connect_docker(preferred: str) -> docker.DockerClient:
+    """
+    Try to connect to Docker using `preferred` first, then fallback sockets.
+    Skips paths whose socket file does not exist to give a fast, clear error.
+    """
+    candidates = [preferred] + [s for s in _FALLBACK_SOCKETS if s != preferred]
+    last_exc: Exception | None = None
+    for url in candidates:
+        # Strip the unix:// prefix to get the filesystem path for existence check
+        sock_path = url.removeprefix("unix://")
+        if not Path(sock_path).exists():
+            continue
+        try:
+            client = docker.DockerClient(base_url=url)
+            client.ping()          # fast connectivity check
+            logger.debug("sandbox.docker.connected", socket=url)
+            return client
+        except Exception as exc:
+            last_exc = exc
+            continue
+    raise docker.errors.DockerException(
+        f"Could not connect to Docker. Tried: {candidates}. Last error: {last_exc}"
+    )
+
 
 def get_workspace_dir(session_id: str | uuid.UUID) -> Path:
     settings = get_settings()
@@ -51,7 +82,7 @@ class DockerSandbox:
 
     def _get_client(self) -> docker.DockerClient:
         if self._client is None:
-            self._client = docker.from_env()
+            self._client = _connect_docker(self._settings.docker_host)
         return self._client
 
     def bash(self, cmd: str) -> str:
