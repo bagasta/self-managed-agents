@@ -19,6 +19,10 @@
     {
       "key": "session_id",
       "value": ""
+    },
+    {
+      "key": "doc_id",
+      "value": ""
     }
   ],
   "item": [
@@ -54,7 +58,7 @@
             "url": "{{base_url}}/v1/agents",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"Coding Agent\",\n  \"description\": \"Agent untuk menulis dan menjalankan kode Python\",\n  \"instructions\": \"Kamu adalah coding assistant. Tulis kode Python yang bersih, jalankan untuk verifikasi, dan jelaskan hasilnya.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"sandbox_config\": {\n    \"memory\": \"512m\",\n    \"cpu\": \"1.0\"\n  },\n  \"safety_policy\": {}\n}"
+              "raw": "{\n  \"name\": \"Coding Agent\",\n  \"description\": \"Agent untuk menulis dan menjalankan kode Python\",\n  \"instructions\": \"Kamu adalah coding assistant. Tulis kode Python yang bersih, jalankan untuk verifikasi, dan jelaskan hasilnya.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"tools_config\": {},\n  \"sandbox_config\": {\n    \"memory\": \"512m\",\n    \"cpu\": \"1.0\"\n  },\n  \"safety_policy\": {}\n}"
             }
           }
         },
@@ -387,6 +391,165 @@
               }
             ],
             "url": "{{base_url}}/v1/agents/{{agent_id}}/custom-tools/fibonacci"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Models (M2)",
+      "item": [
+        {
+          "name": "GET /v1/models — Daftar model OpenRouter yang tersedia",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": "{{base_url}}/v1/models"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Documents / RAG (M2)",
+      "item": [
+        {
+          "name": "POST /v1/agents/:agent_id/documents — Tambah dokumen ke knowledge base",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/documents",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Panduan Onboarding Internal\",\n  \"content\": \"Selamat datang di tim! Berikut langkah-langkah onboarding:\\n1. Setup akun GitHub dan VPN\\n2. Clone repository utama\\n3. Ikuti README untuk setup lokal\\n4. Hubungi tech lead untuk akses database dev\\n5. Review dokumen arsitektur di Notion\",\n  \"source\": \"notion/onboarding-guide\",\n  \"doc_metadata\": {\n    \"category\": \"onboarding\",\n    \"author\": \"hr-team\"\n  }\n}"
+            }
+          }
+        },
+        {
+          "name": "GET /v1/agents/:agent_id/documents — List semua dokumen",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/agents/{{agent_id}}/documents?limit=20&offset=0",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "agents", "{{agent_id}}", "documents"],
+              "query": [
+                { "key": "limit", "value": "20" },
+                { "key": "offset", "value": "0" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "GET /v1/agents/:agent_id/documents/:doc_id — Detail dokumen",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/documents/{{doc_id}}"
+          }
+        },
+        {
+          "name": "PATCH /v1/agents/:agent_id/documents/:doc_id — Update dokumen",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/documents/{{doc_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"content\": \"Konten dokumen yang sudah diperbarui.\"\n}"
+            }
+          }
+        },
+        {
+          "name": "DELETE /v1/agents/:agent_id/documents/:doc_id — Hapus dokumen",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/documents/{{doc_id}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Agent dengan HTTP + RAG Tools (contoh config)",
+      "item": [
+        {
+          "name": "POST /v1/agents — Buat RAG Agent (dengan http + rag enabled)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Knowledge Agent\",\n  \"description\": \"Agent yang bisa search knowledge base dan panggil HTTP API internal\",\n  \"instructions\": \"Kamu adalah asisten internal. Gunakan search_knowledge_base untuk menjawab pertanyaan dari dokumen internal. Gunakan http_get/http_post untuk mengambil data dari API internal.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.3,\n  \"tools_config\": {\n    \"sandbox\": {\"enabled\": false},\n    \"memory\": {\"enabled\": true},\n    \"skills\": {\"enabled\": false},\n    \"tool_creator\": {\"enabled\": false},\n    \"http\": {\n      \"enabled\": true,\n      \"timeout_seconds\": 30,\n      \"allowed_hosts\": []\n    },\n    \"rag\": {\n      \"enabled\": true,\n      \"max_results\": 5\n    }\n  },\n  \"safety_policy\": {}\n}"
+            }
+          }
+        },
+        {
+          "name": "PATCH /v1/agents/:agent_id — Ganti model + temperature",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"google/gemini-2.5-flash\",\n  \"temperature\": 0.5\n}"
+            }
           }
         }
       ]
