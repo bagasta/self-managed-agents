@@ -6,7 +6,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import agents, custom_tools, documents, history, memory, messages, models, runs, sessions, skills
+from app.api import agents, channels, custom_tools, documents, history, memory, messages, models, runs, sessions, skills, stream
 from app.config import get_settings
 
 settings = get_settings()
@@ -36,7 +36,14 @@ async def lifespan(_app: FastAPI):
     # Downloads model files (~130MB) on first run, cached after that.
     from app.core.embedding_service import warmup_embedding_model
     await warmup_embedding_model()
+
+    # Start proactive agent scheduler
+    from app.core.scheduler_service import start_scheduler, stop_scheduler
+    start_scheduler()
+
     yield
+
+    stop_scheduler()
 
 
 app = FastAPI(
@@ -57,6 +64,7 @@ app.add_middleware(
 )
 
 app.include_router(agents.router)
+app.include_router(channels.router)
 app.include_router(sessions.router)
 app.include_router(messages.router)
 app.include_router(history.router)
@@ -66,6 +74,7 @@ app.include_router(custom_tools.router)
 app.include_router(documents.router)
 app.include_router(models.router)
 app.include_router(runs.router)
+app.include_router(stream.router)
 
 
 @app.get("/health", tags=["meta"])

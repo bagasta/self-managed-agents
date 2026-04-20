@@ -19,3 +19,19 @@
   Building a managed agent platform. RAG is now working correctly. Next: continue with anyremaining Milestone 2 features or fixes
 
 
+Building a managed AI agent platform with proactive scheduling, human escalation via channels, and MCP tool support. Dev
+  UI is functional with escalation simulator. Next: run the server and verify the operator-to-customer message flow works end to
+  end.
+
+  Membangun platform managed AI agent berbasis FastAPI. Semua TODO selesai dan Postman collection baru saja diperbarui     
+  dengan contoh lengkap untuk semua endpoint, termasuk MCP config, Slack/webhook session, dan semua default tools. Tidak ada task 
+  pending. 
+
+  Working on real-time delivery of scheduled agent reminders to the dev UI. Added SSE endpoint and wired it into the chat  
+  section — restart the server to test.
+
+Building a managed agent platform. Just fixed scheduled reminders so they appear in the dev UI chat in real-time via SSE. No
+     pending tasks — all features are working.      
+
+Adding per-agent subscription with token quota, expiry period, and unique API key per agent. Migration 007 is ready —    
+  next step is running alembic upgrade 007 to apply it. (disable recaps in /config)

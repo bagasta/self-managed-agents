@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Managed Agents — Dev UI</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ── Topbar ── -->
+<div id="topbar">
+  <div class="logo">🤖 AgentDev</div>
+  <label>Base URL</label>
+  <input id="cfg-url" type="text" value="http://localhost:8000" placeholder="http://localhost:8000" style="width:200px">
+  <label>API Key</label>
+  <input id="cfg-key" type="text" placeholder="sk-..." style="width:160px">
+  <button id="save-config" onclick="saveConfig()">Save & Ping</button>
+  <div id="status-dot" title="Server status"></div>
+</div>
+
+<!-- ── Layout ── -->
+<div id="layout">
+
+  <!-- ── Sidebar ── -->
+  <nav id="sidebar">
+    <div class="nav-group">
+      <div class="nav-group-label">Core</div>
+      <div class="nav-item active" onclick="nav('agents')"><span class="icon">🤖</span> Agents</div>
+      <div class="nav-item" onclick="nav('sessions')"><span class="icon">💬</span> Sessions</div>
+      <div class="nav-item" onclick="nav('chat')"><span class="icon">📨</span> Chat / Messages</div>
+      <div class="nav-item" onclick="nav('history')"><span class="icon">📜</span> History</div>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Knowledge</div>
+      <div class="nav-item" onclick="nav('documents')"><span class="icon">📄</span> Documents</div>
+      <div class="nav-item" onclick="nav('memory')"><span class="icon">🧠</span> Memory</div>
+      <div class="nav-item" onclick="nav('skills')"><span class="icon">🎯</span> Skills</div>
+      <div class="nav-item" onclick="nav('tools')"><span class="icon">🔧</span> Custom Tools</div>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Channel</div>
+      <div class="nav-item" onclick="nav('escalation')"><span class="icon">🚨</span> Escalation Test</div>
+      <div class="nav-item" onclick="nav('channels')"><span class="icon">📡</span> Incoming Msg</div>
+      <div class="nav-item" onclick="nav('runs')"><span class="icon">🔍</span> Runs</div>
+    </div>
+  </nav>
+
+  <!-- ── Main ── -->
+  <div id="main">
+    <div id="content">
+
+      <!-- ═══════════════════════════ AGENTS ═══════════════════════════ -->
+      <div class="section active" id="sec-agents">
+        <div class="section-title">🤖 Agents</div>
+
+        <!-- List -->
+        <div class="card">
+          <div class="card-title">📋 Agent List <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="loadAgents()">Refresh</button></div>
+          <div id="agents-table"><div class="empty-state"><div class="icon">🤖</div>Klik Refresh untuk load agents</div></div>
+        </div>
+
+        <!-- Create / Edit -->
+        <div class="card">
+          <div class="card-title" id="agent-form-title">➕ Create Agent</div>
+          <input type="hidden" id="agent-edit-id">
+          <div class="card-grid">
+            <div class="form-group">
+              <label>Name *</label>
+              <input id="a-name" type="text" placeholder="CS Agent">
+            </div>
+            <div class="form-group">
+              <label>Model</label>
+              <input id="a-model" type="text" value="anthropic/claude-sonnet-4-6" placeholder="anthropic/claude-sonnet-4-6">
+            </div>
+            <div class="form-group">
+              <label>Temperature</label>
+              <input id="a-temp" type="number" value="0.7" min="0" max="2" step="0.1">
+            </div>
+            <div class="form-group">
+              <label>Description</label>
+              <input id="a-desc" type="text" placeholder="Agen untuk customer service">
+            </div>
+            <div class="form-group full">
+              <label>Instructions (System Prompt)</label>
+              <textarea id="a-instructions" rows="4" placeholder="Kamu adalah agen CS yang ramah dan profesional..."></textarea>
+            </div>
+            <div class="form-group full">
+              <label>Tools Config (JSON)</label>
+              <textarea id="a-tools" rows="6"></textarea>
+              <div class="tools-config-hint">Default ON: memory, tool_creator, rag, sandbox, skills, scheduler, escalation | Default OFF: http, mcp</div>
+            </div>
+            <div class="form-group full">
+              <label>Escalation Config (JSON)</label>
+              <textarea id="a-escalation" rows="3"></textarea>
+              <div class="tools-config-hint">
+                📞 Kontak <strong>human operator</strong> yang menerima notifikasi saat agent mengeskalasi.
+                <code>operator_phone</code> = nomor/ID operator. <code>channel_type</code> = channel untuk hubungi operator.
+                Contoh: <code>{"channel_type":"whatsapp","operator_phone":"+62811xxx"}</code>
+              </div>
+            </div>
+            <div class="form-group full">
+              <label>Safety Policy (JSON)</label>
+              <textarea id="a-safety" rows="2">{}</textarea>
+            </div>
+          </div>
+          <div class="btn-group">
+            <button class="btn btn-success" onclick="submitAgent()">💾 Save Agent</button>
+            <button class="btn btn-ghost" onclick="resetAgentForm()">✖ Reset</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════ SESSIONS ═══════════════════════════ -->
+      <div class="section" id="sec-sessions">
+        <div class="section-title">💬 Sessions</div>
+
+        <div class="card">
+          <div class="card-title">Select Agent</div>
+          <div class="flex">
+            <select id="sess-agent-sel" style="flex:1" onchange="loadSessions()">
+              <option value="">— pilih agent —</option>
+            </select>
+            <button class="btn btn-ghost btn-sm" onclick="populateAgentSelects()">↻</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">📋 Sessions</div>
+          <div id="sessions-table"><div class="empty-state"><div class="icon">💬</div>Pilih agent untuk load sessions</div></div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">➕ Create Session</div>
+          <div class="card-grid">
+            <div class="form-group">
+              <label>External User ID</label>
+              <input id="s-userid" type="text" placeholder="user-001 atau +62812xxx">
+            </div>
+            <div class="form-group">
+              <label>Channel Type</label>
+              <select id="s-channel-type" onchange="updateChannelConfigExample()">
+                <option value="">— tidak ada —</option>
+                <option value="whatsapp">WhatsApp</option>
+                <option value="telegram">Telegram</option>
+                <option value="slack">Slack</option>
+                <option value="webhook">Webhook</option>
+                <option value="in-app">In-App</option>
+              </select>
+            </div>
+            <div class="form-group full">
+              <label>Channel Config (JSON)</label>
+              <textarea id="s-channel-config" rows="4">{}</textarea>
+            </div>
+            <div class="form-group full">
+              <label>Metadata (JSON)</label>
+              <textarea id="s-meta" rows="2">{}</textarea>
+            </div>
+          </div>
+          <div class="btn-group">
+            <button class="btn btn-success" onclick="createSession()">💬 Create Session</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════ CHAT ═══════════════════════════ -->
+      <div class="section" id="sec-chat">
+        <div class="section-title">📨 Chat / Messages</div>
+
+        <div class="card" style="padding: 12px; margin-bottom: 12px;">
+          <div class="flex">
+            <div class="form-group" style="flex:1">
+              <label>Agent</label>
+              <select id="chat-agent-sel" onchange="loadSessionsForChat()">
+                <option value="">— pilih agent —</option>
+              </select>
+            </div>
+            <div class="form-group" style="flex:1">
+              <label>Session</label>
+              <select id="chat-session-sel" onchange="loadChatHistory()">
+                <option value="">— pilih session —</option>
+              </select>
+            </div>
+            <div style="align-self:flex-end; display:flex; flex-direction:column; gap:4px; align-items:flex-end">
+              <div id="sse-indicator" style="font-size:11px; color:var(--text-muted)"><span>⚪ Stream off</span></div>
+              <button class="btn btn-ghost btn-sm" onclick="clearChatUI()">🗑 Clear UI</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="chat-wrap">
+          <div id="chat-messages">
+            <div class="bubble-system">Pilih agent & session untuk mulai chat</div>
+          </div>
+          <div id="chat-input-row">
+            <textarea id="chat-input" placeholder="Ketik pesan..." onkeydown="chatKeydown(event)"></textarea>
+            <button class="btn btn-primary" onclick="sendChatMessage()" id="chat-send-btn">Send ↑</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════ HISTORY ═══════════════════════════ -->
+      <div class="section" id="sec-history">
+        <div class="section-title">📜 History</div>
+        <div class="card">
+          <div class="card-title">Get Session History</div>
+          <div class="flex">
+            <div class="form-group" style="flex:1">
+              <label>Session ID</label>
+              <input id="hist-session-id" type="text" placeholder="uuid">
+            </div>
+            <div class="form-group">
+              <label>Limit</label>
+              <input id="hist-limit" type="number" value="50" style="width:80px">
+            </div>
+            <button class="btn btn-primary" style="align-self:flex-end" onclick="loadHistory()">Load</button>
+          </div>
+        </div>
+        <div id="history-result"></div>
+      </div>
+
+      <!-- ═══════════════════════════ DOCUMENTS ═══════════════════════════ -->
+      <div class="section" id="sec-documents">
+        <div class="section-title">📄 Documents</div>
+
+        <div class="card">
+          <div class="card-title">Select Agent</div>
+          <div class="flex">
+            <select id="doc-agent-sel" style="flex:1" onchange="loadDocuments()">
+              <option value="">— pilih agent —</option>
+            </select>
+            <button class="btn btn-ghost btn-sm" onclick="populateAgentSelects()">↻</button>
+          </div>
+        </div>
+
+        <div class="card-grid" style="margin-bottom:16px">
+          <!-- Upload text -->
+          <div class="card" style="margin:0">
+            <div class="card-title">📝 Upload Text Doc</div>
+            <div class="form-group">
+              <label>Title *</label>
+              <input id="doc-title" type="text" placeholder="FAQ Produk">
+            </div>
+            <div class="form-group mt-8">
+              <label>Content *</label>
+              <textarea id="doc-content" rows="5" placeholder="Isi dokumen..."></textarea>
+            </div>
+            <div class="form-group mt-8">
+              <label>Source (opsional)</label>
+              <input id="doc-source" type="text" placeholder="https://...">
+            </div>
+            <div class="btn-group">
+              <button class="btn btn-success btn-sm" onclick="uploadDoc()">Upload</button>
+            </div>
+          </div>
+
+          <!-- Upload file -->
+          <div class="card" style="margin:0">
+            <div class="card-title">📎 Upload File (PDF/DOCX/PPTX)</div>
+            <div class="form-group">
+              <label>File</label>
+              <input id="doc-file" type="file" accept=".pdf,.docx,.pptx,.txt" style="color:var(--text-muted)">
+            </div>
+            <div class="form-group mt-8">
+              <label>Title (opsional, default: nama file)</label>
+              <input id="doc-file-title" type="text" placeholder="Judul dokumen">
+            </div>
+            <div class="btn-group">
+              <button class="btn btn-success btn-sm" onclick="uploadFile()">Upload File</button>
+            </div>
+
+            <div class="divider"></div>
+
+            <div class="card-title">🔍 Search Documents</div>
+            <div class="form-group">
+              <label>Query</label>
+              <input id="doc-search-q" type="text" placeholder="Cari dokumen...">
+            </div>
+            <div class="btn-group">
+              <button class="btn btn-primary btn-sm" onclick="searchDocs()">Search</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">📋 Document List</div>
+          <div id="docs-table"><div class="empty-state text-muted">Pilih agent untuk load dokumen</div></div>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════ MEMORY ═══════════════════════════ -->
+      <div class="section" id="sec-memory">
+        <div class="section-title">🧠 Memory</div>
+        <div class="card">
+          <div class="flex">
+            <select id="mem-agent-sel" style="flex:1" onchange="loadMemory()">
+              <option value="">— pilih agent —</option>
+            </select>
+            <button class="btn btn-ghost btn-sm" onclick="populateAgentSelects()">↻</button>
+          </div>
+        </div>
+        <div class="card-grid">
+          <div class="card" style="margin:0">
+            <div class="card-title">➕ Add Memory</div>
+            <div class="form-group"><label>Key</label><input id="mem-key" type="text" placeholder="user_preference"></div>
+            <div class="form-group mt-8"><label>Value</label><textarea id="mem-val" rows="3" placeholder="User lebih suka bahasa formal"></textarea></div>
+            <div class="btn-group"><button class="btn btn-success btn-sm" onclick="addMemory()">Save</button></div>
+          </div>
+          <div class="card" style="margin:0">
+            <div class="card-title">📋 Memory List</div>
+            <div id="memory-list"><div class="empty-state text-muted">Pilih agent</div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════ SKILLS ═══════════════════════════ -->
+      <div class="section" id="sec-skills">
+        <div class="section-title">🎯 Skills</div>
+        <div class="card">
+          <div class="flex">
+            <select id="skill-agent-sel" style="flex:1" onchange="loadSkills()">
+              <option value="">— pilih agent —</option>
+            </select>
+            <button class="btn btn-ghost btn-sm" onclick="populateAgentSelects()">↻</button>
+          </div>
+        </div>
+        <div class="card-grid">
+          <div class="card" style="margin:0">
+            <div class="card-title">➕ Create Skill</div>
+            <div class="form-group"><label>Name *</label><input id="sk-name" type="text" placeholder="handle_refund"></div>
+            <div class="form-group mt-8"><label>Description</label><input id="sk-desc" type="text" placeholder="Panduan proses refund"></div>
+            <div class="form-group mt-8"><label>Content (Markdown)</label><textarea id="sk-content" rows="6" placeholder="## Handle Refund&#10;&#10;1. Verifikasi order ID..."></textarea></div>
+            <div class="btn-group"><button class="btn btn-success btn-sm" onclick="createSkill()">Save</button></div>
+          </div>
+          <div class="card" style="margin:0">
+            <div class="card-title">📋 Skills List</div>
+            <div id="skills-list"><div class="empty-state text-muted">Pilih agent</div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════ CUSTOM TOOLS ═══════════════════════════ -->
+      <div class="section" id="sec-tools">
+        <div class="section-title">🔧 Custom Tools</div>
+        <div class="card">
+          <div class="flex">
+            <select id="ct-agent-sel" style="flex:1" onchange="loadCustomTools()">
+              <option value="">— pilih agent —</option>
+            </select>
+            <button class="btn btn-ghost btn-sm" onclick="populateAgentSelects()">↻</button>
+          </div>
+        </div>
+        <div class="card-grid">
+          <div class="card" style="margin:0">
+            <div class="card-title">➕ Create Tool</div>
+            <div class="form-group"><label>Name *</label><input id="ct-name" type="text" placeholder="get_weather"></div>
+            <div class="form-group mt-8"><label>Description</label><input id="ct-desc" type="text" placeholder="Get current weather for a city"></div>
+            <div class="form-group mt-8">
+              <label>Python Code</label>
+              <textarea id="ct-code" rows="8" placeholder="def get_weather(city: str) -> str:&#10;    import requests&#10;    # ...&#10;    return f'Weather in {city}: sunny'"></textarea>
+            </div>
+            <div class="btn-group"><button class="btn btn-success btn-sm" onclick="createCustomTool()">Save</button></div>
+          </div>
+          <div class="card" style="margin:0">
+            <div class="card-title">📋 Tools List</div>
+            <div id="custom-tools-list"><div class="empty-state text-muted">Pilih agent</div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════ ESCALATION TEST ═══════════════════════════ -->
+      <div class="section" id="sec-escalation">
+        <div class="section-title">🚨 Escalation Simulator</div>
+        <p class="text-muted" style="margin-bottom:16px">
+          Simulasi percakapan antara <strong>User</strong> dan <strong>Operator</strong> tanpa perlu WhatsApp API.
+          Pesan dari operator dikirim via <code>/v1/channels/incoming</code> dengan <code>from_phone</code> = operator_phone.
+        </p>
+
+        <!-- Config -->
+        <div class="card">
+          <div class="card-title">⚙️ Setup</div>
+          <div class="card-grid cols-3">
+            <div class="form-group">
+              <label>Agent</label>
+              <select id="esc-agent-sel" onchange="loadEscalationAgent()">
+                <option value="">— pilih agent —</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Session ID</label>
+              <input id="esc-session-id" type="text" placeholder="uuid session">
+            </div>
+            <div class="form-group">
+              <label>Operator Phone (dari escalation_config)</label>
+              <input id="esc-operator-phone" type="text" placeholder="+62811xxx" readonly style="color:var(--warning)">
+            </div>
+          </div>
+          <div class="btn-group">
+            <button class="btn btn-ghost btn-sm" onclick="checkEscalationStatus()">🔄 Cek Status</button>
+            <button class="btn btn-danger btn-sm" onclick="forceEscalation(true)">🚨 Force Aktifkan Eskalasi</button>
+            <button class="btn btn-success btn-sm" onclick="forceEscalation(false)">✅ Reset (Non-aktifkan)</button>
+          </div>
+          <div id="esc-status-bar" class="mt-8"></div>
+          <div class="text-muted mt-8" style="line-height:1.6">
+            <strong>Cara pakai:</strong>
+            1️⃣ Pilih agent yang sudah punya <code>escalation_config.operator_phone</code>
+            → 2️⃣ Isi Session ID
+            → 3️⃣ Klik <em>Force Aktifkan Eskalasi</em> (atau biarkan agent memicunya sendiri lewat chat)
+            → 4️⃣ Kirim pesan sebagai <strong>User</strong> di kiri, balas sebagai <strong>Operator</strong> di kanan
+          </div>
+        </div>
+
+        <!-- Two-column sim -->
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px">
+
+          <!-- User side -->
+          <div class="card" style="margin:0; display:flex; flex-direction:column">
+            <div class="card-title">👤 User Side</div>
+            <div id="esc-user-log" style="flex:1; min-height:220px; max-height:320px; overflow-y:auto; background:var(--surface-2); border-radius:6px; padding:10px; margin-bottom:10px; display:flex; flex-direction:column; gap:8px">
+              <div class="bubble-system">Pesan user akan muncul di sini</div>
+            </div>
+            <textarea id="esc-user-msg" rows="3" placeholder="Ketik pesan sebagai user..."></textarea>
+            <div class="btn-group">
+              <button class="btn btn-primary btn-sm" onclick="escalationSendUser()">Send as User ↑</button>
+            </div>
+          </div>
+
+          <!-- Operator side -->
+          <div class="card" style="margin:0; display:flex; flex-direction:column">
+            <div class="card-title">👨‍💼 Operator Side <span class="badge badge-yellow" style="margin-left:8px">Kendali Penuh</span></div>
+            <div id="esc-op-log" style="flex:1; min-height:220px; max-height:320px; overflow-y:auto; background:var(--surface-2); border-radius:6px; padding:10px; margin-bottom:10px; display:flex; flex-direction:column; gap:8px">
+              <div class="bubble-system">Notifikasi & balasan agent ke operator muncul di sini</div>
+            </div>
+            <textarea id="esc-op-msg" rows="3" placeholder='Contoh perintah operator:&#10;"Kirim ke customer: Maaf atas kendalanya..."&#10;"Selesai, tangani sendiri"'></textarea>
+            <div class="btn-group">
+              <button class="btn btn-success btn-sm" onclick="escalationSendOperator()">Send as Operator ↑</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════ CHANNELS ═══════════════════════════ -->
+      <div class="section" id="sec-channels">
+        <div class="section-title">📡 Incoming Channel Message</div>
+        <div class="card">
+          <div class="card-title">Simulasi pesan masuk dari channel eksternal</div>
+          <div class="card-grid">
+            <div class="form-group">
+              <label>Session ID *</label>
+              <input id="ch-session-id" type="text" placeholder="uuid">
+            </div>
+            <div class="form-group">
+              <label>From Phone (pengirim)</label>
+              <input id="ch-from" type="text" placeholder="+62812xxx (kosong = user biasa)">
+            </div>
+            <div class="form-group full">
+              <label>Message *</label>
+              <textarea id="ch-message" rows="4" placeholder="Halo, saya mau tanya soal refund..."></textarea>
+            </div>
+          </div>
+          <div class="text-muted mt-8">
+            💡 Jika from_phone = operator_phone di escalation_config → pesan dianggap perintah operator
+          </div>
+          <div class="btn-group">
+            <button class="btn btn-primary" onclick="sendIncoming()">📤 Send Incoming</button>
+          </div>
+          <div id="ch-result" class="mt-12"></div>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════ RUNS ═══════════════════════════ -->
+      <div class="section" id="sec-runs">
+        <div class="section-title">🔍 Runs</div>
+        <div class="card">
+          <div class="card-title">Get Run Detail</div>
+          <div class="flex">
+            <div class="form-group" style="flex:1">
+              <label>Run ID</label>
+              <input id="run-id-input" type="text" placeholder="uuid">
+            </div>
+            <button class="btn btn-primary" style="align-self:flex-end" onclick="getRun()">Load</button>
+          </div>
+        </div>
+        <div id="run-result"></div>
+      </div>
+
+    </div><!-- /content -->
+
+    <!-- ── Log Panel ── -->
+    <div id="log-panel">
+      <div id="log-header" onclick="toggleLog()">
+        <span>Request Log</span>
+        <span id="log-method" class="badge badge-blue">—</span>
+        <span id="log-url" class="text-muted">—</span>
+        <span id="log-status-badge"></span>
+        <span style="margin-left:auto; color:var(--text-muted); font-size:11px" id="log-toggle-icon">▼</span>
+      </div>
+      <div id="log-body">Belum ada request...</div>
+    </div>
+  </div><!-- /main -->
+
+</div><!-- /layout -->
+
+<script src="app.js"></script>
+</body>
+</html>

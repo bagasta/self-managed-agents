@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
@@ -7,7 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.deps import verify_api_key
 from app.models.agent import Agent
-from app.schemas.agent import AgentCreate, AgentListResponse, AgentResponse, AgentUpdate
+from app.schemas.agent import (
+    AgentCreate,
+    AgentListResponse,
+    AgentRenewResponse,
+    AgentResponse,
+    AgentUpdate,
+)
 
 router = APIRouter(prefix="/v1/agents", tags=["agents"])
 
@@ -18,6 +25,7 @@ async def create_agent(
     db: AsyncSession = Depends(get_db),
     _: str = Depends(verify_api_key),
 ) -> AgentResponse:
+    active_until = datetime.now(timezone.utc) + timedelta(days=payload.quota_period_days)
     agent = Agent(
         name=payload.name,
         description=payload.description,
@@ -27,6 +35,10 @@ async def create_agent(
         tools_config=payload.tools_config,
         sandbox_config=payload.sandbox_config,
         safety_policy=payload.safety_policy,
+        escalation_config=payload.escalation_config,
+        token_quota=payload.token_quota,
+        quota_period_days=payload.quota_period_days,
+        active_until=active_until,
     )
     db.add(agent)
     await db.flush()
@@ -99,6 +111,32 @@ async def delete_agent(
     agent = await _get_active_agent(agent_id, db)
     agent.is_deleted = True
     await db.flush()
+
+
+@router.post("/{agent_id}/renew", response_model=AgentRenewResponse)
+async def renew_agent(
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(verify_api_key),
+) -> AgentRenewResponse:
+    """Extend the agent's active period and reset token usage counter."""
+    agent = await _get_active_agent(agent_id, db)
+    agent.active_until = datetime.now(timezone.utc) + timedelta(days=agent.quota_period_days)
+    agent.tokens_used = 0
+    await db.flush()
+    await db.refresh(agent)
+    return AgentRenewResponse(
+        id=agent.id,
+        api_key=agent.api_key,
+        tokens_used=agent.tokens_used,
+        token_quota=agent.token_quota,
+        active_until=agent.active_until,
+        quota_period_days=agent.quota_period_days,
+        message=(
+            f"Agent renewed for {agent.quota_period_days} days. "
+            f"Token quota reset to {agent.token_quota:,}."
+        ),
+    )
 
 
 async def _get_active_agent(agent_id: uuid.UUID, db: AsyncSession) -> Agent:

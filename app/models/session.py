@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -26,6 +26,9 @@ class Session(Base):
         "metadata", JSONB, nullable=False, default=dict
     )
     workspace_dir: Mapped[str | None] = mapped_column(Text, nullable=True)
+    channel_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    channel_config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    escalation_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

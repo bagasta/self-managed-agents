@@ -330,7 +330,8 @@ async def _build_rag_context(
     markdown block ready to inject into the system prompt.
     Returns "" if RAG is disabled, no documents match, or any error occurs.
     """
-    cfg: dict[str, Any] = tools_config.get("rag", {})
+    raw = tools_config.get("rag", {})
+    cfg: dict[str, Any] = raw if isinstance(raw, dict) else {}
     max_results: int = int(cfg.get("max_results", 3))
 
     try:
@@ -409,6 +410,8 @@ async def run_agent(
     sandbox = DockerSandbox(session.id)
 
     # --- Tools ---
+    # Default ON: sandbox, memory, skills, tool_creator, rag, scheduler, escalation
+    # Default OFF: http, mcp
     tools: list = []
     active_groups: list[str] = []
 
@@ -430,15 +433,25 @@ async def run_agent(
         tools.extend(build_loaded_custom_tools(saved_custom_tools, sandbox))
         active_groups.append("tool_creator")
 
+    if _is_enabled(tools_config, "scheduler"):
+        from app.core.tools.scheduler_tool import build_scheduler_tools
+        tools.extend(build_scheduler_tools(session.id, agent_id, db))
+        active_groups.append("scheduler")
+
+    if _is_enabled(tools_config, "escalation"):
+        from app.core.tools.escalation_tool import build_escalation_tools
+        tools.extend(build_escalation_tools(session.id, agent_id, db))
+        active_groups.append("escalation")
+
     if _is_enabled(tools_config, "http", default=False):
         tools.extend(build_http_tools(tools_config))
         active_groups.append("http")
 
-    log.debug("agent_run.tools_ready", groups=active_groups, count=len(tools))
+    log.debug("agent_run.tools_ready (pre-mcp)", groups=active_groups, count=len(tools))
 
     # --- RAG context (auto-injected, not a tool) ---
     rag_context = ""
-    if _is_enabled(tools_config, "rag", default=False):
+    if _is_enabled(tools_config, "rag"):
         rag_context = await _build_rag_context(agent_id, user_message, db, tools_config, log)
 
     # --- Short-term memory: load last N turns ---
@@ -447,6 +460,10 @@ async def run_agent(
     )
     prior_messages = _db_messages_to_lc(history_rows)
     log.debug("agent_run.history_loaded", turns=len(prior_messages) // 2)
+
+    # --- Detect message context: operator command vs escalation mode ---
+    is_operator_message = user_message.startswith("[OPERATOR] ")
+    is_user_in_escalation = user_message.startswith("[USER_IN_ESCALATION] ")
 
     # --- System prompt ---
     system_prompt = agent_model.instructions or "You are a helpful assistant."
@@ -464,7 +481,27 @@ async def run_agent(
     if rag_context:
         system_prompt += f"\n\n{rag_context}"
 
-    # 4. Available capabilities description
+    # 4. Escalation context
+    if is_operator_message:
+        system_prompt += (
+            "\n\n## MODE: OPERATOR COMMAND\n"
+            "Pesan berikut adalah PERINTAH dari human operator yang mengendalikan kamu. "
+            "Eksekusi perintah tersebut secara tepat. "
+            "Gunakan tool `reply_to_user(message)` untuk kirim pesan ke user, "
+            "atau `send_to_number(phone, message)` untuk kirim ke nomor lain. "
+            "Jika operator berkata 'selesai' atau 'tangani sendiri', "
+            "kamu boleh merespons user secara normal kembali."
+        )
+    elif is_user_in_escalation or session.escalation_active:
+        system_prompt += (
+            "\n\n## MODE: ESKALASI AKTIF\n"
+            "Percakapan ini sedang dalam mode eskalasi — human operator sedang memantau. "
+            "Teruskan pesan user ke operator menggunakan `reply_to_user` atau tunggu instruksi operator. "
+            "Kamu tetap bisa menjawab pertanyaan umum yang aman, "
+            "tapi untuk tindakan sensitif tunggu konfirmasi operator."
+        )
+
+    # 5. Available capabilities description
     cap_parts: list[str] = []
     if "memory" in active_groups:
         cap_parts.append("memory tools (remember/recall/forget)")
@@ -472,6 +509,10 @@ async def run_agent(
         cap_parts.append("skill tools (create_skill/list_skills/use_skill)")
     if "tool_creator" in active_groups:
         cap_parts.append("tool creator (create_tool/list_tools/run_custom_tool)")
+    if "scheduler" in active_groups:
+        cap_parts.append("scheduler tools (set_reminder/list_reminders/cancel_reminder)")
+    if "escalation" in active_groups:
+        cap_parts.append("escalation tools (escalate_to_human/reply_to_user/send_to_number)")
     if "http" in active_groups:
         cap_parts.append("HTTP tools (http_get/http_post)")
 
@@ -496,73 +537,87 @@ async def run_agent(
     ))
     await db.flush()
 
-    # --- Build and run agent graph ---
-    graph = create_react_agent(llm, tools=tools, prompt=system_prompt)
-    input_messages: list[BaseMessage] = prior_messages + [HumanMessage(content=user_message)]
-    steps: list[dict[str, Any]] = []
-    final_reply = ""
-    step_counter = step_base + 1
+    # --- Build and run agent graph (MCP client kept alive for entire run) ---
+    from app.core.tools.mcp_tool import mcp_client_context
 
-    try:
-        result = await graph.ainvoke(
-            {"messages": input_messages},
-            config={"recursion_limit": settings.agent_max_steps * 2},
-        )
-    except Exception as exc:
-        log.error("agent_run.error", error=str(exc))
-        final_reply = f"Agent error: {exc}"
-        db.add(Message(
-            session_id=session.id,
-            role="agent",
-            content=final_reply,
-            step_index=step_counter,
-            run_id=run_id,
-        ))
-        await db.flush()
-        sandbox.close()
-        return {"reply": final_reply, "steps": [], "run_id": run_id}
+    async with mcp_client_context(tools_config) as mcp_tools:
+        if mcp_tools:
+            tools = tools + mcp_tools
+            active_groups.append(f"mcp({len(mcp_tools)} tools)")
+            log.debug("agent_run.mcp_tools_added", count=len(mcp_tools))
 
-    # --- Parse result messages ---
-    all_messages: list[BaseMessage] = result.get("messages", [])
-    new_messages = all_messages[len(input_messages):]
-    tool_step = 0
-    pending_tool_records: list[Message] = []
+        graph = create_react_agent(llm, tools=tools, prompt=system_prompt)
+        input_messages: list[BaseMessage] = prior_messages + [HumanMessage(content=user_message)]
+        steps: list[dict[str, Any]] = []
+        final_reply = ""
+        step_counter = step_base + 1
 
-    for msg in new_messages:
-        if isinstance(msg, AIMessage):
-            if msg.content:
-                text = msg.content if isinstance(msg.content, str) else str(msg.content)
-                final_reply = text
-                db.add(Message(
-                    session_id=session.id,
-                    role="agent",
-                    content=text,
-                    step_index=step_counter,
-                    run_id=run_id,
-                ))
-                step_counter += 1
-            for tc in (msg.tool_calls or []):
-                tool_step += 1
-                steps.append({"step": tool_step, "tool": tc["name"], "args": tc.get("args", {}), "result": ""})
-                record = Message(
-                    session_id=session.id,
-                    role="tool",
-                    tool_name=tc["name"],
-                    tool_args=tc.get("args", {}),
-                    step_index=step_counter,
-                    run_id=run_id,
-                )
-                db.add(record)
-                pending_tool_records.append(record)
-                step_counter += 1
-        elif isinstance(msg, ToolMessage):
-            output = msg.content if isinstance(msg.content, str) else str(msg.content)
-            for entry in reversed(steps):
-                if entry["result"] == "":
-                    entry["result"] = output[:500]
-                    break
-            if pending_tool_records:
-                pending_tool_records.pop(0).tool_result = output[:2000]
+        try:
+            result = await graph.ainvoke(
+                {"messages": input_messages},
+                config={"recursion_limit": settings.agent_max_steps * 2},
+            )
+        except Exception as exc:
+            log.error("agent_run.error", error=str(exc))
+            final_reply = f"Agent error: {exc}"
+            db.add(Message(
+                session_id=session.id,
+                role="agent",
+                content=final_reply,
+                step_index=step_counter,
+                run_id=run_id,
+            ))
+            await db.flush()
+            sandbox.close()
+            return {"reply": final_reply, "steps": [], "run_id": run_id, "tokens_used": 0}
+
+        # --- Parse result messages ---
+        all_messages: list[BaseMessage] = result.get("messages", [])
+        new_messages = all_messages[len(input_messages):]
+        tool_step = 0
+        pending_tool_records: list[Message] = []
+        total_tokens_used = 0
+
+        for msg in new_messages:
+            if isinstance(msg, AIMessage):
+                # accumulate token usage across all LLM calls in the graph
+                usage = getattr(msg, "usage_metadata", None)
+                if usage:
+                    total_tokens_used += usage.get("total_tokens", 0)
+
+                if msg.content:
+                    text = msg.content if isinstance(msg.content, str) else str(msg.content)
+                    final_reply = text
+                    db.add(Message(
+                        session_id=session.id,
+                        role="agent",
+                        content=text,
+                        step_index=step_counter,
+                        run_id=run_id,
+                    ))
+                    step_counter += 1
+                for tc in (msg.tool_calls or []):
+                    tool_step += 1
+                    steps.append({"step": tool_step, "tool": tc["name"], "args": tc.get("args", {}), "result": ""})
+                    record = Message(
+                        session_id=session.id,
+                        role="tool",
+                        tool_name=tc["name"],
+                        tool_args=tc.get("args", {}),
+                        step_index=step_counter,
+                        run_id=run_id,
+                    )
+                    db.add(record)
+                    pending_tool_records.append(record)
+                    step_counter += 1
+            elif isinstance(msg, ToolMessage):
+                output = msg.content if isinstance(msg.content, str) else str(msg.content)
+                for entry in reversed(steps):
+                    if entry["result"] == "":
+                        entry["result"] = output[:500]
+                        break
+                if pending_tool_records:
+                    pending_tool_records.pop(0).tool_result = output[:2000]
 
     await db.flush()
 
@@ -583,5 +638,10 @@ async def run_agent(
             )
 
     sandbox.close()
-    log.info("agent_run.complete", steps=len(steps), reply_len=len(final_reply))
-    return {"reply": final_reply, "steps": steps, "run_id": run_id}
+    log.info(
+        "agent_run.complete",
+        steps=len(steps),
+        reply_len=len(final_reply),
+        tokens_used=total_tokens_used,
+    )
+    return {"reply": final_reply, "steps": steps, "run_id": run_id, "tokens_used": total_tokens_used}
