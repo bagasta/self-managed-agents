@@ -387,7 +387,8 @@ async def run_agent(
 ) -> dict[str, Any]:
     run_id = uuid.uuid4()
     agent_id: uuid.UUID = session.agent_id
-    tools_config: dict[str, Any] = agent_model.tools_config or {}
+    _raw_tools_cfg = agent_model.tools_config
+    tools_config: dict[str, Any] = _raw_tools_cfg if isinstance(_raw_tools_cfg, dict) else {}
     temperature: float = getattr(agent_model, "temperature", 0.7)
 
     log = logger.bind(
@@ -442,7 +443,8 @@ async def run_agent(
 
     if _is_enabled(tools_config, "escalation"):
         from app.core.tools.escalation_tool import build_escalation_tools
-        _channel_cfg = session.channel_config or {}
+        _raw_cfg = session.channel_config
+        _channel_cfg = _raw_cfg if isinstance(_raw_cfg, dict) else {}
         _user_jid = (
             escalation_user_jid                          # operator session: target = escalated user
             or _channel_cfg.get("user_phone")            # user session: own channel

@@ -55,7 +55,8 @@ def build_escalation_tools(
         if not agent:
             return "[error] Agent tidak ditemukan."
 
-        escalation_cfg: dict = agent.escalation_config or {}
+        _raw_esc = agent.escalation_config
+        escalation_cfg: dict = _raw_esc if isinstance(_raw_esc, dict) else {}
         if not escalation_cfg:
             return "[error] Agent belum dikonfigurasi escalation_config. Tambahkan operator_phone dan channel_type."
 
@@ -75,7 +76,8 @@ def build_escalation_tools(
         case_id = f"esc_{int(time.time())}_{str(session_id)[:6]}"
 
         # Ambil JID user dari channel_config (reply target WA) sebagai primary identifier
-        channel_cfg = session.channel_config or {}
+        _raw_cfg = session.channel_config
+        channel_cfg = _raw_cfg if isinstance(_raw_cfg, dict) else {}
         user_wa_jid = channel_cfg.get("user_phone") or session.external_user_id or str(session.id)
         user_phone_display = session.external_user_id or user_wa_jid
 

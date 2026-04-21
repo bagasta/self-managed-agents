@@ -38,7 +38,8 @@ def _check_host(url: str, allowed_hosts: list[str]) -> str | None:
 
 def build_http_tools(tools_config: dict[str, Any]) -> list:
     """Return LangChain HTTP tools according to tools_config["http"]."""
-    cfg: dict[str, Any] = tools_config.get("http", {})
+    _raw = tools_config.get("http", {})
+    cfg: dict[str, Any] = _raw if isinstance(_raw, dict) else {}
     timeout: int = int(cfg.get("timeout_seconds", 30))
     allowed_hosts: list[str] = cfg.get("allowed_hosts", [])
 

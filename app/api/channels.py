@@ -239,7 +239,8 @@ async def wa_incoming(
         )
         esc_session = esc_result.scalars().first()
         if esc_session:
-            ch = esc_session.channel_config or {}
+            _raw_ch = esc_session.channel_config
+            ch = _raw_ch if isinstance(_raw_ch, dict) else {}
             escalation_user_jid = ch.get("user_phone") or esc_session.external_user_id
 
     # Tentukan external_user_id untuk session lookup:
@@ -266,7 +267,8 @@ async def wa_incoming(
 
     if session:
         # Pastikan device_id dan user_phone (reply JID) selalu up-to-date
-        new_config = dict(session.channel_config or {})
+        _raw_cfg = session.channel_config
+        new_config = dict(_raw_cfg) if isinstance(_raw_cfg, dict) else {}
         if new_config.get("device_id") != body.device_id or new_config.get("user_phone") != effective_reply_target:
             new_config["device_id"] = body.device_id
             new_config["user_phone"] = effective_reply_target
@@ -326,7 +328,7 @@ async def wa_incoming(
             escalation_user_jid=escalation_user_jid,
         )
     except Exception as exc:
-        log.error("wa_incoming.agent_error", error=str(exc))
+        log.error("wa_incoming.agent_error", error=str(exc), exc_info=True)
         raise HTTPException(status_code=500, detail=f"Agent error: {exc}")
 
     reply = result.get("reply", "")

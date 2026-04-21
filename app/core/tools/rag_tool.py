@@ -33,7 +33,8 @@ def build_rag_tools(
     tools_config: dict[str, Any],
 ) -> list:
     """Return LangChain RAG tools bound to this agent's document store."""
-    cfg: dict[str, Any] = tools_config.get("rag", {})
+    _raw = tools_config.get("rag", {})
+    cfg: dict[str, Any] = _raw if isinstance(_raw, dict) else {}
     max_results: int = int(cfg.get("max_results", 5))
 
     @tool
