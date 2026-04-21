@@ -74,6 +74,20 @@ func (dm *DeviceManager) CreateDevice(deviceID string) (string, error) {
 		return "", nil // already connected, no QR needed
 	}
 
+	// If device exists but store has no valid session (e.g. logged out from phone),
+	// tear it down so we can do a fresh QR scan below.
+	if ok && existing.Client.Store.ID == nil {
+		log.Printf("[%s] device has no valid session (logged out) — reinitialising", deviceID)
+		if existing.Client.IsConnected() {
+			existing.Client.Disconnect()
+		}
+		existing.Container.Close()
+		dm.mu.Lock()
+		delete(dm.devices, deviceID)
+		dm.mu.Unlock()
+		ok = false
+	}
+
 	dbPath := fmt.Sprintf("file:%s/%s.db?_foreign_keys=on", dm.storeDir, deviceID)
 	dbLog := waLog.Stdout("DB", "ERROR", true)
 	container, err := sqlstore.New(context.Background(), "sqlite3", dbPath, dbLog)
@@ -376,8 +390,85 @@ func (dm *DeviceManager) makeEventHandler(deviceID string) func(interface{}) {
 				di.Status = StatusDisconnected
 			}
 			dm.mu.Unlock()
+		case *events.LoggedOut:
+			log.Printf("[%s] logged out (reason: %v) — clearing session store", deviceID, v.Reason)
+			dm.mu.Lock()
+			di, ok := dm.devices[deviceID]
+			if ok {
+				di.Status = StatusDisconnected
+				di.LatestQR = ""
+				di.PhoneNumber = ""
+				// Delete the persisted session so CreateDevice can do a fresh QR scan
+				if err := di.Client.Store.Delete(context.Background()); err != nil {
+					log.Printf("[%s] store.Delete after logout err: %v", deviceID, err)
+				}
+			}
+			dm.mu.Unlock()
 		}
 	}
+}
+
+// SendImage uploads and sends an image to a WhatsApp number.
+// imageData is the raw image bytes, mimetype e.g. "image/jpeg".
+func (dm *DeviceManager) SendImage(deviceID, to string, imageData []byte, caption, mimetype string) error {
+	dm.mu.RLock()
+	info, ok := dm.devices[deviceID]
+	dm.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("device %s not found", deviceID)
+	}
+	if info.Status != StatusConnected {
+		return fmt.Errorf("device %s not connected (status: %s)", deviceID, info.Status)
+	}
+	if info.Client.Store.ID == nil {
+		return fmt.Errorf("device %s: no valid WA session (needs re-scan QR)", deviceID)
+	}
+
+	// Parse destination JID
+	var jid types.JID
+	if strings.Contains(to, "@") {
+		parsed, err := types.ParseJID(to)
+		if err != nil {
+			return fmt.Errorf("invalid JID %q: %w", to, err)
+		}
+		if parsed.Device > 0 {
+			return fmt.Errorf("cannot send to AD JID %q — use non-device JID", to)
+		}
+		jid = parsed
+	} else {
+		phone := strings.TrimPrefix(to, "+")
+		jid = types.NewJID(phone, types.DefaultUserServer)
+	}
+
+	if mimetype == "" {
+		mimetype = "image/jpeg"
+	}
+
+	// Upload to WhatsApp servers
+	resp, err := info.Client.Upload(context.Background(), imageData, whatsmeow.MediaImage)
+	if err != nil {
+		return fmt.Errorf("upload image: %w", err)
+	}
+
+	msg := &waE2E.Message{
+		ImageMessage: &waE2E.ImageMessage{
+			Caption:       proto.String(caption),
+			Mimetype:      proto.String(mimetype),
+			URL:           proto.String(resp.URL),
+			DirectPath:    proto.String(resp.DirectPath),
+			MediaKey:      resp.MediaKey,
+			FileEncSHA256: resp.FileEncSHA256,
+			FileSHA256:    resp.FileSHA256,
+			FileLength:    proto.Uint64(resp.FileLength),
+		},
+	}
+
+	_, err = info.Client.SendMessage(context.Background(), jid, msg)
+	if err != nil {
+		log.Printf("[%s] send image to %s failed: %v", deviceID, to, err)
+	}
+	return err
 }
 
 func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
@@ -388,9 +479,13 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 	chatJID := evt.Info.Chat
 	isGroup := chatJID.Server == types.GroupServer
 
-	// Extract text and mention list
+	// Extract text, mention list, and media info
 	text := ""
 	var mentionedJIDs []string
+	mediaType := ""
+	mediaData := ""
+	mediaFilename := ""
+
 	if conv := evt.Message.GetConversation(); conv != "" {
 		text = conv
 	} else if ext := evt.Message.GetExtendedTextMessage(); ext != nil {
@@ -398,8 +493,72 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 		if ctx := ext.GetContextInfo(); ctx != nil {
 			mentionedJIDs = ctx.GetMentionedJID()
 		}
+	} else if img := evt.Message.GetImageMessage(); img != nil {
+		// Image message
+		dm.mu.RLock()
+		info, ok := dm.devices[deviceID]
+		dm.mu.RUnlock()
+		if ok {
+			raw, err := info.Client.Download(context.Background(), img)
+			if err == nil {
+				mediaData = base64.StdEncoding.EncodeToString(raw)
+				mediaType = "image"
+				ext := ".jpg"
+				if mt := img.GetMimetype(); strings.Contains(mt, "png") {
+					ext = ".png"
+				} else if strings.Contains(mt, "webp") {
+					ext = ".webp"
+				}
+				mediaFilename = "image" + ext
+			} else {
+				log.Printf("[%s] download image err: %v", deviceID, err)
+			}
+		}
+		if cap := img.GetCaption(); cap != "" {
+			text = cap
+		} else {
+			text = "[Gambar]"
+		}
+	} else if doc := evt.Message.GetDocumentMessage(); doc != nil {
+		// Document message
+		dm.mu.RLock()
+		info, ok := dm.devices[deviceID]
+		dm.mu.RUnlock()
+		if ok {
+			raw, err := info.Client.Download(context.Background(), doc)
+			if err == nil {
+				mediaData = base64.StdEncoding.EncodeToString(raw)
+				mediaType = "document"
+				mediaFilename = doc.GetFileName()
+				if mediaFilename == "" {
+					mediaFilename = "file"
+				}
+			} else {
+				log.Printf("[%s] download document err: %v", deviceID, err)
+			}
+		}
+		if cap := doc.GetCaption(); cap != "" {
+			text = cap
+		} else {
+			text = fmt.Sprintf("[Dokumen: %s]", doc.GetFileName())
+		}
+	} else if sticker := evt.Message.GetStickerMessage(); sticker != nil {
+		dm.mu.RLock()
+		info, ok := dm.devices[deviceID]
+		dm.mu.RUnlock()
+		if ok {
+			raw, err := info.Client.Download(context.Background(), sticker)
+			if err == nil {
+				mediaData = base64.StdEncoding.EncodeToString(raw)
+				mediaType = "sticker"
+				mediaFilename = "sticker.webp"
+			}
+		}
+		text = "[Sticker]"
 	}
-	if text == "" {
+
+	// Skip if no text and no media
+	if text == "" && mediaType == "" {
 		return
 	}
 
@@ -430,7 +589,7 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 		// Strip the @mention tag from the text so the agent gets a clean message
 		text = strings.ReplaceAll(text, "@"+botUser, "")
 		text = strings.TrimSpace(text)
-		if text == "" {
+		if text == "" && mediaType == "" {
 			return
 		}
 	}
@@ -444,11 +603,14 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 	chatID := chatJID.String()
 
 	payload := map[string]interface{}{
-		"device_id": deviceID,
-		"from":      from,
-		"chat_id":   chatID,
-		"message":   text,
-		"timestamp": evt.Info.Timestamp.Unix(),
+		"device_id":      deviceID,
+		"from":           from,
+		"chat_id":        chatID,
+		"message":        text,
+		"timestamp":      evt.Info.Timestamp.Unix(),
+		"media_type":     mediaType,
+		"media_data":     mediaData,
+		"media_filename": mediaFilename,
 	}
 	data, _ := json.Marshal(payload)
 

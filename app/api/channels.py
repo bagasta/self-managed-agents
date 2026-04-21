@@ -50,6 +50,10 @@ class WAIncomingMessage(BaseModel):
     chat_id: str | None = None  # group JID (xxx@g.us) atau nomor DM; kalau None fallback ke from_
     message: str
     timestamp: int | None = None
+    # Media fields — diisi oleh Go service saat pesan mengandung gambar/dokumen/sticker
+    media_type: str | None = None      # "image" | "document" | "sticker" | None
+    media_data: str | None = None      # base64-encoded raw bytes
+    media_filename: str | None = None  # original filename (dokumen) atau generated (gambar)
 
     model_config = {"populate_by_name": True}
 
@@ -290,13 +294,35 @@ async def wa_incoming(
         await db.refresh(session)
         log.info("wa_incoming.session_created", session_id=str(session.id), is_operator=is_operator)
 
+    # --- Simpan media ke workspace session (jika ada) ---
+    media_context = ""
+    if body.media_type and body.media_data:
+        try:
+            import base64 as _b64
+            from app.core.sandbox import get_workspace_dir
+            workspace = get_workspace_dir(session.id)
+            filename = body.media_filename or f"incoming_{body.media_type}"
+            # Pastikan ekstensi ada
+            if "." not in filename:
+                ext_map = {"image": ".jpg", "document": ".bin", "sticker": ".webp"}
+                filename += ext_map.get(body.media_type, ".bin")
+            target_path = workspace / filename
+            target_path.write_bytes(_b64.b64decode(body.media_data))
+            media_context = (
+                f"\n[Media diterima: {body.media_type}, "
+                f"tersimpan di /workspace/{filename}]"
+            )
+            log.info("wa_incoming.media_saved", media_type=body.media_type, filename=filename)
+        except Exception as exc:
+            log.warning("wa_incoming.media_save_failed", error=str(exc))
+
     if is_operator:
-        user_message = raw_message  # operator chats normally in their own session
+        user_message = raw_message + media_context
         log.info("wa_incoming.operator_session", escalation_user_jid=escalation_user_jid)
     elif session.escalation_active:
         # User biasa tapi eskalasi aktif → forward ke operator dulu, baru proses agent
         log.info("wa_incoming.user_escalation_active")
-        forward_text = f"[USER {from_phone}]: {raw_message}"
+        forward_text = f"[USER {from_phone}]: {raw_message}{media_context}"
 
         # Forward ke operator
         try:
@@ -310,10 +336,10 @@ async def wa_incoming(
         except Exception as exc:
             log.warning("wa_incoming.forward_failed", error=str(exc))
 
-        user_message = f"[USER_IN_ESCALATION] {raw_message}"
+        user_message = f"[USER_IN_ESCALATION] {raw_message}{media_context}"
     else:
         # Pesan normal dari user
-        user_message = raw_message
+        user_message = raw_message + media_context
         log.info("wa_incoming.normal")
 
     # Run agent

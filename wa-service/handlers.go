@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -130,6 +131,44 @@ func (h *Handlers) sendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("[%s] send OK → %s", deviceID, req.To)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
+}
+
+// POST /devices/{id}/send-image
+// Body: {"to": "+628xxx", "image_base64": "...", "caption": "...", "mimetype": "image/jpeg"}
+func (h *Handlers) sendImageMessage(w http.ResponseWriter, r *http.Request) {
+	deviceID := r.PathValue("id")
+	if deviceID == "" {
+		writeError(w, http.StatusBadRequest, "device id required")
+		return
+	}
+
+	var req struct {
+		To          string `json:"to"`
+		ImageBase64 string `json:"image_base64"`
+		Caption     string `json:"caption"`
+		Mimetype    string `json:"mimetype"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.To == "" || req.ImageBase64 == "" {
+		writeError(w, http.StatusBadRequest, "to and image_base64 required")
+		return
+	}
+
+	imageData, err := base64.StdEncoding.DecodeString(req.ImageBase64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid base64: %v", err))
+		return
+	}
+
+	log.Printf("[%s] send-image request → %s (%d bytes, caption: %q)", deviceID, req.To, len(imageData), req.Caption)
+
+	if err := h.dm.SendImage(deviceID, req.To, imageData, req.Caption, req.Mimetype); err != nil {
+		log.Printf("[%s] send-image FAILED → %s: %v", deviceID, req.To, err)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	log.Printf("[%s] send-image OK → %s", deviceID, req.To)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
 }
 

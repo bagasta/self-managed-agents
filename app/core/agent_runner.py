@@ -21,7 +21,9 @@ Tool selection  Driven by tools_config. Default: sandbox/memory/skills/
 """
 from __future__ import annotations
 
+import ast
 import json
+import sys
 import uuid
 from typing import Any
 
@@ -83,6 +85,12 @@ def build_sandbox_tools(sandbox: DockerSandbox) -> list:
         return sandbox.write_file(path, content)
 
     @tool
+    def write_binary_file(path: str, base64_content: str) -> str:
+        """Decode a base64 string and write it as a binary file in the sandbox workspace.
+        Useful for saving images or other binary data. Args: path (e.g. 'output.png'), base64_content (raw base64 string without data URI prefix)."""
+        return sandbox.write_binary_file(path, base64_content)
+
+    @tool
     def read_file(path: str) -> str:
         """Read and return the full text content of a file in the sandbox workspace."""
         return sandbox.read_file(path)
@@ -92,7 +100,7 @@ def build_sandbox_tools(sandbox: DockerSandbox) -> list:
         """List all files under a directory in the sandbox workspace."""
         return sandbox.list_files(directory)
 
-    return [bash, write_file, read_file, list_files]
+    return [bash, write_file, write_binary_file, read_file, list_files]
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +172,35 @@ def build_skill_tools(agent_id: uuid.UUID, db: AsyncSession) -> list:
 # Tool Creator tools
 # ---------------------------------------------------------------------------
 
+_STDLIB_MODULES = set(sys.stdlib_module_names)
+
+def _pip_prefix(code: str) -> str:
+    """
+    Parse top-level imports from code and return a pip install command for
+    any non-stdlib packages, or empty string if none needed.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return ""
+    packages: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top = alias.name.split(".")[0]
+                if top not in _STDLIB_MODULES:
+                    packages.append(top)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                top = node.module.split(".")[0]
+                if top not in _STDLIB_MODULES:
+                    packages.append(top)
+    if not packages:
+        return ""
+    pkg_list = " ".join(dict.fromkeys(packages))
+    return f"pip install --quiet --root-user-action=ignore {pkg_list} && "
+
+
 def build_tool_creator_tools(agent_id: uuid.UUID, db: AsyncSession, sandbox: DockerSandbox) -> list:
     @tool
     async def create_tool(name: str, description: str, python_code: str) -> str:
@@ -197,16 +234,22 @@ def build_tool_creator_tools(agent_id: uuid.UUID, db: AsyncSession, sandbox: Doc
             args = json.loads(args_json)
         except json.JSONDecodeError as e:
             return f"[error] Invalid args_json: {e}"
-        args_repr = ", ".join(f"{k}={repr(v)}" for k, v in args.items())
+        args_json_str = json.dumps(json.dumps(args))  # double-encode so it's a safe string literal
         runner_code = f"""{ct.code}
 
 if __name__ == "__main__":
-    import json
-    result = {name}({args_repr})
+    import json, inspect as _inspect
+    _all_args = json.loads({args_json_str})
+    _sig = _inspect.signature({name})
+    _params = _sig.parameters
+    _has_var_kw = any(p.kind == _inspect.Parameter.VAR_KEYWORD for p in _params.values())
+    _filtered = _all_args if _has_var_kw else {{k: v for k, v in _all_args.items() if k in _params}}
+    result = {name}(**_filtered)
     print(json.dumps({{"result": result}}) if result is not None else "null")
 """
         sandbox.write_file(f"_custom_tool_{name}.py", runner_code)
-        return sandbox.bash(f"python /workspace/_custom_tool_{name}.py")
+        pip_cmd = _pip_prefix(ct.code)
+        return sandbox.bash(f"{pip_cmd}python /workspace/_custom_tool_{name}.py")
 
     return [create_tool, list_tools, run_custom_tool]
 
@@ -226,19 +269,180 @@ def build_loaded_custom_tools(custom_tools_db: list, sandbox: DockerSandbox) -> 
                     args = json.loads(args_json)
                 except json.JSONDecodeError as e:
                     return f"[error] Invalid args_json: {e}"
-                args_repr = ", ".join(f"{k}={repr(v)}" for k, v in args.items())
+                args_json_str = json.dumps(json.dumps(args))
                 runner_code = f"""{ct_code}
 
 if __name__ == "__main__":
-    import json
-    result = {ct_name}({args_repr})
+    import json, inspect as _inspect
+    _all_args = json.loads({args_json_str})
+    _sig = _inspect.signature({ct_name})
+    _params = _sig.parameters
+    _has_var_kw = any(p.kind == _inspect.Parameter.VAR_KEYWORD for p in _params.values())
+    _filtered = _all_args if _has_var_kw else {{k: v for k, v in _all_args.items() if k in _params}}
+    result = {ct_name}(**_filtered)
     print(json.dumps({{"result": result}}) if result is not None else "null")
 """
                 sandbox.write_file(f"_custom_tool_{ct_name}.py", runner_code)
-                return sandbox.bash(f"python /workspace/_custom_tool_{ct_name}.py")
+                pip_cmd = _pip_prefix(ct_code)
+                return sandbox.bash(f"{pip_cmd}python /workspace/_custom_tool_{ct_name}.py")
             return _runner
         lc_tools.append(_make_runner(ct.name, ct.code, ct.description))
     return lc_tools
+
+
+# ---------------------------------------------------------------------------
+# WhatsApp media tools
+# ---------------------------------------------------------------------------
+
+def build_whatsapp_media_tools(session: Any, sandbox: DockerSandbox) -> list:
+    """
+    Tools untuk mengirim gambar/media ke WhatsApp.
+    Hanya diaktifkan jika session memiliki channel_type == 'whatsapp'.
+    """
+    _raw_cfg = session.channel_config
+    channel_cfg: dict = _raw_cfg if isinstance(_raw_cfg, dict) else {}
+    device_id: str = channel_cfg.get("device_id", "")
+    default_target: str = channel_cfg.get("user_phone", "")
+
+    @tool
+    async def send_whatsapp_image(
+        image_path_or_base64: str,
+        caption: str = "",
+        phone: str = "",
+        mimetype: str = "image/jpeg",
+    ) -> str:
+        """
+        Kirim gambar ke WhatsApp.
+
+        Args:
+            image_path_or_base64: Path file di /workspace (misal '/workspace/chart.png') ATAU
+                                  string base64 langsung (tanpa prefix 'data:image/...')
+            caption             : Teks caption yang menyertai gambar (opsional)
+            phone               : Nomor tujuan WA atau JID (misal '+62812...@s.whatsapp.net').
+                                  Biarkan kosong untuk kirim ke user saat ini.
+            mimetype            : MIME type gambar, default 'image/jpeg'
+        """
+        target = phone or default_target
+        if not target:
+            return "[error] Tidak ada target nomor WhatsApp — set phone atau pastikan session punya user_phone"
+        if not device_id:
+            return "[error] Tidak ada device_id WhatsApp pada session ini"
+
+        # Tentukan apakah input adalah path file atau base64 langsung
+        if image_path_or_base64.startswith("/workspace/") or not image_path_or_base64.startswith("/"):
+            # Path file di workspace — baca via bash base64
+            path = image_path_or_base64 if image_path_or_base64.startswith("/workspace/") else f"/workspace/{image_path_or_base64}"
+            b64_output = sandbox.bash(f"base64 -w 0 {path} 2>&1")
+            if b64_output.startswith("["):
+                return f"[error] Gagal membaca file: {b64_output}"
+            image_b64 = b64_output.strip()
+        else:
+            # Base64 langsung
+            image_b64 = image_path_or_base64.strip()
+
+        try:
+            from app.core.wa_client import send_wa_image
+            await send_wa_image(device_id, target, image_b64, caption, mimetype)
+            return f"[IMAGE_SENT] Gambar dikirim ke {target}" + (f" dengan caption: {caption}" if caption else "")
+        except Exception as exc:
+            return f"[error] Gagal kirim gambar: {exc}"
+
+    @tool
+    async def send_agent_wa_qr(
+        agent_id: str,
+        caption: str = "Scan QR code ini untuk menghubungkan WhatsApp ke agent.",
+        phone: str = "",
+    ) -> str:
+        """
+        Kirimkan QR code WhatsApp dari sebuah agent ke user.
+
+        Gunakan tool ini SETIAP KALI perlu mengirim QR WhatsApp — baik untuk agent baru
+        maupun saat user minta QR baru / QR refresh. Tool ini selalu menggunakan
+        wa_device_id yang tersimpan di DB untuk agent tersebut, sehingga tidak akan
+        membuat device orphan.
+
+        Jika QR tidak tersedia (device disconnected / logged out), tool ini otomatis
+        re-init device dan generate QR baru.
+
+        PENTING: Gunakan `agent_id` (UUID agent di platform ini), BUKAN wa_device_id.
+
+        Args:
+            agent_id : UUID agent yang QR-nya ingin dikirim (dari response saat agent dibuat)
+            caption  : Caption gambar QR (opsional)
+            phone    : Nomor tujuan WA. Biarkan kosong untuk kirim ke user saat ini.
+        """
+        target = phone or default_target
+        if not target:
+            return "[error] Tidak ada target nomor WhatsApp — set phone atau pastikan session punya user_phone"
+        if not device_id:
+            return "[error] Tidak ada device_id WhatsApp pada session ini"
+
+        from app.core.wa_client import create_wa_device, get_wa_qr, send_wa_image
+        from app.database import get_db as _get_db
+        from app.models.agent import Agent as _Agent
+        from sqlalchemy import select as _select
+        import uuid as _uuid
+
+        # Lookup wa_device_id dari DB menggunakan agent_id
+        try:
+            agent_uuid = _uuid.UUID(agent_id)
+        except ValueError:
+            return f"[error] agent_id tidak valid: '{agent_id}' — harus berupa UUID"
+
+        async for _db in _get_db():
+            result = await _db.execute(
+                _select(_Agent).where(_Agent.id == agent_uuid, _Agent.is_deleted.is_(False))
+            )
+            agent_row = result.scalar_one_or_none()
+            break
+
+        if not agent_row:
+            return f"[error] Agent '{agent_id}' tidak ditemukan"
+        if not agent_row.wa_device_id:
+            return f"[error] Agent '{agent_id}' tidak memiliki WhatsApp device — pastikan agent dibuat dengan channel_type='whatsapp'"
+
+        wa_dev_id: str = agent_row.wa_device_id
+
+        try:
+            # Coba ambil QR yang sedang aktif
+            try:
+                resp = await get_wa_qr(wa_dev_id)
+            except Exception:
+                resp = {"status": "not_found", "qr_image": ""}
+
+            qr_status: str = resp.get("status", "")
+            qr_b64: str = resp.get("qr_image", "")
+
+            if qr_status == "connected":
+                return f"[INFO] Agent '{agent_id}' sudah terhubung ke WhatsApp — tidak perlu scan QR lagi."
+
+            # QR tidak tersedia → re-init device (handle logout / disconnected)
+            if not qr_b64:
+                resp = await create_wa_device(wa_dev_id)
+                qr_status = resp.get("status", "")
+                qr_b64 = resp.get("qr_image", "")
+
+                if qr_status == "connected":
+                    return f"[INFO] Agent '{agent_id}' sudah terhubung kembali — tidak perlu scan QR."
+                if not qr_b64:
+                    return (
+                        f"[error] Gagal generate QR untuk agent '{agent_id}' (device: {wa_dev_id}). "
+                        f"Status: {qr_status}. Coba beberapa saat lagi."
+                    )
+
+            if "," in qr_b64:
+                qr_b64 = qr_b64.split(",", 1)[1]
+
+            await send_wa_image(device_id, target, qr_b64, caption, "image/png")
+            return (
+                f"[QR_SENT] QR untuk agent '{agent_id}' dikirim ke {target}. "
+                f"Scan sekarang — QR expire dalam ~20 detik. "
+                f"Jika belum sempat scan, minta user ketik 'kirim QR baru' dan panggil tool ini lagi."
+            )
+        except Exception as exc:
+            return f"[error] Gagal mengirim QR: {exc}"
+
+    return [send_whatsapp_image, send_agent_wa_qr]
 
 
 # ---------------------------------------------------------------------------
@@ -457,6 +661,11 @@ async def run_agent(
         tools.extend(build_http_tools(tools_config))
         active_groups.append("http")
 
+    # WhatsApp media tools: aktif otomatis jika session channel adalah whatsapp dan sandbox aktif
+    if getattr(session, "channel_type", None) == "whatsapp" and _is_enabled(tools_config, "sandbox"):
+        tools.extend(build_whatsapp_media_tools(session, sandbox))
+        active_groups.append("whatsapp_media")
+
     log.debug("agent_run.tools_ready (pre-mcp)", groups=active_groups, count=len(tools))
 
     # --- RAG context (auto-injected, not a tool) ---
@@ -576,6 +785,8 @@ async def run_agent(
         cap_parts.append("escalation tools (escalate_to_human/reply_to_user/send_to_number)")
     if "http" in active_groups:
         cap_parts.append("HTTP tools (http_get/http_post)")
+    if "whatsapp_media" in active_groups:
+        cap_parts.append("WhatsApp media tools (send_whatsapp_image, send_agent_wa_qr)")
 
     if cap_parts:
         system_prompt += (

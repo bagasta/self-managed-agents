@@ -77,3 +77,24 @@ Adding per-agent subscription with token quota, expiry period, and unique API ke
       - Agent tampilkan draft ke operator + tanya "Sudah OK? Ketik 'kirim'..."
       - Setelah operator konfirmasi → reply_to_user(draft) → balas "Terkirim ✓"
       - Berlaku untuk sesi operator baru maupun legacy [OPERATOR] prefix path.
+
+Fixed sandbox so custom tools can install and use third-party
+      packages. No next action needed, all changes are live.      
+
+  Fix sandbox agent (21 Apr 2026) — 3 root cause:
+
+  1. Image python:3.12-slim tidak punya curl.
+     Fix: ganti DOCKER_SANDBOX_IMAGE=python:3.12 di .env (full Debian, curl sudah include).
+
+  2. PIP_USER=1 + PYTHONUSERBASE=/workspace/.local menyebabkan pip install ke user site,
+     tapi Python menonaktifkan user site saat jalan sebagai root di Docker.
+     Akibatnya import requests/library apapun gagal meski pip install sukses.
+     Fix: hapus PIP_USER=1 dan PYTHONUSERBASE dari environment container — pip install
+     system-wide sebagai root, package langsung bisa diimport.
+
+  3. json.dumps(args) menghasilkan JSON literal (false/true/null) yang di-embed langsung
+     sebagai Python code di _all_args = {json.dumps(args)}.
+     Python tidak kenal false — hanya False. Hasilnya NameError tiap tool dipanggil dengan boolean/null args.
+     Fix: double-encode args jadi string (json.dumps(json.dumps(args))), lalu di runtime
+     parse balik dengan json.loads(...) sehingga tipe Python-nya benar.
+

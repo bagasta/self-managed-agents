@@ -94,6 +94,8 @@ class DockerSandbox:
         log = logger.bind(session_id=self.session_id, cmd_preview=cmd[:120])
         log.debug("sandbox.bash.start")
 
+        # PYTHONUSERBASE points inside /workspace so pip installs survive across
+        # ephemeral container runs (only /workspace is mounted on the host).
         run_kwargs: dict = dict(
             image=self._settings.docker_sandbox_image,
             command=["bash", "-c", cmd],
@@ -101,9 +103,11 @@ class DockerSandbox:
                 str(self.workspace_dir): {"bind": "/workspace", "mode": "rw"}
             },
             working_dir="/workspace",
+            environment={},
             mem_limit="512m",
             nano_cpus=int(1e9),  # 1 CPU
-            network_disabled=False,
+            network_mode="bridge",
+            extra_hosts={"host.docker.internal": "host-gateway"},
             remove=True,
             stdout=True,
             stderr=True,
@@ -121,7 +125,11 @@ class DockerSandbox:
             return output or "(no output)"
         except docker.errors.ContainerError as exc:
             stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
-            log.warning("sandbox.bash.container_error", exit_status=exc.exit_status)
+            log.warning(
+                "sandbox.bash.container_error",
+                exit_status=exc.exit_status,
+                stderr=stderr[:2000],
+            )
             return f"[exit {exc.exit_status}]\n{stderr}"
         except docker.errors.ImageNotFound:
             log.error("sandbox.bash.image_not_found", image=self._settings.docker_sandbox_image)
@@ -136,6 +144,18 @@ class DockerSandbox:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         return f"Written {len(content)} chars to {path}"
+
+    def write_binary_file(self, path: str, base64_content: str) -> str:
+        """Decode base64 string and write as binary file to the workspace."""
+        import base64
+        target = self.workspace_dir / path.lstrip("/")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            raw = base64.b64decode(base64_content)
+            target.write_bytes(raw)
+            return f"Written {len(raw)} bytes to {path}"
+        except Exception as exc:
+            return f"[error] Failed to write binary file: {exc}"
 
     def read_file(self, path: str) -> str:
         """Read a file from the workspace."""
