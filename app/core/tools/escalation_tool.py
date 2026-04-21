@@ -30,6 +30,7 @@ def build_escalation_tools(
     session_id: uuid.UUID,
     agent_id: uuid.UUID,
     db: AsyncSession,
+    user_jid: str | None = None,
 ) -> list:
 
     @tool
@@ -58,7 +59,7 @@ def build_escalation_tools(
         if not escalation_cfg:
             return "[error] Agent belum dikonfigurasi escalation_config. Tambahkan operator_phone dan channel_type."
 
-        # Aktifkan mode eskalasi
+        # Aktifkan escalation_active pada sesi user (untuk forwarding pesan user ke operator)
         session.escalation_active = True
         await db.flush()
 
@@ -70,19 +71,24 @@ def build_escalation_tools(
             "user_phone": operator_phone,
         }
 
-        user_id = session.external_user_id or str(session.id)
-        channel_info = session.channel_config or {}
-        user_phone = channel_info.get("user_phone", user_id)
+        import time
+        case_id = f"esc_{int(time.time())}_{str(session_id)[:6]}"
+
+        # Ambil JID user dari channel_config (reply target WA) sebagai primary identifier
+        channel_cfg = session.channel_config or {}
+        user_wa_jid = channel_cfg.get("user_phone") or session.external_user_id or str(session.id)
+        user_phone_display = session.external_user_id or user_wa_jid
 
         notif_text = (
-            f"🚨 *ESKALASI AGENT*\n"
-            f"User: {user_phone}\n"
+            f"🚨 *[CS AI Clevio] Eskalasi pertanyaan customer*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"ID Kasus: {case_id}\n"
+            f"Chat ID/no wa: {user_wa_jid}\n"
             f"Alasan: {reason}\n"
-            + (f"Ringkasan: {summary}\n" if summary else "")
-            + f"\nBalas pesan ini untuk mengendalikan agent. Contoh:\n"
-            f'- "Kirim ke customer: [pesan balasan]"\n'
-            f'- "Kirim ke +62812xxx: [pesan]"\n'
-            f'- "Selesai, tangani sendiri"'
+            + (f"Pertanyaan customer:\n{summary}\n" if summary else "")
+            + f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Balas pesan ini dengan jawaban untuk customer.\n"
+            f"Agent akan menyusun draft pesan dan meminta konfirmasimu sebelum dikirim."
         )
 
         # Selalu simpan notifikasi ke DB (untuk dev UI & fallback jika channel gagal)
@@ -108,25 +114,18 @@ def build_escalation_tools(
             logger.warning("escalation_tool.channel_send_skipped", error=str(exc))
 
         return (
-            f"Eskalasi berhasil diaktifkan. Operator ({operator_phone}) telah dinotifikasi. "
-            f"Pesan user berikutnya akan diteruskan ke operator. "
-            f"Tunggu instruksi dari operator."
+            "Eskalasi berhasil diaktifkan. Operator telah dinotifikasi. "
+            "Balas user dengan pesan singkat bahwa pertanyaannya sedang diteruskan ke tim yang berwenang. "
+            "JANGAN sebutkan nomor telepon apapun. "
+            "Pesan user berikutnya akan diteruskan otomatis — cukup balas user secara normal."
         )
 
     @tool
     async def reply_to_user(message: str) -> str:
-        """
-        Kirim pesan ke user via channel sesi ini.
-        Gunakan untuk mengirim jawaban atau informasi ke user atas perintah operator.
-
-        Args:
-            message: Pesan yang akan dikirim ke user
-        """
+        """Kirim pesan ke user via channel sesi ini. Gunakan HANYA setelah operator mengkonfirmasi draft. Args: message (pesan final yang akan dikirim ke user)."""
         from app.models.message import Message as Msg
-        sess_result = await db.execute(select(Session).where(Session.id == session_id))
-        session = sess_result.scalar_one_or_none()
 
-        # Simpan ke DB selalu — supaya UI simulator bisa detect & tampilkan di sisi user
+        # Simpan ke DB
         db.add(Msg(
             session_id=session_id,
             role="agent",
@@ -135,22 +134,31 @@ def build_escalation_tools(
         ))
         await db.flush()
 
-        # Coba kirim ke channel jika dikonfigurasi
-        if session and session.channel_type:
+        # PENTING: gunakan user_jid langsung dari closure — JANGAN load session.channel_config
+        # karena di sesi operator, channel_config.user_phone = JID operator (bukan user).
+        if user_jid:
             try:
                 from app.core.channel_service import send_message
+                # Buat channel_config minimal dengan device_id dari sesi operator
+                sess_result = await db.execute(select(Session).where(Session.id == session_id))
+                op_session = sess_result.scalar_one_or_none()
+                ch_cfg = dict(op_session.channel_config or {}) if op_session else {}
+                ch_cfg["user_phone"] = user_jid  # OVERRIDE ke user target
+                channel_type = op_session.channel_type if op_session else "whatsapp"
                 await send_message(
-                    channel_type=session.channel_type,
-                    channel_config=session.channel_config or {},
+                    channel_type=channel_type,
+                    channel_config=ch_cfg,
                     text=message,
                 )
-                logger.info("escalation_tool.reply_to_user", channel=session.channel_type)
+                logger.info(
+                    "escalation_tool.reply_to_user.sent",
+                    target=user_jid,
+                )
             except Exception as exc:
                 logger.warning("escalation_tool.reply_channel_failed", error=str(exc))
         else:
-            logger.info("escalation_tool.reply_to_user.dev_mode", message_preview=message[:80])
+            logger.info("escalation_tool.reply_to_user.no_user_jid", message_preview=message[:80])
 
-        # Prefix SENT_TO_USER dipakai UI untuk detect & tampilkan di sisi user
         return f"[SENT_TO_USER] {message}"
 
     @tool

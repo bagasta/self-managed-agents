@@ -94,35 +94,23 @@ def decrypt_channel_config(config: dict) -> dict:
 
 async def _send_whatsapp(to_phone: str, text: str, config: dict) -> None:
     """
-    Kirim pesan via WhatsApp Business API (Meta Cloud API).
-    config harus punya: api_key (Bearer token), phone_number_id
+    Kirim pesan via Go wa-service (whatsmeow).
+    config harus punya: device_id (wa_device_id dari agent).
     """
-    api_key = config.get("api_key", "")
-    phone_number_id = config.get("phone_number_id", "")
-    if not api_key or not phone_number_id:
+    device_id = config.get("device_id", "")
+    if not device_id:
         logger.warning(
-            "channel_service.whatsapp.missing_config — dev mode, message logged only",
+            "channel_service.whatsapp.missing_device_id",
             to=to_phone, text_preview=text[:80],
         )
         return
 
-    url = f"https://graph.facebook.com/v19.0/{phone_number_id}/messages"
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to_phone,
-        "type": "text",
-        "text": {"body": text},
-    }
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.post(
-            url,
-            json=payload,
-            headers={"Authorization": f"Bearer {api_key}"},
-        )
-    if resp.status_code >= 400:
-        logger.error("channel_service.whatsapp.send_failed", status=resp.status_code, body=resp.text)
-    else:
+    try:
+        from app.core.wa_client import send_wa_message
+        await send_wa_message(device_id, to_phone, text)
         logger.info("channel_service.whatsapp.sent", to=to_phone)
+    except Exception as exc:
+        logger.error("channel_service.whatsapp.send_failed", error=str(exc), to=to_phone)
 
 
 async def _send_telegram(to_chat_id: str, text: str, config: dict) -> None:

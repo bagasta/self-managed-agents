@@ -30,18 +30,20 @@ async def upsert_memory(
     key: str,
     value: str,
     db: AsyncSession,
+    scope: str | None = None,
 ) -> Memory:
-    """Insert or update a memory entry (upsert on unique agent_id+key)."""
+    """Insert or update a memory entry scoped to agent + optional phone number."""
     stmt = (
         pg_insert(Memory)
         .values(
             id=uuid.uuid4(),
             agent_id=agent_id,
+            scope=scope,
             key=key,
             value_data=value,
         )
         .on_conflict_do_update(
-            constraint="uq_agent_memory_key",
+            constraint="uq_agent_memory_scope_key",
             set_={"value_data": value},
         )
         .returning(Memory)
@@ -55,28 +57,52 @@ async def get_memory(
     agent_id: uuid.UUID,
     key: str,
     db: AsyncSession,
+    scope: str | None = None,
 ) -> Memory | None:
-    stmt = select(Memory).where(Memory.agent_id == agent_id, Memory.key == key)
+    stmt = select(Memory).where(
+        Memory.agent_id == agent_id,
+        Memory.scope == scope,
+        Memory.key == key,
+    )
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
-async def list_memories(agent_id: uuid.UUID, db: AsyncSession) -> list[Memory]:
-    stmt = select(Memory).where(Memory.agent_id == agent_id).order_by(Memory.key)
+async def list_memories(
+    agent_id: uuid.UUID,
+    db: AsyncSession,
+    scope: str | None = None,
+) -> list[Memory]:
+    stmt = (
+        select(Memory)
+        .where(Memory.agent_id == agent_id, Memory.scope == scope)
+        .order_by(Memory.key)
+    )
     return list((await db.execute(stmt)).scalars().all())
 
 
 async def delete_memory(
-    agent_id: uuid.UUID, key: str, db: AsyncSession
+    agent_id: uuid.UUID,
+    key: str,
+    db: AsyncSession,
+    scope: str | None = None,
 ) -> bool:
-    stmt = delete(Memory).where(Memory.agent_id == agent_id, Memory.key == key)
+    stmt = delete(Memory).where(
+        Memory.agent_id == agent_id,
+        Memory.scope == scope,
+        Memory.key == key,
+    )
     result = await db.execute(stmt)
     await db.flush()
     return result.rowcount > 0
 
 
-async def build_memory_context(agent_id: uuid.UUID, db: AsyncSession) -> str:
-    """Return a compact markdown block of all memories to inject into system prompt."""
-    memories = await list_memories(agent_id, db)
+async def build_memory_context(
+    agent_id: uuid.UUID,
+    db: AsyncSession,
+    scope: str | None = None,
+) -> str:
+    """Return a compact markdown block of scoped memories to inject into system prompt."""
+    memories = await list_memories(agent_id, db, scope=scope)
     if not memories:
         return ""
     lines = ["## Long-Term Memory", ""]
@@ -96,6 +122,7 @@ async def extract_long_term_memory(
     llm: "ChatOpenAI",
     db: AsyncSession,
     log: Any = None,
+    scope: str | None = None,
 ) -> None:
     """
     Call the LLM to extract important facts from recent_messages and persist
@@ -151,7 +178,7 @@ async def extract_long_term_memory(
         for key, value in facts.items():
             if isinstance(key, str) and value is not None:
                 safe_key = f"auto_{key[:80]}"
-                await upsert_memory(agent_id, safe_key, str(value)[:1000], db)
+                await upsert_memory(agent_id, safe_key, str(value)[:1000], db, scope=scope)
                 saved += 1
 
         log.info("ltm.extraction.complete", facts_saved=saved)

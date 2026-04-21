@@ -34,6 +34,10 @@ class AgentCreate(BaseModel):
         ge=1,
         description="Subscription period in days before renewal is required (default 30)",
     )
+    channel_type: str | None = Field(
+        None,
+        description="Channel to connect at creation time. Supported: 'whatsapp'",
+    )
 
 
 class AgentUpdate(BaseModel):
@@ -71,8 +75,15 @@ class AgentResponse(BaseModel):
     active_until: datetime
     quota_period_days: int
 
+    # whatsapp channel
+    wa_device_id: str | None
+    channel_type: str | None
+
     created_at: datetime
     updated_at: datetime
+
+    # Populated only on create/reconnect response when channel_type == "whatsapp"
+    qr_image: str | None = None
 
 
 class AgentListResponse(BaseModel):
@@ -80,6 +91,18 @@ class AgentListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class AgentWhatsAppQRResponse(BaseModel):
+    device_id: str
+    qr_image: str  # base64 PNG
+    status: str    # "waiting_qr" | "connected"
+
+
+class AgentWhatsAppStatusResponse(BaseModel):
+    device_id: str
+    status: str
+    phone_number: str
 
 
 class AgentRenewResponse(BaseModel):

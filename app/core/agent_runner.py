@@ -99,20 +99,20 @@ def build_sandbox_tools(sandbox: DockerSandbox) -> list:
 # Memory tools
 # ---------------------------------------------------------------------------
 
-def build_memory_tools(agent_id: uuid.UUID, db: AsyncSession) -> list:
+def build_memory_tools(agent_id: uuid.UUID, db: AsyncSession, scope: str | None = None) -> list:
     @tool
     async def remember(key: str, value: str) -> str:
         """Store or update a fact in long-term memory. Args: key (short label), value (text to remember)."""
-        await upsert_memory(agent_id, key, value, db)
+        await upsert_memory(agent_id, key, value, db, scope=scope)
         return f"Remembered: {key} = {value}"
 
     @tool
     async def recall(query: str) -> str:
         """Retrieve a memory entry by its key. Args: query (the key to look up)."""
-        mem = await get_memory(agent_id, query, db)
+        mem = await get_memory(agent_id, query, db, scope=scope)
         if mem:
             return f"{mem.key}: {mem.value_data}"
-        all_mems = await list_memories(agent_id, db)
+        all_mems = await list_memories(agent_id, db, scope=scope)
         if not all_mems:
             return "No memories stored yet."
         keys = ", ".join(m.key for m in all_mems)
@@ -121,7 +121,7 @@ def build_memory_tools(agent_id: uuid.UUID, db: AsyncSession) -> list:
     @tool
     async def forget(key: str) -> str:
         """Delete a memory entry by key. Args: key (the key to remove)."""
-        deleted = await delete_memory(agent_id, key, db)
+        deleted = await delete_memory(agent_id, key, db, scope=scope)
         return f"Forgotten: {key}" if deleted else f"No memory found for key '{key}'"
 
     return [remember, recall, forget]
@@ -383,6 +383,7 @@ async def run_agent(
     session: Session,
     user_message: str,
     db: AsyncSession,
+    escalation_user_jid: str | None = None,
 ) -> dict[str, Any]:
     run_id = uuid.uuid4()
     agent_id: uuid.UUID = session.agent_id
@@ -419,8 +420,9 @@ async def run_agent(
         tools.extend(build_sandbox_tools(sandbox))
         active_groups.append("sandbox")
 
+    _memory_scope = getattr(session, "external_user_id", None)
     if _is_enabled(tools_config, "memory"):
-        tools.extend(build_memory_tools(agent_id, db))
+        tools.extend(build_memory_tools(agent_id, db, scope=_memory_scope))
         active_groups.append("memory")
 
     if _is_enabled(tools_config, "skills"):
@@ -440,7 +442,13 @@ async def run_agent(
 
     if _is_enabled(tools_config, "escalation"):
         from app.core.tools.escalation_tool import build_escalation_tools
-        tools.extend(build_escalation_tools(session.id, agent_id, db))
+        _channel_cfg = session.channel_config or {}
+        _user_jid = (
+            escalation_user_jid                          # operator session: target = escalated user
+            or _channel_cfg.get("user_phone")            # user session: own channel
+            or getattr(session, "external_user_id", None)
+        )
+        tools.extend(build_escalation_tools(session.id, agent_id, db, user_jid=_user_jid))
         active_groups.append("escalation")
 
     if _is_enabled(tools_config, "http", default=False):
@@ -468,8 +476,8 @@ async def run_agent(
     # --- System prompt ---
     system_prompt = agent_model.instructions or "You are a helpful assistant."
 
-    # 1. Long-term memories
-    memory_block = await build_memory_context(agent_id, db)
+    # 1. Long-term memories (scoped per phone number to prevent cross-user leakage)
+    memory_block = await build_memory_context(agent_id, db, scope=_memory_scope)
     if memory_block:
         system_prompt += f"\n\n{memory_block}"
 
@@ -481,24 +489,75 @@ async def run_agent(
     if rag_context:
         system_prompt += f"\n\n{rag_context}"
 
-    # 4. Escalation context
-    if is_operator_message:
+    # 4. Channel-specific + escalation context
+    is_whatsapp = getattr(session, "channel_type", None) == "whatsapp"
+
+    if is_whatsapp and not is_operator_message and not escalation_user_jid:
+        # Untuk channel WhatsApp: agent harus selalu reply langsung dengan teks.
+        # reply_to_user / send_to_number hanya untuk perintah operator.
         system_prompt += (
-            "\n\n## MODE: OPERATOR COMMAND\n"
-            "Pesan berikut adalah PERINTAH dari human operator yang mengendalikan kamu. "
-            "Eksekusi perintah tersebut secara tepat. "
-            "Gunakan tool `reply_to_user(message)` untuk kirim pesan ke user, "
-            "atau `send_to_number(phone, message)` untuk kirim ke nomor lain. "
-            "Jika operator berkata 'selesai' atau 'tangani sendiri', "
-            "kamu boleh merespons user secara normal kembali."
+            "\n\n## WhatsApp Channel\n"
+            "Balas user LANGSUNG dengan teks biasa sebagai output akhirmu. "
+            "JANGAN gunakan tool `reply_to_user` untuk menjawab user secara normal — "
+            "cukup tulis jawabanmu. "
+            "Tool `reply_to_user` dan `send_to_number` HANYA dipakai saat menerima perintah dari OPERATOR."
+        )
+
+    if escalation_user_jid:
+        # Sesi OPERATOR: agent menerima jawaban operator dan menyusun draft untuk dikirim ke user
+        system_prompt += (
+            f"\n\n## SESI OPERATOR — ALUR KONFIRMASI\n"
+            f"Kamu sedang berbicara dengan OPERATOR/ADMIN.\n"
+            f"Target user WhatsApp (Chat ID): `{escalation_user_jid}`\n\n"
+            "### ALUR WAJIB saat operator memberi jawaban untuk dikirim ke customer:\n"
+            "1. **SUSUN DRAFT** — Buat versi pesan yang rapi dan sopan dari jawaban operator.\n"
+            "   - Perbaiki tata bahasa, ejaan, dan format agar enak dibaca customer.\n"
+            "   - JANGAN tambah informasi/URL/kontak yang tidak ada dalam jawaban operator.\n"
+            "   - Konten harus 1:1 dari jawaban operator, hanya format yang boleh diperbaiki.\n"
+            "2. **TAMPILKAN DRAFT & MINTA KONFIRMASI** — Tunjukkan draft ke operator, contoh:\n"
+            "   > Draft pesan ke customer:\n"
+            "   > ---\n"
+            "   > [isi draft]\n"
+            "   > ---\n"
+            "   > Apakah sudah OK? Ketik 'kirim' untuk mengirim, atau koreksi jika perlu.\n"
+            "3. **SETELAH OPERATOR KONFIRMASI** (bilang 'ok', 'kirim', 'ya', atau sejenisnya):\n"
+            "   - Panggil `reply_to_user(message)` dengan isi draft yang sudah dikonfirmasi.\n"
+            "   - Balas operator hanya: \"Terkirim ✓\"\n\n"
+            "### ATURAN LAIN\n"
+            "- Jika operator bertanya/diskusi (bukan memberi jawaban untuk customer) → jawab langsung, "
+            "tidak perlu draft.\n"
+            "- Jika operator berkata 'selesai' atau 'tangani sendiri' → konfirmasi singkat.\n"
+            "- `send_to_number(phone, message)` HANYA jika operator eksplisit menyebut nomor pihak ketiga.\n"
+            "- JANGAN kirim ke user sebelum operator mengkonfirmasi draft.\n"
+        )
+    elif is_operator_message:
+        # Legacy: operator command via [OPERATOR] prefix di session user
+        _ch_cfg = session.channel_config or {}
+        user_wa_jid = _ch_cfg.get("user_phone") or getattr(session, "external_user_id", None) or "unknown"
+        system_prompt += (
+            f"\n\n## MODE: OPERATOR COMMAND — ALUR KONFIRMASI\n"
+            f"WhatsApp JID user dalam eskalasi: `{user_wa_jid}`\n"
+            "Pesan berikut adalah PERINTAH dari human operator.\n\n"
+            "### ALUR WAJIB\n"
+            "1. Susun draft pesan rapi dari instruksi operator (perbaiki format, JANGAN tambah konten).\n"
+            "2. Tampilkan draft dan tanya: \"Apakah sudah OK? Ketik 'kirim' untuk mengirim.\"\n"
+            "3. Setelah operator konfirmasi → panggil `reply_to_user(message)` → balas operator: \"Terkirim ✓\"\n\n"
+            "### ATURAN\n"
+            "- JANGAN kirim ke user sebelum operator mengkonfirmasi draft.\n"
+            "- Konten pesan ke user harus 1:1 dari instruksi operator (hanya format boleh diperbaiki).\n"
+            "- `send_to_number(phone, message)` HANYA untuk nomor pihak ketiga yang BUKAN user ini.\n"
+            "- Jika operator berkata 'selesai' atau 'tangani sendiri', balas singkat dan kembali normal.\n"
         )
     elif is_user_in_escalation or session.escalation_active:
         system_prompt += (
             "\n\n## MODE: ESKALASI AKTIF\n"
-            "Percakapan ini sedang dalam mode eskalasi — human operator sedang memantau. "
-            "Teruskan pesan user ke operator menggunakan `reply_to_user` atau tunggu instruksi operator. "
-            "Kamu tetap bisa menjawab pertanyaan umum yang aman, "
-            "tapi untuk tindakan sensitif tunggu konfirmasi operator."
+            "Percakapan ini sedang dalam mode eskalasi — human operator sedang memantau dan akan segera merespons.\n"
+            "ATURAN WAJIB dalam mode ini:\n"
+            "1. Balas user dengan teks biasa secara langsung — JANGAN gunakan tool apapun untuk membalas user.\n"
+            "2. JANGAN panggil `send_to_number` atau `reply_to_user` — "
+            "penerusan pesan ke operator sudah dilakukan OTOMATIS oleh sistem, BUKAN tugasmu.\n"
+            "3. JANGAN sebutkan nomor telepon atau JID apapun dalam jawabanmu.\n"
+            "4. Untuk tindakan sensitif atau yang butuh keputusan operator, beritahu user untuk menunggu."
         )
 
     # 5. Available capabilities description
@@ -635,6 +694,7 @@ async def run_agent(
                 llm=llm,
                 db=db,
                 log=log,
+                scope=_memory_scope,
             )
 
     sandbox.close()

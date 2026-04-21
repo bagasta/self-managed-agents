@@ -22,7 +22,10 @@ def _generate_api_key() -> str:
 
 class Agent(Base):
     __tablename__ = "agents"
-    __table_args__ = (Index("ix_agents_api_key", "api_key", unique=True),)
+    __table_args__ = (
+        Index("ix_agents_api_key", "api_key", unique=True),
+        Index("ix_agents_wa_device_id", "wa_device_id", unique=True),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -40,6 +43,10 @@ class Agent(Base):
     escalation_config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    # --- whatsapp channel ---
+    wa_device_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    channel_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     # --- subscription / quota ---
     api_key: Mapped[str] = mapped_column(

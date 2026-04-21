@@ -69,6 +69,88 @@
 
 ---
 
+## Phase 7 — WhatsApp Integration (whatsmeow)
+
+### Arsitektur
+WhatsApp menggunakan **whatsmeow** (Go library) — harus dibangun sebagai **Go microservice** terpisah
+(`wa-service/`) yang diekspos via HTTP internal. Python FastAPI berkomunikasi dengan service ini.
+
+```
+┌─────────────────────┐       HTTP internal       ┌──────────────────────────┐
+│  Python FastAPI     │ ◄────────────────────────► │  wa-service (Go)          │
+│  :8000              │                             │  :8080                    │
+│                     │                             │  - whatsmeow multi-device │
+│  /v1/agents         │   POST /devices             │  - SQLite session store   │
+│  /v1/channels/wa/   │   GET  /devices/:id/qr      │  - QR PNG generator       │
+│  incoming           │   GET  /devices/:id/status  │  - Webhook forwarder      │
+└─────────────────────┘   POST /devices/:id/send    └──────────────────────────┘
+                          DELETE /devices/:id
+
+WhatsApp user ──► Go service ──► POST /v1/channels/wa/incoming ──► Python ──► Agent
+Agent reply   ──► Python     ──► POST /devices/:id/send         ──► Go ──► WhatsApp user
+```
+
+### Sub-tasks
+
+#### 7.1 — Go WhatsApp Service
+- [x] **7.1.1** Init Go module `wa-service/` — `go mod init wa-service`
+  - Dependencies: `go.mau.fi/whatsmeow`, `github.com/skip2/go-qrcode`, `github.com/gorilla/mux`,
+    `go.mau.fi/whatsmeow/store/sqlstore`, `mattn/go-sqlite3`
+- [x] **7.1.2** `wa-service/device_manager.go` — multi-device manager:
+  - Map `deviceID (string) → *whatsmeow.Client`
+  - `CreateDevice(id string) (qrPNG []byte, err error)` — buat client baru, stream QR channel,
+    encode QR ke PNG dengan go-qrcode, kembalikan image PNG bytes + base64 string
+  - `GetStatus(id string) string` → `"waiting_qr" | "connected" | "disconnected"`
+  - `GetFreshQR(id string) ([]byte, error)` → generate QR baru jika belum connected
+  - `SendMessage(id, to, text string) error` → send text message via JID
+  - `Disconnect(id string)` → logout + hapus dari map
+  - Event handler: saat terima pesan masuk → POST ke Python webhook
+- [x] **7.1.3** `wa-service/handlers.go` — HTTP handlers:
+  - `POST /devices` → `CreateDevice`, return `{device_id, qr_image (base64 PNG), status}`
+  - `GET /devices/{id}/qr` → `GetFreshQR`, return `{qr_image, status}`
+  - `GET /devices/{id}/status` → `{status, phone_number (jika connected)}`
+  - `POST /devices/{id}/send` → body `{to, message}` → `SendMessage`
+  - `DELETE /devices/{id}` → `Disconnect`
+- [x] **7.1.4** `wa-service/main.go` — HTTP server startup, load existing devices dari SQLite saat boot
+- [x] **7.1.5** `wa-service/go.mod` + `wa-service/go.sum`
+- [ ] **7.1.6** `wa-service/Dockerfile` (optional, untuk deployment)
+
+#### 7.2 — DB Migration & Model (Python side)
+- [x] **7.2.1** `alembic/versions/008_agent_whatsapp.py`
+- [x] **7.2.2** Update ORM `app/models/agent.py`
+- [x] **7.2.3** Update Pydantic `app/schemas/agent.py`
+
+#### 7.3 — Python API Endpoints
+- [x] **7.3.1** `app/core/wa_client.py` — thin HTTP client ke Go service:
+  - `async def create_wa_device(device_id: str) → dict` (qr_image, status)
+  - `async def get_wa_qr(device_id: str) → dict`
+  - `async def get_wa_status(device_id: str) → dict`
+  - `async def send_wa_message(device_id: str, to: str, text: str) → None`
+  - `async def delete_wa_device(device_id: str) → None`
+  - Baca `WA_SERVICE_URL` dari env (default `http://localhost:8080`)
+- [x] **7.3.2** Update `app/api/agents.py`:
+  - `create_agent`: jika `payload.channel_type == "whatsapp"` → generate `device_id = str(uuid4())`,
+    panggil `wa_client.create_wa_device(device_id)`, simpan ke `agent.wa_device_id`,
+    sertakan `qr_image` di response
+  - Tambah `GET /{agent_id}/whatsapp/qr` → return QR baru dari Go service
+  - Tambah `GET /{agent_id}/whatsapp/status` → return status koneksi
+  - Tambah `DELETE /{agent_id}/whatsapp` → logout device di Go service, clear `wa_device_id`
+- [x] **7.3.3** Update `app/api/channels.py` — `POST /v1/channels/wa/incoming`
+- [x] **7.3.4** Update `app/core/channel_service.py` — use wa_client
+
+#### 7.4 — Config & Env
+- [x] **7.4.1** Tambah `WA_SERVICE_URL=http://localhost:8080` ke `.env.example`
+- [x] **7.4.2** Expose `WA_SERVICE_URL` via pydantic settings
+
+#### 7.5 — Postman Collection
+- [x] **7.5.1** Update `managed-agents.postman_collection.json`:
+  - Create Agent: tambah contoh dengan `channel_type: "whatsapp"`; response menampilkan `qr_image`
+  - Tambah request `GET /v1/agents/:agent_id/whatsapp/qr`
+  - Tambah request `GET /v1/agents/:agent_id/whatsapp/status`
+  - Tambah request `DELETE /v1/agents/:agent_id/whatsapp`
+
+---
+
 ## Catatan Arsitektur
 
 ### Flow Eskalasi

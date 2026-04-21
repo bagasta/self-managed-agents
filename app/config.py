@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     short_term_memory_turns: int = 10   # conversation turns kept in LLM context
     ltm_extraction_every: int = 10      # extract LTM every N user messages
 
+    # WhatsApp microservice
+    wa_service_url: str = "http://localhost:8080"
+
     # Logging
     log_level: str = "INFO"
 

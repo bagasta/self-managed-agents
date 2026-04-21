@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,8 +15,11 @@ from app.schemas.agent import (
     AgentRenewResponse,
     AgentResponse,
     AgentUpdate,
+    AgentWhatsAppQRResponse,
+    AgentWhatsAppStatusResponse,
 )
 
+logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/v1/agents", tags=["agents"])
 
 
@@ -26,6 +30,7 @@ async def create_agent(
     _: str = Depends(verify_api_key),
 ) -> AgentResponse:
     active_until = datetime.now(timezone.utc) + timedelta(days=payload.quota_period_days)
+    device_id = str(uuid.uuid4()) if payload.channel_type == "whatsapp" else None
     agent = Agent(
         name=payload.name,
         description=payload.description,
@@ -39,11 +44,26 @@ async def create_agent(
         token_quota=payload.token_quota,
         quota_period_days=payload.quota_period_days,
         active_until=active_until,
+        channel_type=payload.channel_type,
+        wa_device_id=device_id,
     )
     db.add(agent)
     await db.flush()
     await db.refresh(agent)
-    return AgentResponse.model_validate(agent)
+
+    response = AgentResponse.model_validate(agent)
+
+    # If whatsapp channel requested, call Go service to get QR code
+    if payload.channel_type == "whatsapp" and device_id:
+        try:
+            from app.core.wa_client import create_wa_device
+            wa_result = await create_wa_device(device_id)
+            response.qr_image = wa_result.get("qr_image", "")
+        except Exception as exc:
+            logger.warning("create_agent.wa_init_failed", error=str(exc), device_id=device_id)
+            # Agent is still created; user can fetch QR later
+
+    return response
 
 
 @router.get("", response_model=AgentListResponse)
@@ -109,6 +129,12 @@ async def delete_agent(
     _: str = Depends(verify_api_key),
 ) -> None:
     agent = await _get_active_agent(agent_id, db)
+    if agent.wa_device_id:
+        try:
+            from app.core.wa_client import delete_wa_device
+            await delete_wa_device(agent.wa_device_id)
+        except Exception as exc:
+            logger.warning("delete_agent.wa_disconnect_failed", error=str(exc))
     agent.is_deleted = True
     await db.flush()
 
@@ -119,7 +145,6 @@ async def renew_agent(
     db: AsyncSession = Depends(get_db),
     _: str = Depends(verify_api_key),
 ) -> AgentRenewResponse:
-    """Extend the agent's active period and reset token usage counter."""
     agent = await _get_active_agent(agent_id, db)
     agent.active_until = datetime.now(timezone.utc) + timedelta(days=agent.quota_period_days)
     agent.tokens_used = 0
@@ -136,6 +161,117 @@ async def renew_agent(
             f"Agent renewed for {agent.quota_period_days} days. "
             f"Token quota reset to {agent.token_quota:,}."
         ),
+    )
+
+
+@router.get("/{agent_id}/whatsapp/qr", response_model=AgentWhatsAppQRResponse)
+async def get_whatsapp_qr(
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(verify_api_key),
+) -> AgentWhatsAppQRResponse:
+    """Get a fresh WhatsApp QR code for an agent (call while status is waiting_qr)."""
+    agent = await _get_active_agent(agent_id, db)
+    if not agent.wa_device_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Agent does not have a WhatsApp channel configured",
+        )
+    try:
+        from app.core.wa_client import get_wa_qr
+        result = await get_wa_qr(agent.wa_device_id)
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
+
+    return AgentWhatsAppQRResponse(
+        device_id=agent.wa_device_id,
+        qr_image=result.get("qr_image", ""),
+        status=result.get("status", "unknown"),
+    )
+
+
+@router.get("/{agent_id}/whatsapp/status", response_model=AgentWhatsAppStatusResponse)
+async def get_whatsapp_status(
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(verify_api_key),
+) -> AgentWhatsAppStatusResponse:
+    """Get WhatsApp connection status for an agent."""
+    agent = await _get_active_agent(agent_id, db)
+    if not agent.wa_device_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Agent does not have a WhatsApp channel configured",
+        )
+    try:
+        from app.core.wa_client import get_wa_status
+        result = await get_wa_status(agent.wa_device_id)
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
+
+    return AgentWhatsAppStatusResponse(
+        device_id=agent.wa_device_id,
+        status=result.get("status", "unknown"),
+        phone_number=result.get("phone_number", ""),
+    )
+
+
+@router.delete("/{agent_id}/whatsapp", status_code=status.HTTP_204_NO_CONTENT)
+async def disconnect_whatsapp(
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(verify_api_key),
+) -> None:
+    """Logout WhatsApp and clear the device from the agent."""
+    agent = await _get_active_agent(agent_id, db)
+    if not agent.wa_device_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Agent does not have a WhatsApp channel configured",
+        )
+    try:
+        from app.core.wa_client import delete_wa_device
+        await delete_wa_device(agent.wa_device_id)
+    except Exception as exc:
+        logger.warning("disconnect_whatsapp.wa_service_error", error=str(exc))
+
+    agent.wa_device_id = None
+    agent.channel_type = None
+    await db.flush()
+
+
+@router.post("/{agent_id}/whatsapp/connect", response_model=AgentWhatsAppQRResponse)
+async def connect_whatsapp(
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(verify_api_key),
+) -> AgentWhatsAppQRResponse:
+    """Initialize or re-initialize WhatsApp for an existing agent.
+
+    Creates a new device_id if missing, calls Go wa-service to get QR code.
+    Useful when agent was created while wa-service was down.
+    """
+    agent = await _get_active_agent(agent_id, db)
+
+    # Generate device_id if not present
+    if not agent.wa_device_id:
+        agent.wa_device_id = str(uuid.uuid4())
+        agent.channel_type = "whatsapp"
+        await db.flush()
+
+    try:
+        from app.core.wa_client import create_wa_device
+        wa_result = await create_wa_device(agent.wa_device_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"wa-service error: {exc}",
+        )
+
+    return AgentWhatsAppQRResponse(
+        device_id=agent.wa_device_id,
+        qr_image=wa_result.get("qr_image", ""),
+        status=wa_result.get("status", "waiting_qr"),
     )
 
 

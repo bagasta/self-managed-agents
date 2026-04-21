@@ -8,15 +8,39 @@
 </head>
 <body>
 
+<!-- ── QR Modal ── -->
+<div id="qr-modal" class="modal-overlay" style="display:none" onclick="closeQRModal(event)">
+  <div class="modal-box" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <span>📱 Scan QR WhatsApp</span>
+      <button class="modal-close" onclick="closeQRModal()">✕</button>
+    </div>
+    <div class="modal-body" style="text-align:center">
+      <p class="text-muted" style="margin-bottom:16px">Buka WhatsApp → Linked Devices → Link a Device → Scan QR</p>
+      <div id="modal-qr-img"></div>
+      <div id="modal-qr-status" style="margin-top:12px"></div>
+      <div id="modal-qr-hint" class="text-muted" style="margin-top:8px; font-size:11px">QR berubah tiap 20 detik — UI auto-refresh</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost btn-sm" onclick="refreshModalQR()">🔄 Refresh QR</button>
+      <button class="btn btn-success btn-sm" id="modal-done-btn" style="display:none" onclick="closeQRModal()">✅ Done</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── Topbar ── -->
 <div id="topbar">
   <div class="logo">🤖 AgentDev</div>
   <label>Base URL</label>
-  <input id="cfg-url" type="text" value="http://localhost:8000" placeholder="http://localhost:8000" style="width:200px">
+  <input id="cfg-url" type="text" value="http://localhost:8000" style="width:200px">
   <label>API Key</label>
   <input id="cfg-key" type="text" placeholder="sk-..." style="width:160px">
   <button id="save-config" onclick="saveConfig()">Save & Ping</button>
   <div id="status-dot" title="Server status"></div>
+  <div style="margin-left:auto; display:flex; align-items:center; gap:8px">
+    <span class="text-muted" style="font-size:10px">WA Service</span>
+    <div id="wa-service-dot" title="wa-service status" style="width:8px;height:8px;border-radius:50%;background:var(--text-muted)"></div>
+  </div>
 </div>
 
 <!-- ── Layout ── -->
@@ -40,6 +64,7 @@
     </div>
     <div class="nav-group">
       <div class="nav-group-label">Channel</div>
+      <div class="nav-item" onclick="nav('whatsapp')"><span class="icon">📱</span> WhatsApp</div>
       <div class="nav-item" onclick="nav('escalation')"><span class="icon">🚨</span> Escalation Test</div>
       <div class="nav-item" onclick="nav('channels')"><span class="icon">📡</span> Incoming Msg</div>
       <div class="nav-item" onclick="nav('runs')"><span class="icon">🔍</span> Runs</div>
@@ -54,13 +79,11 @@
       <div class="section active" id="sec-agents">
         <div class="section-title">🤖 Agents</div>
 
-        <!-- List -->
         <div class="card">
           <div class="card-title">📋 Agent List <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="loadAgents()">Refresh</button></div>
           <div id="agents-table"><div class="empty-state"><div class="icon">🤖</div>Klik Refresh untuk load agents</div></div>
         </div>
 
-        <!-- Create / Edit -->
         <div class="card">
           <div class="card-title" id="agent-form-title">➕ Create Agent</div>
           <input type="hidden" id="agent-edit-id">
@@ -71,13 +94,20 @@
             </div>
             <div class="form-group">
               <label>Model</label>
-              <input id="a-model" type="text" value="anthropic/claude-sonnet-4-6" placeholder="anthropic/claude-sonnet-4-6">
+              <input id="a-model" type="text" value="anthropic/claude-sonnet-4-6">
             </div>
             <div class="form-group">
               <label>Temperature</label>
               <input id="a-temp" type="number" value="0.7" min="0" max="2" step="0.1">
             </div>
             <div class="form-group">
+              <label>Channel Type <span class="text-muted">(opsional)</span></label>
+              <select id="a-channel-type" onchange="onAgentChannelTypeChange()">
+                <option value="">— tidak ada —</option>
+                <option value="whatsapp">📱 WhatsApp (scan QR)</option>
+              </select>
+            </div>
+            <div class="form-group full">
               <label>Description</label>
               <input id="a-desc" type="text" placeholder="Agen untuk customer service">
             </div>
@@ -94,8 +124,7 @@
               <label>Escalation Config (JSON)</label>
               <textarea id="a-escalation" rows="3"></textarea>
               <div class="tools-config-hint">
-                📞 Kontak <strong>human operator</strong> yang menerima notifikasi saat agent mengeskalasi.
-                <code>operator_phone</code> = nomor/ID operator. <code>channel_type</code> = channel untuk hubungi operator.
+                📞 Kontak <strong>human operator</strong> untuk eskalasi.
                 Contoh: <code>{"channel_type":"whatsapp","operator_phone":"+62811xxx"}</code>
               </div>
             </div>
@@ -167,7 +196,7 @@
       <div class="section" id="sec-chat">
         <div class="section-title">📨 Chat / Messages</div>
 
-        <div class="card" style="padding: 12px; margin-bottom: 12px;">
+        <div class="card" style="padding:12px; margin-bottom:12px">
           <div class="flex">
             <div class="form-group" style="flex:1">
               <label>Agent</label>
@@ -183,6 +212,7 @@
             </div>
             <div style="align-self:flex-end; display:flex; flex-direction:column; gap:4px; align-items:flex-end">
               <div id="sse-indicator" style="font-size:11px; color:var(--text-muted)"><span>⚪ Stream off</span></div>
+              <div id="chat-agent-key-badge" style="font-size:10px; color:var(--text-muted)"></div>
               <button class="btn btn-ghost btn-sm" onclick="clearChatUI()">🗑 Clear UI</button>
             </div>
           </div>
@@ -193,7 +223,7 @@
             <div class="bubble-system">Pilih agent & session untuk mulai chat</div>
           </div>
           <div id="chat-input-row">
-            <textarea id="chat-input" placeholder="Ketik pesan..." onkeydown="chatKeydown(event)"></textarea>
+            <textarea id="chat-input" placeholder="Ketik pesan... (Enter kirim, Shift+Enter baris baru)" onkeydown="chatKeydown(event)"></textarea>
             <button class="btn btn-primary" onclick="sendChatMessage()" id="chat-send-btn">Send ↑</button>
           </div>
         </div>
@@ -234,54 +264,24 @@
         </div>
 
         <div class="card-grid" style="margin-bottom:16px">
-          <!-- Upload text -->
           <div class="card" style="margin:0">
             <div class="card-title">📝 Upload Text Doc</div>
-            <div class="form-group">
-              <label>Title *</label>
-              <input id="doc-title" type="text" placeholder="FAQ Produk">
-            </div>
-            <div class="form-group mt-8">
-              <label>Content *</label>
-              <textarea id="doc-content" rows="5" placeholder="Isi dokumen..."></textarea>
-            </div>
-            <div class="form-group mt-8">
-              <label>Source (opsional)</label>
-              <input id="doc-source" type="text" placeholder="https://...">
-            </div>
-            <div class="btn-group">
-              <button class="btn btn-success btn-sm" onclick="uploadDoc()">Upload</button>
-            </div>
+            <div class="form-group"><label>Title *</label><input id="doc-title" type="text" placeholder="FAQ Produk"></div>
+            <div class="form-group mt-8"><label>Content *</label><textarea id="doc-content" rows="5" placeholder="Isi dokumen..."></textarea></div>
+            <div class="form-group mt-8"><label>Source (opsional)</label><input id="doc-source" type="text" placeholder="https://..."></div>
+            <div class="btn-group"><button class="btn btn-success btn-sm" onclick="uploadDoc()">Upload</button></div>
           </div>
-
-          <!-- Upload file -->
           <div class="card" style="margin:0">
             <div class="card-title">📎 Upload File (PDF/DOCX/PPTX)</div>
-            <div class="form-group">
-              <label>File</label>
-              <input id="doc-file" type="file" accept=".pdf,.docx,.pptx,.txt" style="color:var(--text-muted)">
-            </div>
-            <div class="form-group mt-8">
-              <label>Title (opsional, default: nama file)</label>
-              <input id="doc-file-title" type="text" placeholder="Judul dokumen">
-            </div>
-            <div class="btn-group">
-              <button class="btn btn-success btn-sm" onclick="uploadFile()">Upload File</button>
-            </div>
-
+            <div class="form-group"><label>File</label><input id="doc-file" type="file" accept=".pdf,.docx,.pptx,.txt" style="color:var(--text-muted)"></div>
+            <div class="form-group mt-8"><label>Title (opsional)</label><input id="doc-file-title" type="text" placeholder="Judul dokumen"></div>
+            <div class="btn-group"><button class="btn btn-success btn-sm" onclick="uploadFile()">Upload File</button></div>
             <div class="divider"></div>
-
             <div class="card-title">🔍 Search Documents</div>
-            <div class="form-group">
-              <label>Query</label>
-              <input id="doc-search-q" type="text" placeholder="Cari dokumen...">
-            </div>
-            <div class="btn-group">
-              <button class="btn btn-primary btn-sm" onclick="searchDocs()">Search</button>
-            </div>
+            <div class="form-group"><label>Query</label><input id="doc-search-q" type="text" placeholder="Cari dokumen..."></div>
+            <div class="btn-group"><button class="btn btn-primary btn-sm" onclick="searchDocs()">Search</button></div>
           </div>
         </div>
-
         <div class="card">
           <div class="card-title">📋 Document List</div>
           <div id="docs-table"><div class="empty-state text-muted">Pilih agent untuk load dokumen</div></div>
@@ -293,9 +293,7 @@
         <div class="section-title">🧠 Memory</div>
         <div class="card">
           <div class="flex">
-            <select id="mem-agent-sel" style="flex:1" onchange="loadMemory()">
-              <option value="">— pilih agent —</option>
-            </select>
+            <select id="mem-agent-sel" style="flex:1" onchange="loadMemory()"><option value="">— pilih agent —</option></select>
             <button class="btn btn-ghost btn-sm" onclick="populateAgentSelects()">↻</button>
           </div>
         </div>
@@ -318,9 +316,7 @@
         <div class="section-title">🎯 Skills</div>
         <div class="card">
           <div class="flex">
-            <select id="skill-agent-sel" style="flex:1" onchange="loadSkills()">
-              <option value="">— pilih agent —</option>
-            </select>
+            <select id="skill-agent-sel" style="flex:1" onchange="loadSkills()"><option value="">— pilih agent —</option></select>
             <button class="btn btn-ghost btn-sm" onclick="populateAgentSelects()">↻</button>
           </div>
         </div>
@@ -344,9 +340,7 @@
         <div class="section-title">🔧 Custom Tools</div>
         <div class="card">
           <div class="flex">
-            <select id="ct-agent-sel" style="flex:1" onchange="loadCustomTools()">
-              <option value="">— pilih agent —</option>
-            </select>
+            <select id="ct-agent-sel" style="flex:1" onchange="loadCustomTools()"><option value="">— pilih agent —</option></select>
             <button class="btn btn-ghost btn-sm" onclick="populateAgentSelects()">↻</button>
           </div>
         </div>
@@ -368,6 +362,104 @@
         </div>
       </div>
 
+      <!-- ═══════════════════════════ WHATSAPP ═══════════════════════════ -->
+      <div class="section" id="sec-whatsapp">
+        <div class="section-title">📱 WhatsApp Connect</div>
+        <p class="text-muted" style="margin-bottom:16px">
+          Kelola koneksi WhatsApp agent. Setiap agent bisa connect ke 1 nomor WhatsApp.
+          Setelah scan QR, semua pesan masuk dari WA akan di-handle otomatis oleh agent.
+        </p>
+
+        <!-- Agent selector -->
+        <div class="card">
+          <div class="card-title">⚙️ Pilih Agent</div>
+          <div class="flex">
+            <select id="wa-agent-sel" style="flex:1" onchange="loadWAAgent()">
+              <option value="">— pilih agent (yang punya channel_type: whatsapp) —</option>
+            </select>
+            <button class="btn btn-ghost btn-sm" onclick="populateWAAgentSelect()">↻</button>
+          </div>
+          <div id="wa-agent-info" class="mt-8"></div>
+        </div>
+
+        <!-- QR + Status panel -->
+        <div id="wa-connect-panel" style="display:none">
+          <div class="card-grid">
+            <!-- QR Column -->
+            <div class="card wa-qr-card" style="margin:0">
+              <div class="card-title" style="justify-content:space-between">
+                <span>📷 QR Code</span>
+                <div id="wa-poll-indicator" class="text-muted" style="font-size:10px"></div>
+              </div>
+              <div id="wa-qr-wrap">
+                <div class="empty-state"><div class="icon">📷</div>Loading...</div>
+              </div>
+              <div id="wa-qr-status-badge" style="margin-top:12px; text-align:center"></div>
+              <div class="btn-group" style="justify-content:center; margin-top:12px">
+                <button class="btn btn-ghost btn-sm" onclick="refreshWAQR()">🔄 Refresh QR</button>
+                <button class="btn btn-danger btn-sm" onclick="disconnectWA()">⛔ Disconnect</button>
+              </div>
+              <p class="text-muted" style="text-align:center; margin-top:8px; font-size:10px">
+                WhatsApp → Linked Devices → Link a Device → Scan QR
+              </p>
+            </div>
+
+            <!-- Info + Simulator Column -->
+            <div style="display:flex; flex-direction:column; gap:16px">
+              <div class="card" style="margin:0">
+                <div class="card-title">📊 Connection Info</div>
+                <div id="wa-info-rows"></div>
+              </div>
+
+              <div class="card" style="margin:0">
+                <div class="card-title">🔔 Simulate Incoming WA Message</div>
+                <p class="text-muted" style="margin-bottom:10px; font-size:11px">
+                  Test langsung tanpa kirim dari HP — memanggil webhook <code>POST /v1/channels/wa/incoming</code>
+                </p>
+                <div class="form-group">
+                  <label>From Phone *</label>
+                  <input id="wa-sim-from" type="text" placeholder="+628123456789">
+                </div>
+                <div class="form-group mt-8">
+                  <label>Message *</label>
+                  <textarea id="wa-sim-msg" rows="3" placeholder="Halo, saya mau tanya tentang produk..."></textarea>
+                </div>
+                <div class="btn-group">
+                  <button class="btn btn-primary btn-sm" onclick="simulateWAIncoming()">📤 Send & Get Reply</button>
+                </div>
+                <div id="wa-sim-result" class="mt-8"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Create new WA agent shortcut -->
+        <div class="card">
+          <div class="card-title">➕ Buat Agent Baru + Konek WhatsApp</div>
+          <p class="text-muted" style="margin-bottom:12px">
+            Buat agent baru dengan <code>channel_type: "whatsapp"</code> sekaligus. QR otomatis muncul setelah dibuat.
+          </p>
+          <div class="card-grid">
+            <div class="form-group">
+              <label>Name *</label>
+              <input id="wa-new-name" type="text" placeholder="WhatsApp CS Agent">
+            </div>
+            <div class="form-group">
+              <label>Model</label>
+              <input id="wa-new-model" type="text" value="anthropic/claude-sonnet-4-6">
+            </div>
+            <div class="form-group full">
+              <label>Instructions</label>
+              <textarea id="wa-new-inst" rows="3" placeholder="Kamu adalah customer service yang membalas pesan WhatsApp dengan ramah dan informatif."></textarea>
+            </div>
+          </div>
+          <div class="btn-group">
+            <button class="btn btn-success" onclick="createWAAgent()">📱 Buat & Connect WhatsApp</button>
+          </div>
+          <div id="wa-create-result" class="mt-8"></div>
+        </div>
+      </div>
+
       <!-- ═══════════════════════════ ESCALATION TEST ═══════════════════════════ -->
       <div class="section" id="sec-escalation">
         <div class="section-title">🚨 Escalation Simulator</div>
@@ -376,7 +468,6 @@
           Pesan dari operator dikirim via <code>/v1/channels/incoming</code> dengan <code>from_phone</code> = operator_phone.
         </p>
 
-        <!-- Config -->
         <div class="card">
           <div class="card-title">⚙️ Setup</div>
           <div class="card-grid cols-3">
@@ -405,15 +496,12 @@
             <strong>Cara pakai:</strong>
             1️⃣ Pilih agent yang sudah punya <code>escalation_config.operator_phone</code>
             → 2️⃣ Isi Session ID
-            → 3️⃣ Klik <em>Force Aktifkan Eskalasi</em> (atau biarkan agent memicunya sendiri lewat chat)
+            → 3️⃣ Klik <em>Force Aktifkan Eskalasi</em>
             → 4️⃣ Kirim pesan sebagai <strong>User</strong> di kiri, balas sebagai <strong>Operator</strong> di kanan
           </div>
         </div>
 
-        <!-- Two-column sim -->
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px">
-
-          <!-- User side -->
           <div class="card" style="margin:0; display:flex; flex-direction:column">
             <div class="card-title">👤 User Side</div>
             <div id="esc-user-log" style="flex:1; min-height:220px; max-height:320px; overflow-y:auto; background:var(--surface-2); border-radius:6px; padding:10px; margin-bottom:10px; display:flex; flex-direction:column; gap:8px">
@@ -424,14 +512,12 @@
               <button class="btn btn-primary btn-sm" onclick="escalationSendUser()">Send as User ↑</button>
             </div>
           </div>
-
-          <!-- Operator side -->
           <div class="card" style="margin:0; display:flex; flex-direction:column">
             <div class="card-title">👨‍💼 Operator Side <span class="badge badge-yellow" style="margin-left:8px">Kendali Penuh</span></div>
             <div id="esc-op-log" style="flex:1; min-height:220px; max-height:320px; overflow-y:auto; background:var(--surface-2); border-radius:6px; padding:10px; margin-bottom:10px; display:flex; flex-direction:column; gap:8px">
               <div class="bubble-system">Notifikasi & balasan agent ke operator muncul di sini</div>
             </div>
-            <textarea id="esc-op-msg" rows="3" placeholder='Contoh perintah operator:&#10;"Kirim ke customer: Maaf atas kendalanya..."&#10;"Selesai, tangani sendiri"'></textarea>
+            <textarea id="esc-op-msg" rows="3" placeholder='Contoh: "Kirim ke customer: Maaf atas kendalanya..."'></textarea>
             <div class="btn-group">
               <button class="btn btn-success btn-sm" onclick="escalationSendOperator()">Send as Operator ↑</button>
             </div>
@@ -451,7 +537,7 @@
             </div>
             <div class="form-group">
               <label>From Phone (pengirim)</label>
-              <input id="ch-from" type="text" placeholder="+62812xxx (kosong = user biasa)">
+              <input id="ch-from" type="text" placeholder="+62812xxx">
             </div>
             <div class="form-group full">
               <label>Message *</label>

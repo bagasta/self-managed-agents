@@ -35,3 +35,45 @@ Building a managed agent platform. Just fixed scheduled reminders so they appear
 
 Adding per-agent subscription with token quota, expiry period, and unique API key per agent. Migration 007 is ready —    
   next step is running alembic upgrade 007 to apply it. (disable recaps in /config)
+
+   Built a WhatsApp integration using a Go microservice (whatsmeow) in wa-service/ and updated the Python API. Next step:   
+  run `alembic upgrade 008` to apply the database migration. (disable recaps in /config)
+
+  Built a Go WhatsApp microservice using whatsmeow in the wa-service folder, plus Python integration endpoints. Next action:
+     run alembic upgrade head to apply migration 008.
+
+     Working on a managed agent platform's WhatsApp integration. All bugs are fixed and confirmed working. No immediate next   
+     action needed.                                                                                                          
+                      
+   Redesign eskalasi WhatsApp: Operator kini punya **session sendiri** (bukan inject [OPERATOR] ke session user).
+   - channels.py: `lookup_user_id = operator_phone` untuk operator — session terpisah per pengirim.
+   - `escalation_user_jid` dicari dari session user yang escalation_active=True, diteruskan ke run_agent().
+   - agent_runner.py: jika escalation_user_jid ada, inject prompt "SESI OPERATOR" dan set user_jid closure pada
+     tool reply_to_user sehingga pesan dikirim tepat ke user yang dieskalasi (bukan ke operator).
+   - memory_service: scoped per external_user_id (nomor WA) mencegah kebocoran memori antar user.
+   - Tidak perlu flag routing tambahan — operator cukup baca Chat ID dari history pesan eskalasi.
+
+   Bug Fix eskalasi WhatsApp (21 Apr 2026):
+
+   1. Migration fix: 009_memory_scope.py memakai `down_revision = "008_agent_whatsapp"` (nama file),
+      padahal revision ID di 008_agent_whatsapp.py adalah `"008"` → Alembic KeyError.
+      Fix: ubah ke `down_revision = "008"`. Kolom `scope` di tabel agent_memories sekarang berhasil dibuat.
+
+   2. Routing bug — reply_to_user kirim ke operator bukan user:
+      Root cause: di sesi operator, session.channel_config["user_phone"] berisi JID operator sendiri.
+      Kode lama meng-override user_jid terlalu terlambat sehingga routing tetap ke operator.
+      Fix (escalation_tool.py): load session hanya untuk ambil device_id; user_jid dari closure
+      langsung di-set ke ch_cfg["user_phone"] sebelum send_message dipanggil.
+
+   3. Format notifikasi eskalasi diperbarui agar operator tau Chat ID tujuan:
+        🚨 [CS AI Clevio] Eskalasi pertanyaan customer
+        ID Kasus: esc_<timestamp>_<session_prefix>
+        Chat ID/no wa: <user_wa_jid>
+        Pertanyaan customer: <summary>
+        → Agent akan menyusun draft & minta konfirmasi sebelum kirim.
+
+   4. Flow operator diubah: Draft → Konfirmasi → Kirim (sebelumnya langsung kirim):
+      - Agent susun draft rapi dari jawaban operator (fix format, JANGAN tambah konten)
+      - Agent tampilkan draft ke operator + tanya "Sudah OK? Ketik 'kirim'..."
+      - Setelah operator konfirmasi → reply_to_user(draft) → balas "Terkirim ✓"
+      - Berlaku untuk sesi operator baru maupun legacy [OPERATOR] prefix path.
