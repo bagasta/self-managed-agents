@@ -431,11 +431,13 @@ async def wa_incoming(
     # --- Kirim reply ke channel ---
     if reply:
         try:
+            from app.core.text_utils import markdown_to_wa
             from app.core.wa_client import send_wa_message
+            wa_reply = markdown_to_wa(reply)
             if is_operator:
                 # Kirim final reply ke operator (session milik operator sendiri)
                 # Jika agent juga memanggil reply_to_user, pesan itu sudah dikirim oleh tool
-                await send_wa_message(body.device_id, reply_target, reply)
+                await send_wa_message(body.device_id, reply_target, wa_reply)
             else:
                 # Balas ke user; guard: jangan kirim ke nomor operator
                 normalized_target = reply_target.lstrip("+").split("@")[0]
@@ -443,7 +445,7 @@ async def wa_incoming(
                 if normalized_operator and normalized_target == normalized_operator:
                     log.warning("wa_incoming.reply_target_is_operator_suppressed", reply_target=reply_target)
                 else:
-                    await send_wa_message(body.device_id, reply_target, reply)
+                    await send_wa_message(body.device_id, reply_target, wa_reply)
         except Exception as exc:
             log.error("wa_incoming.send_reply_failed", target=reply_target, error=str(exc))
 

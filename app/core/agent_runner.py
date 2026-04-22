@@ -25,12 +25,13 @@ import ast
 import json
 import sys
 import uuid
-from typing import Any
+from typing import Any, Optional
 
 import structlog
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
-from langchain_core.tools import tool
+from langchain_core.tools import tool, StructuredTool
 from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field, create_model
 from langgraph.prebuilt import create_react_agent
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -174,6 +175,28 @@ def build_skill_tools(agent_id: uuid.UUID, db: AsyncSession) -> list:
 
 _STDLIB_MODULES = set(sys.stdlib_module_names)
 
+
+def _extract_ast_params(code: str, func_name: str) -> list[tuple[str, bool]]:
+    """Return list of (param_name, has_default) for the named function."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == func_name:
+            args = node.args
+            n_args = len(args.args)
+            n_defaults = len(args.defaults)
+            result = []
+            for i, arg in enumerate(args.args):
+                if arg.arg == "self":
+                    continue
+                has_default = i >= (n_args - n_defaults)
+                result.append((arg.arg, has_default))
+            return result
+    return []
+
+
 def _pip_prefix(code: str) -> str:
     """
     Parse top-level imports from code and return a pip install command for
@@ -224,16 +247,35 @@ def build_tool_creator_tools(agent_id: uuid.UUID, db: AsyncSession, sandbox: Doc
     async def run_custom_tool(name: str, args_json: str = "{}") -> str:
         """Execute a saved custom tool by running its Python code in the sandbox.
         IMPORTANT: If you just created a new tool using create_tool, use this to execute it
-        in the current session. Args: name (tool name), args_json (JSON string of kwargs)."""
+        in the current session.
+        Args:
+          name      : tool name (as given to create_tool)
+          args_json : JSON object string with the keyword arguments required by the tool function.
+                      Call list_tools() first to see available tools, then inspect the tool's
+                      function signature to know which keys are required.
+                      Example: '{"content": "Hello", "filename": "out.pdf"}'"""
         tools = await list_custom_tools(agent_id, db)
         tool_map = {t.name: t for t in tools}
         if name not in tool_map:
-            return f"[error] No custom tool named '{name}'. Use list_tools() to see available tools."
+            available = ", ".join(tool_map.keys()) or "none"
+            return f"[error] No custom tool named '{name}'. Available: {available}"
         ct = tool_map[name]
+
+        # Show required params if args is empty and the tool needs them
         try:
             args = json.loads(args_json)
         except json.JSONDecodeError as e:
-            return f"[error] Invalid args_json: {e}"
+            return f"[error] Invalid args_json (must be a JSON object string): {e}"
+
+        if not args:
+            required_params = [p for p, has_def in _extract_ast_params(ct.code, name) if not has_def]
+            if required_params:
+                example = json.dumps({p: "..." for p in required_params})
+                return (
+                    f"[error] Tool '{name}' requires arguments: {required_params}. "
+                    f"Pass them as args_json, e.g. args_json='{example}'"
+                )
+
         args_json_str = json.dumps(json.dumps(args))  # double-encode so it's a safe string literal
         runner_code = f"""{ct.code}
 
@@ -259,18 +301,24 @@ if __name__ == "__main__":
 # ---------------------------------------------------------------------------
 
 def build_loaded_custom_tools(custom_tools_db: list, sandbox: DockerSandbox) -> list:
+    """
+    Build LangChain tools from saved custom tools, exposing the real function
+    parameters so the LLM knows exactly what arguments to pass.
+    """
     lc_tools = []
     for ct in custom_tools_db:
-        def _make_runner(ct_name: str, ct_code: str, ct_desc: str):
-            @tool(ct_name, description=ct_desc)
-            def _runner(args_json: str = "{}") -> str:
-                """Execute a saved custom tool in the sandbox."""
-                try:
-                    args = json.loads(args_json)
-                except json.JSONDecodeError as e:
-                    return f"[error] Invalid args_json: {e}"
-                args_json_str = json.dumps(json.dumps(args))
-                runner_code = f"""{ct_code}
+        lc_tools.append(_make_custom_tool_runner(ct.name, ct.code, ct.description, sandbox))
+    return lc_tools
+
+
+def _make_custom_tool_runner(ct_name: str, ct_code: str, ct_desc: str, sandbox: DockerSandbox):
+    """Build a StructuredTool with the real parameters from the custom tool function."""
+    params = _extract_ast_params(ct_code, ct_name)
+
+    # Build runner code template
+    def _build_runner_code(kwargs: dict) -> str:
+        args_json_str = json.dumps(json.dumps(kwargs))
+        return f"""{ct_code}
 
 if __name__ == "__main__":
     import json, inspect as _inspect
@@ -282,22 +330,45 @@ if __name__ == "__main__":
     result = {ct_name}(**_filtered)
     print(json.dumps({{"result": result}}) if result is not None else "null")
 """
-                sandbox.write_file(f"_custom_tool_{ct_name}.py", runner_code)
-                pip_cmd = _pip_prefix(ct_code)
-                return sandbox.bash(f"{pip_cmd}python /workspace/_custom_tool_{ct_name}.py")
-            return _runner
-        lc_tools.append(_make_runner(ct.name, ct.code, ct.description))
-    return lc_tools
+
+    def _execute(**kwargs) -> str:
+        runner_code = _build_runner_code(kwargs)
+        sandbox.write_file(f"_custom_tool_{ct_name}.py", runner_code)
+        pip_cmd = _pip_prefix(ct_code)
+        return sandbox.bash(f"{pip_cmd}python /workspace/_custom_tool_{ct_name}.py")
+
+    if params:
+        fields: dict = {}
+        for pname, has_default in params:
+            if has_default:
+                fields[pname] = (Optional[str], Field(default=None, description=pname))
+            else:
+                fields[pname] = (str, Field(..., description=pname))
+        SchemaModel = create_model(f"_{ct_name}_schema", **fields)
+        return StructuredTool.from_function(
+            func=_execute,
+            name=ct_name,
+            description=ct_desc,
+            args_schema=SchemaModel,
+        )
+
+    # Fallback for zero-parameter tools
+    return StructuredTool.from_function(
+        func=lambda: _execute(),
+        name=ct_name,
+        description=ct_desc,
+    )
 
 
 # ---------------------------------------------------------------------------
 # WhatsApp media tools
 # ---------------------------------------------------------------------------
 
-def build_whatsapp_media_tools(session: Any, sandbox: DockerSandbox) -> list:
+def build_whatsapp_media_tools(session: Any, sandbox: DockerSandbox | None) -> list:
     """
     Tools untuk mengirim gambar/media ke WhatsApp.
-    Hanya diaktifkan jika session memiliki channel_type == 'whatsapp'.
+    sandbox=None: hanya send_agent_wa_qr yang tersedia (tidak butuh sandbox).
+    sandbox=DockerSandbox: semua tools tersedia termasuk send_whatsapp_image & send_whatsapp_document.
     """
     _raw_cfg = session.channel_config
     channel_cfg: dict = _raw_cfg if isinstance(_raw_cfg, dict) else {}
@@ -330,6 +401,8 @@ def build_whatsapp_media_tools(session: Any, sandbox: DockerSandbox) -> list:
 
         # Tentukan apakah input adalah path file atau base64 langsung
         if image_path_or_base64.startswith("/workspace/") or not image_path_or_base64.startswith("/"):
+            if sandbox is None:
+                return "[error] Tool send_whatsapp_image membutuhkan sandbox aktif untuk membaca file. Gunakan base64 langsung atau aktifkan sandbox."
             # Path file di workspace — baca via bash base64
             path = image_path_or_base64 if image_path_or_base64.startswith("/workspace/") else f"/workspace/{image_path_or_base64}"
             b64_output = sandbox.bash(f"base64 -w 0 {path} 2>&1")
@@ -477,6 +550,8 @@ def build_whatsapp_media_tools(session: Any, sandbox: DockerSandbox) -> list:
 
         # Tentukan apakah input adalah path file atau base64 langsung
         if file_path_or_base64.startswith("/workspace/") or (not file_path_or_base64.startswith("/") and len(file_path_or_base64) < 500):
+            if sandbox is None:
+                return "[error] Tool send_whatsapp_document membutuhkan sandbox aktif untuk membaca file."
             path = file_path_or_base64 if file_path_or_base64.startswith("/workspace/") else f"/workspace/{file_path_or_base64}"
             b64_output = sandbox.bash(f"base64 -w 0 {path} 2>&1")
             if b64_output.startswith("[") or "No such file" in b64_output:
@@ -717,9 +792,12 @@ async def run_agent(
         tools.extend(build_http_tools(tools_config))
         active_groups.append("http")
 
-    # WhatsApp media tools: aktif otomatis jika session channel adalah whatsapp dan sandbox aktif
-    if getattr(session, "channel_type", None) == "whatsapp" and _is_enabled(tools_config, "sandbox"):
-        tools.extend(build_whatsapp_media_tools(session, sandbox))
+    # WhatsApp media tools: aktif otomatis jika session channel adalah whatsapp.
+    # send_agent_wa_qr tidak butuh sandbox, jadi selalu diaktifkan untuk WA session.
+    # send_whatsapp_image & send_whatsapp_document butuh sandbox untuk baca file workspace.
+    if getattr(session, "channel_type", None) == "whatsapp":
+        sandbox_on = _is_enabled(tools_config, "sandbox")
+        tools.extend(build_whatsapp_media_tools(session, sandbox if sandbox_on else None))
         active_groups.append("whatsapp_media")
 
     log.debug("agent_run.tools_ready (pre-mcp)", groups=active_groups, count=len(tools))
@@ -766,6 +844,12 @@ async def run_agent(
             "Balas user LANGSUNG dengan teks biasa sebagai output akhirmu. "
             "JANGAN gunakan tool `reply_to_user` untuk menjawab user secara normal — cukup tulis jawabanmu. "
             "Tool `reply_to_user` dan `send_to_number` HANYA dipakai saat menerima perintah dari OPERATOR.\n\n"
+            "### Kirim Gambar / QR ke User\n"
+            "Jika kamu perlu mengirim gambar atau QR code ke user (misalnya setelah membuat agent baru dan perlu "
+            "user scan QR WhatsApp), kamu WAJIB memanggil tool yang sesuai:\n"
+            "- `send_agent_wa_qr(agent_id='<UUID agent>')` — untuk kirim QR WhatsApp dari sebuah agent.\n"
+            "- `send_whatsapp_image(image_path_or_base64='...')` — untuk kirim gambar/chart dari workspace.\n"
+            "JANGAN hanya mendeskripsikan gambar dalam teks — panggil tool-nya agar gambar benar-benar terkirim.\n\n"
             "### Setelah memanggil `escalate_to_human`:\n"
             "- Tool tersebut SUDAH mengirim notifikasi ke operator secara otomatis. "
             "JANGAN tulis atau kirim pesan apapun ke operator.\n"

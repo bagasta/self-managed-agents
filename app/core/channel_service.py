@@ -106,8 +106,9 @@ async def _send_whatsapp(to_phone: str, text: str, config: dict) -> None:
         return
 
     try:
+        from app.core.text_utils import markdown_to_wa
         from app.core.wa_client import send_wa_message
-        await send_wa_message(device_id, to_phone, text)
+        await send_wa_message(device_id, to_phone, markdown_to_wa(text))
         logger.info("channel_service.whatsapp.sent", to=to_phone)
     except Exception as exc:
         logger.error("channel_service.whatsapp.send_failed", error=str(exc), to=to_phone)

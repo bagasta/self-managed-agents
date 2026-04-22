@@ -111,3 +111,6 @@ Fixed WhatsApp document sending and a bug where documents were routed to the wro
 restart the server and test by asking the agent to send a document again. 
 Added WhatsApp media understanding: images are sent as multimodal vision input, documents are text-extracted and included
      in the message. Fixed a bug where document extraction silently failed due to wrong settings import. No next action needed.
+
+Added markdown-to-WhatsApp conversion so agent replies display cleanly without raw markdown syntax. No further action 
+  needed unless testing reveals edge cases. (disable recaps in /config
