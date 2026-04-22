@@ -37,11 +37,12 @@ CHUNK_OVERLAP = 150
 # File size limit sent to Mistral OCR (50 MB)
 MISTRAL_MAX_BYTES = 50 * 1024 * 1024
 
-SUPPORTED_EXTENSIONS = {".pdf", ".txt", ".md", ".docx", ".pptx"}
+SUPPORTED_EXTENSIONS = {".pdf", ".txt", ".md", ".docx", ".pptx", ".csv"}
 SUPPORTED_MIME = {
     "application/pdf",
     "text/plain",
     "text/markdown",
+    "text/csv",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 }
@@ -84,6 +85,9 @@ async def extract_text(
 
     if ext == ".pptx":
         return _extract_pptx(content)
+
+    if ext == ".csv":
+        return _extract_csv(content)
 
     raise ValueError(
         f"Unsupported file type '{ext}'. "
@@ -297,6 +301,20 @@ def _extract_pptx(content: bytes) -> str:
 
 
 # ---------------------------------------------------------------------------
+# CSV
+# ---------------------------------------------------------------------------
+
+def _extract_csv(content: bytes) -> str:
+    import csv
+    from io import StringIO
+
+    text = content.decode("utf-8", errors="replace")
+    reader = csv.reader(StringIO(text))
+    rows = [" | ".join(cell.strip() for cell in row) for row in reader if any(c.strip() for c in row)]
+    return "\n".join(rows).strip()
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -312,6 +330,7 @@ def _get_extension(filename: str, content_type: str | None) -> str:
         "application/pdf": ".pdf",
         "text/plain": ".txt",
         "text/markdown": ".md",
+        "text/csv": ".csv",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
         "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
     }

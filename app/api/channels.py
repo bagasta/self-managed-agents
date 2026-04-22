@@ -321,25 +321,65 @@ async def wa_incoming(
         await db.refresh(session)
         log.info("wa_incoming.session_created", session_id=str(session.id), is_operator=is_operator)
 
-    # --- Simpan media ke workspace session (jika ada) ---
+    # --- Proses media (gambar/dokumen) jika ada ---
     media_context = ""
+    media_image_b64: str | None = None
+    media_image_mime: str | None = None
+
     if body.media_type and body.media_data:
         try:
             import base64 as _b64
             from app.core.sandbox import get_workspace_dir
+
+            raw_bytes = _b64.b64decode(body.media_data)
             workspace = get_workspace_dir(session.id)
             filename = body.media_filename or f"incoming_{body.media_type}"
-            # Pastikan ekstensi ada
             if "." not in filename:
                 ext_map = {"image": ".jpg", "document": ".bin", "sticker": ".webp"}
                 filename += ext_map.get(body.media_type, ".bin")
             target_path = workspace / filename
-            target_path.write_bytes(_b64.b64decode(body.media_data))
-            media_context = (
-                f"\n[Media diterima: {body.media_type}, "
-                f"tersimpan di /workspace/{filename}]"
-            )
+            target_path.write_bytes(raw_bytes)
             log.info("wa_incoming.media_saved", media_type=body.media_type, filename=filename)
+
+            if body.media_type == "image":
+                # Kirim gambar sebagai konten multimodal ke LLM
+                ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "jpg"
+                mime_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
+                media_image_mime = mime_map.get(ext, "image/jpeg")
+                media_image_b64 = body.media_data
+                media_context = f"\n[Gambar diterima dan ditampilkan di atas. File juga tersimpan di /workspace/{filename}]"
+
+            elif body.media_type == "document":
+                # Ekstrak teks dari dokumen dan sertakan dalam pesan
+                ext = ("." + filename.rsplit(".", 1)[-1].lower()) if "." in filename else ""
+                doc_extractable = {".pdf", ".docx", ".pptx", ".txt", ".md", ".csv"}
+                if ext in doc_extractable:
+                    try:
+                        from app.core.file_processor import extract_text
+                        from app.config import get_settings as _get_settings
+                        extracted = await extract_text(
+                            content=raw_bytes,
+                            filename=filename,
+                            content_type=None,
+                            mistral_api_key=_get_settings().mistral_api_key,
+                        )
+                        # Batasi panjang teks agar tidak membanjiri konteks
+                        MAX_CHARS = 12000
+                        if len(extracted) > MAX_CHARS:
+                            extracted = extracted[:MAX_CHARS] + f"\n... [dipotong, total {len(extracted)} karakter]"
+                        media_context = (
+                            f"\n[Dokumen diterima: {filename}]\n"
+                            f"Isi dokumen:\n```\n{extracted}\n```"
+                        )
+                    except Exception as exc:
+                        log.warning("wa_incoming.doc_extract_failed", error=str(exc))
+                        media_context = f"\n[Dokumen diterima: {filename}, tersimpan di /workspace/{filename}]"
+                else:
+                    media_context = f"\n[Dokumen diterima: {filename}, tersimpan di /workspace/{filename}]"
+
+            elif body.media_type == "sticker":
+                media_context = f"\n[Stiker diterima, tersimpan di /workspace/{filename}]"
+
         except Exception as exc:
             log.warning("wa_incoming.media_save_failed", error=str(exc))
 
@@ -347,7 +387,6 @@ async def wa_incoming(
         user_message = raw_message + media_context
         log.info("wa_incoming.operator_session", escalation_user_jid=escalation_user_jid)
     else:
-        # Pesan normal dari user
         user_message = raw_message + media_context
         log.info("wa_incoming.normal")
 
@@ -362,6 +401,8 @@ async def wa_incoming(
             db=db,
             escalation_user_jid=escalation_user_jid,
             escalation_context=escalation_context,
+            media_image_b64=media_image_b64,
+            media_image_mime=media_image_mime,
         )
     except Exception as exc:
         log.error("wa_incoming.agent_error", error=str(exc), exc_info=True)

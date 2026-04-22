@@ -642,6 +642,8 @@ async def run_agent(
     db: AsyncSession,
     escalation_user_jid: str | None = None,
     escalation_context: str | None = None,
+    media_image_b64: str | None = None,
+    media_image_mime: str | None = None,
 ) -> dict[str, Any]:
     run_id = uuid.uuid4()
     agent_id: uuid.UUID = session.agent_id
@@ -857,7 +859,14 @@ async def run_agent(
             log.debug("agent_run.mcp_tools_added", count=len(mcp_tools))
 
         graph = create_react_agent(llm, tools=tools, prompt=system_prompt)
-        input_messages: list[BaseMessage] = prior_messages + [HumanMessage(content=user_message)]
+        if media_image_b64 and media_image_mime:
+            human_content: Any = [
+                {"type": "text", "text": user_message},
+                {"type": "image_url", "image_url": {"url": f"data:{media_image_mime};base64,{media_image_b64}"}},
+            ]
+        else:
+            human_content = user_message
+        input_messages: list[BaseMessage] = prior_messages + [HumanMessage(content=human_content)]
         steps: list[dict[str, Any]] = []
         final_reply = ""
         step_counter = step_base + 1

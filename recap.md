@@ -105,4 +105,9 @@ Fixed sandbox so custom tools can install and use third-party
    (disable recaps in /config)                                                                                                 
 
 Fixing WhatsApp bot behavior: blocked broadcast/status messages, fixed group @mention detection via LID mapping, and      
-     scoped sessions by group JID vs sender phone. No pending action needed—all fixes are live and working.     
+     scoped sessions by group JID vs sender phone. No pending action needed—all fixes are live and working.
+
+Fixed WhatsApp document sending and a bug where documents were routed to the wrong number via LID JID mismatch. Next:     
+restart the server and test by asking the agent to send a document again. 
+Added WhatsApp media understanding: images are sent as multimodal vision input, documents are text-extracted and included
+     in the message. Fixed a bug where document extraction silently failed due to wrong settings import. No next action needed.
