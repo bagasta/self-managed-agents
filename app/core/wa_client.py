@@ -68,6 +68,29 @@ async def send_wa_image(
         resp.raise_for_status()
 
 
+async def send_wa_document(
+    device_id: str,
+    to: str,
+    document_base64: str,
+    filename: str = "file",
+    caption: str = "",
+    mimetype: str = "application/octet-stream",
+) -> None:
+    """Send a WhatsApp document message via Go service. document_base64 is raw base64-encoded file bytes."""
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(
+            f"{_base_url()}/devices/{device_id}/send-document",
+            json={
+                "to": to,
+                "document_base64": document_base64,
+                "filename": filename,
+                "caption": caption,
+                "mimetype": mimetype,
+            },
+        )
+        resp.raise_for_status()
+
+
 async def delete_wa_device(device_id: str) -> None:
     """Logout and delete a WhatsApp device."""
     async with httpx.AsyncClient(timeout=_WA_TIMEOUT_DEFAULT) as client:

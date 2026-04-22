@@ -44,6 +44,7 @@ func main() {
 	mux.HandleFunc("GET /devices/{id}/status", h.getStatus)
 	mux.HandleFunc("POST /devices/{id}/send", h.sendMessage)
 	mux.HandleFunc("POST /devices/{id}/send-image", h.sendImageMessage)
+	mux.HandleFunc("POST /devices/{id}/send-document", h.sendDocumentMessage)
 	mux.HandleFunc("DELETE /devices/{id}", h.deleteDevice)
 
 	if err = http.ListenAndServe(":"+port, mux); err != nil {

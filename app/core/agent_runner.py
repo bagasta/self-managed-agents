@@ -442,7 +442,60 @@ def build_whatsapp_media_tools(session: Any, sandbox: DockerSandbox) -> list:
         except Exception as exc:
             return f"[error] Gagal mengirim QR: {exc}"
 
-    return [send_whatsapp_image, send_agent_wa_qr]
+    @tool
+    async def send_whatsapp_document(
+        file_path_or_base64: str,
+        filename: str = "file",
+        caption: str = "",
+        phone: str = "",
+        mimetype: str = "",
+    ) -> str:
+        """
+        Kirim dokumen/file ke WhatsApp (PDF, DOCX, XLSX, ZIP, dll).
+
+        Args:
+            file_path_or_base64: Path file di /workspace (misal '/workspace/laporan.pdf') ATAU
+                                  string base64 langsung dari file tersebut
+            filename            : Nama file yang akan ditampilkan di WhatsApp (misal 'laporan.pdf')
+            caption             : Teks caption yang menyertai dokumen (opsional)
+            phone               : Nomor tujuan WA atau JID. Biarkan kosong untuk kirim ke user saat ini.
+            mimetype            : MIME type file. Jika kosong, otomatis ditentukan dari ekstensi filename.
+        """
+        target = phone or default_target
+        if not target:
+            return "[error] Tidak ada target nomor WhatsApp — set phone atau pastikan session punya user_phone"
+        if not device_id:
+            return "[error] Tidak ada device_id WhatsApp pada session ini"
+
+        # Auto-detect mimetype dari ekstensi jika tidak disediakan
+        if not mimetype and filename:
+            import mimetypes
+            guessed, _ = mimetypes.guess_type(filename)
+            mimetype = guessed or "application/octet-stream"
+        elif not mimetype:
+            mimetype = "application/octet-stream"
+
+        # Tentukan apakah input adalah path file atau base64 langsung
+        if file_path_or_base64.startswith("/workspace/") or (not file_path_or_base64.startswith("/") and len(file_path_or_base64) < 500):
+            path = file_path_or_base64 if file_path_or_base64.startswith("/workspace/") else f"/workspace/{file_path_or_base64}"
+            b64_output = sandbox.bash(f"base64 -w 0 {path} 2>&1")
+            if b64_output.startswith("[") or "No such file" in b64_output:
+                return f"[error] Gagal membaca file: {b64_output}"
+            doc_b64 = b64_output.strip()
+            if not filename or filename == "file":
+                import os as _os
+                filename = _os.path.basename(path)
+        else:
+            doc_b64 = file_path_or_base64.strip()
+
+        try:
+            from app.core.wa_client import send_wa_document
+            await send_wa_document(device_id, target, doc_b64, filename, caption, mimetype)
+            return f"[DOCUMENT_SENT] Dokumen '{filename}' dikirim ke {target}" + (f" dengan caption: {caption}" if caption else "")
+        except Exception as exc:
+            return f"[error] Gagal kirim dokumen: {exc}"
+
+    return [send_whatsapp_image, send_agent_wa_qr, send_whatsapp_document]
 
 
 # ---------------------------------------------------------------------------
@@ -771,7 +824,7 @@ async def run_agent(
     if "http" in active_groups:
         cap_parts.append("HTTP tools (http_get/http_post)")
     if "whatsapp_media" in active_groups:
-        cap_parts.append("WhatsApp media tools (send_whatsapp_image, send_agent_wa_qr)")
+        cap_parts.append("WhatsApp media tools (send_whatsapp_image, send_agent_wa_qr, send_whatsapp_document)")
 
     if cap_parts:
         system_prompt += (

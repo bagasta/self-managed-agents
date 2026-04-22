@@ -471,6 +471,71 @@ func (dm *DeviceManager) SendImage(deviceID, to string, imageData []byte, captio
 	return err
 }
 
+// SendDocument uploads and sends a document to a WhatsApp number.
+// docData is the raw file bytes; filename is the display name; mimetype e.g. "application/pdf".
+func (dm *DeviceManager) SendDocument(deviceID, to string, docData []byte, filename, caption, mimetype string) error {
+	dm.mu.RLock()
+	info, ok := dm.devices[deviceID]
+	dm.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("device %s not found", deviceID)
+	}
+	if info.Status != StatusConnected {
+		return fmt.Errorf("device %s not connected (status: %s)", deviceID, info.Status)
+	}
+	if info.Client.Store.ID == nil {
+		return fmt.Errorf("device %s: no valid WA session (needs re-scan QR)", deviceID)
+	}
+
+	var jid types.JID
+	if strings.Contains(to, "@") {
+		parsed, err := types.ParseJID(to)
+		if err != nil {
+			return fmt.Errorf("invalid JID %q: %w", to, err)
+		}
+		if parsed.Device > 0 {
+			return fmt.Errorf("cannot send to AD JID %q — use non-device JID", to)
+		}
+		jid = parsed
+	} else {
+		phone := strings.TrimPrefix(to, "+")
+		jid = types.NewJID(phone, types.DefaultUserServer)
+	}
+
+	if mimetype == "" {
+		mimetype = "application/octet-stream"
+	}
+	if filename == "" {
+		filename = "file"
+	}
+
+	resp, err := info.Client.Upload(context.Background(), docData, whatsmeow.MediaDocument)
+	if err != nil {
+		return fmt.Errorf("upload document: %w", err)
+	}
+
+	msg := &waE2E.Message{
+		DocumentMessage: &waE2E.DocumentMessage{
+			Caption:       proto.String(caption),
+			Mimetype:      proto.String(mimetype),
+			FileName:      proto.String(filename),
+			URL:           proto.String(resp.URL),
+			DirectPath:    proto.String(resp.DirectPath),
+			MediaKey:      resp.MediaKey,
+			FileEncSHA256: resp.FileEncSHA256,
+			FileSHA256:    resp.FileSHA256,
+			FileLength:    proto.Uint64(resp.FileLength),
+		},
+	}
+
+	_, err = info.Client.SendMessage(context.Background(), jid, msg)
+	if err != nil {
+		log.Printf("[%s] send document to %s failed: %v", deviceID, to, err)
+	}
+	return err
+}
+
 func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 	if evt.Info.IsFromMe || evt.Message == nil {
 		return
