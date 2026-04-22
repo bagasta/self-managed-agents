@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WA Dev Agent Dashboard</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      min-height: 100vh;
+    }
+
+    header {
+      background: #1e293b;
+      border-bottom: 1px solid #334155;
+      padding: 1rem 2rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    header .logo {
+      width: 36px;
+      height: 36px;
+      background: #25D366;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 20px;
+    }
+
+    header h1 {
+      font-size: 1.2rem;
+      font-weight: 600;
+      color: #f1f5f9;
+    }
+
+    header span {
+      font-size: 0.8rem;
+      color: #64748b;
+    }
+
+    .container {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 2rem;
+      display: grid;
+      gap: 1.5rem;
+    }
+
+    .card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 1.5rem;
+    }
+
+    .card h2 {
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 1.25rem;
+    }
+
+    /* Status section */
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 1.5rem;
+      flex-wrap: wrap;
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.4rem 1rem;
+      border-radius: 999px;
+      font-size: 0.85rem;
+      font-weight: 600;
+    }
+
+    .status-badge.connected { background: #064e3b; color: #34d399; }
+    .status-badge.waiting_qr { background: #1c1917; color: #fb923c; }
+    .status-badge.disconnected { background: #1e1b4b; color: #818cf8; }
+
+    .status-badge .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+
+    .phone-label {
+      font-size: 1rem;
+      color: #f1f5f9;
+      font-weight: 500;
+    }
+
+    .phone-label .prefix { color: #64748b; }
+
+    /* QR section */
+    .qr-container {
+      text-align: center;
+      padding: 1rem 0;
+    }
+
+    .qr-container img {
+      width: 220px;
+      height: 220px;
+      border-radius: 8px;
+      border: 4px solid #fff;
+    }
+
+    .qr-placeholder {
+      width: 220px;
+      height: 220px;
+      background: #0f172a;
+      border: 2px dashed #334155;
+      border-radius: 8px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      color: #475569;
+      margin: 0 auto;
+      font-size: 0.85rem;
+    }
+
+    .qr-placeholder .icon { font-size: 2rem; }
+
+    .qr-hint {
+      margin-top: 0.75rem;
+      font-size: 0.8rem;
+      color: #64748b;
+      max-width: 240px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+
+    /* Buttons */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.5rem 1.1rem;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+      transition: opacity 0.15s, transform 0.1s;
+    }
+
+    .btn:active { transform: scale(0.97); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .btn-primary { background: #25D366; color: #000; }
+    .btn-primary:hover:not(:disabled) { background: #1fba58; }
+
+    .btn-danger { background: #7f1d1d; color: #fca5a5; }
+    .btn-danger:hover:not(:disabled) { background: #991b1b; }
+
+    .btn-sm { padding: 0.3rem 0.75rem; font-size: 0.78rem; }
+
+    /* Instructions */
+    .instructions {
+      background: #0f172a;
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      font-size: 0.85rem;
+      color: #94a3b8;
+      line-height: 1.7;
+    }
+
+    .instructions strong { color: #e2e8f0; }
+    .instructions code {
+      background: #1e293b;
+      padding: 0.1rem 0.35rem;
+      border-radius: 4px;
+      font-family: 'SF Mono', Consolas, monospace;
+      font-size: 0.8rem;
+      color: #7dd3fc;
+    }
+
+    .instructions ol { padding-left: 1.25rem; margin-top: 0.5rem; }
+    .instructions li { margin-bottom: 0.35rem; }
+
+    /* Connections table */
+    .table-wrap { overflow-x: auto; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+    }
+
+    thead th {
+      text-align: left;
+      padding: 0.6rem 0.8rem;
+      color: #64748b;
+      font-weight: 600;
+      border-bottom: 1px solid #334155;
+      white-space: nowrap;
+    }
+
+    tbody tr { border-bottom: 1px solid #1e293b; }
+    tbody tr:hover { background: #1e2d40; }
+
+    tbody td {
+      padding: 0.75rem 0.8rem;
+      vertical-align: middle;
+    }
+
+    .agent-id {
+      font-family: 'SF Mono', Consolas, monospace;
+      font-size: 0.78rem;
+      color: #7dd3fc;
+      max-width: 200px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .time-label { color: #64748b; font-size: 0.78rem; }
+
+    .empty-state {
+      text-align: center;
+      padding: 2.5rem;
+      color: #475569;
+    }
+
+    .empty-state .icon { font-size: 2.5rem; margin-bottom: 0.5rem; }
+    .empty-state p { font-size: 0.85rem; }
+
+    /* Toast */
+    #toast {
+      position: fixed;
+      bottom: 1.5rem;
+      right: 1.5rem;
+      background: #0f172a;
+      border: 1px solid #334155;
+      color: #e2e8f0;
+      padding: 0.75rem 1.25rem;
+      border-radius: 10px;
+      font-size: 0.85rem;
+      opacity: 0;
+      transform: translateY(10px);
+      transition: all 0.2s;
+      z-index: 100;
+      max-width: 320px;
+    }
+
+    #toast.show { opacity: 1; transform: translateY(0); }
+
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+
+    @media (max-width: 700px) {
+      .grid-2 { grid-template-columns: 1fr; }
+      .container { padding: 1rem; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo">📱</div>
+  <div>
+    <h1>WA Dev Agent</h1>
+    <span>Development WhatsApp Number Dashboard</span>
+  </div>
+  <div style="margin-left: auto; display: flex; align-items: center; gap: 0.75rem;">
+    <span id="refresh-label" style="font-size:0.75rem; color:#475569;">Auto-refresh aktif</span>
+    <div id="status-indicator" style="width:8px;height:8px;border-radius:50%;background:#334155;"></div>
+  </div>
+</header>
+
+<div class="container">
+
+  <!-- Status + QR -->
+  <div class="grid-2">
+
+    <div class="card">
+      <h2>Status WhatsApp</h2>
+      <div class="status-row">
+        <div id="status-badge" class="status-badge disconnected">
+          <div class="dot"></div>
+          <span id="status-text">Memuat...</span>
+        </div>
+        <div id="phone-display" class="phone-label" style="display:none">
+          <span class="prefix">+</span><span id="phone-number"></span>
+        </div>
+      </div>
+
+      <div style="margin-top: 1.25rem;">
+        <button id="btn-connect" class="btn btn-primary" onclick="connectWA()">
+          📲 Hubungkan WhatsApp
+        </button>
+      </div>
+
+      <div style="margin-top: 1.5rem;" class="instructions">
+        <strong>Cara menggunakan:</strong>
+        <ol>
+          <li>Klik <strong>Hubungkan WhatsApp</strong> untuk scan QR</li>
+          <li>User kirim pesan ke nomor ini</li>
+          <li>Kirim <code>connect AGENT_ID</code> untuk terhubung ke agent</li>
+          <li>Chat langsung dengan agent</li>
+          <li>Kirim <code>berhenti</code> atau <code>/stop</code> untuk disconnect</li>
+        </ol>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>QR Code</h2>
+      <div class="qr-container" id="qr-container">
+        <div class="qr-placeholder" id="qr-placeholder">
+          <div class="icon">⬜</div>
+          <div>QR Code muncul di sini</div>
+        </div>
+        <img id="qr-image" src="" alt="QR Code" style="display:none" />
+        <p class="qr-hint" id="qr-hint" style="display:none">
+          Scan dengan WhatsApp → Perangkat Tertaut → Tautkan Perangkat
+        </p>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Connections Table -->
+  <div class="card">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom: 1.25rem;">
+      <h2 style="margin-bottom:0">Koneksi Aktif (<span id="conn-count">0</span>)</h2>
+      <button class="btn btn-sm" onclick="loadConnections()" style="background:#334155;color:#e2e8f0;">
+        🔄 Refresh
+      </button>
+    </div>
+    <div class="table-wrap">
+      <table id="conn-table">
+        <thead>
+          <tr>
+            <th>Nomor HP</th>
+            <th>Agent ID</th>
+            <th>Session ID</th>
+            <th>Terhubung Sejak</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="conn-tbody">
+          <tr>
+            <td colspan="5">
+              <div class="empty-state">
+                <div class="icon">📭</div>
+                <p>Belum ada user yang terhubung</p>
+              </div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<div id="toast"></div>
+
+<script>
+  const API = '';  // same origin
+
+  let autoRefreshInterval = null;
+
+  async function fetchStatus() {
+    try {
+      const res = await fetch(`${API}/status`);
+      const data = await res.json();
+      updateStatus(data);
+    } catch (e) {
+      console.error('status fetch err:', e);
+    }
+  }
+
+  function updateStatus(data) {
+    const badge = document.getElementById('status-badge');
+    const text = document.getElementById('status-text');
+    const phoneDisplay = document.getElementById('phone-display');
+    const phoneNum = document.getElementById('phone-number');
+    const indicator = document.getElementById('status-indicator');
+    const btnConnect = document.getElementById('btn-connect');
+    const qrImg = document.getElementById('qr-image');
+    const qrPlaceholder = document.getElementById('qr-placeholder');
+    const qrHint = document.getElementById('qr-hint');
+
+    badge.className = 'status-badge ' + data.status;
+
+    const labels = {
+      connected: '✓ Terhubung',
+      waiting_qr: '⏳ Menunggu QR Scan',
+      disconnected: '○ Terputus'
+    };
+    text.textContent = labels[data.status] || data.status;
+
+    if (data.status === 'connected') {
+      phoneDisplay.style.display = 'flex';
+      phoneNum.textContent = data.phone_number || '';
+      btnConnect.style.display = 'none';
+      indicator.style.background = '#34d399';
+    } else {
+      phoneDisplay.style.display = 'none';
+      btnConnect.style.display = 'inline-flex';
+      indicator.style.background = data.status === 'waiting_qr' ? '#fb923c' : '#334155';
+    }
+
+    if (data.qr) {
+      qrImg.src = 'data:image/png;base64,' + data.qr;
+      qrImg.style.display = 'block';
+      qrPlaceholder.style.display = 'none';
+      qrHint.style.display = 'block';
+    } else {
+      qrImg.style.display = 'none';
+      qrPlaceholder.style.display = 'flex';
+      qrHint.style.display = 'none';
+    }
+  }
+
+  async function connectWA() {
+    const btn = document.getElementById('btn-connect');
+    btn.disabled = true;
+    btn.textContent = '⏳ Menghubungkan...';
+    try {
+      const res = await fetch(`${API}/connect-wa`, { method: 'POST' });
+      const data = await res.json();
+      if (data.qr) {
+        document.getElementById('qr-image').src = 'data:image/png;base64,' + data.qr;
+        document.getElementById('qr-image').style.display = 'block';
+        document.getElementById('qr-placeholder').style.display = 'none';
+        document.getElementById('qr-hint').style.display = 'block';
+        showToast('📷 QR Code siap! Scan dengan WhatsApp kamu.');
+      } else {
+        showToast('✅ Sudah terhubung!');
+        fetchStatus();
+      }
+    } catch (e) {
+      showToast('❌ Gagal terhubung: ' + e.message);
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '📲 Hubungkan WhatsApp';
+    }
+  }
+
+  async function loadConnections() {
+    try {
+      const res = await fetch(`${API}/connections`);
+      const data = await res.json();
+      renderConnections(data);
+    } catch (e) {
+      console.error('connections fetch err:', e);
+    }
+  }
+
+  function renderConnections(data) {
+    const tbody = document.getElementById('conn-tbody');
+    const countEl = document.getElementById('conn-count');
+    const entries = Object.entries(data || {});
+    countEl.textContent = entries.length;
+
+    if (entries.length === 0) {
+      tbody.innerHTML = `
+        <tr><td colspan="5">
+          <div class="empty-state">
+            <div class="icon">📭</div>
+            <p>Belum ada user yang terhubung</p>
+          </div>
+        </td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = entries.map(([phone, conn]) => {
+      const since = conn.connected_at
+        ? new Date(conn.connected_at).toLocaleString('id-ID', { dateStyle: 'short', timeStyle: 'short' })
+        : '-';
+      const shortAgent = conn.agent_id ? conn.agent_id.substring(0, 8) + '...' : '-';
+      const shortSession = conn.session_id ? conn.session_id.substring(0, 8) + '...' : '-';
+
+      return `<tr>
+        <td><strong>${escHtml(phone)}</strong></td>
+        <td>
+          <span class="agent-id" title="${escHtml(conn.agent_id || '')}">${escHtml(conn.agent_id || '-')}</span>
+        </td>
+        <td>
+          <span class="agent-id" title="${escHtml(conn.session_id || '')}">${escHtml(conn.session_id || '-')}</span>
+        </td>
+        <td><span class="time-label">${since}</span></td>
+        <td>
+          <button class="btn btn-danger btn-sm" onclick="disconnectUser('${escHtml(phone)}')">
+            Disconnect
+          </button>
+        </td>
+      </tr>`;
+    }).join('');
+  }
+
+  async function disconnectUser(phone) {
+    if (!confirm(`Disconnect user ${phone} dari agentnya?`)) return;
+    try {
+      const encoded = encodeURIComponent(phone);
+      const res = await fetch(`${API}/connections/${encoded}`, { method: 'DELETE' });
+      if (res.ok || res.status === 204) {
+        showToast(`✅ ${phone} berhasil di-disconnect`);
+        loadConnections();
+      } else {
+        showToast('❌ Gagal disconnect user');
+      }
+    } catch (e) {
+      showToast('❌ Error: ' + e.message);
+    }
+  }
+
+  function showToast(msg) {
+    const toast = document.getElementById('toast');
+    toast.textContent = msg;
+    toast.classList.add('show');
+    setTimeout(() => toast.classList.remove('show'), 3500);
+  }
+
+  function escHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  // Initial load
+  fetchStatus();
+  loadConnections();
+
+  // Auto-refresh every 5 seconds
+  setInterval(() => {
+    fetchStatus();
+    loadConnections();
+  }, 5000);
+</script>
+</body>
+</html>

@@ -23,7 +23,8 @@ make downgrade        # rollback one migration
 
 # Run
 make dev              # uvicorn app.main:app --reload (port 8000)
-make wa               # build & run wa-service Go microservice (port 8080)
+make wa-build         # compile wa-service Go binary
+make wa               # run wa-service binary (port 8080); requires make wa-build first
 
 # Code quality
 make lint             # ruff check app/ alembic/
@@ -75,6 +76,9 @@ Client (X-API-Key header required)
 | `app/core/scheduler_service.py` | APScheduler background reminders |
 | `app/core/channel_service.py` | Multi-channel config (WhatsApp, WebChat) |
 | `app/core/wa_client.py` | HTTP client calling Go wa-service |
+| `app/core/event_bus.py` | In-memory asyncio pub/sub per session; used by scheduler → SSE stream |
+| `app/core/file_processor.py` | Extracts text from uploaded files before embedding |
+| `app/core/custom_tool_service.py` | CRUD for agent-created Python tools stored in DB |
 | `app/core/tools/` | Self-contained tool modules; each returns LangChain-compatible tools |
 
 ### Tool Stack (enabled per-agent via `tools_config`)
@@ -142,6 +146,7 @@ GET/DELETE      /v1/agents/{id}/documents
 GET    /v1/agents/{id}/wa/qr
 GET    /v1/agents/{id}/wa/status
 POST   /v1/channels/wa/incoming                         ← wa-service webhook
+GET    /v1/sessions/{session_id}/stream                 ← SSE stream (scheduled/proactive events)
 GET    /health
 ```
 

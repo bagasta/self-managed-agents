@@ -1,4 +1,4 @@
-.PHONY: help install dev db-up migrate upgrade downgrade lint format wa wa-build dev-all
+.PHONY: help install dev db-up migrate upgrade downgrade lint format wa wa-build dev-all wa-dev-build wa-dev
 
 help:
 	@echo "Managed Agent Platform"
@@ -7,6 +7,8 @@ help:
 	@echo "  make dev           Run API in dev mode (uvicorn --reload)"
 	@echo "  make wa            Run WhatsApp Go microservice (port 8080)"
 	@echo "  make wa-build      Build wa-service binary"
+	@echo "  make wa-dev-build  Build wa-dev-service binary"
+	@echo "  make wa-dev        Run WA dev number service (port 8081) + dashboard"
 	@echo "  make dev-all       Run API + wa-service (2 terminals needed)"
 	@echo "  make db-up         Start PostgreSQL via docker-compose"
 	@echo "  make migrate       Generate migration  (MSG='description')"
@@ -26,6 +28,12 @@ wa:
 
 wa-build:
 	cd wa-service && go build -o wa-service .
+
+wa-dev-build:
+	cd wa-dev-service && go build -o wa-dev-service .
+
+wa-dev:
+	cd wa-dev-service && set -a && . ../.env && set +a && MAIN_API_KEY=$$API_KEY MAIN_API_URL=http://localhost:8000 ./wa-dev-service
 
 dev-all:
 	@echo "=== Jalankan di 2 terminal terpisah ==="
