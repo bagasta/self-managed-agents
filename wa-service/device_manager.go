@@ -477,6 +477,13 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 	}
 
 	chatJID := evt.Info.Chat
+
+	// Skip broadcast and WA Status messages
+	if chatJID.Server == types.BroadcastServer || chatJID.User == "status" {
+		log.Printf("[%s] ignored broadcast/status msg from %s (chat: %s)", deviceID, evt.Info.Sender.User, chatJID.String())
+		return
+	}
+
 	isGroup := chatJID.Server == types.GroupServer
 
 	// Extract text, mention list, and media info
@@ -572,11 +579,23 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 			return
 		}
 
-		botUser := info.Client.Store.ID.User // e.g. "628xxx"
+		botJID := *info.Client.Store.ID
+		botUser := botJID.User // phone number e.g. "628xxx"
+
+		// Also resolve bot's LID so we can match @lid mentions
+		botLID := ""
+		if lidJID, err := info.Client.Store.LIDs.GetLIDForPN(context.Background(), botJID); err == nil {
+			botLID = lidJID.User
+		}
+
+		log.Printf("[%s] group mention check: botUser=%s botLID=%s mentionedJIDs=%v", deviceID, botUser, botLID, mentionedJIDs)
 		mentioned := false
 		for _, jidStr := range mentionedJIDs {
 			parsed, err := types.ParseJID(jidStr)
-			if err == nil && parsed.User == botUser {
+			if err != nil {
+				continue
+			}
+			if parsed.User == botUser || (botLID != "" && parsed.User == botLID) {
 				mentioned = true
 				break
 			}

@@ -60,16 +60,13 @@ def build_escalation_tools(
         if not escalation_cfg:
             return "[error] Agent belum dikonfigurasi escalation_config. Tambahkan operator_phone dan channel_type."
 
-        # Aktifkan escalation_active pada sesi user (untuk forwarding pesan user ke operator)
-        session.escalation_active = True
-        await db.flush()
-
         # Kirim notifikasi ke operator
         operator_channel = escalation_cfg.get("channel_type", "")
         operator_phone = escalation_cfg.get("operator_phone", "")
         operator_config = {
             **escalation_cfg,
             "user_phone": operator_phone,
+            "device_id": (session.channel_config or {}).get("device_id", "") if isinstance(session.channel_config, dict) else "",
         }
 
         import time
@@ -90,7 +87,7 @@ def build_escalation_tools(
             + (f"Pertanyaan customer:\n{summary}\n" if summary else "")
             + f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"Balas pesan ini dengan jawaban untuk customer.\n"
-            f"Agent akan menyusun draft pesan dan meminta konfirmasimu sebelum dikirim."
+            f"Agent akan langsung meneruskan jawabanmu ke customer."
         )
 
         # Selalu simpan notifikasi ke DB (untuk dev UI & fallback jika channel gagal)
@@ -116,15 +113,21 @@ def build_escalation_tools(
             logger.warning("escalation_tool.channel_send_skipped", error=str(exc))
 
         return (
-            "Eskalasi berhasil diaktifkan. Operator telah dinotifikasi. "
-            "Balas user dengan pesan singkat bahwa pertanyaannya sedang diteruskan ke tim yang berwenang. "
-            "JANGAN sebutkan nomor telepon apapun. "
-            "Pesan user berikutnya akan diteruskan otomatis — cukup balas user secara normal."
+            "Eskalasi berhasil. Notifikasi ke operator SUDAH terkirim otomatis oleh tool ini — "
+            "JANGAN tulis pesan tambahan ke operator apapun. "
+            "Tugasmu sekarang: balas USER (bukan operator) dengan 1-2 kalimat singkat bahwa pertanyaannya "
+            "sedang diteruskan ke tim yang berwenang dan akan segera dibalas. "
+            "JANGAN sebutkan nomor telepon, JID, nama operator, atau detail teknis apapun."
         )
 
     @tool
     async def reply_to_user(message: str) -> str:
-        """Kirim pesan ke user via channel sesi ini. Gunakan HANYA setelah operator mengkonfirmasi draft. Args: message (pesan final yang akan dikirim ke user)."""
+        """
+        Kirim pesan final ke user.
+        🚨 LARANGAN KERAS: JANGAN PERNAH memanggil tool ini jika operator belum secara eksplisit mengetik 'kirim', 'ok', atau menyetujui draft!
+        Jika operator baru saja menginstruksikan jawaban, tugasmu HANYA menulis pesan biasa berisi draft. JANGAN panggil tool ini sampai operator merespons draft tersebut.
+        Args: message (pesan final yang akan dikirim ke user).
+        """
         from app.models.message import Message as Msg
 
         # Simpan ke DB
@@ -192,7 +195,7 @@ def build_escalation_tools(
                 from app.core.channel_service import send_message
                 await send_message(
                     channel_type=session.channel_type,
-                    channel_config=session.channel_config or {},
+                    channel_config=session.channel_config if isinstance(session.channel_config, dict) else {},
                     text=message,
                     to_override=phone_or_target,
                 )

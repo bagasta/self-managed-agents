@@ -108,7 +108,7 @@ async def _run_job(job_id) -> None:
             if session.channel_type and reply:
                 await send_message(
                     channel_type=session.channel_type,
-                    channel_config=session.channel_config or {},
+                    channel_config=session.channel_config if isinstance(session.channel_config, dict) else {},
                     text=reply,
                 )
                 log.info("scheduler_service.reply_sent", channel=session.channel_type)

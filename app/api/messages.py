@@ -97,7 +97,7 @@ async def send_message(
             from app.core.channel_service import send_message as channel_send
             await channel_send(
                 channel_type=session.channel_type,
-                channel_config=session.channel_config or {},
+                channel_config=session.channel_config if isinstance(session.channel_config, dict) else {},
                 text=reply,
             )
         except Exception:

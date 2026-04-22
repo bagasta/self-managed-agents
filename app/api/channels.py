@@ -94,25 +94,6 @@ async def incoming_message(
         # Pesan dari operator → inject sebagai perintah operator ke agent
         user_message = f"[OPERATOR] {raw_message}"
         log.info("channels.incoming.operator_command")
-    elif session.escalation_active:
-        # User biasa tapi eskalasi aktif → forward ke operator dulu, baru proses agent
-        log.info("channels.incoming.user_escalation_active")
-        channel_cfg = session.channel_config or {}
-        user_phone = channel_cfg.get("user_phone", from_phone or str(session_id))
-        forward_text = f"[USER {user_phone}]: {raw_message}"
-
-        # Forward ke operator
-        try:
-            op_channel_cfg = {**escalation_cfg, "user_phone": operator_phone}
-            await send_message(
-                channel_type=escalation_cfg.get("channel_type", session.channel_type or ""),
-                channel_config=op_channel_cfg,
-                text=forward_text,
-            )
-        except Exception as exc:
-            log.warning("channels.incoming.forward_failed", error=str(exc))
-
-        user_message = f"[USER_IN_ESCALATION] {raw_message}"
     else:
         # Pesan normal dari user
         user_message = raw_message
@@ -151,7 +132,7 @@ async def incoming_message(
                 # Balas ke user
                 await send_message(
                     channel_type=session.channel_type,
-                    channel_config=session.channel_config or {},
+                    channel_config=session.channel_config if isinstance(session.channel_config, dict) else {},
                     text=reply,
                 )
         except Exception as exc:
@@ -234,12 +215,20 @@ async def wa_incoming(
 
     # Cari user JID yang sedang dalam eskalasi (untuk context operator)
     escalation_user_jid: str | None = None
+    escalation_context: str | None = None
     if is_operator:
+        from app.models.message import Message as _Msg
+        from sqlalchemy import desc as _desc
+        
         esc_result = await db.execute(
-            select(Session).where(
+            select(Session)
+            .join(_Msg, _Msg.session_id == Session.id)
+            .where(
                 Session.agent_id == agent.id,
-                Session.escalation_active == True,
-            ).order_by(Session.updated_at.desc())
+                _Msg.role == "escalation"
+            )
+            .order_by(_desc(_Msg.timestamp))
+            .limit(1)
         )
         esc_session = esc_result.scalars().first()
         if esc_session:
@@ -247,10 +236,41 @@ async def wa_incoming(
             ch = _raw_ch if isinstance(_raw_ch, dict) else {}
             escalation_user_jid = ch.get("user_phone") or esc_session.external_user_id
 
+            # Ambil pesan user terkini dari sesi eskalasi agar agent punya konteks
+            from app.models.message import Message as _Msg
+            from sqlalchemy import desc as _desc
+            _recent = await db.execute(
+                select(_Msg)
+                .where(
+                    _Msg.session_id == esc_session.id,
+                    _Msg.role == "user",
+                )
+                .order_by(_desc(_Msg.step_index))
+                .limit(5)
+            )
+            recent_msgs = list(reversed(_recent.scalars().all()))
+            if recent_msgs:
+                lines = []
+                for m in recent_msgs:
+                    content = m.content or ""
+                    # Strip internal prefix agar operator lihat pesan asli user
+                    content = content.removeprefix("[USER_IN_ESCALATION] ").strip()
+                    if content:
+                        lines.append(f"- {content}")
+                if lines:
+                    escalation_context = "\n".join(lines)
+
     # Tentukan external_user_id untuk session lookup:
     # - operator → pakai operator_phone (session milik operator sendiri)
-    # - user biasa → pakai body.from_
-    lookup_user_id = operator_phone if is_operator else body.from_
+    # - pesan grup → pakai group JID (chat_id berakhiran @g.us) agar semua member berbagi satu session grup
+    # - DM → pakai nomor pengirim (body.from_)
+    is_group = bool(body.chat_id and body.chat_id.endswith("@g.us"))
+    if is_operator:
+        lookup_user_id = operator_phone
+    elif is_group:
+        lookup_user_id = body.chat_id
+    else:
+        lookup_user_id = body.from_
 
     session = None
     # Cari session berdasarkan agent_id + external_user_id
@@ -319,24 +339,6 @@ async def wa_incoming(
     if is_operator:
         user_message = raw_message + media_context
         log.info("wa_incoming.operator_session", escalation_user_jid=escalation_user_jid)
-    elif session.escalation_active:
-        # User biasa tapi eskalasi aktif → forward ke operator dulu, baru proses agent
-        log.info("wa_incoming.user_escalation_active")
-        forward_text = f"[USER {from_phone}]: {raw_message}{media_context}"
-
-        # Forward ke operator
-        try:
-            from app.core.channel_service import send_message
-            op_channel_cfg = {**escalation_cfg, "user_phone": operator_phone, "device_id": body.device_id}
-            await send_message(
-                channel_type=escalation_cfg.get("channel_type", "whatsapp"),
-                channel_config=op_channel_cfg,
-                text=forward_text,
-            )
-        except Exception as exc:
-            log.warning("wa_incoming.forward_failed", error=str(exc))
-
-        user_message = f"[USER_IN_ESCALATION] {raw_message}{media_context}"
     else:
         # Pesan normal dari user
         user_message = raw_message + media_context
@@ -352,6 +354,7 @@ async def wa_incoming(
             user_message=user_message,
             db=db,
             escalation_user_jid=escalation_user_jid,
+            escalation_context=escalation_context,
         )
     except Exception as exc:
         log.error("wa_incoming.agent_error", error=str(exc), exc_info=True)

@@ -588,6 +588,7 @@ async def run_agent(
     user_message: str,
     db: AsyncSession,
     escalation_user_jid: str | None = None,
+    escalation_context: str | None = None,
 ) -> dict[str, Any]:
     run_id = uuid.uuid4()
     agent_id: uuid.UUID = session.agent_id
@@ -682,7 +683,6 @@ async def run_agent(
 
     # --- Detect message context: operator command vs escalation mode ---
     is_operator_message = user_message.startswith("[OPERATOR] ")
-    is_user_in_escalation = user_message.startswith("[USER_IN_ESCALATION] ")
 
     # --- System prompt ---
     system_prompt = agent_model.instructions or "You are a helpful assistant."
@@ -709,66 +709,51 @@ async def run_agent(
         system_prompt += (
             "\n\n## WhatsApp Channel\n"
             "Balas user LANGSUNG dengan teks biasa sebagai output akhirmu. "
-            "JANGAN gunakan tool `reply_to_user` untuk menjawab user secara normal — "
-            "cukup tulis jawabanmu. "
-            "Tool `reply_to_user` dan `send_to_number` HANYA dipakai saat menerima perintah dari OPERATOR."
+            "JANGAN gunakan tool `reply_to_user` untuk menjawab user secara normal — cukup tulis jawabanmu. "
+            "Tool `reply_to_user` dan `send_to_number` HANYA dipakai saat menerima perintah dari OPERATOR.\n\n"
+            "### Setelah memanggil `escalate_to_human`:\n"
+            "- Tool tersebut SUDAH mengirim notifikasi ke operator secara otomatis. "
+            "JANGAN tulis atau kirim pesan apapun ke operator.\n"
+            "- Output akhirmu adalah pesan singkat untuk USER (bukan operator): "
+            "beritahu user bahwa pertanyaannya sedang diteruskan ke tim dan akan segera dibalas.\n"
+            "- JANGAN minta info tambahan ke operator, JANGAN mention nomor/JID apapun."
         )
 
     if escalation_user_jid:
-        # Sesi OPERATOR: agent menerima jawaban operator dan menyusun draft untuk dikirim ke user
+        # Sesi OPERATOR: agent menerima instruksi operator dan langsung kirim ke user
+        ctx_block = ""
+        if escalation_context:
+            ctx_block = f"\n\n### Pesan terakhir dari user yang dieskalasi:\n{escalation_context}"
         system_prompt += (
-            f"\n\n## SESI OPERATOR — ALUR KONFIRMASI\n"
+            f"\n\n## SESI OPERATOR\n"
             f"Kamu sedang berbicara dengan OPERATOR/ADMIN.\n"
-            f"Target user WhatsApp (Chat ID): `{escalation_user_jid}`\n\n"
-            "### ALUR WAJIB saat operator memberi jawaban untuk dikirim ke customer:\n"
-            "1. **SUSUN DRAFT** — Buat versi pesan yang rapi dan sopan dari jawaban operator.\n"
-            "   - Perbaiki tata bahasa, ejaan, dan format agar enak dibaca customer.\n"
-            "   - JANGAN tambah informasi/URL/kontak yang tidak ada dalam jawaban operator.\n"
-            "   - Konten harus 1:1 dari jawaban operator, hanya format yang boleh diperbaiki.\n"
-            "2. **TAMPILKAN DRAFT & MINTA KONFIRMASI** — Tunjukkan draft ke operator, contoh:\n"
-            "   > Draft pesan ke customer:\n"
-            "   > ---\n"
-            "   > [isi draft]\n"
-            "   > ---\n"
-            "   > Apakah sudah OK? Ketik 'kirim' untuk mengirim, atau koreksi jika perlu.\n"
-            "3. **SETELAH OPERATOR KONFIRMASI** (bilang 'ok', 'kirim', 'ya', atau sejenisnya):\n"
-            "   - Panggil `reply_to_user(message)` dengan isi draft yang sudah dikonfirmasi.\n"
-            "   - Balas operator hanya: \"Terkirim ✓\"\n\n"
-            "### ATURAN LAIN\n"
-            "- Jika operator bertanya/diskusi (bukan memberi jawaban untuk customer) → jawab langsung, "
-            "tidak perlu draft.\n"
-            "- Jika operator berkata 'selesai' atau 'tangani sendiri' → konfirmasi singkat.\n"
-            "- `send_to_number(phone, message)` HANYA jika operator eksplisit menyebut nomor pihak ketiga.\n"
-            "- JANGAN kirim ke user sebelum operator mengkonfirmasi draft.\n"
+            f"Target user WhatsApp (Chat ID): `{escalation_user_jid}`"
+            f"{ctx_block}\n\n"
+            "### 🚨 ATURAN PALING KRITIS: DRAFT DULU, JANGAN LANGSUNG KIRIM 🚨\n"
+            "- Apabila operator memberikan instruksi/jawaban untuk diteruskan ke customer, KAMU DILARANG KERAS langsung memanggil tool `reply_to_user`.\n"
+            "- Kamu WAJIB menyusun *draft* pesan yang rapi & sopan (perbaiki ejaan), menampilkannya kepada operator sebagai pesan biasa, lalu diakhiri dengan pertanyaan:\n"
+            "  \"Sudah OK? Ketik 'kirim' untuk meneruskannya ke customer.\"\n"
+            "- SETELAH operator membalas dengan 'kirim', 'ya', atau 'ok', BARULAH kamu diizinkan memanggil tool `reply_to_user(message)` membawa pesan draft tadi.\n"
+            "- Balas operator dengan singkat setelah terkirim: \"Terkirim ✓\"\n"
+            "Pelanggaran terhadap aturan ini (mengirim langsung tanpa konfirmasi) adalah kesalahan fatal!\n"
         )
     elif is_operator_message:
         # Legacy: operator command via [OPERATOR] prefix di session user
-        _ch_cfg = session.channel_config or {}
+        _raw_cfg = session.channel_config
+        _ch_cfg = _raw_cfg if isinstance(_raw_cfg, dict) else {}
         user_wa_jid = _ch_cfg.get("user_phone") or getattr(session, "external_user_id", None) or "unknown"
         system_prompt += (
             f"\n\n## MODE: OPERATOR COMMAND — ALUR KONFIRMASI\n"
             f"WhatsApp JID user dalam eskalasi: `{user_wa_jid}`\n"
             "Pesan berikut adalah PERINTAH dari human operator.\n\n"
-            "### ALUR WAJIB\n"
-            "1. Susun draft pesan rapi dari instruksi operator (perbaiki format, JANGAN tambah konten).\n"
-            "2. Tampilkan draft dan tanya: \"Apakah sudah OK? Ketik 'kirim' untuk mengirim.\"\n"
-            "3. Setelah operator konfirmasi → panggil `reply_to_user(message)` → balas operator: \"Terkirim ✓\"\n\n"
-            "### ATURAN\n"
-            "- JANGAN kirim ke user sebelum operator mengkonfirmasi draft.\n"
-            "- Konten pesan ke user harus 1:1 dari instruksi operator (hanya format boleh diperbaiki).\n"
-            "- `send_to_number(phone, message)` HANYA untuk nomor pihak ketiga yang BUKAN user ini.\n"
+            "### INSTRUKSI WAJIB\n"
+            "- Alur DRAFT -> KONFIRMASI -> KIRIM:\n"
+            "  1. Agent menyusun draft rapi dari pesanan operator (JANGAN tambah konten).\n"
+            "  2. Tampilkan draft + tanya: \"Sudah OK? Ketik 'kirim'...\"\n"
+            "  3. JANGAN panggil `reply_to_user` atau kirim ke user sebelum dikonfirmasi operator.\n"
+            "- Setelah operator konfirmasi (contoh: \"ok\", \"kirim\"), panggil tool `reply_to_user(message)`.\n"
+            "- Sesudah sukses, balas operator: \"Terkirim ✓\"\n"
             "- Jika operator berkata 'selesai' atau 'tangani sendiri', balas singkat dan kembali normal.\n"
-        )
-    elif is_user_in_escalation or session.escalation_active:
-        system_prompt += (
-            "\n\n## MODE: ESKALASI AKTIF\n"
-            "Percakapan ini sedang dalam mode eskalasi — human operator sedang memantau dan akan segera merespons.\n"
-            "ATURAN WAJIB dalam mode ini:\n"
-            "1. Balas user dengan teks biasa secara langsung — JANGAN gunakan tool apapun untuk membalas user.\n"
-            "2. JANGAN panggil `send_to_number` atau `reply_to_user` — "
-            "penerusan pesan ke operator sudah dilakukan OTOMATIS oleh sistem, BUKAN tugasmu.\n"
-            "3. JANGAN sebutkan nomor telepon atau JID apapun dalam jawabanmu.\n"
-            "4. Untuk tindakan sensitif atau yang butuh keputusan operator, beritahu user untuk menunggu."
         )
 
     # 5. Available capabilities description

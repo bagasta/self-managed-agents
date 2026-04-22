@@ -98,3 +98,11 @@ Fixed sandbox so custom tools can install and use third-party
      Fix: double-encode args jadi string (json.dumps(json.dumps(args))), lalu di runtime
      parse balik dengan json.loads(...) sehingga tipe Python-nya benar.
 
+
+
+ Memperbaiki flow QR WhatsApp untuk agent Arthur agar QR yang dikirim ke user bisa di-scan dan terhubung. Langkah      
+  berikutnya: update instruksi Arthur di DB agar dia pakai tool send_agent_wa_qr dengan agent_id, bukan membuat device sendiri.
+   (disable recaps in /config)                                                                                                 
+
+Fixing WhatsApp bot behavior: blocked broadcast/status messages, fixed group @mention detection via LID mapping, and      
+     scoped sessions by group JID vs sender phone. No pending action needed—all fixes are live and working.     
