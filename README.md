@@ -1,30 +1,40 @@
 # Managed Agent Platform
 
-Self-hosted multi-model agent platform terinspirasi dari Claude Managed Agents. Dibangun di atas FastAPI + LangChain + OpenRouter, dengan sandbox eksekusi kode berbasis Docker.
+Self-hosted multi-model agent platform terinspirasi dari Claude Managed Agents. Dibangun di atas FastAPI + DeepAgents + OpenRouter, dengan sandbox Docker, integrasi WhatsApp, memory jangka panjang, RAG, scheduling, dan escalation ke human operator.
 
 ## Arsitektur
 
 ```
-Client (OpenClaw / webchat / CLI / MCP)
+Client (webchat / WhatsApp / CLI / webhook)
         │
         ▼
-  FastAPI Backend
+  FastAPI Backend  (port 8000)
         │
-        ├── OpenRouter ──► Claude / GPT / Llama / Gemini / ...
-        │   (multi-model, per-agent config)
+        ├── OpenRouter ──► Claude / GPT / Llama / Gemini / Mistral / ...
+        │   (300+ model, per-agent config)
         │
-        └── Docker Sandbox
-            (ephemeral container + persistent workspace per session)
-            bash · write_file · read_file · list_files
+        ├── DeepAgents executor
+        │   (planning via write_todos, virtual FS, tool calling)
+        │
+        ├── Docker Sandbox
+        │   (ephemeral container per bash() call, workspace persist per session)
+        │
+        ├── PostgreSQL + pgvector  (agent config, sessions, messages, memory, RAG)
+        │
+        └── Go WhatsApp Microservices
+            ├── wa-service     (port 8080) — production, satu device per agent
+            └── wa-dev-service (port 8081) — dev/testing, satu nomor WA multi-agent
 ```
 
 **Stack:**
 - **Backend**: Python 3.12 + FastAPI (async)
-- **Orchestration**: LangChain + LangGraph `create_react_agent`
-- **LLM Access**: OpenRouter (`langchain-openrouter`) — 300+ model via satu API key
-- **Database**: PostgreSQL + SQLAlchemy async + Alembic
-- **Sandbox**: Docker (ephemeral container per run, workspace dir persist per session)
-- **Logging**: structlog (JSON di prod, console di dev)
+- **Agent executor**: DeepAgents (`create_deep_agent`) + fallback LangGraph `create_react_agent`
+- **LLM**: OpenRouter via `langchain-openai` — 300+ model via satu API key
+- **Database**: PostgreSQL + SQLAlchemy async + Alembic migrations
+- **Vector search**: pgvector + Sentence-Transformers (all-MiniLM-L6-v2)
+- **Sandbox**: Docker — ephemeral container per run, workspace dir persist per session
+- **WhatsApp**: Go + whatsmeow (dua microservice: production & dev)
+- **Logging**: structlog
 
 ---
 
@@ -35,11 +45,12 @@ Client (OpenClaw / webchat / CLI / MCP)
 - Python 3.12+
 - Docker (aktif, bisa diakses tanpa sudo)
 - PostgreSQL — atau jalankan via `docker compose`
+- Go 1.21+ (hanya untuk WhatsApp microservice)
 
 ### 1. Install dependencies
 
 ```bash
-pip install -r requirements.txt
+make install
 ```
 
 ### 2. Konfigurasi environment
@@ -48,271 +59,291 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Edit `.env`:
+Edit `.env` — field wajib:
 
 ```env
 DATABASE_URL=postgresql+asyncpg://postgres:password@localhost:5432/managed_agents
-OPENROUTER_API_KEY=sk-or-v1-...        # dari openrouter.ai
-API_KEY=ganti-dengan-secret-random     # dipakai di header X-API-Key
-LOG_LEVEL=INFO
+OPENROUTER_API_KEY=sk-or-v1-...         # dari openrouter.ai
+API_KEY=ganti-dengan-secret-random      # header X-API-Key untuk semua request
+MISTRAL_API_KEY=                        # opsional — hanya untuk PDF OCR
+
+# Sandbox
 SANDBOX_BASE_DIR=/tmp/agent-sandboxes
-DOCKER_SANDBOX_IMAGE=python:3.12-slim
+DOCKER_SANDBOX_IMAGE=python:3.12        # full image (bukan slim) agar curl tersedia
+DOCKER_HOST=unix:///run/docker.sock
+
+# Agent limits
 AGENT_MAX_STEPS=12
 AGENT_TIMEOUT_SECONDS=300
+
+# WhatsApp microservices
+WA_SERVICE_URL=http://localhost:8080
+WA_DEV_SERVICE_URL=http://localhost:8081
 ```
 
 ### 3. Jalankan PostgreSQL
 
 ```bash
 make db-up
-# atau: docker compose up -d postgres
 ```
 
 ### 4. Jalankan migrasi database
 
 ```bash
 make upgrade
-# atau: alembic upgrade head
 ```
 
 ### 5. Jalankan server
 
 ```bash
 make dev
-# atau: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-Server berjalan di `http://localhost:8000`. Swagger UI tersedia di `http://localhost:8000/docs`.
+Server berjalan di `http://localhost:8000`. Swagger UI: `http://localhost:8000/docs`.
+
+### 6. Jalankan WhatsApp microservice (opsional)
+
+```bash
+# Production — satu WhatsApp device per agent
+make wa-build   # compile binary (sekali saja)
+make wa         # jalankan di port 8080
+
+# Development — satu nomor WA untuk semua agent
+make wa-dev-build   # compile binary
+make wa-dev         # jalankan di port 8081 (baca .env otomatis)
+```
 
 ---
 
 ## Menjalankan via Docker Compose
 
-Untuk menjalankan seluruh stack (PostgreSQL + API) sekaligus:
-
 ```bash
-# isi .env terlebih dahulu (minimal OPENROUTER_API_KEY dan API_KEY)
+# isi .env terlebih dahulu
 docker compose up --build
 ```
 
-> **Catatan**: Docker socket (`/var/run/docker.sock`) di-mount ke dalam container API agar sandbox containers bisa berjalan sebagai sibling container di host Docker daemon.
+> Docker socket (`/var/run/docker.sock`) di-mount ke container API agar sandbox bisa berjalan sebagai sibling container di host Docker daemon.
+
+---
+
+## Tools Agent
+
+Tools dikonfigurasi per-agent via field `tools_config` (JSON). Default konservatif — hanya tools aman yang aktif by default:
+
+| Tool Group | Default | Tools yang tersedia |
+|-----------|:-------:|---------------------|
+| `memory` | **ON** | `remember`, `recall`, `forget` |
+| `skills` | **ON** | `create_skill`, `use_skill`, `list_skills` |
+| `escalation` | **ON** | `escalate_to_human`, `reply_to_user`, `send_to_number` |
+| `sandbox` | OFF | `bash`, `sandbox_write_file`, `sandbox_read_file`, `list_files` |
+| `tool_creator` | OFF | `create_tool`, `run_custom_tool`, `list_tools` |
+| `scheduler` | OFF | `set_reminder`, `list_reminders`, `cancel_reminder` |
+| `http` | OFF | `http_get`, `http_post`, `http_patch`, `http_delete` |
+| `rag` | OFF | `search_knowledge_base` |
+| `mcp` | OFF | tools dari MCP server eksternal |
+| `whatsapp_media` | OFF | `send_whatsapp_image` |
+| `wa_agent_manager` | OFF | `send_agent_wa_qr` |
+
+DeepAgents menambahkan otomatis: `write_todos`, `ls`, `read_file`, `write_file`, `edit_file`, `grep`.
 
 ---
 
 ## API Reference
 
-Semua endpoint memerlukan header `X-API-Key: <nilai API_KEY di .env>`.
+Semua endpoint memerlukan header `X-API-Key: <API_KEY>`. Dokumentasi interaktif di `/docs`.
 
 ### Agent
 
 | Method | Endpoint | Deskripsi |
 |--------|----------|-----------|
 | `POST` | `/v1/agents` | Buat agent baru |
-| `GET` | `/v1/agents` | List semua agent (paging: `?limit=20&offset=0`) |
-| `GET` | `/v1/agents/{agent_id}` | Detail satu agent |
-| `PATCH` | `/v1/agents/{agent_id}` | Update config agent (increment version otomatis) |
-| `DELETE` | `/v1/agents/{agent_id}` | Soft delete agent |
+| `GET` | `/v1/agents` | List semua agent |
+| `GET` | `/v1/agents/{id}` | Detail agent |
+| `PATCH` | `/v1/agents/{id}` | Update config agent |
+| `DELETE` | `/v1/agents/{id}` | Soft delete agent |
 
-**Contoh buat agent:**
-
-```bash
-curl -X POST http://localhost:8000/v1/agents \
-  -H "X-API-Key: your-api-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Coding Agent",
-    "instructions": "Kamu adalah coding assistant. Tulis kode Python yang bersih, jalankan untuk verifikasi, dan jelaskan hasilnya.",
-    "model": "anthropic/claude-sonnet-4-6",
-    "sandbox_config": {
-      "memory": "512m",
-      "cpu": "1.0"
-    }
-  }'
-```
-
-Field `model` menggunakan format OpenRouter: `provider/model-name`. Contoh model yang tersedia:
-
-| Model | Identifier |
-|-------|-----------|
-| Claude Sonnet 4.6 | `anthropic/claude-sonnet-4-6` |
-| GPT-4.1 | `openai/gpt-4.1` |
-| GPT-4.1 Mini | `openai/gpt-4.1-mini` |
-| Llama 3.3 70B | `meta-llama/llama-3.3-70b-instruct` |
-| Gemini 2.5 Pro | `google/gemini-2.5-pro` |
-
-Lihat daftar lengkap di [openrouter.ai/models](https://openrouter.ai/models).
-
----
-
-### Session
-
-| Method | Endpoint | Deskripsi |
-|--------|----------|-----------|
-| `POST` | `/v1/agents/{agent_id}/sessions` | Buat session baru untuk agent |
-
-Session akan membuat workspace directory di `SANDBOX_BASE_DIR/{session_id}/`. File yang ditulis agent dalam workspace ini persist selama session ada.
-
-**Contoh buat session:**
-
-```bash
-curl -X POST http://localhost:8000/v1/agents/{agent_id}/sessions \
-  -H "X-API-Key: your-api-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "external_user_id": "user-123",
-    "metadata": {"channel": "webchat"}
-  }'
-```
-
----
-
-### Pesan & Eksekusi Agent
-
-| Method | Endpoint | Deskripsi |
-|--------|----------|-----------|
-| `POST` | `/v1/agents/{agent_id}/sessions/{session_id}/messages` | Kirim pesan dan jalankan agent |
-| `GET` | `/v1/sessions/{session_id}/history` | Ambil riwayat percakapan |
-
-**Contoh kirim pesan:**
-
-```bash
-curl -X POST http://localhost:8000/v1/agents/{agent_id}/sessions/{session_id}/messages \
-  -H "X-API-Key: your-api-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "message": "Buat script Python yang membaca file CSV dan tampilkan 5 baris pertama beserta statistik kolomnya."
-  }'
-```
-
-**Contoh response:**
+**Contoh buat agent WhatsApp CS:**
 
 ```json
+POST /v1/agents
 {
-  "reply": "Sudah saya buat dan jalankan script-nya. Hasilnya:\n...",
-  "steps": [
-    { "step": 1, "tool": "write_file", "args": {"path": "analyze.py", "content": "..."}, "result": "Written 342 chars to analyze.py" },
-    { "step": 2, "tool": "bash", "args": {"cmd": "python analyze.py"}, "result": "   col1  col2\n0  ..." }
-  ],
-  "run_id": "550e8400-e29b-41d4-a716-446655440000"
+  "name": "CS Agent",
+  "instructions": "Kamu adalah customer service yang ramah dan membantu.",
+  "model": "anthropic/claude-sonnet-4-6",
+  "tools_config": {
+    "memory": true,
+    "skills": true,
+    "escalation": true,
+    "scheduler": true,
+    "whatsapp_media": true
+  },
+  "escalation_config": {
+    "channel_type": "whatsapp",
+    "operator_phone": "+628123456789"
+  },
+  "operator_ids": ["+628123456789"]
 }
 ```
 
+### Session & Pesan
+
+| Method | Endpoint | Deskripsi |
+|--------|----------|-----------|
+| `POST` | `/v1/agents/{id}/sessions` | Buat session baru |
+| `POST` | `/v1/agents/{id}/sessions/{session_id}/messages` | Kirim pesan, jalankan agent |
+| `GET` | `/v1/sessions/{session_id}/history` | Riwayat percakapan |
+| `GET` | `/v1/sessions/{session_id}/stream` | SSE stream — terima reminder proaktif real-time |
+| `GET` | `/v1/runs/{run_id}` | Detail satu run (steps + tool calls) |
+
+### Memory, Skills, Custom Tools
+
+| Method | Endpoint | Deskripsi |
+|--------|----------|-----------|
+| `GET/POST/DELETE` | `/v1/agents/{id}/memory` | Kelola long-term memory |
+| `GET/POST/DELETE` | `/v1/agents/{id}/skills` | Kelola skill library |
+| `GET/POST` | `/v1/agents/{id}/custom-tools` | Kelola custom Python tools |
+
+### Knowledge Base (RAG)
+
+| Method | Endpoint | Deskripsi |
+|--------|----------|-----------|
+| `POST` | `/v1/agents/{id}/documents/upload` | Upload dokumen (PDF, DOCX, PPTX, TXT, CSV) |
+| `GET` | `/v1/agents/{id}/documents` | List dokumen |
+| `DELETE` | `/v1/agents/{id}/documents/{doc_id}` | Hapus dokumen |
+
+### WhatsApp
+
+| Method | Endpoint | Deskripsi |
+|--------|----------|-----------|
+| `GET` | `/v1/agents/{id}/wa/qr` | Ambil QR code untuk scan device |
+| `GET` | `/v1/agents/{id}/wa/status` | Status koneksi WA device |
+| `POST` | `/v1/channels/wa/incoming` | Webhook dari Go wa-service (internal) |
+
+### Lainnya
+
+| Method | Endpoint | Deskripsi |
+|--------|----------|-----------|
+| `GET` | `/v1/models` | Daftar model yang tersedia |
+| `GET` | `/health` | Health check |
+
 ---
 
-## Sandbox
+## WhatsApp Integration
 
-Agent memiliki akses ke 4 built-in tools yang berjalan di dalam sandbox Docker:
+### wa-service — Production
 
-| Tool | Deskripsi |
-|------|-----------|
-| `bash(cmd)` | Jalankan perintah bash di dalam container terisolasi |
-| `write_file(path, content)` | Tulis file ke workspace |
-| `read_file(path)` | Baca file dari workspace |
-| `list_files(directory)` | List file di workspace |
+Setiap agent punya WhatsApp device sendiri (field `wa_device_id` di agent config). Gunakan endpoint `/v1/agents/{id}/wa/qr` untuk mendapatkan QR, lalu scan dari WhatsApp.
 
-**Desain sandbox:**
-- Setiap message spin up **container baru** (ephemeral) dari image `DOCKER_SANDBOX_IMAGE`
-- Workspace directory `SANDBOX_BASE_DIR/{session_id}/` di-mount sebagai `/workspace` di dalam container
-- Container di-remove otomatis setelah selesai (`remove=True`)
-- File yang ditulis **persist antar messages** karena ada di host directory, bukan di dalam container
-- Network di-disable by default (`network_disabled=True`)
-- Memory limit: 512m, CPU limit: 1 core
+API wa-service (port 8080):
 
-**Mengaktifkan gVisor (isolasi lebih kuat):**
-
-Install gVisor dan tambahkan `runtime: runsc` ke Docker daemon, lalu set di `.env`:
-
-```env
-DOCKER_RUNTIME=runsc
+```
+POST   /devices                        buat device baru, returns QR base64 PNG
+GET    /devices/{id}/qr                ambil QR terbaru
+GET    /devices/{id}/status            status koneksi
+POST   /devices/{id}/send              kirim pesan teks
+POST   /devices/{id}/send-image        kirim gambar
+POST   /devices/{id}/send-document     kirim dokumen
+DELETE /devices/{id}                   hapus device (logout)
 ```
 
+Incoming messages di-forward ke `POST /v1/channels/wa/incoming` di Python backend.
+
+**Fitur:**
+- Per-device SQLite session (reconnect otomatis saat restart)
+- Dukungan grup dengan deteksi @mention bot (termasuk LID account)
+- Terima gambar (multimodal vision ke LLM), dokumen (ekstrak teks), audio, sticker
+- Block broadcast/status messages
+- Markdown-to-WhatsApp conversion pada reply agent
+- QR 512px High quality — tahan kompresi WhatsApp
+
+### wa-dev-service — Development
+
+Satu nomor WA shared untuk semua agent. Cocok untuk testing tanpa menyiapkan device terpisah per agent.
+
+**Cara pakai:**
+```
+connect {agentID}   → mulai sesi dengan agent tertentu
+berhenti            → disconnect dari agent
+```
+
+**Fitur khusus wa-dev:**
+- **Operator auto-route**: nomor yang terdaftar di `operator_ids` atau `escalation_config.operator_phone` di-route otomatis ke agent yang relevan tanpa perlu `connect` — sehingga operator bisa langsung membalas notifikasi eskalasi.
+- Semua fitur identik dengan wa-service: gambar, dokumen, audio, sticker, grup @mention, reminder, escalation, RAG.
+- Dashboard web tersedia di `http://localhost:8081`.
+
+Environment variables wa-dev-service (dibaca dari `.env` via `make wa-dev`):
+
+| Var | Default | Keterangan |
+|-----|---------|-----------|
+| `PORT` | `8081` | Port server |
+| `MAIN_API_URL` | `http://localhost:8000` | URL Python backend |
+| `MAIN_API_KEY` | — | Sama dengan `API_KEY` di `.env` |
+| `WA_DEV_STORE_DIR` | `wa-dev-store` | Direktori SQLite session WA |
+| `CONNECTIONS_FILE` | `connections.json` | File mapping phone→agent |
+
 ---
 
-## Migrations
+## Escalation Flow
+
+Saat agent tidak bisa menangani request, ia bisa eskalasi ke human operator:
+
+1. Agent memanggil `escalate_to_human(reason, summary)`
+2. Notifikasi otomatis dikirim ke `operator_phone` via channel yang dikonfigurasi
+3. Operator membalas → agent menyusun draft reply
+4. Agent tampilkan draft ke operator untuk konfirmasi
+5. Operator ketik "kirim" → `reply_to_user(draft)` → pesan terkirim ke user
+
+Untuk WhatsApp, operator bisa membalas langsung tanpa setup tambahan karena session operator dikelola terpisah dari session user.
+
+---
+
+## Database Schema
+
+| Tabel | Isi |
+|-------|-----|
+| `agents` | Config: model, instructions, tools_config, escalation_config, operator_ids, wa_device_id, api_key |
+| `sessions` | Context per user: agent_id, external_user_id, channel_type, channel_config |
+| `messages` | Setiap turn & tool call: role (user/agent/tool/escalation), content, step_index |
+| `agent_memories` | Long-term KV facts, scoped per external_user_id |
+| `agent_skills` | Reusable prompt snippets |
+| `agent_custom_tools` | Python tool code dibuat agent di runtime |
+| `documents` | File upload + pgvector embeddings |
+| `scheduled_jobs` | APScheduler reminders |
+| `channels` | Per-agent channel config (WhatsApp, Telegram, Slack, webhook) |
+
+---
+
+## Model yang Tersedia
+
+Format OpenRouter: `provider/model-name`. Lihat daftar lengkap: `GET /v1/models`.
+
+| Provider | Model |
+|----------|-------|
+| Anthropic | `anthropic/claude-sonnet-4-6`, `anthropic/claude-opus-4-7`, `anthropic/claude-haiku-4-5` |
+| OpenAI | `openai/gpt-4.1`, `openai/gpt-4.1-mini`, `openai/o4-mini` |
+| Google | `google/gemini-2.5-pro`, `google/gemini-2.0-flash` |
+| Meta | `meta-llama/llama-3.3-70b-instruct` |
+| Mistral | `mistral/mistral-large`, `mistral/mistral-small` |
+| DeepSeek | `deepseek/deepseek-r1`, `deepseek/deepseek-chat-v3` |
+| Qwen | `qwen/qwen-2.5-72b-instruct` |
+
+---
+
+## Development Commands
 
 ```bash
-# Generate migration baru dari perubahan model
-make migrate MSG="tambah kolom baru"
-# atau: alembic revision --autogenerate -m "tambah kolom baru"
+make install          # pip install -r requirements.txt
+make dev              # uvicorn --reload (port 8000)
+make db-up            # start PostgreSQL via docker compose
+make upgrade          # alembic upgrade head
+make migrate MSG="x"  # generate migration baru
+make downgrade        # rollback satu migration
+make lint             # ruff check app/ alembic/
+make format           # ruff format app/ alembic/
 
-# Apply semua migration pending
-make upgrade
-
-# Rollback satu migration
-make downgrade
+make wa-build         # compile wa-service binary
+make wa               # jalankan wa-service (port 8080)
+make wa-dev-build     # compile wa-dev-service binary
+make wa-dev           # jalankan wa-dev-service (port 8081)
+make dev-all          # tampilkan instruksi jalankan semua sekaligus
 ```
-
----
-
-## Menambah Agent Baru
-
-Tidak perlu ubah kode. Cukup `POST /v1/agents` dengan config yang berbeda:
-
-```bash
-# Ops agent pakai model yang lebih hemat
-curl -X POST http://localhost:8000/v1/agents \
-  -H "X-API-Key: your-api-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Ops Agent",
-    "instructions": "Kamu adalah ops assistant. Bantu monitoring dan troubleshooting sistem internal.",
-    "model": "openai/gpt-4.1-mini",
-    "safety_policy": {
-      "forbidden": ["hapus data produksi", "modifikasi konfigurasi tanpa konfirmasi"]
-    }
-  }'
-```
-
-Update model agent tanpa restart server:
-
-```bash
-curl -X PATCH http://localhost:8000/v1/agents/{agent_id} \
-  -H "X-API-Key: your-api-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model": "anthropic/claude-sonnet-4-6"}'
-```
-
----
-
-## Upgrade ke DeepAgents
-
-`app/core/agent_runner.py` saat ini menggunakan `create_react_agent` dari LangGraph. Saat LangChain DeepAgents siap dipakai, swap bagian build agent di `run_agent()`:
-
-```python
-# Ganti ini:
-graph = create_react_agent(llm, tools=tools, prompt=system_prompt)
-
-# Dengan ini:
-from deepagents import create_deep_agent
-from deepagents.middleware import TodoListMiddleware, FilesystemMiddleware
-
-graph = create_deep_agent(
-    llm=llm,
-    tools=tools,
-    system_prompt=system_prompt,
-    middlewares=[
-        TodoListMiddleware(),          # externalize planning ke to-do list
-        FilesystemMiddleware(sandbox=sandbox),
-    ],
-)
-```
-
-Sisa `run_agent()` tidak perlu diubah — sama-sama `ainvoke` + parsing messages.
-
----
-
-## Upgrade ke Daytona Sandbox
-
-Untuk produksi, ganti `DockerSandbox` dengan Daytona (open-source, startup <60ms, hardware isolation):
-
-1. Deploy Daytona self-hosted: [github.com/daytonaio/daytona](https://github.com/daytonaio/daytona)
-2. Buat class `DaytonaSandbox` di `app/core/sandbox.py` yang implement method `bash`, `write_file`, `read_file`, `list_files` menggunakan Daytona Python SDK
-3. Update `agent_runner.py` untuk instantiate `DaytonaSandbox` jika `SANDBOX_BACKEND=daytona`
-
----
-
-## Milestone
-
-- [x] **Milestone 1** — FastAPI skeleton, Agent CRUD, session, message endpoint dengan Docker sandbox + LangGraph
-- [ ] **Milestone 2** — Daytona sandbox, tools tambahan (HTTP internal, RAG), LangSmith, integrasi OpenClaw/webchat
-- [ ] **Milestone 3** — Web admin UI, JWT auth, developer docs, SubAgent support
