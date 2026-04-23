@@ -50,15 +50,19 @@
 | Container | Image |
 |-----------|-------|
 | `deploy-api-1` | `deploy-api` (built dari project) |
+| `deploy-wa-service-1` | `deploy-wa-service` (Go WhatsApp microservice) |
 
-## Update code
+## Update code (via GitHub)
+
+VPS sudah di-setup sebagai git repo yang clone dari GitHub.
 
 ```bash
-# SSH ke VPS
 ssh clevio@194.238.23.242
 
-# Rebuild setelah ada perubahan kode:
-cd /home/clevio/stack/managed-agents/deploy
+# Pull latest dari GitHub lalu rebuild
+cd /home/clevio/stack/managed-agents
+git pull
+cd deploy
 sudo docker compose -f docker-compose.prod.yml up -d --build
 
 # Jalankan migrasi kalau ada schema baru
@@ -84,5 +88,7 @@ sudo docker compose -f /home/clevio/stack/managed-agents/deploy/docker-compose.p
 ## Catatan penting
 
 - Jangan hapus network `root_default` — dipakai semua project di VPS
-- `UI-DEV/` di-serve di path `/ui/` — kalau ada perubahan file UI, upload ulang ke VPS dan rebuild
-- `wa-service` belum di-deploy (WhatsApp Go microservice), `WA_SERVICE_URL` di env masih `localhost:8080`
+- `UI-DEV/` di-serve di path `/ui/` — perubahan UI cukup `git pull` + rebuild
+- `wa-service` jalan di container `deploy-wa-service-1`, berkomunikasi dengan API via network internal `deploy_internal`
+- `deploy/.env.prod` **tidak ada di git** (di-gitignore) — kalau VPS di-rebuild dari scratch, file ini harus dibuat manual (lihat isinya di atas)
+- wa-service session (SQLite) disimpan di Docker volume `deploy_wa_store` — jangan `docker compose down -v` karena akan hapus session WA yang sudah terpasang

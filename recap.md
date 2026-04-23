@@ -199,3 +199,24 @@ Fix:
 
 Hasil: reminder, gambar/dokumen, dan eskalasi semua berfungsi di wa-dev. Cara connect tetap sama
 ("connect {agentID}"). Rebuild binary diperlukan: make wa-dev-build (atau go build di wa-dev-service/).
+
+Deploy ke VPS production (23 Apr 2026):
+
+1. Project di-deploy ke VPS `194.238.23.242` (user clevio) via Docker + Traefik.
+   - Domain: https://managed-agent.chiefaiofficer.id
+   - Postgres: pakai instance yang sudah ada di VPS via host.docker.internal
+   - wa-service (Go) jalan sebagai container tersendiri dalam network internal Docker
+   - UI-DEV di-serve sebagai static files di /ui/ via FastAPI StaticFiles
+
+2. Git workflow: VPS clone dari https://github.com/bagasta/self-managed-agents.git
+   Update cukup: git pull → docker compose up -d --build
+
+3. Bug fix @lid JID untuk media WhatsApp:
+   Root cause: whatsmeow otomatis resolve @s.whatsapp.net → @lid untuk pesan teks,
+   tapi TIDAK untuk media (gambar/dokumen). Akibatnya send-image OK tapi gambar tidak sampai.
+   Fix: tambah helper resolveJID() di wa-service/device_manager.go yang pakai IsOnWhatsApp()
+   untuk lookup JID yang benar sebelum upload dan kirim media. Berlaku untuk SendImage dan SendDocument.
+
+4. Bug fix AgentLogger:
+   LangChain terbaru kadang pass None sebagai serialized di on_chain_start callback.
+   Fix: tambah guard `if not serialized: return` sebelum .get() di agent_runner.py.
