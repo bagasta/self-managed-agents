@@ -146,7 +146,7 @@ func (dm *DeviceManager) CreateDevice(deviceID string) (string, error) {
 		for evt := range qrChan {
 			switch evt.Event {
 			case "code":
-				png, genErr := qrcode.Encode(evt.Code, qrcode.Medium, 256)
+				png, genErr := qrcode.Encode(evt.Code, qrcode.High, 512)
 				if genErr != nil {
 					log.Printf("[%s] qr encode err: %v", deviceID, genErr)
 					continue

@@ -33,6 +33,7 @@ class Settings(BaseSettings):
 
     # WhatsApp microservice
     wa_service_url: str = "http://localhost:8080"
+    wa_dev_service_url: str = "http://localhost:8081"
 
     # Logging
     log_level: str = "INFO"

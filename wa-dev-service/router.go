@@ -64,51 +64,34 @@ func (r *Router) HandleMessage(msg IncomingMessage) {
 		if strings.HasPrefix(lower, "connect ") {
 			agentID := strings.TrimSpace(msg.Text[len("connect "):])
 			r.handleConnect(msg.From, msg.ChatID, agentID)
-		} else {
-			_ = r.wa.SendText(msg.ChatID, "👋 Halo! Ini adalah *WhatsApp Development Agent*.\n\nKirim perintah berikut untuk mulai:\n*connect AGENT_ID*\n\nContoh: connect abc123-def456\n\nDapatkan Agent ID dari dashboard.")
+			return
 		}
+		// Check if this phone is an operator for any agent — auto-route without requiring 'connect'
+		if agentID, ok := r.lookupOperatorAgent(msg.From); ok {
+			log.Printf("[dev-router] operator %s auto-routed to agent %s", msg.From, agentID)
+			r.forwardToAgent(agentID, msg)
+			return
+		}
+		_ = r.wa.SendText(msg.ChatID, "👋 Halo! Ini adalah *WhatsApp Development Agent*.\n\nKirim perintah berikut untuk mulai:\n*connect AGENT_ID*\n\nContoh: connect abc123-def456\n\nDapatkan Agent ID dari dashboard.")
 		return
 	}
 
-	// Forward to agent — build text with media context if any
-	agentText := msg.Text
-	if msg.MediaType != "" && msg.MediaData != "" {
-		agentText = fmt.Sprintf("[%s: %s]\n%s", msg.MediaType, msg.MediaFilename, msg.Text)
-	}
-
-	reply, err := r.callAgentAPI(conn.AgentID, conn.AgentKey, conn.SessionID, agentText)
-	if err != nil {
-		log.Printf("[dev-router] agent API error for %s: %v", msg.From, err)
-		_ = r.wa.SendText(msg.ChatID, "❌ Terjadi error saat menghubungi agent. Coba lagi nanti.")
-		return
-	}
-
-	if reply != "" {
-		_ = r.wa.SendText(msg.ChatID, reply)
-	}
+	// Forward to Python via /v1/channels/wa/incoming with virtual device_id
+	r.forwardToAgent(conn.AgentID, msg)
 }
 
 func (r *Router) handleConnect(from, chatID, agentID string) {
 	_ = r.wa.SendText(chatID, "⏳ Menghubungkan ke agent...")
 
-	agentKey, agentName, err := r.fetchAgentKey(agentID)
+	agentName, err := r.fetchAgentName(agentID)
 	if err != nil {
 		log.Printf("[dev-router] fetch agent %s err: %v", agentID, err)
 		_ = r.wa.SendText(chatID, fmt.Sprintf("❌ Agent ID *%s* tidak ditemukan. Pastikan Agent ID benar dan coba lagi.", agentID))
 		return
 	}
 
-	sessionID, err := r.createSession(agentID, agentKey, from)
-	if err != nil {
-		log.Printf("[dev-router] create session for agent %s err: %v", agentID, err)
-		_ = r.wa.SendText(chatID, "❌ Gagal membuat sesi. Coba lagi.")
-		return
-	}
-
 	conn := &UserConnection{
 		AgentID:     agentID,
-		AgentKey:    agentKey,
-		SessionID:   sessionID,
 		ConnectedAt: time.Now(),
 		ChatID:      chatID,
 	}
@@ -117,49 +100,91 @@ func (r *Router) handleConnect(from, chatID, agentID string) {
 	}
 
 	_ = r.wa.SendText(chatID, fmt.Sprintf("✅ Berhasil terhubung ke agent *%s*!\n\nSekarang kamu bisa chat langsung di sini.\nKirim *berhenti* atau */stop* untuk disconnect.", agentName))
-	log.Printf("[dev-router] %s connected to agent %s (session: %s)", from, agentID, sessionID)
+	log.Printf("[dev-router] %s connected to agent %s", from, agentID)
 }
 
-func (r *Router) fetchAgentKey(agentID string) (apiKey, name string, err error) {
+// forwardToAgent POSTs the message to Python /v1/channels/wa/incoming using a
+// virtual device_id of the form "wadev_{agentID}". Python handles session
+// management, media processing, escalation, and reminder delivery.
+func (r *Router) forwardToAgent(agentID string, msg IncomingMessage) {
+	deviceID := "wadev_" + agentID
+	payload := map[string]interface{}{
+		"device_id":      deviceID,
+		"from":           msg.From,
+		"chat_id":        msg.ChatID,
+		"message":        msg.Text,
+		"timestamp":      msg.Timestamp,
+		"media_type":     msg.MediaType,
+		"media_data":     msg.MediaData,
+		"media_filename": msg.MediaFilename,
+	}
+
+	data, _ := json.Marshal(payload)
+	url := r.mainAPIURL + "/v1/channels/wa/incoming"
+	req, err := http.NewRequest("POST", url, bytes.NewReader(data))
+	if err != nil {
+		log.Printf("[dev-router] build request err: %v", err)
+		_ = r.wa.SendText(msg.ChatID, "❌ Error internal. Coba lagi.")
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", r.mainAPIKey)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("[dev-router] forward to python err: %v", err)
+		_ = r.wa.SendText(msg.ChatID, "❌ Terjadi error saat menghubungi agent. Coba lagi nanti.")
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(resp.Body)
+		log.Printf("[dev-router] python returned HTTP %d: %s", resp.StatusCode, string(b))
+		_ = r.wa.SendText(msg.ChatID, "❌ Terjadi error saat menghubungi agent. Coba lagi nanti.")
+		return
+	}
+
+	// Python already sends the reply back to the user via wa-dev-service's /send/text endpoint.
+	// Nothing more to do here.
+	log.Printf("[dev-router] forwarded msg from %s to agent %s", msg.From, agentID)
+}
+
+// lookupOperatorAgent checks whether a phone number is an operator for any agent.
+// Used to auto-route escalation replies without requiring the operator to 'connect {agentID}'.
+func (r *Router) lookupOperatorAgent(phone string) (string, bool) {
+	url := fmt.Sprintf("%s/v1/channels/wa-dev/operator-route?phone=%s", r.mainAPIURL, phone)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", false
+	}
+	req.Header.Set("X-API-Key", r.mainAPIKey)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", false
+	}
+
+	var result struct {
+		AgentID string `json:"agent_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", false
+	}
+	return result.AgentID, result.AgentID != ""
+}
+
+func (r *Router) fetchAgentName(agentID string) (string, error) {
 	req, err := http.NewRequest("GET", fmt.Sprintf("%s/v1/agents/%s", r.mainAPIURL, agentID), nil)
 	if err != nil {
-		return "", "", err
-	}
-	req.Header.Set("X-API-Key", r.mainAPIKey)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		b, _ := io.ReadAll(resp.Body)
-		return "", "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(b))
-	}
-
-	var result struct {
-		APIKey string `json:"api_key"`
-		Name   string `json:"name"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", "", err
-	}
-	if result.APIKey == "" {
-		return "", "", fmt.Errorf("empty api_key in agent response")
-	}
-	return result.APIKey, result.Name, nil
-}
-
-func (r *Router) createSession(agentID, agentKey, externalUserID string) (string, error) {
-	body, _ := json.Marshal(map[string]string{"external_user_id": externalUserID})
-	req, err := http.NewRequest("POST", fmt.Sprintf("%s/v1/agents/%s/sessions", r.mainAPIURL, agentID), bytes.NewReader(body))
-	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-API-Key", r.mainAPIKey)
-	req.Header.Set("X-Agent-Key", agentKey)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -173,46 +198,12 @@ func (r *Router) createSession(agentID, agentKey, externalUserID string) (string
 	}
 
 	var result struct {
-		ID string `json:"id"`
+		Name string `json:"name"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", err
 	}
-	if result.ID == "" {
-		return "", fmt.Errorf("empty session ID in response")
-	}
-	return result.ID, nil
-}
-
-func (r *Router) callAgentAPI(agentID, agentKey, sessionID, message string) (string, error) {
-	body, _ := json.Marshal(map[string]string{"message": message})
-	url := fmt.Sprintf("%s/v1/agents/%s/sessions/%s/messages", r.mainAPIURL, agentID, sessionID)
-	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-API-Key", r.mainAPIKey)
-	req.Header.Set("X-Agent-Key", agentKey)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		b, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(b))
-	}
-
-	var result struct {
-		Reply string `json:"reply"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
-	}
-	return result.Reply, nil
+	return result.Name, nil
 }
 
 func (r *Router) forwardWebhook(msg IncomingMessage) {

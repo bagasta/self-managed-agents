@@ -19,7 +19,7 @@
     {
       "key": "agent_key",
       "value": "",
-      "description": "Per-agent API key \u2014 auto-saved saat create agent, dipakai di endpoint /messages"
+      "description": "Per-agent API key — auto-saved saat create agent, dipakai di endpoint /messages"
     },
     {
       "key": "session_id",
@@ -43,7 +43,7 @@
       "name": "Health",
       "item": [
         {
-          "name": "GET /health \u2014 Cek status server",
+          "name": "GET /health — Cek status server",
           "request": {
             "method": "GET",
             "url": "{{base_url}}/health"
@@ -65,7 +65,7 @@
       "name": "Agents",
       "item": [
         {
-          "name": "POST /v1/agents \u2014 Buat CS Agent (semua default tool ON)",
+          "name": "POST /v1/agents — Buat CS Agent (default: memory+skills+escalation)",
           "request": {
             "method": "POST",
             "header": [
@@ -81,7 +81,7 @@
             "url": "{{base_url}}/v1/agents",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"CS Agent\",\n  \"description\": \"Agent customer service dengan kemampuan eskalasi ke operator manusia.\",\n  \"instructions\": \"Kamu adalah agen CS yang ramah dan profesional. Bantu user dengan pertanyaan mereka. Jika ada permintaan yang tidak bisa kamu tangani (refund, komplain besar, dll), gunakan tool escalate_to_human.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"tools_config\": {\n    \"memory\": true,\n    \"tool_creator\": true,\n    \"rag\": true,\n    \"sandbox\": true,\n    \"skills\": true,\n    \"scheduler\": true,\n    \"escalation\": true,\n    \"http\": false,\n    \"mcp\": false\n  },\n  \"sandbox_config\": {},\n  \"safety_policy\": {\n    \"rules\": [\n      \"Jangan pernah mengeksekusi perintah sistem yang berbahaya.\",\n      \"Tolak permintaan yang melanggar hukum atau tidak etis.\"\n    ]\n  },\n  \"escalation_config\": {\n    \"channel_type\": \"whatsapp\",\n    \"operator_phone\": \"+62811000000\"\n  },\n  \"token_quota\": 4000000,\n  \"quota_period_days\": 30\n}",
+              "raw": "{\n  \"name\": \"CS Agent\",\n  \"description\": \"Agent customer service dengan kemampuan eskalasi ke operator manusia.\",\n  \"instructions\": \"Kamu adalah agen CS yang ramah dan profesional. Bantu user dengan pertanyaan mereka. Jika ada permintaan yang tidak bisa kamu tangani (refund, komplain besar, dll), gunakan tool escalate_to_human.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"tools_config\": {\n    \"memory\": true,\n    \"skills\": true,\n    \"escalation\": true,\n    \"sandbox\": false,\n    \"tool_creator\": false,\n    \"scheduler\": false,\n    \"rag\": false,\n    \"http\": false,\n    \"mcp\": false,\n    \"wa_agent_manager\": false\n  },\n  \"sandbox_config\": {},\n  \"safety_policy\": {\n    \"rules\": [\n      \"Jangan pernah mengeksekusi perintah sistem yang berbahaya.\",\n      \"Tolak permintaan yang melanggar hukum atau tidak etis.\"\n    ]\n  },\n  \"escalation_config\": {\n    \"channel_type\": \"whatsapp\",\n    \"operator_phone\": \"+62811000000\"\n  },\n  \"token_quota\": 4000000,\n  \"quota_period_days\": 30,\n  \"operator_ids\": [\n    \"+62811000000\"\n  ]\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -109,7 +109,7 @@
           ]
         },
         {
-          "name": "POST /v1/agents \u2014 Buat Coding Agent (sandbox+memory, eskalasi OFF)",
+          "name": "POST /v1/agents — Buat Coding Agent (sandbox+memory, eskalasi OFF)",
           "request": {
             "method": "POST",
             "header": [
@@ -125,7 +125,7 @@
             "url": "{{base_url}}/v1/agents",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"Coding Agent\",\n  \"description\": \"Agent untuk menulis dan menjalankan kode Python di sandbox Docker yang aman.\",\n  \"instructions\": \"Kamu adalah coding assistant yang ahli Python. Saat menjawab pertanyaan kode:\\n1. Tulis kode yang bersih dan mudah dibaca.\\n2. Selalu jalankan kode terlebih dahulu untuk memverifikasi hasilnya.\\n3. Jelaskan output yang dihasilkan dengan singkat.\\n4. Jika ada error, perbaiki dan coba lagi.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"tools_config\": {\n    \"memory\": true,\n    \"tool_creator\": true,\n    \"rag\": false,\n    \"sandbox\": true,\n    \"skills\": true,\n    \"scheduler\": false,\n    \"escalation\": false,\n    \"http\": false,\n    \"mcp\": false\n  },\n  \"sandbox_config\": { \"memory\": \"512m\", \"cpu\": \"1.0\" },\n  \"safety_policy\": {\n    \"rules\": [\n      \"Jangan pernah mengeksekusi perintah sistem yang berbahaya (rm -rf, shutdown, dll).\",\n      \"Jangan mengakses atau memodifikasi file di luar direktori kerja.\",\n      \"Tolak permintaan yang melanggar hukum atau tidak etis.\"\n    ],\n    \"max_output_length\": 4000\n  },\n  \"escalation_config\": {},\n  \"token_quota\": 4000000,\n  \"quota_period_days\": 30\n}",
+              "raw": "{\n  \"name\": \"Coding Agent\",\n  \"description\": \"Agent untuk menulis dan menjalankan kode Python di sandbox Docker yang aman.\",\n  \"instructions\": \"Kamu adalah coding assistant yang ahli Python. Saat menjawab pertanyaan kode:\\n1. Tulis kode yang bersih dan mudah dibaca.\\n2. Selalu jalankan kode terlebih dahulu untuk memverifikasi hasilnya.\\n3. Jelaskan output yang dihasilkan dengan singkat.\\n4. Jika ada error, perbaiki dan coba lagi.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"tools_config\": {\n    \"memory\": true,\n    \"skills\": true,\n    \"escalation\": false,\n    \"sandbox\": true,\n    \"tool_creator\": true,\n    \"scheduler\": false,\n    \"rag\": false,\n    \"http\": false,\n    \"mcp\": false\n  },\n  \"sandbox_config\": {\n    \"memory\": \"512m\",\n    \"cpu\": \"1.0\"\n  },\n  \"safety_policy\": {\n    \"rules\": [\n      \"Jangan pernah mengeksekusi perintah sistem yang berbahaya (rm -rf, shutdown, dll).\",\n      \"Jangan mengakses atau memodifikasi file di luar direktori kerja.\",\n      \"Tolak permintaan yang melanggar hukum atau tidak etis.\"\n    ],\n    \"max_output_length\": 4000\n  },\n  \"escalation_config\": {},\n  \"token_quota\": 4000000,\n  \"quota_period_days\": 30,\n  \"operator_ids\": []\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -135,7 +135,7 @@
           }
         },
         {
-          "name": "POST /v1/agents \u2014 Buat RAG Knowledge Agent (Telegram operator)",
+          "name": "POST /v1/agents — Buat RAG Knowledge Agent (Telegram operator)",
           "request": {
             "method": "POST",
             "header": [
@@ -151,7 +151,7 @@
             "url": "{{base_url}}/v1/agents",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"Knowledge Agent\",\n  \"description\": \"Agent berbasis RAG \u2014 menjawab dari dokumen internal yang diupload.\",\n  \"instructions\": \"Kamu adalah asisten internal perusahaan. Dokumen relevan dari knowledge base sudah otomatis tersedia di konteksmu \u2014 gunakan sebagai sumber utama. Jika informasi tidak ada, katakan dengan jujur.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.3,\n  \"tools_config\": {\n    \"memory\": true,\n    \"tool_creator\": false,\n    \"rag\": true,\n    \"sandbox\": false,\n    \"skills\": false,\n    \"scheduler\": false,\n    \"escalation\": true,\n    \"http\": true,\n    \"mcp\": false\n  },\n  \"sandbox_config\": {},\n  \"safety_policy\": {\n    \"rules\": [\n      \"Jangan pernah mengungkapkan informasi rahasia kepada pihak luar.\",\n      \"Jangan membuat klaim yang tidak didukung dokumen yang tersedia.\"\n    ]\n  },\n  \"escalation_config\": {\n    \"channel_type\": \"telegram\",\n    \"operator_phone\": \"123456789\"\n  },\n  \"token_quota\": 2000000,\n  \"quota_period_days\": 30\n}",
+              "raw": "{\n  \"name\": \"Knowledge Agent\",\n  \"description\": \"Agent berbasis RAG — menjawab dari dokumen internal yang diupload.\",\n  \"instructions\": \"Kamu adalah asisten internal perusahaan. Dokumen relevan dari knowledge base sudah otomatis tersedia di konteksmu — gunakan sebagai sumber utama. Jika informasi tidak ada, katakan dengan jujur.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.3,\n  \"tools_config\": {\n    \"memory\": true,\n    \"skills\": false,\n    \"escalation\": true,\n    \"sandbox\": false,\n    \"tool_creator\": false,\n    \"scheduler\": false,\n    \"rag\": true,\n    \"http\": true,\n    \"mcp\": false\n  },\n  \"sandbox_config\": {},\n  \"safety_policy\": {\n    \"rules\": [\n      \"Jangan pernah mengungkapkan informasi rahasia kepada pihak luar.\",\n      \"Jangan membuat klaim yang tidak didukung dokumen yang tersedia.\"\n    ]\n  },\n  \"escalation_config\": {\n    \"channel_type\": \"telegram\",\n    \"operator_phone\": \"123456789\"\n  },\n  \"token_quota\": 2000000,\n  \"quota_period_days\": 30,\n  \"operator_ids\": [\n    \"+628xxxx_telegram_admin\"\n  ]\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -161,7 +161,7 @@
           }
         },
         {
-          "name": "POST /v1/agents \u2014 Buat MCP Agent (remote SSE server)",
+          "name": "POST /v1/agents — Buat MCP Agent (remote SSE server)",
           "request": {
             "method": "POST",
             "header": [
@@ -177,7 +177,7 @@
             "url": "{{base_url}}/v1/agents",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"MCP Agent\",\n  \"description\": \"Agent dengan akses ke tool eksternal via MCP server (SSE/HTTP atau stdio).\",\n  \"instructions\": \"Kamu adalah asisten yang dapat menggunakan tool dari server MCP eksternal. Gunakan tool yang tersedia untuk membantu user.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"tools_config\": {\n    \"memory\": true,\n    \"tool_creator\": false,\n    \"rag\": false,\n    \"sandbox\": false,\n    \"skills\": false,\n    \"scheduler\": false,\n    \"escalation\": false,\n    \"http\": false,\n    \"mcp\": {\n      \"enabled\": true,\n      \"servers\": {\n        \"filesystem\": {\n          \"url\": \"http://localhost:8080/mcp\",\n          \"transport\": \"streamable_http\"\n        },\n        \"github\": {\n          \"url\": \"http://localhost:8081/sse\",\n          \"transport\": \"sse\"\n        }\n      }\n    }\n  },\n  \"sandbox_config\": {},\n  \"safety_policy\": {},\n  \"escalation_config\": {}\n}",
+              "raw": "{\n  \"name\": \"MCP Agent\",\n  \"description\": \"Agent dengan akses ke tool eksternal via MCP server (SSE/HTTP atau stdio).\",\n  \"instructions\": \"Kamu adalah asisten yang dapat menggunakan tool dari server MCP eksternal. Gunakan tool yang tersedia untuk membantu user.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"tools_config\": {\n    \"memory\": true,\n    \"tool_creator\": false,\n    \"rag\": false,\n    \"sandbox\": false,\n    \"skills\": false,\n    \"scheduler\": false,\n    \"escalation\": false,\n    \"http\": false,\n    \"mcp\": {\n      \"enabled\": true,\n      \"servers\": {\n        \"filesystem\": {\n          \"url\": \"http://localhost:8080/mcp\",\n          \"transport\": \"streamable_http\"\n        },\n        \"github\": {\n          \"url\": \"http://localhost:8081/sse\",\n          \"transport\": \"sse\"\n        }\n      }\n    }\n  },\n  \"sandbox_config\": {},\n  \"safety_policy\": {},\n  \"escalation_config\": {},\n  \"operator_ids\": []\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -187,7 +187,7 @@
           }
         },
         {
-          "name": "POST /v1/agents \u2014 Buat MCP Agent (stdio local process)",
+          "name": "POST /v1/agents — Buat MCP Agent (stdio local process)",
           "request": {
             "method": "POST",
             "header": [
@@ -203,7 +203,7 @@
             "url": "{{base_url}}/v1/agents",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"Filesystem Agent\",\n  \"description\": \"Agent dengan akses ke filesystem lokal via MCP stdio server.\",\n  \"instructions\": \"Kamu bisa membaca dan menulis file. Gunakan tool filesystem untuk membantu user mengelola file.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"tools_config\": {\n    \"memory\": true,\n    \"tool_creator\": false,\n    \"rag\": false,\n    \"sandbox\": false,\n    \"skills\": false,\n    \"scheduler\": false,\n    \"escalation\": false,\n    \"http\": false,\n    \"mcp\": {\n      \"enabled\": true,\n      \"servers\": {\n        \"filesystem\": {\n          \"command\": \"npx\",\n          \"args\": [\"-y\", \"@modelcontextprotocol/server-filesystem\", \"/tmp\"],\n          \"env\": {}\n        }\n      }\n    }\n  },\n  \"sandbox_config\": {},\n  \"safety_policy\": {},\n  \"escalation_config\": {}\n}",
+              "raw": "{\n  \"name\": \"Filesystem Agent\",\n  \"description\": \"Agent dengan akses ke filesystem lokal via MCP stdio server.\",\n  \"instructions\": \"Kamu bisa membaca dan menulis file. Gunakan tool filesystem untuk membantu user mengelola file.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"tools_config\": {\n    \"memory\": true,\n    \"tool_creator\": false,\n    \"rag\": false,\n    \"sandbox\": false,\n    \"skills\": false,\n    \"scheduler\": false,\n    \"escalation\": false,\n    \"http\": false,\n    \"mcp\": {\n      \"enabled\": true,\n      \"servers\": {\n        \"filesystem\": {\n          \"command\": \"npx\",\n          \"args\": [\n            \"-y\",\n            \"@modelcontextprotocol/server-filesystem\",\n            \"/tmp\"\n          ],\n          \"env\": {}\n        }\n      }\n    }\n  },\n  \"sandbox_config\": {},\n  \"safety_policy\": {},\n  \"escalation_config\": {},\n  \"operator_ids\": []\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -213,7 +213,7 @@
           }
         },
         {
-          "name": "POST /v1/agents \u2014 Buat WhatsApp Agent (scan QR)",
+          "name": "POST /v1/agents — Buat WhatsApp Agent (scan QR)",
           "request": {
             "method": "POST",
             "header": [
@@ -228,7 +228,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"WhatsApp CS Agent\",\n  \"description\": \"Agent yang terhubung ke WhatsApp via QR scan\",\n  \"instructions\": \"Kamu adalah customer service yang membalas pesan WhatsApp dengan ramah dan informatif.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"channel_type\": \"whatsapp\",\n  \"tools_config\": {\n    \"memory\": true,\n    \"tool_creator\": true,\n    \"rag\": true,\n    \"sandbox\": false,\n    \"skills\": true,\n    \"scheduler\": true,\n    \"escalation\": true,\n    \"http\": false,\n    \"mcp\": false\n  },\n  \"sandbox_config\": {},\n  \"safety_policy\": {},\n  \"escalation_config\": {\n    \"channel_type\": \"whatsapp\",\n    \"operator_phone\": \"+628xxxx\"\n  },\n  \"token_quota\": 4000000,\n  \"quota_period_days\": 30\n}",
+              "raw": "{\n  \"name\": \"WhatsApp CS Agent\",\n  \"description\": \"Agent yang terhubung ke WhatsApp via QR scan\",\n  \"instructions\": \"Kamu adalah customer service yang membalas pesan WhatsApp dengan ramah dan informatif.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"channel_type\": \"whatsapp\",\n  \"tools_config\": {\n    \"memory\": true,\n    \"skills\": true,\n    \"escalation\": true,\n    \"sandbox\": false,\n    \"tool_creator\": false,\n    \"scheduler\": false,\n    \"rag\": false,\n    \"http\": false,\n    \"mcp\": false,\n    \"whatsapp_media\": true,\n    \"wa_agent_manager\": false\n  },\n  \"sandbox_config\": {},\n  \"safety_policy\": {},\n  \"escalation_config\": {\n    \"channel_type\": \"whatsapp\",\n    \"operator_phone\": \"+628xxxx\"\n  },\n  \"token_quota\": 4000000,\n  \"quota_period_days\": 30,\n  \"operator_ids\": [\n    \"+628xxxx\"\n  ]\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -273,7 +273,7 @@
           ]
         },
         {
-          "name": "GET /v1/agents \u2014 List semua agent",
+          "name": "GET /v1/agents — List semua agent",
           "request": {
             "method": "GET",
             "header": [
@@ -305,7 +305,7 @@
           }
         },
         {
-          "name": "GET /v1/agents/:agent_id \u2014 Detail agent",
+          "name": "GET /v1/agents/:agent_id — Detail agent",
           "request": {
             "method": "GET",
             "header": [
@@ -318,7 +318,7 @@
           }
         },
         {
-          "name": "PATCH /v1/agents/:agent_id \u2014 Update nama & model",
+          "name": "POST /v1/agents — Buat CS Agent (default: memory+skills+escalation)",
           "request": {
             "method": "PATCH",
             "header": [
@@ -334,7 +334,7 @@
             "url": "{{base_url}}/v1/agents/{{agent_id}}",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"CS Agent v2\",\n  \"model\": \"openai/gpt-4.1\",\n  \"temperature\": 0.5\n}",
+              "raw": "{\n  \"name\": \"CS Agent v2\",\n  \"model\": \"openai/gpt-4.1\",\n  \"temperature\": 0.5,\n  \"operator_ids\": [\n    \"+62811000000\"\n  ],\n  \"tools_config\": {\n    \"memory\": true,\n    \"skills\": true,\n    \"escalation\": true,\n    \"sandbox\": false,\n    \"tool_creator\": false,\n    \"scheduler\": false,\n    \"rag\": false,\n    \"http\": false,\n    \"mcp\": false,\n    \"wa_agent_manager\": false\n  }\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -344,7 +344,7 @@
           }
         },
         {
-          "name": "PATCH /v1/agents/:agent_id \u2014 Update escalation_config (WhatsApp)",
+          "name": "PATCH /v1/agents/:agent_id — Update escalation_config (WhatsApp)",
           "request": {
             "method": "PATCH",
             "header": [
@@ -370,7 +370,7 @@
           }
         },
         {
-          "name": "PATCH /v1/agents/:agent_id \u2014 Update escalation_config (Telegram)",
+          "name": "PATCH /v1/agents/:agent_id — Update escalation_config (Telegram)",
           "request": {
             "method": "PATCH",
             "header": [
@@ -396,7 +396,7 @@
           }
         },
         {
-          "name": "PATCH /v1/agents/:agent_id \u2014 Aktifkan MCP tool",
+          "name": "PATCH /v1/agents/:agent_id — Aktifkan MCP tool",
           "request": {
             "method": "PATCH",
             "header": [
@@ -422,7 +422,7 @@
           }
         },
         {
-          "name": "POST /v1/agents/:agent_id/renew \u2014 Perpanjang masa aktif & reset token",
+          "name": "POST /v1/agents/:agent_id/renew — Perpanjang masa aktif & reset token",
           "request": {
             "method": "POST",
             "header": [
@@ -453,7 +453,7 @@
           ]
         },
         {
-          "name": "GET /v1/agents/:agent_id/whatsapp/qr \u2014 Ambil QR terbaru",
+          "name": "GET /v1/agents/:agent_id/whatsapp/qr — Ambil QR terbaru",
           "request": {
             "method": "GET",
             "header": [
@@ -480,7 +480,7 @@
           "response": []
         },
         {
-          "name": "GET /v1/agents/:agent_id/whatsapp/status \u2014 Cek status koneksi",
+          "name": "GET /v1/agents/:agent_id/whatsapp/status — Cek status koneksi",
           "request": {
             "method": "GET",
             "header": [
@@ -507,7 +507,7 @@
           "response": []
         },
         {
-          "name": "DELETE /v1/agents/:agent_id/whatsapp \u2014 Disconnect WhatsApp",
+          "name": "DELETE /v1/agents/:agent_id/whatsapp — Disconnect WhatsApp",
           "request": {
             "method": "DELETE",
             "header": [
@@ -533,7 +533,7 @@
           "response": []
         },
         {
-          "name": "DELETE /v1/agents/:agent_id \u2014 Hapus agent (soft delete)",
+          "name": "DELETE /v1/agents/:agent_id — Hapus agent (soft delete)",
           "request": {
             "method": "DELETE",
             "header": [
@@ -551,7 +551,7 @@
       "name": "Sessions",
       "item": [
         {
-          "name": "POST /v1/agents/:agent_id/sessions \u2014 Tanpa channel (dev/internal)",
+          "name": "POST /v1/agents/:agent_id/sessions — Tanpa channel (dev/internal)",
           "request": {
             "method": "POST",
             "header": [
@@ -591,7 +591,7 @@
           ]
         },
         {
-          "name": "POST /v1/agents/:agent_id/sessions \u2014 Channel WhatsApp",
+          "name": "POST /v1/agents/:agent_id/sessions — Channel WhatsApp",
           "request": {
             "method": "POST",
             "header": [
@@ -631,7 +631,7 @@
           ]
         },
         {
-          "name": "POST /v1/agents/:agent_id/sessions \u2014 Channel Telegram",
+          "name": "POST /v1/agents/:agent_id/sessions — Channel Telegram",
           "request": {
             "method": "POST",
             "header": [
@@ -657,7 +657,7 @@
           }
         },
         {
-          "name": "POST /v1/agents/:agent_id/sessions \u2014 Channel Slack",
+          "name": "POST /v1/agents/:agent_id/sessions — Channel Slack",
           "request": {
             "method": "POST",
             "header": [
@@ -683,7 +683,7 @@
           }
         },
         {
-          "name": "POST /v1/agents/:agent_id/sessions \u2014 Channel Generic Webhook",
+          "name": "POST /v1/agents/:agent_id/sessions — Channel Generic Webhook",
           "request": {
             "method": "POST",
             "header": [
@@ -709,7 +709,7 @@
           }
         },
         {
-          "name": "GET /v1/agents/:agent_id/sessions/:session_id \u2014 Detail session",
+          "name": "GET /v1/agents/:agent_id/sessions/:session_id — Detail session",
           "request": {
             "method": "GET",
             "header": [
@@ -722,7 +722,7 @@
           }
         },
         {
-          "name": "PATCH /v1/agents/:agent_id/sessions/:session_id \u2014 Aktifkan eskalasi",
+          "name": "PATCH /v1/agents/:agent_id/sessions/:session_id — Aktifkan eskalasi",
           "request": {
             "method": "PATCH",
             "header": [
@@ -748,7 +748,7 @@
           }
         },
         {
-          "name": "PATCH /v1/agents/:agent_id/sessions/:session_id \u2014 Nonaktifkan eskalasi",
+          "name": "PATCH /v1/agents/:agent_id/sessions/:session_id — Nonaktifkan eskalasi",
           "request": {
             "method": "PATCH",
             "header": [
@@ -779,7 +779,7 @@
       "name": "Messages",
       "item": [
         {
-          "name": "POST .../messages \u2014 Tanya biasa",
+          "name": "POST .../messages — Tanya biasa",
           "request": {
             "method": "POST",
             "header": [
@@ -822,7 +822,7 @@
           ]
         },
         {
-          "name": "POST .../messages \u2014 Eksekusi kode Python (sandbox)",
+          "name": "POST .../messages — Eksekusi kode Python (sandbox)",
           "request": {
             "method": "POST",
             "header": [
@@ -848,7 +848,7 @@
           }
         },
         {
-          "name": "POST .../messages \u2014 Set reminder (scheduler tool)",
+          "name": "POST .../messages — Set reminder (scheduler tool)",
           "request": {
             "method": "POST",
             "header": [
@@ -874,7 +874,7 @@
           }
         },
         {
-          "name": "POST .../messages \u2014 Trigger eskalasi ke operator",
+          "name": "POST .../messages — Trigger eskalasi ke operator",
           "request": {
             "method": "POST",
             "header": [
@@ -900,7 +900,7 @@
           }
         },
         {
-          "name": "POST .../messages \u2014 Dengan metadata tambahan",
+          "name": "POST .../messages — Dengan metadata tambahan",
           "request": {
             "method": "POST",
             "header": [
@@ -931,7 +931,7 @@
       "name": "Channels (Incoming)",
       "item": [
         {
-          "name": "POST /v1/channels/incoming/:session_id \u2014 Pesan dari user biasa",
+          "name": "POST /v1/channels/incoming/:session_id — Pesan dari user biasa",
           "request": {
             "method": "POST",
             "header": [
@@ -969,7 +969,7 @@
           ]
         },
         {
-          "name": "POST /v1/channels/incoming/:session_id \u2014 Pesan dari user (dengan from_phone)",
+          "name": "POST /v1/channels/incoming/:session_id — Pesan dari user (dengan from_phone)",
           "request": {
             "method": "POST",
             "header": [
@@ -991,7 +991,7 @@
           }
         },
         {
-          "name": "POST /v1/channels/incoming/:session_id \u2014 Pesan user saat eskalasi aktif",
+          "name": "POST /v1/channels/incoming/:session_id — Pesan user saat eskalasi aktif",
           "request": {
             "method": "POST",
             "header": [
@@ -1013,7 +1013,7 @@
           }
         },
         {
-          "name": "POST /v1/channels/incoming/:session_id \u2014 Operator: balas ke customer",
+          "name": "POST /v1/channels/incoming/:session_id — Operator: balas ke customer",
           "request": {
             "method": "POST",
             "header": [
@@ -1049,7 +1049,7 @@
           ]
         },
         {
-          "name": "POST /v1/channels/incoming/:session_id \u2014 Operator: kirim ke nomor lain",
+          "name": "POST /v1/channels/incoming/:session_id — Operator: kirim ke nomor lain",
           "request": {
             "method": "POST",
             "header": [
@@ -1071,7 +1071,7 @@
           }
         },
         {
-          "name": "POST /v1/channels/incoming/:session_id \u2014 Operator: nonaktifkan eskalasi",
+          "name": "POST /v1/channels/incoming/:session_id — Operator: nonaktifkan eskalasi",
           "request": {
             "method": "POST",
             "header": [
@@ -1093,7 +1093,7 @@
           }
         },
         {
-          "name": "POST /v1/channels/wa/incoming \u2014 Webhook WhatsApp (dari wa-service)",
+          "name": "POST /v1/channels/wa/incoming — Webhook WhatsApp (dari wa-service)",
           "request": {
             "method": "POST",
             "header": [
@@ -1133,7 +1133,7 @@
       "name": "History",
       "item": [
         {
-          "name": "GET /v1/sessions/:session_id/history \u2014 Riwayat percakapan",
+          "name": "GET /v1/sessions/:session_id/history — Riwayat percakapan",
           "request": {
             "method": "GET",
             "header": [
@@ -1168,7 +1168,7 @@
       "name": "Runs",
       "item": [
         {
-          "name": "GET /v1/runs/:run_id \u2014 Detail semua tool step dalam satu run",
+          "name": "GET /v1/runs/:run_id — Detail semua tool step dalam satu run",
           "request": {
             "method": "GET",
             "header": [
@@ -1200,7 +1200,7 @@
       "name": "Memory",
       "item": [
         {
-          "name": "GET /v1/agents/:agent_id/memory \u2014 List semua memory",
+          "name": "GET /v1/agents/:agent_id/memory — List semua memory",
           "request": {
             "method": "GET",
             "header": [
@@ -1213,7 +1213,7 @@
           }
         },
         {
-          "name": "POST /v1/agents/:agent_id/memory \u2014 Simpan nama user",
+          "name": "POST /v1/agents/:agent_id/memory — Simpan nama user",
           "request": {
             "method": "POST",
             "header": [
@@ -1239,7 +1239,7 @@
           }
         },
         {
-          "name": "POST /v1/agents/:agent_id/memory \u2014 Simpan preferensi user",
+          "name": "POST /v1/agents/:agent_id/memory — Simpan preferensi user",
           "request": {
             "method": "POST",
             "header": [
@@ -1265,7 +1265,7 @@
           }
         },
         {
-          "name": "POST /v1/agents/:agent_id/memory \u2014 Simpan konteks bisnis (value JSON)",
+          "name": "POST /v1/agents/:agent_id/memory — Simpan konteks bisnis (value JSON)",
           "request": {
             "method": "POST",
             "header": [
@@ -1291,7 +1291,7 @@
           }
         },
         {
-          "name": "DELETE /v1/agents/:agent_id/memory/:key \u2014 Hapus memory entry",
+          "name": "DELETE /v1/agents/:agent_id/memory/:key — Hapus memory entry",
           "request": {
             "method": "DELETE",
             "header": [
@@ -1309,7 +1309,7 @@
       "name": "Skills",
       "item": [
         {
-          "name": "GET /v1/agents/:agent_id/skills \u2014 List semua skill",
+          "name": "GET /v1/agents/:agent_id/skills — List semua skill",
           "request": {
             "method": "GET",
             "header": [
@@ -1322,7 +1322,7 @@
           }
         },
         {
-          "name": "POST /v1/agents/:agent_id/skills \u2014 Buat skill: handle refund",
+          "name": "POST /v1/agents/:agent_id/skills — Buat skill: handle refund",
           "request": {
             "method": "POST",
             "header": [
@@ -1348,7 +1348,7 @@
           }
         },
         {
-          "name": "POST /v1/agents/:agent_id/skills \u2014 Buat skill: analisis CSV",
+          "name": "POST /v1/agents/:agent_id/skills — Buat skill: analisis CSV",
           "request": {
             "method": "POST",
             "header": [
@@ -1374,7 +1374,7 @@
           }
         },
         {
-          "name": "GET /v1/agents/:agent_id/skills/:name \u2014 Detail skill",
+          "name": "GET /v1/agents/:agent_id/skills/:name — Detail skill",
           "request": {
             "method": "GET",
             "header": [
@@ -1387,7 +1387,7 @@
           }
         },
         {
-          "name": "DELETE /v1/agents/:agent_id/skills/:name \u2014 Hapus skill",
+          "name": "DELETE /v1/agents/:agent_id/skills/:name — Hapus skill",
           "request": {
             "method": "DELETE",
             "header": [
@@ -1405,7 +1405,7 @@
       "name": "Custom Tools",
       "item": [
         {
-          "name": "GET /v1/agents/:agent_id/custom-tools \u2014 List semua custom tool",
+          "name": "GET /v1/agents/:agent_id/custom-tools — List semua custom tool",
           "request": {
             "method": "GET",
             "header": [
@@ -1418,7 +1418,7 @@
           }
         },
         {
-          "name": "POST /v1/agents/:agent_id/custom-tools \u2014 Buat tool: hitung fibonacci",
+          "name": "POST /v1/agents/:agent_id/custom-tools — Buat tool: hitung fibonacci",
           "request": {
             "method": "POST",
             "header": [
@@ -1444,7 +1444,7 @@
           }
         },
         {
-          "name": "POST /v1/agents/:agent_id/custom-tools \u2014 Buat tool: konversi suhu",
+          "name": "POST /v1/agents/:agent_id/custom-tools — Buat tool: konversi suhu",
           "request": {
             "method": "POST",
             "header": [
@@ -1470,7 +1470,7 @@
           }
         },
         {
-          "name": "POST /v1/agents/:agent_id/custom-tools \u2014 Buat tool: cek hari libur",
+          "name": "POST /v1/agents/:agent_id/custom-tools — Buat tool: cek hari libur",
           "request": {
             "method": "POST",
             "header": [
@@ -1496,7 +1496,7 @@
           }
         },
         {
-          "name": "GET /v1/agents/:agent_id/custom-tools/:name \u2014 Detail custom tool",
+          "name": "GET /v1/agents/:agent_id/custom-tools/:name — Detail custom tool",
           "request": {
             "method": "GET",
             "header": [
@@ -1509,7 +1509,7 @@
           }
         },
         {
-          "name": "DELETE /v1/agents/:agent_id/custom-tools/:name \u2014 Hapus custom tool",
+          "name": "DELETE /v1/agents/:agent_id/custom-tools/:name — Hapus custom tool",
           "request": {
             "method": "DELETE",
             "header": [
@@ -1527,7 +1527,7 @@
       "name": "Documents / RAG",
       "item": [
         {
-          "name": "POST /v1/agents/:agent_id/documents \u2014 Tambah dokumen teks",
+          "name": "POST /v1/agents/:agent_id/documents — Tambah dokumen teks",
           "request": {
             "method": "POST",
             "header": [
@@ -1543,7 +1543,7 @@
             "url": "{{base_url}}/v1/agents/{{agent_id}}/documents",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"title\": \"FAQ Produk \u2014 Managed Agent Platform\",\n  \"content\": \"Q: Apa itu Managed Agent Platform?\\nA: Platform internal untuk membuat dan menjalankan AI agent yang dapat diakses via API.\\n\\nQ: Model AI apa saja yang didukung?\\nA: Semua model via OpenRouter: Claude, GPT-4, Gemini, Llama, DeepSeek, Mistral.\\n\\nQ: Bagaimana cara eskalasi ke operator?\\nA: Agent akan otomatis memanggil tool escalate_to_human() jika tidak bisa menangani permintaan.\",\n  \"source\": \"internal/faq\",\n  \"doc_metadata\": {\n    \"category\": \"product-faq\",\n    \"language\": \"id\",\n    \"version\": \"1.0\"\n  }\n}",
+              "raw": "{\n  \"title\": \"FAQ Produk — Managed Agent Platform\",\n  \"content\": \"Q: Apa itu Managed Agent Platform?\\nA: Platform internal untuk membuat dan menjalankan AI agent yang dapat diakses via API.\\n\\nQ: Model AI apa saja yang didukung?\\nA: Semua model via OpenRouter: Claude, GPT-4, Gemini, Llama, DeepSeek, Mistral.\\n\\nQ: Bagaimana cara eskalasi ke operator?\\nA: Agent akan otomatis memanggil tool escalate_to_human() jika tidak bisa menangani permintaan.\",\n  \"source\": \"internal/faq\",\n  \"doc_metadata\": {\n    \"category\": \"product-faq\",\n    \"language\": \"id\",\n    \"version\": \"1.0\"\n  }\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -1567,7 +1567,7 @@
           ]
         },
         {
-          "name": "POST /v1/agents/:agent_id/documents \u2014 Tambah SOP internal",
+          "name": "POST /v1/agents/:agent_id/documents — Tambah SOP internal",
           "request": {
             "method": "POST",
             "header": [
@@ -1593,7 +1593,7 @@
           }
         },
         {
-          "name": "GET /v1/agents/:agent_id/documents \u2014 List semua dokumen",
+          "name": "GET /v1/agents/:agent_id/documents — List semua dokumen",
           "request": {
             "method": "GET",
             "header": [
@@ -1627,7 +1627,7 @@
           }
         },
         {
-          "name": "GET /v1/agents/:agent_id/documents/:doc_id \u2014 Detail dokumen",
+          "name": "GET /v1/agents/:agent_id/documents/:doc_id — Detail dokumen",
           "request": {
             "method": "GET",
             "header": [
@@ -1640,7 +1640,7 @@
           }
         },
         {
-          "name": "PATCH /v1/agents/:agent_id/documents/:doc_id \u2014 Update dokumen",
+          "name": "PATCH /v1/agents/:agent_id/documents/:doc_id — Update dokumen",
           "request": {
             "method": "PATCH",
             "header": [
@@ -1656,7 +1656,7 @@
             "url": "{{base_url}}/v1/agents/{{agent_id}}/documents/{{doc_id}}",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"title\": \"FAQ Produk \u2014 Versi Terbaru\",\n  \"content\": \"Konten yang sudah diperbarui dengan informasi terkini.\",\n  \"source\": \"internal/faq-v2\",\n  \"doc_metadata\": {\n    \"category\": \"product-faq\",\n    \"version\": \"2.0\"\n  }\n}",
+              "raw": "{\n  \"title\": \"FAQ Produk — Versi Terbaru\",\n  \"content\": \"Konten yang sudah diperbarui dengan informasi terkini.\",\n  \"source\": \"internal/faq-v2\",\n  \"doc_metadata\": {\n    \"category\": \"product-faq\",\n    \"version\": \"2.0\"\n  }\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -1666,7 +1666,7 @@
           }
         },
         {
-          "name": "DELETE /v1/agents/:agent_id/documents/:doc_id \u2014 Hapus dokumen",
+          "name": "DELETE /v1/agents/:agent_id/documents/:doc_id — Hapus dokumen",
           "request": {
             "method": "DELETE",
             "header": [
@@ -1679,7 +1679,7 @@
           }
         },
         {
-          "name": "POST /v1/agents/:agent_id/documents/search \u2014 Pencarian semantik",
+          "name": "POST /v1/agents/:agent_id/documents/search — Pencarian semantik",
           "request": {
             "method": "POST",
             "header": [
@@ -1705,7 +1705,7 @@
           }
         },
         {
-          "name": "POST /v1/agents/:agent_id/documents/upload \u2014 Upload file PDF/DOCX/PPTX/TXT",
+          "name": "POST /v1/agents/:agent_id/documents/upload — Upload file PDF/DOCX/PPTX/TXT",
           "request": {
             "method": "POST",
             "header": [
@@ -1758,7 +1758,7 @@
       "name": "Models",
       "item": [
         {
-          "name": "GET /v1/models \u2014 Daftar model OpenRouter yang tersedia",
+          "name": "GET /v1/models — Daftar model OpenRouter yang tersedia",
           "request": {
             "method": "GET",
             "header": [

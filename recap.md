@@ -114,3 +114,88 @@ Added WhatsApp media understanding: images are sent as multimodal vision input, 
 
 Added markdown-to-WhatsApp conversion so agent replies display cleanly without raw markdown syntax. No further action 
   needed unless testing reveals edge cases. (disable recaps in /config
+
+Migrasi ke Deep Agents SDK (23 Apr 2026):
+
+1. Migrasi LLM executor dari LangGraph `create_react_agent` ke `deepagents.create_deep_agent`.
+   - deepagents memberi agen kemampuan planning (`write_todos`) dan virtual FS tools (`ls`, `read_file`, `write_file`, `edit_file`, `grep`) secara otomatis.
+   - Fallback ke `create_react_agent` jika deepagents tidak tersedia (try/except).
+   - Rename sandbox tools untuk menghindari konflik nama: `write_file` → `sandbox_write_file`, `read_file` → `sandbox_read_file`.
+
+2. Requirements upgrade ke langchain v1.x ekosistem:
+   - deepagents>=0.5.0, langgraph>=1.0.0, langchain>=1.0.0, langchain-openai>=1.0.0, langchain-mcp-adapters>=0.2.0
+
+3. Agent Context Block: setiap system prompt kini diawali blok metadata otomatis:
+   - Agent ID, Agent Name, Model, Active Tools, Channel, User Phone, User Role (operator/user), Session ID.
+   - Role ditentukan dari `operator_ids` list dan `escalation_config.operator_phone`.
+
+4. `operator_ids` field baru di model Agent (migration 011):
+   - List nomor WA/JID yang punya akses operator per agent.
+   - Dipakai di channels.py untuk deteksi operator di wa/incoming webhook.
+   - Coexist dengan legacy `escalation_config.operator_phone`.
+
+5. Conservative tool defaults:
+   - ON by default: memory, skills, escalation.
+   - OFF by default: sandbox, tool_creator, scheduler, http, mcp, whatsapp_media, wa_agent_manager.
+   - `send_agent_wa_qr` dipindah dari whatsapp_media ke tool group baru `wa_agent_manager` (opt-in).
+
+6. Lazy sandbox init: DockerSandbox hanya dibuat jika `tools_config.sandbox = true`.
+
+Next: jalankan `alembic upgrade head` untuk apply migration 011 (operator_ids column).
+
+Fix TURRRRRR (agent manager) + QR scan (23 Apr 2026):
+
+1. TURRRRRR tidak bisa edit agent karena http_tool.py hanya punya http_get/http_post.
+   Fix: tambah http_patch dan http_delete ke http_tool.py.
+
+2. TURRRRRR pakai sandbox bash untuk hit API dan kirim QR (harusnya pakai tools).
+   Fix: enable http: true dan wa_agent_manager: true di tools_config TURRRRRR.
+   Update instruksi TURRRRRR: wajib pakai http_patch untuk PATCH, send_agent_wa_qr untuk kirim QR.
+
+3. QR tidak bisa di-scan setelah dikirim via WhatsApp.
+   Root cause: QR di-generate 256px dengan qrcode.Medium — terlalu kecil dan rapuh setelah kompresi WA.
+   Fix: ubah ke qrcode.High, 512px di wa-service/device_manager.go dan wa-dev-service/whatsapp.go.
+   Rebuild binary diperlukan: make wa-build.
+
+Update Postman + UI-DEV setelah migrasi Deep Agents (23 Apr 2026):
+
+- Postman collection: semua agent create body diupdate — tools_config pakai defaults baru
+  (sandbox/tool_creator/scheduler OFF, memory/skills/escalation ON), tambah field `operator_ids`,
+  WA agent pakai `whatsapp_media: true`, nama request dirapikan.
+- UI-DEV/app.js: `setAgentFormDefaults()` dan `createWAAgent()` disesuaikan dengan defaults baru.
+- UI-DEV/index.html: hint text tools config diupdate mencerminkan defaults konservatif.
+- wa-dev-service/connections.json: tidak ada perubahan (data runtime).
+
+Upgrade wa-dev-service setara wa-service (23 Apr 2026):
+
+Sebelumnya wa-dev-service tidak bisa kirim reminder, terima gambar/file, atau eskalasi.
+Root cause: wa-dev memanggil /v1/agents/{id}/sessions/{id}/messages langsung — bypass semua
+logika media, session, escalation, dan scheduler di Python.
+
+Fix:
+
+1. wa-dev-service/router.go:
+   - forwardToAgent() menggantikan callAgentAPI(): POST ke /v1/channels/wa/incoming dengan
+     virtual device_id = "wadev_{agentID}". Python menangani session, media, escalation, reminder.
+   - handleConnect() disederhanakan: hanya validasi agent dan simpan {from → agentID, chatID}.
+     Session Python dibuat otomatis saat pesan pertama masuk.
+   - lookupOperatorAgent(): cek apakah pengirim adalah operator di agent manapun via endpoint baru.
+     Jika ya, auto-route tanpa perlu 'connect {agentID}' — eskalasi bisa langsung dibalas operator.
+
+2. wa-dev-service/store.go: hapus AgentKey dan SessionID (tidak diperlukan lagi).
+
+3. wa-dev-service/whatsapp.go: tambah dukungan pesan grup dengan deteksi @mention bot
+   (termasuk LID account mapping), sama persis seperti wa-service.
+
+4. app/api/channels.py:
+   - wa_incoming: agent lookup by agent.id langsung jika device_id berawalan "wadev_".
+   - GET /v1/channels/wa-dev/operator-route?phone=...: endpoint baru, dipakai Go router untuk
+     auto-route operator tanpa perlu connect command.
+
+5. app/core/wa_client.py: send_wa_message/send_wa_image/send_wa_document mendeteksi prefix
+   "wadev_" dan route ke wa-dev-service /send/* alih-alih wa-service /devices/{id}/send*.
+
+6. app/config.py: tambah wa_dev_service_url (default http://localhost:8081).
+
+Hasil: reminder, gambar/dokumen, dan eskalasi semua berfungsi di wa-dev. Cara connect tetap sama
+("connect {agentID}"). Rebuild binary diperlukan: make wa-dev-build (atau go build di wa-dev-service/).

@@ -24,6 +24,10 @@ class AgentCreate(BaseModel):
             "Contoh: {\"channel_type\": \"whatsapp\", \"operator_phone\": \"+62811xxx\"}"
         ),
     )
+    operator_ids: list[str] = Field(
+        default_factory=list,
+        description="Daftar external_user_id (nomor WA/JID) yang punya akses operator.",
+    )
     token_quota: int = Field(
         _DEFAULT_TOKEN_QUOTA,
         ge=1,
@@ -50,6 +54,7 @@ class AgentUpdate(BaseModel):
     sandbox_config: dict[str, Any] | None = None
     safety_policy: dict[str, Any] | None = None
     escalation_config: dict[str, Any] | None = None
+    operator_ids: list[str] | None = None
 
 
 class AgentResponse(BaseModel):
@@ -65,6 +70,7 @@ class AgentResponse(BaseModel):
     sandbox_config: dict[str, Any]
     safety_policy: dict[str, Any]
     escalation_config: dict[str, Any]
+    operator_ids: list[str]
     version: int
     is_deleted: bool
 

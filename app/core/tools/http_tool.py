@@ -89,7 +89,51 @@ def build_http_tools(tools_config: dict[str, Any]) -> list:
         except Exception as exc:
             return f"[error] HTTP POST failed: {exc}"
 
-    return [http_get, http_post]
+    @tool
+    async def http_patch(url: str, body: str = "{}", headers: str = "{}") -> str:
+        """Make an HTTP PATCH request with a JSON body. Use this to update/edit existing resources.
+        Args:
+          url     — full URL to request
+          body    — JSON string for the request body, e.g. '{"name": "new name"}'
+          headers — JSON string of extra request headers
+        Returns the response body (first 4000 chars) or an error message."""
+        err = _check_host(url, allowed_hosts)
+        if err:
+            return f"[error] {err}"
+        try:
+            payload = json.loads(body)
+            h_extra = json.loads(headers)
+        except json.JSONDecodeError as e:
+            return f"[error] Invalid JSON in body or headers: {e}"
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.patch(url, json=payload, headers=h_extra)
+            return _format_response(resp)
+        except Exception as exc:
+            return f"[error] HTTP PATCH failed: {exc}"
+
+    @tool
+    async def http_delete(url: str, headers: str = "{}") -> str:
+        """Make an HTTP DELETE request.
+        Args:
+          url     — full URL to request
+          headers — JSON string of extra request headers
+        Returns the response body (first 4000 chars) or an error message."""
+        err = _check_host(url, allowed_hosts)
+        if err:
+            return f"[error] {err}"
+        try:
+            h_extra = json.loads(headers)
+        except json.JSONDecodeError as e:
+            return f"[error] Invalid JSON in headers: {e}"
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.delete(url, headers=h_extra)
+            return _format_response(resp)
+        except Exception as exc:
+            return f"[error] HTTP DELETE failed: {exc}"
+
+    return [http_get, http_post, http_patch, http_delete]
 
 
 def _format_response(resp: httpx.Response) -> str:

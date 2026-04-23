@@ -242,9 +242,9 @@ function toggleLog() {
 // ═══════════════════════════════════════════════════════════════════
 function setAgentFormDefaults() {
   document.getElementById('a-tools').value = JSON.stringify({
-    memory: true, tool_creator: true, rag: true,
-    sandbox: true, skills: true, scheduler: true, escalation: true,
-    http: false, mcp: false
+    memory: true, skills: true, escalation: true,
+    sandbox: false, tool_creator: false, scheduler: false,
+    rag: false, http: false, mcp: false, wa_agent_manager: false
   }, null, 2);
   document.getElementById('a-escalation').value = JSON.stringify({
     channel_type: "whatsapp",
@@ -1067,8 +1067,9 @@ async function createWAAgent() {
     instructions: inst || 'Kamu adalah customer service yang membalas pesan WhatsApp dengan ramah.',
     channel_type: 'whatsapp',
     tools_config: {
-      memory: true, tool_creator: true, rag: true, sandbox: false,
-      skills: true, scheduler: true, escalation: true, http: false, mcp: false
+      memory: true, skills: true, escalation: true,
+      sandbox: false, tool_creator: false, scheduler: false,
+      rag: false, http: false, mcp: false
     },
     escalation_config: {},
     safety_policy: {},

@@ -48,6 +48,9 @@ class Agent(Base):
     wa_device_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     channel_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
+    # --- operator access ---
+    operator_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+
     # --- subscription / quota ---
     api_key: Mapped[str] = mapped_column(
         String(64), nullable=False, default=_generate_api_key

@@ -122,7 +122,7 @@ func (wa *WhatsAppClient) Connect() (string, error) {
 		for evt := range qrChan {
 			switch evt.Event {
 			case "code":
-				png, encErr := qrcode.Encode(evt.Code, qrcode.Medium, 256)
+				png, encErr := qrcode.Encode(evt.Code, qrcode.High, 512)
 				if encErr != nil {
 					continue
 				}
@@ -288,12 +288,13 @@ func (wa *WhatsAppClient) handleMessage(evt *events.Message) {
 		return
 	}
 	chatJID := evt.Info.Chat
+
+	// Skip broadcast and WA Status messages
 	if chatJID.Server == types.BroadcastServer || chatJID.User == "status" {
 		return
 	}
-	if chatJID.Server == types.GroupServer {
-		return
-	}
+
+	isGroup := chatJID.Server == types.GroupServer
 
 	msg := IncomingMessage{
 		From:      "+" + evt.Info.Sender.User,
@@ -301,12 +302,18 @@ func (wa *WhatsAppClient) handleMessage(evt *events.Message) {
 		Timestamp: evt.Info.Timestamp.Unix(),
 	}
 
+	var mentionedJIDs []string
+
 	switch {
 	case evt.Message.GetConversation() != "":
 		msg.Text = evt.Message.GetConversation()
 
 	case evt.Message.GetExtendedTextMessage() != nil:
-		msg.Text = evt.Message.GetExtendedTextMessage().GetText()
+		ext := evt.Message.GetExtendedTextMessage()
+		msg.Text = ext.GetText()
+		if ctx := ext.GetContextInfo(); ctx != nil {
+			mentionedJIDs = ctx.GetMentionedJID()
+		}
 
 	case evt.Message.GetImageMessage() != nil:
 		img := evt.Message.GetImageMessage()
@@ -315,8 +322,10 @@ func (wa *WhatsAppClient) handleMessage(evt *events.Message) {
 			msg.MediaData = base64.StdEncoding.EncodeToString(raw)
 			msg.MediaType = "image"
 			msg.MediaMimetype = img.GetMimetype()
-			ext := mimeToExt(img.GetMimetype(), ".jpg")
-			msg.MediaFilename = "image" + ext
+			msg.MediaFilename = "image" + mimeToExt(img.GetMimetype(), ".jpg")
+		}
+		if ctx := img.GetContextInfo(); ctx != nil {
+			mentionedJIDs = ctx.GetMentionedJID()
 		}
 		msg.Text = img.GetCaption()
 		if msg.Text == "" {
@@ -363,6 +372,50 @@ func (wa *WhatsAppClient) handleMessage(evt *events.Message) {
 		msg.Text = "[Sticker]"
 
 	default:
+		return
+	}
+
+	// Group messages: only process if the bot is explicitly @mentioned
+	if isGroup {
+		wa.mu.RLock()
+		storeID := wa.client.Store.ID
+		wa.mu.RUnlock()
+
+		if storeID == nil {
+			return
+		}
+
+		botUser := storeID.User
+		botLID := ""
+		if lidJID, err := wa.client.Store.LIDs.GetLIDForPN(context.Background(), *storeID); err == nil {
+			botLID = lidJID.User
+		}
+
+		mentioned := false
+		for _, jidStr := range mentionedJIDs {
+			parsed, err := types.ParseJID(jidStr)
+			if err != nil {
+				continue
+			}
+			if parsed.User == botUser || (botLID != "" && parsed.User == botLID) {
+				mentioned = true
+				break
+			}
+		}
+		if !mentioned {
+			log.Printf("[wa-dev] group msg from +%s ignored (bot not mentioned)", evt.Info.Sender.User)
+			return
+		}
+
+		// Strip the @mention tag from the text
+		msg.Text = strings.ReplaceAll(msg.Text, "@"+botUser, "")
+		msg.Text = strings.TrimSpace(msg.Text)
+		if msg.Text == "" && msg.MediaType == "" {
+			return
+		}
+	}
+
+	if msg.Text == "" && msg.MediaType == "" {
 		return
 	}
 

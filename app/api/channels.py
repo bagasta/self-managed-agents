@@ -39,6 +39,39 @@ logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/v1/channels", tags=["channels"])
 
 
+@router.get("/wa-dev/operator-route")
+async def wa_dev_operator_route(
+    phone: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Used by wa-dev-service: given a phone number, find which agent this phone is an operator for.
+    Returns {agent_id, agent_name} or 404 if not an operator for any agent.
+    This allows wa-dev to auto-route operator messages without requiring the operator
+    to do 'connect {agentID}' explicitly.
+    """
+    def _norm(p: str) -> str:
+        return p.lstrip("+").split("@")[0]
+
+    normalized = _norm(phone)
+    agents_result = await db.execute(
+        select(Agent).where(Agent.is_deleted.is_(False))
+    )
+    for agent in agents_result.scalars().all():
+        op_ids: list = getattr(agent, "operator_ids", None) or []
+        esc_cfg: dict = agent.escalation_config or {}
+        op_phone: str = esc_cfg.get("operator_phone", "")
+
+        all_ops = {_norm(p) for p in op_ids if p}
+        if op_phone:
+            all_ops.add(_norm(op_phone))
+
+        if normalized in all_ops:
+            return {"agent_id": str(agent.id), "agent_name": agent.name}
+
+    raise HTTPException(status_code=404, detail="Not an operator for any agent")
+
+
 class IncomingMessage(BaseModel):
     from_phone: str | None = None
     message: str
@@ -87,8 +120,15 @@ async def incoming_message(
 
     log = logger.bind(session_id=str(session_id), from_phone=from_phone)
 
-    # --- Tentukan jenis pengirim ---
-    is_operator = bool(operator_phone and from_phone and from_phone == operator_phone)
+    def _norm(p: str) -> str:
+        return p.lstrip("+").split("@")[0]
+
+    # --- Tentukan jenis pengirim: cek operator_ids + operator_phone legacy ---
+    _op_ids: list = getattr(agent, "operator_ids", None) or []
+    _norm_op_ids = {_norm(oid) for oid in _op_ids if oid}
+    if operator_phone:
+        _norm_op_ids.add(_norm(operator_phone))
+    is_operator = bool(_norm_op_ids and from_phone and _norm(from_phone) in _norm_op_ids)
 
     if is_operator:
         # Pesan dari operator → inject sebagai perintah operator ke agent
@@ -180,13 +220,27 @@ async def wa_incoming(
     """
     log = logger.bind(device_id=body.device_id, from_phone=body.from_)
 
-    # Find agent by wa_device_id
-    agent_result = await db.execute(
-        select(Agent).where(
-            Agent.wa_device_id == body.device_id,
-            Agent.is_deleted.is_(False),
+    # Find agent by wa_device_id.
+    # Virtual "wadev_{agent_id}" device IDs come from wa-dev-service — look up by agent ID directly.
+    if body.device_id.startswith("wadev_"):
+        import uuid as _uuid
+        try:
+            _agent_uuid = _uuid.UUID(body.device_id[len("wadev_"):])
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid wadev_ device_id format")
+        agent_result = await db.execute(
+            select(Agent).where(
+                Agent.id == _agent_uuid,
+                Agent.is_deleted.is_(False),
+            )
         )
-    )
+    else:
+        agent_result = await db.execute(
+            select(Agent).where(
+                Agent.wa_device_id == body.device_id,
+                Agent.is_deleted.is_(False),
+            )
+        )
     agent = agent_result.scalar_one_or_none()
     if not agent:
         log.warning("wa_incoming.agent_not_found")
@@ -203,13 +257,17 @@ async def wa_incoming(
     def _normalize_phone(p: str) -> str:
         return p.lstrip("+").split("@")[0]
 
-    # Pesan dianggap dari operator jika from_ ATAU chat_id cocok dengan operator_phone.
-    # Fallback ke chat_id diperlukan karena Go WA service kadang mengisi from_ dengan
-    # JID pengirim asli pesan yang di-quote (user), bukan nomor operator yang membalas.
+    # Kumpulkan semua ID operator: dari operator_ids (field baru) + operator_phone (legacy)
+    _operator_ids: list = getattr(agent, "operator_ids", None) or []
+    _normalized_operator_ids = {_normalize_phone(oid) for oid in _operator_ids if oid}
+    if operator_phone:
+        _normalized_operator_ids.add(_normalize_phone(operator_phone))
+
+    # Pesan dianggap dari operator jika from_ ATAU chat_id cocok dengan salah satu operator ID.
     is_operator = bool(
-        operator_phone and (
-            (_normalize_phone(from_phone) == _normalize_phone(operator_phone))
-            or (reply_target and _normalize_phone(reply_target) == _normalize_phone(operator_phone))
+        _normalized_operator_ids and (
+            (_normalize_phone(from_phone) in _normalized_operator_ids)
+            or (reply_target and _normalize_phone(reply_target) in _normalized_operator_ids)
         )
     )
 

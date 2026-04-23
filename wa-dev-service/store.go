@@ -9,8 +9,6 @@ import (
 
 type UserConnection struct {
 	AgentID     string    `json:"agent_id"`
-	AgentKey    string    `json:"agent_key"`
-	SessionID   string    `json:"session_id"`
 	ConnectedAt time.Time `json:"connected_at"`
 	ChatID      string    `json:"chat_id"`
 }

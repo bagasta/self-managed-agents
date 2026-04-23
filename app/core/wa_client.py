@@ -15,6 +15,11 @@ def _base_url() -> str:
     return get_settings().wa_service_url.rstrip("/")
 
 
+def _wa_dev_base_url() -> str:
+    from app.config import get_settings
+    return get_settings().wa_dev_service_url.rstrip("/")
+
+
 async def create_wa_device(device_id: str) -> dict:
     """Call Go service to initialise a new WhatsApp device. Returns {qr_image, status}."""
     async with httpx.AsyncClient(timeout=_WA_TIMEOUT_CREATE) as client:
@@ -44,6 +49,14 @@ async def get_wa_status(device_id: str) -> dict:
 
 async def send_wa_message(device_id: str, to: str, text: str) -> None:
     """Send a WhatsApp text message via Go service."""
+    if device_id.startswith("wadev_"):
+        async with httpx.AsyncClient(timeout=_WA_TIMEOUT_DEFAULT) as client:
+            resp = await client.post(
+                f"{_wa_dev_base_url()}/send/text",
+                json={"to": to, "text": text},
+            )
+            resp.raise_for_status()
+        return
     async with httpx.AsyncClient(timeout=_WA_TIMEOUT_DEFAULT) as client:
         resp = await client.post(
             f"{_base_url()}/devices/{device_id}/send",
@@ -60,6 +73,14 @@ async def send_wa_image(
     mimetype: str = "image/jpeg",
 ) -> None:
     """Send a WhatsApp image message via Go service. image_base64 is raw base64-encoded image bytes."""
+    if device_id.startswith("wadev_"):
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{_wa_dev_base_url()}/send/image",
+                json={"to": to, "image": image_base64, "caption": caption, "mimetype": mimetype},
+            )
+            resp.raise_for_status()
+        return
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             f"{_base_url()}/devices/{device_id}/send-image",
@@ -77,6 +98,20 @@ async def send_wa_document(
     mimetype: str = "application/octet-stream",
 ) -> None:
     """Send a WhatsApp document message via Go service. document_base64 is raw base64-encoded file bytes."""
+    if device_id.startswith("wadev_"):
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                f"{_wa_dev_base_url()}/send/document",
+                json={
+                    "to": to,
+                    "data": document_base64,
+                    "filename": filename,
+                    "caption": caption,
+                    "mimetype": mimetype,
+                },
+            )
+            resp.raise_for_status()
+        return
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.post(
             f"{_base_url()}/devices/{device_id}/send-document",

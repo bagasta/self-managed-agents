@@ -1,6 +1,6 @@
 """
-Agent runner: wires OpenRouter LLM + tools + memory + RAG, runs the agent,
-persists all steps to DB.
+Agent runner: wires OpenRouter LLM + tools + memory + RAG, runs the agent via
+Deep Agents SDK, persists all steps to DB.
 
 Memory model
 ------------
@@ -16,8 +16,11 @@ RAG context Top-3 documents (cosine-similar to the user query) fetched
             from the vector store and injected into the system prompt.
             Agent does NOT need to call a tool — context is pre-injected.
 
-Tool selection  Driven by tools_config. Default: sandbox/memory/skills/
-                tool_creator ON; http/rag OFF (opt-in).
+Tool defaults (conservative)
+-----------------------------
+ON  by default : memory, skills, escalation
+OFF by default : sandbox, tool_creator, scheduler, http, mcp,
+                 whatsapp_media, wa_agent_manager
 """
 from __future__ import annotations
 
@@ -32,7 +35,6 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMe
 from langchain_core.tools import tool, StructuredTool
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field, create_model
-from langgraph.prebuilt import create_react_agent
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -59,7 +61,7 @@ settings = get_settings()
 # tools_config helpers
 # ---------------------------------------------------------------------------
 
-def _is_enabled(tools_config: dict[str, Any], key: str, default: bool = True) -> bool:
+def _is_enabled(tools_config: dict[str, Any], key: str, default: bool = False) -> bool:
     cfg = tools_config.get(key)
     if cfg is None:
         return default
@@ -70,6 +72,10 @@ def _is_enabled(tools_config: dict[str, Any], key: str, default: bool = True) ->
     return default
 
 
+def _normalize_phone(p: str) -> str:
+    return p.lstrip("+").split("@")[0]
+
+
 # ---------------------------------------------------------------------------
 # Sandbox tools
 # ---------------------------------------------------------------------------
@@ -77,31 +83,32 @@ def _is_enabled(tools_config: dict[str, Any], key: str, default: bool = True) ->
 def build_sandbox_tools(sandbox: DockerSandbox) -> list:
     @tool
     def bash(cmd: str) -> str:
-        """Execute a bash command in the isolated sandbox workspace. Returns stdout+stderr."""
+        """Execute a bash command in the isolated Docker sandbox workspace. Returns stdout+stderr."""
         return sandbox.bash(cmd)
 
     @tool
-    def write_file(path: str, content: str) -> str:
-        """Write text content to a file at the given path inside the sandbox workspace."""
+    def sandbox_write_file(path: str, content: str) -> str:
+        """Write text content to a file at the given path inside the Docker sandbox workspace (/workspace/).
+        Use this (not write_file) when you want to persist a file in the sandbox."""
         return sandbox.write_file(path, content)
 
     @tool
-    def write_binary_file(path: str, base64_content: str) -> str:
-        """Decode a base64 string and write it as a binary file in the sandbox workspace.
-        Useful for saving images or other binary data. Args: path (e.g. 'output.png'), base64_content (raw base64 string without data URI prefix)."""
+    def sandbox_write_binary_file(path: str, base64_content: str) -> str:
+        """Decode a base64 string and write it as a binary file in the Docker sandbox workspace (/workspace/).
+        Args: path (e.g. 'output.png'), base64_content (raw base64 string without data URI prefix)."""
         return sandbox.write_binary_file(path, base64_content)
 
     @tool
-    def read_file(path: str) -> str:
-        """Read and return the full text content of a file in the sandbox workspace."""
+    def sandbox_read_file(path: str) -> str:
+        """Read and return the full text content of a file in the Docker sandbox workspace (/workspace/)."""
         return sandbox.read_file(path)
 
     @tool
     def list_files(directory: str = ".") -> str:
-        """List all files under a directory in the sandbox workspace."""
+        """List all files under a directory in the Docker sandbox workspace (/workspace/)."""
         return sandbox.list_files(directory)
 
-    return [bash, write_file, write_binary_file, read_file, list_files]
+    return [bash, sandbox_write_file, sandbox_write_binary_file, sandbox_read_file, list_files]
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +268,6 @@ def build_tool_creator_tools(agent_id: uuid.UUID, db: AsyncSession, sandbox: Doc
             return f"[error] No custom tool named '{name}'. Available: {available}"
         ct = tool_map[name]
 
-        # Show required params if args is empty and the tool needs them
         try:
             args = json.loads(args_json)
         except json.JSONDecodeError as e:
@@ -276,7 +282,7 @@ def build_tool_creator_tools(agent_id: uuid.UUID, db: AsyncSession, sandbox: Doc
                     f"Pass them as args_json, e.g. args_json='{example}'"
                 )
 
-        args_json_str = json.dumps(json.dumps(args))  # double-encode so it's a safe string literal
+        args_json_str = json.dumps(json.dumps(args))
         runner_code = f"""{ct.code}
 
 if __name__ == "__main__":
@@ -315,7 +321,6 @@ def _make_custom_tool_runner(ct_name: str, ct_code: str, ct_desc: str, sandbox: 
     """Build a StructuredTool with the real parameters from the custom tool function."""
     params = _extract_ast_params(ct_code, ct_name)
 
-    # Build runner code template
     def _build_runner_code(kwargs: dict) -> str:
         args_json_str = json.dumps(json.dumps(kwargs))
         return f"""{ct_code}
@@ -352,7 +357,6 @@ if __name__ == "__main__":
             args_schema=SchemaModel,
         )
 
-    # Fallback for zero-parameter tools
     return StructuredTool.from_function(
         func=lambda: _execute(),
         name=ct_name,
@@ -361,14 +365,13 @@ if __name__ == "__main__":
 
 
 # ---------------------------------------------------------------------------
-# WhatsApp media tools
+# WhatsApp media tools (image + document only; no QR)
 # ---------------------------------------------------------------------------
 
 def build_whatsapp_media_tools(session: Any, sandbox: DockerSandbox | None) -> list:
     """
-    Tools untuk mengirim gambar/media ke WhatsApp.
-    sandbox=None: hanya send_agent_wa_qr yang tersedia (tidak butuh sandbox).
-    sandbox=DockerSandbox: semua tools tersedia termasuk send_whatsapp_image & send_whatsapp_document.
+    Tools untuk mengirim gambar dan dokumen ke WhatsApp.
+    send_agent_wa_qr dipisah ke build_wa_agent_manager_tools (opt-in via wa_agent_manager).
     """
     _raw_cfg = session.channel_config
     channel_cfg: dict = _raw_cfg if isinstance(_raw_cfg, dict) else {}
@@ -389,8 +392,7 @@ def build_whatsapp_media_tools(session: Any, sandbox: DockerSandbox | None) -> l
             image_path_or_base64: Path file di /workspace (misal '/workspace/chart.png') ATAU
                                   string base64 langsung (tanpa prefix 'data:image/...')
             caption             : Teks caption yang menyertai gambar (opsional)
-            phone               : Nomor tujuan WA atau JID (misal '+62812...@s.whatsapp.net').
-                                  Biarkan kosong untuk kirim ke user saat ini.
+            phone               : Nomor tujuan WA atau JID. Biarkan kosong untuk kirim ke user saat ini.
             mimetype            : MIME type gambar, default 'image/jpeg'
         """
         target = phone or default_target
@@ -399,18 +401,15 @@ def build_whatsapp_media_tools(session: Any, sandbox: DockerSandbox | None) -> l
         if not device_id:
             return "[error] Tidak ada device_id WhatsApp pada session ini"
 
-        # Tentukan apakah input adalah path file atau base64 langsung
         if image_path_or_base64.startswith("/workspace/") or not image_path_or_base64.startswith("/"):
             if sandbox is None:
                 return "[error] Tool send_whatsapp_image membutuhkan sandbox aktif untuk membaca file. Gunakan base64 langsung atau aktifkan sandbox."
-            # Path file di workspace — baca via bash base64
             path = image_path_or_base64 if image_path_or_base64.startswith("/workspace/") else f"/workspace/{image_path_or_base64}"
             b64_output = sandbox.bash(f"base64 -w 0 {path} 2>&1")
             if b64_output.startswith("["):
                 return f"[error] Gagal membaca file: {b64_output}"
             image_b64 = b64_output.strip()
         else:
-            # Base64 langsung
             image_b64 = image_path_or_base64.strip()
 
         try:
@@ -419,6 +418,72 @@ def build_whatsapp_media_tools(session: Any, sandbox: DockerSandbox | None) -> l
             return f"[IMAGE_SENT] Gambar dikirim ke {target}" + (f" dengan caption: {caption}" if caption else "")
         except Exception as exc:
             return f"[error] Gagal kirim gambar: {exc}"
+
+    @tool
+    async def send_whatsapp_document(
+        file_path_or_base64: str,
+        filename: str = "file",
+        caption: str = "",
+        phone: str = "",
+        mimetype: str = "",
+    ) -> str:
+        """
+        Kirim dokumen/file ke WhatsApp (PDF, DOCX, XLSX, ZIP, dll).
+
+        Args:
+            file_path_or_base64: Path file di /workspace ATAU string base64 langsung
+            filename            : Nama file yang akan ditampilkan di WhatsApp
+            caption             : Teks caption yang menyertai dokumen (opsional)
+            phone               : Nomor tujuan WA atau JID. Biarkan kosong untuk kirim ke user saat ini.
+            mimetype            : MIME type file. Jika kosong, otomatis ditentukan dari ekstensi filename.
+        """
+        target = phone or default_target
+        if not target:
+            return "[error] Tidak ada target nomor WhatsApp — set phone atau pastikan session punya user_phone"
+        if not device_id:
+            return "[error] Tidak ada device_id WhatsApp pada session ini"
+
+        if not mimetype and filename:
+            import mimetypes
+            guessed, _ = mimetypes.guess_type(filename)
+            mimetype = guessed or "application/octet-stream"
+        elif not mimetype:
+            mimetype = "application/octet-stream"
+
+        if file_path_or_base64.startswith("/workspace/") or (not file_path_or_base64.startswith("/") and len(file_path_or_base64) < 500):
+            if sandbox is None:
+                return "[error] Tool send_whatsapp_document membutuhkan sandbox aktif untuk membaca file."
+            path = file_path_or_base64 if file_path_or_base64.startswith("/workspace/") else f"/workspace/{file_path_or_base64}"
+            b64_output = sandbox.bash(f"base64 -w 0 {path} 2>&1")
+            if b64_output.startswith("[") or "No such file" in b64_output:
+                return f"[error] Gagal membaca file: {b64_output}"
+            doc_b64 = b64_output.strip()
+            if not filename or filename == "file":
+                import os as _os
+                filename = _os.path.basename(path)
+        else:
+            doc_b64 = file_path_or_base64.strip()
+
+        try:
+            from app.core.wa_client import send_wa_document
+            await send_wa_document(device_id, target, doc_b64, filename, caption, mimetype)
+            return f"[DOCUMENT_SENT] Dokumen '{filename}' dikirim ke {target}" + (f" dengan caption: {caption}" if caption else "")
+        except Exception as exc:
+            return f"[error] Gagal kirim dokumen: {exc}"
+
+    return [send_whatsapp_image, send_whatsapp_document]
+
+
+# ---------------------------------------------------------------------------
+# WA Agent Manager tool (opt-in: tools_config.wa_agent_manager = true)
+# ---------------------------------------------------------------------------
+
+def build_wa_agent_manager_tools(session: Any) -> list:
+    """Tool send_agent_wa_qr — hanya untuk agent yang perlu mengelola agent lain (e.g. Arthur)."""
+    _raw_cfg = session.channel_config
+    channel_cfg: dict = _raw_cfg if isinstance(_raw_cfg, dict) else {}
+    device_id: str = channel_cfg.get("device_id", "")
+    default_target: str = channel_cfg.get("user_phone", "")
 
     @tool
     async def send_agent_wa_qr(
@@ -431,13 +496,7 @@ def build_whatsapp_media_tools(session: Any, sandbox: DockerSandbox | None) -> l
 
         Gunakan tool ini SETIAP KALI perlu mengirim QR WhatsApp — baik untuk agent baru
         maupun saat user minta QR baru / QR refresh. Tool ini selalu menggunakan
-        wa_device_id yang tersimpan di DB untuk agent tersebut, sehingga tidak akan
-        membuat device orphan.
-
-        Jika QR tidak tersedia (device disconnected / logged out), tool ini otomatis
-        re-init device dan generate QR baru.
-
-        PENTING: Gunakan `agent_id` (UUID agent di platform ini), BUKAN wa_device_id.
+        wa_device_id yang tersimpan di DB untuk agent tersebut.
 
         Args:
             agent_id : UUID agent yang QR-nya ingin dikirim (dari response saat agent dibuat)
@@ -456,7 +515,6 @@ def build_whatsapp_media_tools(session: Any, sandbox: DockerSandbox | None) -> l
         from sqlalchemy import select as _select
         import uuid as _uuid
 
-        # Lookup wa_device_id dari DB menggunakan agent_id
         try:
             agent_uuid = _uuid.UUID(agent_id)
         except ValueError:
@@ -472,12 +530,11 @@ def build_whatsapp_media_tools(session: Any, sandbox: DockerSandbox | None) -> l
         if not agent_row:
             return f"[error] Agent '{agent_id}' tidak ditemukan"
         if not agent_row.wa_device_id:
-            return f"[error] Agent '{agent_id}' tidak memiliki WhatsApp device — pastikan agent dibuat dengan channel_type='whatsapp'"
+            return f"[error] Agent '{agent_id}' tidak memiliki WhatsApp device"
 
         wa_dev_id: str = agent_row.wa_device_id
 
         try:
-            # Coba ambil QR yang sedang aktif
             try:
                 resp = await get_wa_qr(wa_dev_id)
             except Exception:
@@ -489,7 +546,6 @@ def build_whatsapp_media_tools(session: Any, sandbox: DockerSandbox | None) -> l
             if qr_status == "connected":
                 return f"[INFO] Agent '{agent_id}' sudah terhubung ke WhatsApp — tidak perlu scan QR lagi."
 
-            # QR tidak tersedia → re-init device (handle logout / disconnected)
             if not qr_b64:
                 resp = await create_wa_device(wa_dev_id)
                 qr_status = resp.get("status", "")
@@ -515,66 +571,11 @@ def build_whatsapp_media_tools(session: Any, sandbox: DockerSandbox | None) -> l
         except Exception as exc:
             return f"[error] Gagal mengirim QR: {exc}"
 
-    @tool
-    async def send_whatsapp_document(
-        file_path_or_base64: str,
-        filename: str = "file",
-        caption: str = "",
-        phone: str = "",
-        mimetype: str = "",
-    ) -> str:
-        """
-        Kirim dokumen/file ke WhatsApp (PDF, DOCX, XLSX, ZIP, dll).
-
-        Args:
-            file_path_or_base64: Path file di /workspace (misal '/workspace/laporan.pdf') ATAU
-                                  string base64 langsung dari file tersebut
-            filename            : Nama file yang akan ditampilkan di WhatsApp (misal 'laporan.pdf')
-            caption             : Teks caption yang menyertai dokumen (opsional)
-            phone               : Nomor tujuan WA atau JID. Biarkan kosong untuk kirim ke user saat ini.
-            mimetype            : MIME type file. Jika kosong, otomatis ditentukan dari ekstensi filename.
-        """
-        target = phone or default_target
-        if not target:
-            return "[error] Tidak ada target nomor WhatsApp — set phone atau pastikan session punya user_phone"
-        if not device_id:
-            return "[error] Tidak ada device_id WhatsApp pada session ini"
-
-        # Auto-detect mimetype dari ekstensi jika tidak disediakan
-        if not mimetype and filename:
-            import mimetypes
-            guessed, _ = mimetypes.guess_type(filename)
-            mimetype = guessed or "application/octet-stream"
-        elif not mimetype:
-            mimetype = "application/octet-stream"
-
-        # Tentukan apakah input adalah path file atau base64 langsung
-        if file_path_or_base64.startswith("/workspace/") or (not file_path_or_base64.startswith("/") and len(file_path_or_base64) < 500):
-            if sandbox is None:
-                return "[error] Tool send_whatsapp_document membutuhkan sandbox aktif untuk membaca file."
-            path = file_path_or_base64 if file_path_or_base64.startswith("/workspace/") else f"/workspace/{file_path_or_base64}"
-            b64_output = sandbox.bash(f"base64 -w 0 {path} 2>&1")
-            if b64_output.startswith("[") or "No such file" in b64_output:
-                return f"[error] Gagal membaca file: {b64_output}"
-            doc_b64 = b64_output.strip()
-            if not filename or filename == "file":
-                import os as _os
-                filename = _os.path.basename(path)
-        else:
-            doc_b64 = file_path_or_base64.strip()
-
-        try:
-            from app.core.wa_client import send_wa_document
-            await send_wa_document(device_id, target, doc_b64, filename, caption, mimetype)
-            return f"[DOCUMENT_SENT] Dokumen '{filename}' dikirim ke {target}" + (f" dengan caption: {caption}" if caption else "")
-        except Exception as exc:
-            return f"[error] Gagal kirim dokumen: {exc}"
-
-    return [send_whatsapp_image, send_agent_wa_qr, send_whatsapp_document]
+    return [send_agent_wa_qr]
 
 
 # ---------------------------------------------------------------------------
-# HTTP tools (from http_tool.py module)
+# HTTP tools
 # ---------------------------------------------------------------------------
 
 def build_http_tools(tools_config: dict[str, Any]) -> list:
@@ -591,14 +592,7 @@ async def _load_history(
     db: AsyncSession,
     max_turns: int | None = None,
 ) -> list[Message]:
-    """
-    Load conversation history ordered chronologically.
-    If max_turns is given, load only the last max_turns user+agent pairs
-    (tool messages are excluded from the count but still omitted by
-    _db_messages_to_lc — we don't need them here).
-    """
     if max_turns is not None:
-        # Subquery: get IDs of last (max_turns * 2) user/agent messages DESC
         sub = (
             select(Message.id)
             .where(
@@ -625,7 +619,6 @@ async def _load_history(
 
 
 async def _count_user_messages(session_id: uuid.UUID, db: AsyncSession) -> int:
-    """Total number of user messages in this session (for LTM trigger)."""
     result = await db.execute(
         select(func.count()).where(
             Message.session_id == session_id,
@@ -636,7 +629,6 @@ async def _count_user_messages(session_id: uuid.UUID, db: AsyncSession) -> int:
 
 
 def _db_messages_to_lc(db_messages: list[Message]) -> list[BaseMessage]:
-    """Convert ORM message rows to LangChain message objects (user/agent only)."""
     result: list[BaseMessage] = []
     for msg in db_messages:
         if msg.role == "user" and msg.content:
@@ -657,11 +649,6 @@ async def _build_rag_context(
     tools_config: dict[str, Any],
     log: Any,
 ) -> str:
-    """
-    Embed user_message, fetch top-3 similar documents, return a formatted
-    markdown block ready to inject into the system prompt.
-    Returns "" if RAG is disabled, no documents match, or any error occurs.
-    """
     raw = tools_config.get("rag", {})
     cfg: dict[str, Any] = raw if isinstance(raw, dict) else {}
     max_results: int = int(cfg.get("max_results", 3))
@@ -676,7 +663,6 @@ async def _build_rag_context(
         query_embedding = await embed_text(user_message)
         docs = await search_documents_vector(agent_id, query_embedding, db, max_results)
 
-        # Fallback to keyword search if vector search returns nothing
         if not docs:
             docs = await search_documents_keyword(agent_id, user_message, db, max_results)
 
@@ -703,6 +689,52 @@ async def _build_rag_context(
     except Exception as exc:
         log.warning("agent_run.rag_context_failed", error=str(exc))
         return ""
+
+
+# ---------------------------------------------------------------------------
+# Agent Context Block builder (PRD2 §3.3 + §3.4)
+# ---------------------------------------------------------------------------
+
+def _build_agent_context_block(
+    agent_model: Any,
+    session: Session,
+    active_groups: list[str],
+    custom_tools_db: list,
+) -> str:
+    agent_id = session.agent_id
+    _raw_cfg = session.channel_config
+    _ch_cfg = _raw_cfg if isinstance(_raw_cfg, dict) else {}
+    user_phone = _ch_cfg.get("user_phone") or getattr(session, "external_user_id", None) or ""
+    channel_type = getattr(session, "channel_type", None) or "api"
+
+    # Operator awareness: check operator_ids list on agent
+    operator_ids: list = getattr(agent_model, "operator_ids", None) or []
+    if isinstance(operator_ids, list) and user_phone:
+        norm_user = _normalize_phone(user_phone)
+        is_operator = any(_normalize_phone(oid) == norm_user for oid in operator_ids)
+    else:
+        is_operator = False
+    user_role = "OPERATOR" if is_operator else "user"
+
+    lines = [
+        "## Platform Context",
+        f"- Agent ID: {agent_id}",
+        f"- Agent Name: {agent_model.name}",
+        f"- Model: {agent_model.model}",
+        f"- Active Tools: {', '.join(active_groups) if active_groups else 'none'}",
+    ]
+
+    if custom_tools_db:
+        ct_lines = [f"  - {ct.name}: {ct.description}" for ct in custom_tools_db]
+        lines.append("- Custom Tools:\n" + "\n".join(ct_lines))
+
+    lines.append(f"- Channel: {channel_type}")
+    if user_phone:
+        lines.append(f"- Current User Phone: {user_phone}")
+    lines.append(f"- Current User Role: {user_role}")
+    lines.append(f"- Session ID: {session.id}")
+
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -734,7 +766,7 @@ async def run_agent(
     )
     log.info("agent_run.start")
 
-    # --- LLM ---
+    # --- LLM (kept as ChatOpenAI with OpenRouter) ---
     llm = ChatOpenAI(
         model=agent_model.model,
         api_key=settings.openrouter_api_key,
@@ -743,46 +775,52 @@ async def run_agent(
         temperature=temperature,
     )
 
-    # --- Sandbox ---
-    sandbox = DockerSandbox(session.id)
+    # --- Sandbox (lazy init: only if sandbox is enabled) ---
+    sandbox: DockerSandbox | None = None
+    if _is_enabled(tools_config, "sandbox", default=False):
+        sandbox = DockerSandbox(session.id)
 
     # --- Tools ---
-    # Default ON: sandbox, memory, skills, tool_creator, rag, scheduler, escalation
-    # Default OFF: http, mcp
+    # Conservative defaults: only memory, skills, escalation ON by default.
+    # sandbox, tool_creator, scheduler → opt-in (default=False).
     tools: list = []
     active_groups: list[str] = []
+    saved_custom_tools: list = []
 
-    if _is_enabled(tools_config, "sandbox"):
+    if sandbox is not None:
         tools.extend(build_sandbox_tools(sandbox))
         active_groups.append("sandbox")
 
     _memory_scope = getattr(session, "external_user_id", None)
-    if _is_enabled(tools_config, "memory"):
+    if _is_enabled(tools_config, "memory", default=True):
         tools.extend(build_memory_tools(agent_id, db, scope=_memory_scope))
         active_groups.append("memory")
 
-    if _is_enabled(tools_config, "skills"):
+    if _is_enabled(tools_config, "skills", default=True):
         tools.extend(build_skill_tools(agent_id, db))
         active_groups.append("skills")
 
-    if _is_enabled(tools_config, "tool_creator"):
-        tools.extend(build_tool_creator_tools(agent_id, db, sandbox))
-        saved_custom_tools = await list_custom_tools(agent_id, db)
-        tools.extend(build_loaded_custom_tools(saved_custom_tools, sandbox))
-        active_groups.append("tool_creator")
+    if _is_enabled(tools_config, "tool_creator", default=False):
+        if sandbox is None:
+            log.warning("agent_run.tool_creator_requires_sandbox")
+        else:
+            tools.extend(build_tool_creator_tools(agent_id, db, sandbox))
+            saved_custom_tools = await list_custom_tools(agent_id, db)
+            tools.extend(build_loaded_custom_tools(saved_custom_tools, sandbox))
+            active_groups.append("tool_creator")
 
-    if _is_enabled(tools_config, "scheduler"):
+    if _is_enabled(tools_config, "scheduler", default=False):
         from app.core.tools.scheduler_tool import build_scheduler_tools
         tools.extend(build_scheduler_tools(session.id, agent_id, db))
         active_groups.append("scheduler")
 
-    if _is_enabled(tools_config, "escalation"):
+    if _is_enabled(tools_config, "escalation", default=True):
         from app.core.tools.escalation_tool import build_escalation_tools
         _raw_cfg = session.channel_config
         _channel_cfg = _raw_cfg if isinstance(_raw_cfg, dict) else {}
         _user_jid = (
-            escalation_user_jid                          # operator session: target = escalated user
-            or _channel_cfg.get("user_phone")            # user session: own channel
+            escalation_user_jid
+            or _channel_cfg.get("user_phone")
             or getattr(session, "external_user_id", None)
         )
         tools.extend(build_escalation_tools(session.id, agent_id, db, user_jid=_user_jid))
@@ -792,19 +830,22 @@ async def run_agent(
         tools.extend(build_http_tools(tools_config))
         active_groups.append("http")
 
-    # WhatsApp media tools: aktif otomatis jika session channel adalah whatsapp.
-    # send_agent_wa_qr tidak butuh sandbox, jadi selalu diaktifkan untuk WA session.
-    # send_whatsapp_image & send_whatsapp_document butuh sandbox untuk baca file workspace.
+    # WhatsApp media (image + document): opt-in, default ON for WA channel
     if getattr(session, "channel_type", None) == "whatsapp":
-        sandbox_on = _is_enabled(tools_config, "sandbox")
-        tools.extend(build_whatsapp_media_tools(session, sandbox if sandbox_on else None))
-        active_groups.append("whatsapp_media")
+        if _is_enabled(tools_config, "whatsapp_media", default=True):
+            tools.extend(build_whatsapp_media_tools(session, sandbox))
+            active_groups.append("whatsapp_media")
+
+        # send_agent_wa_qr: opt-in only, for agent-manager agents (e.g. Arthur)
+        if _is_enabled(tools_config, "wa_agent_manager", default=False):
+            tools.extend(build_wa_agent_manager_tools(session))
+            active_groups.append("wa_agent_manager")
 
     log.debug("agent_run.tools_ready (pre-mcp)", groups=active_groups, count=len(tools))
 
     # --- RAG context (auto-injected, not a tool) ---
     rag_context = ""
-    if _is_enabled(tools_config, "rag"):
+    if _is_enabled(tools_config, "rag", default=False):
         rag_context = await _build_rag_context(agent_id, user_message, db, tools_config, log)
 
     # --- Short-term memory: load last N turns ---
@@ -814,13 +855,19 @@ async def run_agent(
     prior_messages = _db_messages_to_lc(history_rows)
     log.debug("agent_run.history_loaded", turns=len(prior_messages) // 2)
 
-    # --- Detect message context: operator command vs escalation mode ---
+    # --- Detect message context ---
     is_operator_message = user_message.startswith("[OPERATOR] ")
 
-    # --- System prompt ---
-    system_prompt = agent_model.instructions or "You are a helpful assistant."
+    # --- Agent Context Block (PRD2 §3.3 + §3.4) ---
+    context_block = _build_agent_context_block(
+        agent_model, session, active_groups, saved_custom_tools
+    )
 
-    # 1. Long-term memories (scoped per phone number to prevent cross-user leakage)
+    # --- System prompt ---
+    base_instructions = agent_model.instructions or "You are a helpful assistant."
+    system_prompt = f"{context_block}\n\n{base_instructions}"
+
+    # 1. Long-term memories
     memory_block = await build_memory_context(agent_id, db, scope=_memory_scope)
     if memory_block:
         system_prompt += f"\n\n{memory_block}"
@@ -829,7 +876,7 @@ async def run_agent(
     if agent_model.safety_policy:
         system_prompt += f"\n\n## Safety Policy\n{json.dumps(agent_model.safety_policy, indent=2)}"
 
-    # 3. RAG context (top-3 docs most relevant to this query)
+    # 3. RAG context
     if rag_context:
         system_prompt += f"\n\n{rag_context}"
 
@@ -837,29 +884,23 @@ async def run_agent(
     is_whatsapp = getattr(session, "channel_type", None) == "whatsapp"
 
     if is_whatsapp and not is_operator_message and not escalation_user_jid:
-        # Untuk channel WhatsApp: agent harus selalu reply langsung dengan teks.
-        # reply_to_user / send_to_number hanya untuk perintah operator.
         system_prompt += (
             "\n\n## WhatsApp Channel\n"
             "Balas user LANGSUNG dengan teks biasa sebagai output akhirmu. "
             "JANGAN gunakan tool `reply_to_user` untuk menjawab user secara normal — cukup tulis jawabanmu. "
             "Tool `reply_to_user` dan `send_to_number` HANYA dipakai saat menerima perintah dari OPERATOR.\n\n"
-            "### Kirim Gambar / QR ke User\n"
-            "Jika kamu perlu mengirim gambar atau QR code ke user (misalnya setelah membuat agent baru dan perlu "
-            "user scan QR WhatsApp), kamu WAJIB memanggil tool yang sesuai:\n"
-            "- `send_agent_wa_qr(agent_id='<UUID agent>')` — untuk kirim QR WhatsApp dari sebuah agent.\n"
+            "### Kirim Gambar ke User\n"
+            "Jika kamu perlu mengirim gambar ke user, panggil tool yang sesuai:\n"
             "- `send_whatsapp_image(image_path_or_base64='...')` — untuk kirim gambar/chart dari workspace.\n"
             "JANGAN hanya mendeskripsikan gambar dalam teks — panggil tool-nya agar gambar benar-benar terkirim.\n\n"
             "### Setelah memanggil `escalate_to_human`:\n"
             "- Tool tersebut SUDAH mengirim notifikasi ke operator secara otomatis. "
             "JANGAN tulis atau kirim pesan apapun ke operator.\n"
-            "- Output akhirmu adalah pesan singkat untuk USER (bukan operator): "
+            "- Output akhirmu adalah pesan singkat untuk USER: "
             "beritahu user bahwa pertanyaannya sedang diteruskan ke tim dan akan segera dibalas.\n"
-            "- JANGAN minta info tambahan ke operator, JANGAN mention nomor/JID apapun."
         )
 
     if escalation_user_jid:
-        # Sesi OPERATOR: agent menerima instruksi operator dan langsung kirim ke user
         ctx_block = ""
         if escalation_context:
             ctx_block = f"\n\n### Pesan terakhir dari user yang dieskalasi:\n{escalation_context}"
@@ -870,14 +911,13 @@ async def run_agent(
             f"{ctx_block}\n\n"
             "### 🚨 ATURAN PALING KRITIS: DRAFT DULU, JANGAN LANGSUNG KIRIM 🚨\n"
             "- Apabila operator memberikan instruksi/jawaban untuk diteruskan ke customer, KAMU DILARANG KERAS langsung memanggil tool `reply_to_user`.\n"
-            "- Kamu WAJIB menyusun *draft* pesan yang rapi & sopan (perbaiki ejaan), menampilkannya kepada operator sebagai pesan biasa, lalu diakhiri dengan pertanyaan:\n"
+            "- Kamu WAJIB menyusun *draft* pesan yang rapi & sopan, menampilkannya kepada operator, lalu diakhiri dengan:\n"
             "  \"Sudah OK? Ketik 'kirim' untuk meneruskannya ke customer.\"\n"
-            "- SETELAH operator membalas dengan 'kirim', 'ya', atau 'ok', BARULAH kamu diizinkan memanggil tool `reply_to_user(message)` membawa pesan draft tadi.\n"
-            "- Balas operator dengan singkat setelah terkirim: \"Terkirim ✓\"\n"
-            "Pelanggaran terhadap aturan ini (mengirim langsung tanpa konfirmasi) adalah kesalahan fatal!\n"
+            "- SETELAH operator membalas dengan 'kirim', 'ya', atau 'ok', BARULAH kamu diizinkan memanggil tool `reply_to_user(message)`.\n"
+            "- Balas operator singkat setelah terkirim: \"Terkirim ✓\"\n"
+            "Pelanggaran terhadap aturan ini adalah kesalahan fatal!\n"
         )
     elif is_operator_message:
-        # Legacy: operator command via [OPERATOR] prefix di session user
         _raw_cfg = session.channel_config
         _ch_cfg = _raw_cfg if isinstance(_raw_cfg, dict) else {}
         user_wa_jid = _ch_cfg.get("user_phone") or getattr(session, "external_user_id", None) or "unknown"
@@ -887,12 +927,11 @@ async def run_agent(
             "Pesan berikut adalah PERINTAH dari human operator.\n\n"
             "### INSTRUKSI WAJIB\n"
             "- Alur DRAFT -> KONFIRMASI -> KIRIM:\n"
-            "  1. Agent menyusun draft rapi dari pesanan operator (JANGAN tambah konten).\n"
+            "  1. Agent menyusun draft rapi dari pesanan operator.\n"
             "  2. Tampilkan draft + tanya: \"Sudah OK? Ketik 'kirim'...\"\n"
-            "  3. JANGAN panggil `reply_to_user` atau kirim ke user sebelum dikonfirmasi operator.\n"
-            "- Setelah operator konfirmasi (contoh: \"ok\", \"kirim\"), panggil tool `reply_to_user(message)`.\n"
+            "  3. JANGAN panggil `reply_to_user` sebelum dikonfirmasi operator.\n"
+            "- Setelah operator konfirmasi ('ok', 'kirim'), panggil tool `reply_to_user(message)`.\n"
             "- Sesudah sukses, balas operator: \"Terkirim ✓\"\n"
-            "- Jika operator berkata 'selesai' atau 'tangani sendiri', balas singkat dan kembali normal.\n"
         )
 
     # 5. Available capabilities description
@@ -902,15 +941,19 @@ async def run_agent(
     if "skills" in active_groups:
         cap_parts.append("skill tools (create_skill/list_skills/use_skill)")
     if "tool_creator" in active_groups:
-        cap_parts.append("tool creator (create_tool/list_tools/run_custom_tool)")
+        custom_tool_names = [ct.name for ct in saved_custom_tools]
+        ct_str = f" — custom tools available: {', '.join(custom_tool_names)}" if custom_tool_names else ""
+        cap_parts.append(f"tool creator (create_tool/list_tools/run_custom_tool){ct_str}")
     if "scheduler" in active_groups:
         cap_parts.append("scheduler tools (set_reminder/list_reminders/cancel_reminder)")
     if "escalation" in active_groups:
         cap_parts.append("escalation tools (escalate_to_human/reply_to_user/send_to_number)")
     if "http" in active_groups:
-        cap_parts.append("HTTP tools (http_get/http_post)")
+        cap_parts.append("HTTP tools (http_get/http_post/http_patch/http_delete)")
     if "whatsapp_media" in active_groups:
-        cap_parts.append("WhatsApp media tools (send_whatsapp_image, send_agent_wa_qr, send_whatsapp_document)")
+        cap_parts.append("WhatsApp media tools (send_whatsapp_image, send_whatsapp_document)")
+    if "wa_agent_manager" in active_groups:
+        cap_parts.append("WA agent manager (send_agent_wa_qr)")
 
     if cap_parts:
         system_prompt += (
@@ -933,7 +976,7 @@ async def run_agent(
     ))
     await db.flush()
 
-    # --- Build and run agent graph (MCP client kept alive for entire run) ---
+    # --- Build and run agent via Deep Agents SDK ---
     from app.core.tools.mcp_tool import mcp_client_context
 
     async with mcp_client_context(tools_config) as mcp_tools:
@@ -942,7 +985,18 @@ async def run_agent(
             active_groups.append(f"mcp({len(mcp_tools)} tools)")
             log.debug("agent_run.mcp_tools_added", count=len(mcp_tools))
 
-        graph = create_react_agent(llm, tools=tools, prompt=system_prompt)
+        try:
+            from deepagents import create_deep_agent
+            graph = create_deep_agent(
+                model=llm,
+                tools=tools,
+                system_prompt=system_prompt,
+            )
+        except (ImportError, TypeError):
+            # Fallback: deepagents not installed or doesn't accept LLM object
+            from langgraph.prebuilt import create_react_agent
+            graph = create_react_agent(llm, tools=tools, prompt=system_prompt)
+
         if media_image_b64 and media_image_mime:
             human_content: Any = [
                 {"type": "text", "text": user_message},
@@ -971,7 +1025,8 @@ async def run_agent(
                 run_id=run_id,
             ))
             await db.flush()
-            sandbox.close()
+            if sandbox:
+                sandbox.close()
             return {"reply": final_reply, "steps": [], "run_id": run_id, "tokens_used": 0}
 
         # --- Parse result messages ---
@@ -983,7 +1038,6 @@ async def run_agent(
 
         for msg in new_messages:
             if isinstance(msg, AIMessage):
-                # accumulate token usage across all LLM calls in the graph
                 usage = getattr(msg, "usage_metadata", None)
                 if usage:
                     total_tokens_used += usage.get("total_tokens", 0)
@@ -1025,7 +1079,7 @@ async def run_agent(
     await db.flush()
 
     # --- Long-term memory auto-extraction ---
-    if _is_enabled(tools_config, "memory"):
+    if _is_enabled(tools_config, "memory", default=True):
         user_msg_count = await _count_user_messages(session.id, db)
         if user_msg_count > 0 and user_msg_count % settings.ltm_extraction_every == 0:
             log.info("agent_run.ltm_trigger", user_messages=user_msg_count)
@@ -1041,7 +1095,8 @@ async def run_agent(
                 scope=_memory_scope,
             )
 
-    sandbox.close()
+    if sandbox:
+        sandbox.close()
     log.info(
         "agent_run.complete",
         steps=len(steps),
