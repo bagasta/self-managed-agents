@@ -1035,6 +1035,8 @@ async def run_agent(
                 log.warning("agent_step.tool_error", error=str(error))
 
             async def on_chain_start(self, serialized, inputs, **kwargs):
+                if not serialized:
+                    return
                 name = serialized.get("name", serialized.get("id", ["?"])[-1])
                 log.debug("agent_step.chain_start", chain=name)
 
