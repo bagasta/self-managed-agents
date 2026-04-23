@@ -1,0 +1,50 @@
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env.prod
+    environment:
+      WA_SERVICE_URL: http://wa-service:8080
+    volumes:
+      - sandbox_data:/tmp/agent-sandboxes
+      - /var/run/docker.sock:/var/run/docker.sock
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - internal
+      - root_default
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.managed-agents.rule=Host(`managed-agent.chiefaiofficer.id`)"
+      - "traefik.http.routers.managed-agents.entrypoints=web,websecure"
+      - "traefik.http.routers.managed-agents.tls=true"
+      - "traefik.http.routers.managed-agents.tls.certresolver=mytlschallenge"
+      - "traefik.http.services.managed-agents.loadbalancer.server.port=8000"
+      - "traefik.docker.network=root_default"
+
+  wa-service:
+    build:
+      context: ../wa-service
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      PORT: "8080"
+      PYTHON_WEBHOOK_URL: http://api:8000/v1/channels/wa/incoming
+      WA_STORE_DIR: /data/wa-store
+    volumes:
+      - wa_store:/data/wa-store
+    networks:
+      - internal
+
+volumes:
+  sandbox_data:
+  wa_store:
+
+networks:
+  internal:
+    driver: bridge
+  root_default:
+    external: true

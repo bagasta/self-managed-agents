@@ -1009,10 +1009,45 @@ async def run_agent(
         final_reply = ""
         step_counter = step_base + 1
 
+        from langchain_core.callbacks import AsyncCallbackHandler
+
+        class _AgentLogger(AsyncCallbackHandler):
+            async def on_llm_start(self, serialized, prompts, **kwargs):
+                log.debug("agent_step.llm_thinking")
+
+            async def on_llm_end(self, response, **kwargs):
+                text = ""
+                try:
+                    text = response.generations[0][0].text[:200]
+                except Exception:
+                    pass
+                if text:
+                    log.info("agent_step.llm_response", preview=text)
+
+            async def on_tool_start(self, serialized, input_str, **kwargs):
+                tool_name = serialized.get("name", "?")
+                log.info("agent_step.tool_call", tool=tool_name, input=str(input_str)[:300])
+
+            async def on_tool_end(self, output, **kwargs):
+                log.info("agent_step.tool_result", output=str(output)[:300])
+
+            async def on_tool_error(self, error, **kwargs):
+                log.warning("agent_step.tool_error", error=str(error))
+
+            async def on_chain_start(self, serialized, inputs, **kwargs):
+                name = serialized.get("name", serialized.get("id", ["?"])[-1])
+                log.debug("agent_step.chain_start", chain=name)
+
+            async def on_chain_end(self, outputs, **kwargs):
+                log.debug("agent_step.chain_end")
+
         try:
             result = await graph.ainvoke(
                 {"messages": input_messages},
-                config={"recursion_limit": settings.agent_max_steps * 2},
+                config={
+                    "recursion_limit": settings.agent_max_steps * 2,
+                    "callbacks": [_AgentLogger()],
+                },
             )
         except Exception as exc:
             log.error("agent_run.error", error=str(exc))

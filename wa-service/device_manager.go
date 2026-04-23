@@ -408,6 +408,29 @@ func (dm *DeviceManager) makeEventHandler(deviceID string) func(interface{}) {
 	}
 }
 
+// resolveJID resolves a phone number or JID string to the correct WhatsApp JID,
+// including @lid resolution for newer WA accounts. Uses IsOnWhatsApp for phone lookups.
+func resolveJID(client *whatsmeow.Client, to string) (types.JID, error) {
+	if strings.Contains(to, "@") {
+		parsed, err := types.ParseJID(to)
+		if err != nil {
+			return types.JID{}, fmt.Errorf("invalid JID %q: %w", to, err)
+		}
+		if parsed.Device > 0 {
+			return types.JID{}, fmt.Errorf("cannot send to AD JID %q — use non-device JID", to)
+		}
+		return parsed, nil
+	}
+	phone := strings.TrimPrefix(to, "+")
+	// Query WA servers for the real JID — resolves @lid accounts correctly.
+	results, err := client.IsOnWhatsApp(context.Background(), []string{phone})
+	if err == nil && len(results) > 0 && results[0].IsIn {
+		return results[0].JID, nil
+	}
+	// Fallback to @s.whatsapp.net if lookup fails
+	return types.NewJID(phone, types.DefaultUserServer), nil
+}
+
 // SendImage uploads and sends an image to a WhatsApp number.
 // imageData is the raw image bytes, mimetype e.g. "image/jpeg".
 func (dm *DeviceManager) SendImage(deviceID, to string, imageData []byte, caption, mimetype string) error {
@@ -425,20 +448,9 @@ func (dm *DeviceManager) SendImage(deviceID, to string, imageData []byte, captio
 		return fmt.Errorf("device %s: no valid WA session (needs re-scan QR)", deviceID)
 	}
 
-	// Parse destination JID
-	var jid types.JID
-	if strings.Contains(to, "@") {
-		parsed, err := types.ParseJID(to)
-		if err != nil {
-			return fmt.Errorf("invalid JID %q: %w", to, err)
-		}
-		if parsed.Device > 0 {
-			return fmt.Errorf("cannot send to AD JID %q — use non-device JID", to)
-		}
-		jid = parsed
-	} else {
-		phone := strings.TrimPrefix(to, "+")
-		jid = types.NewJID(phone, types.DefaultUserServer)
+	jid, err := resolveJID(info.Client, to)
+	if err != nil {
+		return err
 	}
 
 	if mimetype == "" {
@@ -488,19 +500,9 @@ func (dm *DeviceManager) SendDocument(deviceID, to string, docData []byte, filen
 		return fmt.Errorf("device %s: no valid WA session (needs re-scan QR)", deviceID)
 	}
 
-	var jid types.JID
-	if strings.Contains(to, "@") {
-		parsed, err := types.ParseJID(to)
-		if err != nil {
-			return fmt.Errorf("invalid JID %q: %w", to, err)
-		}
-		if parsed.Device > 0 {
-			return fmt.Errorf("cannot send to AD JID %q — use non-device JID", to)
-		}
-		jid = parsed
-	} else {
-		phone := strings.TrimPrefix(to, "+")
-		jid = types.NewJID(phone, types.DefaultUserServer)
+	jid, err := resolveJID(info.Client, to)
+	if err != nil {
+		return err
 	}
 
 	if mimetype == "" {

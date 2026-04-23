@@ -5,6 +5,7 @@ import structlog
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.api import agents, channels, custom_tools, documents, history, memory, messages, models, runs, sessions, skills, stream
 from app.config import get_settings
@@ -75,6 +76,8 @@ app.include_router(documents.router)
 app.include_router(models.router)
 app.include_router(runs.router)
 app.include_router(stream.router)
+
+app.mount("/ui", StaticFiles(directory="UI-DEV", html=True), name="ui")
 
 
 @app.get("/health", tags=["meta"])
