@@ -34,6 +34,7 @@
 - **API**: `https://managed-agent.chiefaiofficer.id`
 - **Swagger**: `https://managed-agent.chiefaiofficer.id/docs`
 - **UI Dev**: `https://managed-agent.chiefaiofficer.id/ui/`
+- **WA Dev Dashboard**: `https://managed-agent.chiefaiofficer.id/wa-dev/`
 - **API Key**: `42523db14d86f993409fba4984764be01fb169ddf7e5e401efab2f33442c9a7b`
 
 ## Infrastruktur VPS
@@ -51,6 +52,7 @@
 |-----------|-------|
 | `deploy-api-1` | `deploy-api` (built dari project) |
 | `deploy-wa-service-1` | `deploy-wa-service` (Go WhatsApp microservice) |
+| `deploy-wa-dev-service-1` | `deploy-wa-dev-service` (Go WhatsApp dev/test number) |
 
 ## Update code (via GitHub)
 
@@ -89,6 +91,17 @@ sudo docker compose -f /home/clevio/stack/managed-agents/deploy/docker-compose.p
 
 - Jangan hapus network `root_default` — dipakai semua project di VPS
 - `UI-DEV/` di-serve di path `/ui/` — perubahan UI cukup `git pull` + rebuild
-- `wa-service` jalan di container `deploy-wa-service-1`, berkomunikasi dengan API via network internal `deploy_internal`
-- `deploy/.env.prod` **tidak ada di git** (di-gitignore) — kalau VPS di-rebuild dari scratch, file ini harus dibuat manual (lihat isinya di atas)
-- wa-service session (SQLite) disimpan di Docker volume `deploy_wa_store` — jangan `docker compose down -v` karena akan hapus session WA yang sudah terpasang
+- `wa-service` jalan di container `deploy-wa-service-1`, berkomunikasi dengan API via network internal
+- `wa-dev-service` jalan di container `deploy-wa-dev-service-1`, dashboard di `/wa-dev/` via Traefik subpath
+- `deploy/.env.prod` **tidak ada di git** (di-gitignore) — kalau VPS di-rebuild dari scratch, buat manual. Isi wajib:
+  ```
+  DATABASE_URL=postgresql+asyncpg://postgres:Aiagronomists4725.@host.docker.internal:5432/managed_agents
+  OPENROUTER_API_KEY=...
+  API_KEY=42523db14d86f993409fba4984764be01fb169ddf7e5e401efab2f33442c9a7b
+  WA_DEV_SERVICE_URL=http://wa-dev-service:8081
+  MAIN_API_KEY=42523db14d86f993409fba4984764be01fb169ddf7e5e401efab2f33442c9a7b
+  SANDBOX_BASE_DIR=/tmp/agent-sandboxes
+  ```
+- wa-service session (SQLite) disimpan di Docker volume `deploy_wa_store` — jangan `docker compose down -v`
+- wa-dev-service session disimpan di Docker volume `deploy_wa_dev_store` — sama, jangan dihapus
+- Sandbox pakai **host bind mount** `/tmp/agent-sandboxes` (bukan named volume) — path ini harus sama antara API container dan sandbox container yang dibuat via Docker socket. Kalau VPS di-rebuild, pastikan `mkdir -p /tmp/agent-sandboxes` dijalankan dulu

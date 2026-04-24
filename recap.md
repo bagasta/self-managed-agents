@@ -220,3 +220,30 @@ Deploy ke VPS production (23 Apr 2026):
 4. Bug fix AgentLogger:
    LangChain terbaru kadang pass None sebagai serialized di on_chain_start callback.
    Fix: tambah guard `if not serialized: return` sebelum .get() di agent_runner.py.
+
+Deploy wa-dev-service ke production (24 Apr 2026):
+
+1. Tambah wa-dev-service ke docker-compose.prod.yml sebagai container tersendiri.
+   - Dockerfile baru di wa-dev-service/Dockerfile (sama strukturnya dengan wa-service).
+   - Dashboard di-expose via Traefik subpath `/wa-dev/` dengan StripPrefix middleware.
+   - `const API = '/wa-dev'` di dashboard/index.html agar JS API calls ikut subpath.
+   - Volume `deploy_wa_dev_store` untuk persistent SQLite session.
+
+2. Bug fix WA_DEV_SERVICE_URL tidak terbaca:
+   - Default config `http://localhost:8081` — di Docker, localhost adalah API container sendiri.
+   - Fix: tambah `WA_DEV_SERVICE_URL=http://wa-dev-service:8081` ke .env.prod.
+   - `docker compose restart` tidak cukup — harus `up -d` agar container di-recreate dengan env baru.
+
+3. Bug fix send_whatsapp_image / send_whatsapp_document salah deteksi base64 vs file path:
+   - Kondisi lama: `not image_path_or_base64.startswith("/")` selalu True untuk base64 string.
+   - Akibatnya base64 diperlakukan sebagai nama file dan dijalankan sebagai `base64 -w 0 iVBOR...` di sandbox.
+   - Fix: helper `_looks_like_base64(s)` — cek panjang ≥ 50 char dan fullmatch `[A-Za-z0-9+/]+=*`.
+   - Berlaku untuk send_whatsapp_image dan send_whatsapp_document di agent_runner.py.
+
+4. Bug fix sandbox tidak bisa dipakai di VPS (Docker-in-Docker path mismatch):
+   - Root cause: sandbox_data pakai named Docker volume (`deploy_sandbox_data`).
+     Saat sandbox code membuat container baru via docker.sock dan mount `/tmp/agent-sandboxes/...`,
+     path itu tidak ada di host — hanya ada di dalam API container sebagai volume mount.
+   - Fix: ganti ke host bind mount `-v /tmp/agent-sandboxes:/tmp/agent-sandboxes` di compose.
+     Sekarang path sama antara API container dan sandbox container yang dibuat Docker socket.
+   - Pastikan `mkdir -p /tmp/agent-sandboxes` di VPS host sebelum deploy.
