@@ -344,15 +344,11 @@ async def wa_incoming(
     session = session_result.scalars().first()
 
     # effective_reply_target: JID tujuan saat membalas.
-    # - Grup: wajib pakai chat_id (@g.us JID)
-    # - Operator DM: pakai reply_target (nomor operator)
-    # - User DM biasa: pakai body.from_ (nomor pengirim, bukan chat_id)
-    #   karena chat_id bisa berupa @lid JID yang routing-nya tidak reliable;
-    #   nomor telepon (@s.whatsapp.net) lebih stabil dan WhatsApp routing ke LID otomatis.
-    if is_group or is_operator:
-        effective_reply_target = reply_target
-    else:
-        effective_reply_target = body.from_
+    # Selalu pakai reply_target (= chat_id for DM/group, from_ sebagai fallback).
+    # chat_id dari wa-service/wa-dev sudah mengandung server info yang benar (@s.whatsapp.net atau @lid).
+    # Menggunakan body.from_ (format "+LIDnumber") untuk akun @lid akan menyebabkan
+    # pesan/gambar dikirim ke JID yang salah karena LID number bukan nomor HP.
+    effective_reply_target = reply_target
 
     if session:
         # Pastikan device_id dan user_phone (reply JID) selalu up-to-date
