@@ -39,9 +39,25 @@ services:
     networks:
       - internal
 
+  wa-dev-service:
+    build:
+      context: ../wa-dev-service
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      PORT: "8081"
+      WA_DEV_STORE_DIR: /data/wa-dev-store
+      MAIN_API_URL: http://api:8000
+      MAIN_API_KEY: ${API_KEY}
+    volumes:
+      - wa_dev_store:/data/wa-dev-store
+    networks:
+      - internal
+
 volumes:
   sandbox_data:
   wa_store:
+  wa_dev_store:
 
 networks:
   internal:
