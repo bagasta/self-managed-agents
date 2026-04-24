@@ -9,7 +9,7 @@ services:
     environment:
       WA_SERVICE_URL: http://wa-service:8080
     volumes:
-      - sandbox_data:/tmp/agent-sandboxes
+      - /tmp/agent-sandboxes:/tmp/agent-sandboxes
       - /var/run/docker.sock:/var/run/docker.sock
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -67,7 +67,6 @@ services:
       - "traefik.docker.network=root_default"
 
 volumes:
-  sandbox_data:
   wa_store:
   wa_dev_store:
 
