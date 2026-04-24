@@ -247,3 +247,19 @@ Deploy wa-dev-service ke production (24 Apr 2026):
    - Fix: ganti ke host bind mount `-v /tmp/agent-sandboxes:/tmp/agent-sandboxes` di compose.
      Sekarang path sama antara API container dan sandbox container yang dibuat Docker socket.
    - Pastikan `mkdir -p /tmp/agent-sandboxes` di VPS host sebelum deploy.
+
+Bug fix QR dikirim ke LID number bukan nomor HP (24 Apr 2026):
+
+Root cause: wa-service memformat webhook `from = "+" + evt.Info.Sender.User`.
+Untuk akun @lid, Sender.User adalah LID number (misal 236116347228384), bukan nomor HP.
+Python menyimpannya sebagai user_phone di session. Saat agent kirim QR image,
+resolveJID mencoba lookup `236116347228384` via IsOnWhatsApp() — gagal karena itu bukan nomor HP —
+lalu fallback ke `236116347228384@s.whatsapp.net` yang tidak deliver ke user.
+
+Fix: di channels.py, `effective_reply_target` untuk semua DM sekarang pakai `reply_target`
+(= body.chat_id) bukan body.from_. chat_id dari wa-service sudah berisi full JID yang benar
+(contoh: `236116347228384@lid`) karena diambil dari evt.Info.Chat.String().
+resolveJID menerima JID dengan "@", langsung parse dan kirim ke @lid — deliver benar.
+
+Catatan: sesi existing yang punya user_phone = "+LIDnumber" lama akan otomatis terupdate
+ke chat_id yang benar saat user kirim pesan berikutnya (ada logika update session di channels.py).
