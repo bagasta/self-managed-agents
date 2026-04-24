@@ -401,16 +401,21 @@ def build_whatsapp_media_tools(session: Any, sandbox: DockerSandbox | None) -> l
         if not device_id:
             return "[error] Tidak ada device_id WhatsApp pada session ini"
 
-        if image_path_or_base64.startswith("/workspace/") or not image_path_or_base64.startswith("/"):
+        import base64 as _b64, re as _re
+
+        def _looks_like_base64(s: str) -> bool:
+            return len(s) >= 50 and bool(_re.fullmatch(r'[A-Za-z0-9+/]+=*', s))
+
+        if _looks_like_base64(image_path_or_base64):
+            image_b64 = image_path_or_base64.strip()
+        else:
             if sandbox is None:
                 return "[error] Tool send_whatsapp_image membutuhkan sandbox aktif untuk membaca file. Gunakan base64 langsung atau aktifkan sandbox."
             path = image_path_or_base64 if image_path_or_base64.startswith("/workspace/") else f"/workspace/{image_path_or_base64}"
             b64_output = sandbox.bash(f"base64 -w 0 {path} 2>&1")
-            if b64_output.startswith("["):
+            if b64_output.startswith("[") or "No such file" in b64_output:
                 return f"[error] Gagal membaca file: {b64_output}"
             image_b64 = b64_output.strip()
-        else:
-            image_b64 = image_path_or_base64.strip()
 
         try:
             from app.core.wa_client import send_wa_image
@@ -450,7 +455,12 @@ def build_whatsapp_media_tools(session: Any, sandbox: DockerSandbox | None) -> l
         elif not mimetype:
             mimetype = "application/octet-stream"
 
-        if file_path_or_base64.startswith("/workspace/") or (not file_path_or_base64.startswith("/") and len(file_path_or_base64) < 500):
+        import base64 as _b64, re as _re
+
+        def _looks_like_base64(s: str) -> bool:
+            return len(s) >= 50 and bool(_re.fullmatch(r'[A-Za-z0-9+/]+=*', s))
+
+        if not _looks_like_base64(file_path_or_base64):
             if sandbox is None:
                 return "[error] Tool send_whatsapp_document membutuhkan sandbox aktif untuk membaca file."
             path = file_path_or_base64 if file_path_or_base64.startswith("/workspace/") else f"/workspace/{file_path_or_base64}"
