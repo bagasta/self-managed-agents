@@ -54,6 +54,17 @@ services:
       - wa_dev_store:/data/wa-dev-store
     networks:
       - internal
+      - root_default
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.wa-dev.rule=Host(`managed-agent.chiefaiofficer.id`) && PathPrefix(`/wa-dev`)"
+      - "traefik.http.routers.wa-dev.entrypoints=web,websecure"
+      - "traefik.http.routers.wa-dev.tls=true"
+      - "traefik.http.routers.wa-dev.tls.certresolver=mytlschallenge"
+      - "traefik.http.routers.wa-dev.middlewares=wa-dev-strip"
+      - "traefik.http.middlewares.wa-dev-strip.stripprefix.prefixes=/wa-dev"
+      - "traefik.http.services.wa-dev.loadbalancer.server.port=8081"
+      - "traefik.docker.network=root_default"
 
 volumes:
   sandbox_data:
