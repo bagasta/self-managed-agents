@@ -257,6 +257,9 @@ func (dm *DeviceManager) SendMessage(deviceID, to, text string) error {
 		jid = types.NewJID(phone, types.DefaultUserServer)
 	}
 
+	// Stop typing indicator before sending the actual reply.
+	_ = info.Client.SendChatPresence(context.Background(), jid, types.ChatPresencePaused, types.ChatPresenceMediaText)
+
 	msg := &waE2E.Message{
 		Conversation: proto.String(text),
 	}
@@ -687,6 +690,14 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 	// For groups it is "groupid@g.us".
 	// Reconstructing from Sender.User loses the server info and breaks LID accounts.
 	chatID := chatJID.String()
+
+	// Send typing indicator immediately so the user sees "typing..." while AI processes.
+	dm.mu.RLock()
+	typingInfo, typingOk := dm.devices[deviceID]
+	dm.mu.RUnlock()
+	if typingOk {
+		_ = typingInfo.Client.SendChatPresence(context.Background(), chatJID, types.ChatPresenceComposing, types.ChatPresenceMediaText)
+	}
 
 	payload := map[string]interface{}{
 		"device_id":      deviceID,

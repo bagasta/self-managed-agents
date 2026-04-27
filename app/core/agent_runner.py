@@ -77,38 +77,17 @@ def _normalize_phone(p: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Sandbox tools
+# Sandbox tools (only binary write remains — no text equivalent in BackendProtocol)
 # ---------------------------------------------------------------------------
 
-def build_sandbox_tools(sandbox: DockerSandbox) -> list:
-    @tool
-    def bash(cmd: str) -> str:
-        """Execute a bash command in the isolated Docker sandbox workspace. Returns stdout+stderr."""
-        return sandbox.bash(cmd)
-
-    @tool
-    def sandbox_write_file(path: str, content: str) -> str:
-        """Write text content to a file at the given path inside the Docker sandbox workspace (/workspace/).
-        Use this (not write_file) when you want to persist a file in the sandbox."""
-        return sandbox.write_file(path, content)
-
+def build_sandbox_binary_tool(sandbox: DockerSandbox) -> list:
     @tool
     def sandbox_write_binary_file(path: str, base64_content: str) -> str:
         """Decode a base64 string and write it as a binary file in the Docker sandbox workspace (/workspace/).
         Args: path (e.g. 'output.png'), base64_content (raw base64 string without data URI prefix)."""
         return sandbox.write_binary_file(path, base64_content)
 
-    @tool
-    def sandbox_read_file(path: str) -> str:
-        """Read and return the full text content of a file in the Docker sandbox workspace (/workspace/)."""
-        return sandbox.read_file(path)
-
-    @tool
-    def list_files(directory: str = ".") -> str:
-        """List all files under a directory in the Docker sandbox workspace (/workspace/)."""
-        return sandbox.list_files(directory)
-
-    return [bash, sandbox_write_file, sandbox_write_binary_file, sandbox_read_file, list_files]
+    return [sandbox_write_binary_file]
 
 
 # ---------------------------------------------------------------------------
@@ -585,6 +564,241 @@ def build_wa_agent_manager_tools(session: Any) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Sub-agent builder (Phase 2)
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Built-in system sub-agents — hardcoded, no DB dependency
+# ---------------------------------------------------------------------------
+
+_SYSTEM_SUBAGENTS: list[dict] = [
+    {
+        "name": "sys_critic",
+        "description": "Quality reviewer: evaluasi output agent lain, approve jika OK atau reject dengan feedback spesifik untuk diperbaiki.",
+        "system_prompt": (
+            "Kamu adalah agen critic dan quality reviewer. Tugasmu adalah mengevaluasi output yang diberikan kepadamu.\n\n"
+            "Cara kerja:\n"
+            "1. Baca output yang perlu direview dengan teliti\n"
+            "2. Evaluasi berdasarkan: akurasi, kelengkapan, relevansi dengan task, dan kualitas\n"
+            "3. Berikan verdict dengan format:\n\n"
+            "   **VERDICT: APPROVED** — jika output sudah baik dan bisa digunakan\n"
+            "   atau\n"
+            "   **VERDICT: REJECTED** — jika output perlu diperbaiki\n\n"
+            "4. Jika REJECTED, berikan feedback spesifik: apa yang salah, apa yang kurang, dan apa yang harus diperbaiki\n"
+            "5. Jika APPROVED, berikan catatan singkat mengapa output sudah memenuhi standar\n\n"
+            "Jadilah kritis tapi konstruktif. Jangan approve output yang mengandung informasi salah, "
+            "kode yang error, atau tidak menjawab task dengan benar."
+        ),
+        "model": "openai/gpt-4o-mini",
+        "tools_config": {"sandbox": False, "http": False},
+    },
+    {
+        "name": "sys_researcher",
+        "description": "Riset spesialis: cari dan rangkum informasi dari internet via HTTP tools.",
+        "system_prompt": (
+            "Kamu adalah agen riset spesialis. Tugasmu adalah mencari, mengumpulkan, dan merangkum informasi "
+            "dari internet secara akurat dan terstruktur.\n\n"
+            "Cara kerja:\n"
+            "1. Gunakan http_get untuk mengakses URL dan mencari informasi\n"
+            "2. Ringkas temuan dengan jelas dan terstruktur\n"
+            "3. Sertakan sumber informasi\n"
+            "4. Jika informasi tidak ditemukan, jelaskan apa yang kamu coba dan apa hasilnya\n\n"
+            "Selalu kembalikan hasil riset yang lengkap, akurat, dan bisa langsung digunakan."
+        ),
+        "model": "openai/gpt-4o-mini",
+        "tools_config": {"http": {"enabled": True}, "sandbox": False},
+    },
+    {
+        "name": "sys_coder",
+        "description": "Programmer Python spesialis: tulis dan jalankan kode di sandbox.",
+        "system_prompt": (
+            "Kamu adalah agen programmer spesialis Python. Tugasmu adalah menulis, menjalankan, dan men-debug kode "
+            "untuk menyelesaikan task komputasi yang diberikan.\n\n"
+            "Cara kerja:\n"
+            "1. Pahami task yang diminta\n"
+            "2. Tulis kode Python yang bersih menggunakan write_file\n"
+            "3. Jalankan di sandbox menggunakan execute\n"
+            "4. Jika ada error, debug dan perbaiki\n"
+            "5. Kembalikan hasil eksekusi beserta penjelasan singkat\n\n"
+            "Untuk library eksternal: execute('pip install <package>')"
+        ),
+        "model": "openai/gpt-4o-mini",
+        "tools_config": {"sandbox": True, "http": False},
+    },
+    {
+        "name": "sys_writer",
+        "description": "Penulis dan editor spesialis: buat, edit, dan format konten tulisan.",
+        "system_prompt": (
+            "Kamu adalah agen penulis dan editor spesialis. Tugasmu adalah membuat, mengedit, dan memformat "
+            "konten tulisan berkualitas tinggi.\n\n"
+            "Kemampuan:\n"
+            "- Menulis artikel, laporan, email, proposal, dan konten lainnya\n"
+            "- Mengedit dan memperbaiki tulisan yang ada\n"
+            "- Mengubah format dan tone tulisan sesuai kebutuhan\n"
+            "- Menerjemahkan antara Bahasa Indonesia dan Inggris\n\n"
+            "Selalu hasilkan tulisan yang jelas, terstruktur, dan sesuai tone yang diminta."
+        ),
+        "model": "openai/gpt-4o-mini",
+        "tools_config": {"sandbox": False, "http": False},
+    },
+    {
+        "name": "sys_analyst",
+        "description": "Analis data spesialis: olah data, kalkulasi, dan buat laporan analisis.",
+        "system_prompt": (
+            "Kamu adalah agen analis data spesialis. Tugasmu adalah mengolah data, melakukan kalkulasi, "
+            "dan membuat laporan analisis.\n\n"
+            "Cara kerja:\n"
+            "1. Terima data dalam bentuk teks, CSV, JSON, atau format lain\n"
+            "2. Tulis kode Python dengan pandas/numpy menggunakan write_file\n"
+            "3. Jalankan analisis di sandbox menggunakan execute\n"
+            "4. Buat ringkasan temuan dan insight yang actionable\n"
+            "5. Format hasil sebagai tabel atau laporan terstruktur\n\n"
+            "Install library: execute('pip install pandas numpy')"
+        ),
+        "model": "openai/gpt-4o-mini",
+        "tools_config": {"sandbox": True, "http": False},
+    },
+]
+
+
+def _build_system_subagent(spec: dict, parent_session_id: uuid.UUID) -> tuple[dict, DockerSandbox | None]:
+    """Build a SubAgent dict and optional DockerSandbox from a system sub-agent spec."""
+    sub_cfg = spec.get("tools_config", {})
+    sub_tools: list = []
+    sub_sandbox: DockerSandbox | None = None
+
+    if _is_enabled(sub_cfg, "sandbox", default=False):
+        sub_session_id = f"{parent_session_id}_sys_{spec['name']}"
+        sub_sandbox = DockerSandbox(sub_session_id)
+        sub_tools.extend(build_sandbox_binary_tool(sub_sandbox))
+
+    if _is_enabled(sub_cfg, "http", default=False):
+        sub_tools.extend(build_http_tools(sub_cfg))
+
+    sub_llm = ChatOpenAI(
+        model=spec["model"],
+        api_key=settings.openrouter_api_key,
+        base_url="https://openrouter.ai/api/v1",
+        max_tokens=4096,
+        temperature=0.5,
+    )
+
+    sa = {
+        "name": spec["name"],
+        "description": spec["description"],
+        "system_prompt": spec["system_prompt"],
+        "tools": sub_tools,
+        "model": sub_llm,
+    }
+    return sa, sub_sandbox
+
+
+async def build_subagents(
+    agent_ids: list[str],
+    parent_session_id: uuid.UUID,
+    db: AsyncSession,
+    log: Any,
+) -> tuple[list, list[DockerSandbox]]:
+    """
+    Build SubAgent list for Deep Agents SDK.
+
+    - agent_ids empty → use all hardcoded system sub-agents (no DB dependency)
+    - agent_ids provided → load from DB by UUID (custom agents)
+
+    Returns (subagent_list, sandbox_list) — caller must close sandboxes in finally block.
+    """
+    subagents: list = []
+    sub_sandboxes: list[DockerSandbox] = []
+
+    if not agent_ids:
+        for spec in _SYSTEM_SUBAGENTS:
+            sa, ssb = _build_system_subagent(spec, parent_session_id)
+            subagents.append(sa)
+            if ssb:
+                sub_sandboxes.append(ssb)
+        log.info("build_subagents.system_defaults", count=len(subagents))
+        return subagents, sub_sandboxes
+
+    from app.models.agent import Agent as AgentModel
+
+    for raw_id in agent_ids:
+        try:
+            agent_uuid = uuid.UUID(raw_id)
+        except ValueError:
+            log.warning("build_subagents.invalid_uuid", agent_id=raw_id)
+            continue
+
+        try:
+            result = await db.execute(
+                select(AgentModel).where(
+                    AgentModel.id == agent_uuid,
+                    AgentModel.is_deleted.is_(False),
+                )
+            )
+            agent_row = result.scalar_one_or_none()
+        except Exception as exc:
+            log.error("build_subagents.db_error", agent_id=raw_id, error=str(exc))
+            continue
+
+        if agent_row is None:
+            log.warning("build_subagents.not_found", agent_id=raw_id)
+            continue
+
+        sub_cfg: dict[str, Any] = agent_row.tools_config if isinstance(agent_row.tools_config, dict) else {}
+        sub_tools: list = []
+        sub_sandbox: DockerSandbox | None = None
+
+        # Isolated sandbox for subagent (workspace namespaced under parent)
+        if _is_enabled(sub_cfg, "sandbox", default=False):
+            sub_session_id = f"{parent_session_id}_sub_{agent_uuid}"
+            sub_sandbox = DockerSandbox(sub_session_id)
+            sub_sandboxes.append(sub_sandbox)
+            sub_tools.extend(build_sandbox_binary_tool(sub_sandbox))
+
+        # Memory — isolated scope: subagent's own agent_id (no cross-contamination)
+        if _is_enabled(sub_cfg, "memory", default=True):
+            sub_tools.extend(build_memory_tools(agent_row.id, db, scope=None))
+
+        # Skills
+        if _is_enabled(sub_cfg, "skills", default=True):
+            sub_tools.extend(build_skill_tools(agent_row.id, db))
+
+        # HTTP (opt-in)
+        if _is_enabled(sub_cfg, "http", default=False):
+            sub_tools.extend(build_http_tools(sub_cfg))
+
+        # Intentionally excluded: escalation, scheduler, wa_agent_manager, tool_creator
+        # Subagents do not have channels and should not trigger external side effects.
+
+        # Build DockerBackend for subagent if sandbox is active
+        sub_backend = None
+        if sub_sandbox is not None:
+            from app.core.deep_agent_backend import DockerBackend
+            sub_backend = DockerBackend(sub_sandbox)
+
+        sub_llm = ChatOpenAI(
+            model=agent_row.model or "openai/gpt-4o-mini",
+            api_key=settings.openrouter_api_key,
+            base_url="https://openrouter.ai/api/v1",
+            max_tokens=4096,
+            temperature=getattr(agent_row, "temperature", 0.7),
+        )
+
+        sa: dict = {
+            "name": agent_row.name,
+            "description": (agent_row.instructions or "")[:300].replace("\n", " "),
+            "system_prompt": agent_row.instructions or "You are a helpful assistant.",
+            "tools": sub_tools,
+            "model": sub_llm,
+        }
+
+        subagents.append(sa)
+        log.info("build_subagents.loaded", name=agent_row.name, tools=len(sub_tools))
+
+    return subagents, sub_sandboxes
+
+
+# ---------------------------------------------------------------------------
 # HTTP tools
 # ---------------------------------------------------------------------------
 
@@ -702,6 +916,73 @@ async def _build_rag_context(
 
 
 # ---------------------------------------------------------------------------
+# Memory Summarizer (Phase 3)
+# ---------------------------------------------------------------------------
+
+_SUMMARY_TRIGGER = 10  # summarize when session has >= this many user messages
+
+async def _maybe_summarize_context(
+    session: Any,
+    db: AsyncSession,
+    llm: Any,
+    log: Any,
+) -> str:
+    """
+    If session has >= _SUMMARY_TRIGGER user messages, summarize older turns via LLM
+    and cache the result in session.metadata_['context_summary'].
+    Returns the summary string (empty if not triggered or failed).
+    """
+    try:
+        user_msg_count = await _count_user_messages(session.id, db)
+        if user_msg_count < _SUMMARY_TRIGGER:
+            return ""
+
+        meta: dict = session.metadata_ if isinstance(session.metadata_, dict) else {}
+        cached_at = meta.get("context_summary_at_msg", 0)
+
+        # Re-summarize every _SUMMARY_TRIGGER messages
+        if user_msg_count - cached_at < _SUMMARY_TRIGGER and meta.get("context_summary"):
+            log.debug("agent_run.context_summary_cached", user_messages=user_msg_count)
+            return meta["context_summary"]
+
+        # Load all history for summarization (no turn limit)
+        all_rows = await _load_history(session.id, db)
+        if not all_rows:
+            return ""
+
+        history_text = "\n".join(
+            f"{'User' if m.role == 'user' else 'Agent'}: {(m.content or '')[:500]}"
+            for m in all_rows
+            if m.role in ("user", "agent") and m.content
+        )
+
+        from langchain_core.messages import HumanMessage as _HM
+        summary_prompt = (
+            "Berikut adalah riwayat percakapan antara user dan agent. "
+            "Buat ringkasan padat (maksimal 300 kata) yang mencakup:\n"
+            "- Topik utama yang dibahas\n"
+            "- Keputusan atau hasil penting yang sudah dicapai\n"
+            "- Konteks yang relevan untuk melanjutkan percakapan\n\n"
+            f"Riwayat percakapan:\n{history_text[:6000]}"
+        )
+        resp = await llm.ainvoke([_HM(content=summary_prompt)])
+        summary = resp.content if isinstance(resp.content, str) else str(resp.content)
+
+        # Persist to session metadata
+        new_meta = {**meta, "context_summary": summary, "context_summary_at_msg": user_msg_count}
+        session.metadata_ = new_meta
+        db.add(session)
+        await db.flush()
+
+        log.info("agent_run.context_summarized", user_messages=user_msg_count, summary_len=len(summary))
+        return summary
+
+    except Exception as exc:
+        log.warning("agent_run.context_summary_failed", error=str(exc))
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # Agent Context Block builder (PRD2 §3.3 + §3.4)
 # ---------------------------------------------------------------------------
 
@@ -710,6 +991,7 @@ def _build_agent_context_block(
     session: Session,
     active_groups: list[str],
     custom_tools_db: list,
+    subagent_list: list | None = None,
 ) -> str:
     agent_id = session.agent_id
     _raw_cfg = session.channel_config
@@ -743,6 +1025,15 @@ def _build_agent_context_block(
         lines.append(f"- Current User Phone: {user_phone}")
     lines.append(f"- Current User Role: {user_role}")
     lines.append(f"- Session ID: {session.id}")
+
+    if subagent_list:
+        lines.append("\n## Available Subagents")
+        lines.append(
+            "Delegate specific tasks using `task(name=..., task=...)`. "
+            "Always use write_todos to plan before delegating."
+        )
+        for sa in subagent_list:
+            lines.append(f"- **{sa['name']}**: {sa['description']}")
 
     return "\n".join(lines)
 
@@ -798,7 +1089,7 @@ async def run_agent(
     saved_custom_tools: list = []
 
     if sandbox is not None:
-        tools.extend(build_sandbox_tools(sandbox))
+        tools.extend(build_sandbox_binary_tool(sandbox))
         active_groups.append("sandbox")
 
     _memory_scope = getattr(session, "external_user_id", None)
@@ -851,12 +1142,27 @@ async def run_agent(
             tools.extend(build_wa_agent_manager_tools(session))
             active_groups.append("wa_agent_manager")
 
+    # --- Sub-agents (Phase 2) ---
+    subagent_list: list = []
+    sub_sandboxes: list[DockerSandbox] = []
+    if _is_enabled(tools_config, "subagents", default=False):
+        _sub_ids: list[str] = tools_config.get("subagents", {}).get("agent_ids", [])
+        subagent_list, sub_sandboxes = await build_subagents(
+            _sub_ids, session.id, db, log
+        )
+        if subagent_list:
+            active_groups.append(f"subagents({len(subagent_list)})")
+            log.info("agent_run.subagents_ready", names=[s["name"] for s in subagent_list])
+
     log.debug("agent_run.tools_ready (pre-mcp)", groups=active_groups, count=len(tools))
 
     # --- RAG context (auto-injected, not a tool) ---
     rag_context = ""
     if _is_enabled(tools_config, "rag", default=False):
         rag_context = await _build_rag_context(agent_id, user_message, db, tools_config, log)
+
+    # --- Context summarizer (Phase 3) ---
+    context_summary = await _maybe_summarize_context(session, db, llm, log)
 
     # --- Short-term memory: load last N turns ---
     history_rows = await _load_history(
@@ -870,27 +1176,34 @@ async def run_agent(
 
     # --- Agent Context Block (PRD2 §3.3 + §3.4) ---
     context_block = _build_agent_context_block(
-        agent_model, session, active_groups, saved_custom_tools
+        agent_model, session, active_groups, saved_custom_tools, subagent_list
     )
 
     # --- System prompt ---
     base_instructions = agent_model.instructions or "You are a helpful assistant."
     system_prompt = f"{context_block}\n\n{base_instructions}"
 
-    # 1. Long-term memories
+    # 1. Conversation context summary (injected when session is long)
+    if context_summary:
+        system_prompt += (
+            f"\n\n## Conversation Context Summary\n"
+            f"*Ringkasan percakapan sebelumnya (pesan lama sudah dikompresi):*\n{context_summary}"
+        )
+
+    # 2. Long-term memories
     memory_block = await build_memory_context(agent_id, db, scope=_memory_scope)
     if memory_block:
         system_prompt += f"\n\n{memory_block}"
 
-    # 2. Safety policy
+    # 3. Safety policy
     if agent_model.safety_policy:
         system_prompt += f"\n\n## Safety Policy\n{json.dumps(agent_model.safety_policy, indent=2)}"
 
-    # 3. RAG context
+    # 4. RAG context
     if rag_context:
         system_prompt += f"\n\n{rag_context}"
 
-    # 4. Channel-specific + escalation context
+    # 5. Channel-specific + escalation context
     is_whatsapp = getattr(session, "channel_type", None) == "whatsapp"
 
     if is_whatsapp and not is_operator_message and not escalation_user_jid:
@@ -944,7 +1257,7 @@ async def run_agent(
             "- Sesudah sukses, balas operator: \"Terkirim ✓\"\n"
         )
 
-    # 5. Available capabilities description
+    # 6. Available capabilities description
     cap_parts: list[str] = []
     if "memory" in active_groups:
         cap_parts.append("memory tools (remember/recall/forget)")
@@ -997,10 +1310,16 @@ async def run_agent(
 
         try:
             from deepagents import create_deep_agent
+            from app.core.deep_agent_backend import DockerBackend
+
+            backend = DockerBackend(sandbox) if sandbox is not None else None
+
             graph = create_deep_agent(
                 model=llm,
                 tools=tools,
                 system_prompt=system_prompt,
+                backend=backend,
+                subagents=subagent_list or None,
             )
         except (ImportError, TypeError):
             # Fallback: deepagents not installed or doesn't accept LLM object
@@ -1074,6 +1393,8 @@ async def run_agent(
             await db.flush()
             if sandbox:
                 sandbox.close()
+            for _ssb in sub_sandboxes:
+                _ssb.close()
             return {"reply": final_reply, "steps": [], "run_id": run_id, "tokens_used": 0}
 
         # --- Parse result messages ---
@@ -1144,6 +1465,8 @@ async def run_agent(
 
     if sandbox:
         sandbox.close()
+    for _ssb in sub_sandboxes:
+        _ssb.close()
     log.info(
         "agent_run.complete",
         steps=len(steps),

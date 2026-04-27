@@ -59,7 +59,7 @@ Client (X-API-Key header required)
       → Load agent config from DB
       → Build system prompt: instructions + long-term memories + RAG context + safety policy
       → Assemble tool stack from tools_config (see below)
-      → LangGraph create_react_agent → ainvoke
+      → Deep Agents SDK create_deep_agent → ainvoke (write_todos + filesystem tools built-in)
       → Persist all messages/tool calls to DB
       → (every Nth user message) extract long-term memories via LLM
 ```
@@ -80,22 +80,54 @@ Client (X-API-Key header required)
 | `app/core/file_processor.py` | Extracts text from uploaded files before embedding |
 | `app/core/custom_tool_service.py` | CRUD for agent-created Python tools stored in DB |
 | `app/core/tools/` | Self-contained tool modules; each returns LangChain-compatible tools |
+| `app/core/deep_agent_backend.py` | `DockerBackend` — adapts `DockerSandbox` to Deep Agents `SandboxBackendProtocol`; activates built-in `write_file`, `read_file`, `edit_file`, `ls`, `glob`, `grep`, `execute` tools |
 
 ### Tool Stack (enabled per-agent via `tools_config`)
 
 Always-on tools:
-- **Sandbox**: `bash`, `write_file`, `read_file`, `list_files` — Docker containers, 512MB/1CPU, gVisor-optional
 - **Memory**: `remember`, `recall`, `forget` — persisted to `agent_memories` table, scoped by `external_user_id`
 - **Skills**: `create_skill`, `use_skill`, `list_skills`
-- **Tool Creator**: `create_tool`, `list_tools`, `run_custom_tool` — agents can create Python tools at runtime
-- **Scheduler**: `set_reminder`, `list_reminders`, `cancel_reminder`
 - **Escalation**: `escalate_to_human`, `reply_to_user`, `send_to_number` — human handoff flow with draft-confirm-send
 
+When `sandbox: true`, Deep Agents SDK activates automatically via `DockerBackend`:
+- `write_todos` — task planning / decomposition (always active when backend is set)
+- `write_file`, `read_file`, `edit_file`, `ls`, `glob`, `grep` — filesystem in workspace dir
+- `execute` — bash in ephemeral Docker container
+- `sandbox_write_binary_file` — custom tool for base64 binary writes (not in BackendProtocol)
+
 Opt-in tools (enabled in `tools_config`):
-- **HTTP**: `http_get`, `http_post`
-- **RAG**: `search_documents`
-- **WhatsApp media**: `send_whatsapp_image`, `send_agent_wa_qr`
-- **MCP**: tools from external MCP servers
+- **Sandbox**: `sandbox: true` — Docker containers, workspace at `{SANDBOX_BASE_DIR}/{session_id}/`
+- **Tool Creator**: `tool_creator: true` — `create_tool`, `list_tools`, `run_custom_tool`; requires sandbox
+- **Scheduler**: `scheduler: true` — `set_reminder`, `list_reminders`, `cancel_reminder`
+- **HTTP**: `http: true` — `http_get`, `http_post`
+- **RAG**: `rag: true` — `search_documents`
+- **WhatsApp media**: `whatsapp_media: true` — `send_whatsapp_image`, `send_whatsapp_document`
+- **WA Agent Manager**: `wa_agent_manager: true` — `send_agent_wa_qr`
+- **MCP**: `mcp: {...}` — tools from external MCP servers
+- **Subagents**: `subagents: { "enabled": true }` — delegate tasks to specialist sub-agents via `task()` tool
+
+### Subagents (`tools_config.subagents`)
+
+```json
+{ "subagents": { "enabled": true } }
+```
+Auto-loads 4 hardcoded system sub-agents (no DB dependency):
+- `sys_researcher` — HTTP/web research, returns structured summaries
+- `sys_coder` — Python sandbox, writes and executes code
+- `sys_writer` — Writing, editing, formatting, translation
+- `sys_analyst` — Data analysis with pandas/numpy in sandbox
+
+To use specific custom agents instead:
+```json
+{ "subagents": { "enabled": true, "agent_ids": ["uuid-1", "uuid-2"] } }
+```
+Custom agents are loaded from DB by UUID. Both system and custom can be mixed by listing UUIDs (system agents are always built-in when `agent_ids` is empty).
+
+Sub-agent rules:
+- Workspace isolated: `{SANDBOX_BASE_DIR}/{session_id}_sys_{name}/` or `{session_id}_sub_{agent_id}/`
+- Excluded tools in sub-agents: escalation, scheduler, wa_agent_manager (no channel access)
+- Model: each sub-agent uses its own model config (default `openai/gpt-4o-mini` for system agents)
+- Session: ephemeral — not persisted to DB as a full session
 
 ### WhatsApp Integration (wa-service)
 

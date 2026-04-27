@@ -263,3 +263,94 @@ resolveJID menerima JID dengan "@", langsung parse dan kirim ke @lid — deliver
 
 Catatan: sesi existing yang punya user_phone = "+LIDnumber" lama akan otomatis terupdate
 ke chat_id yang benar saat user kirim pesan berikutnya (ada logika update session di channels.py).
+
+Migrasi Deep Agents SDK — Phase 2 & 3: Sub-agents + Quality Gate + Memory Summarizer (24 Apr 2026):
+
+Phase 2 — Sub-agent Spawning:
+
+1. `build_subagents()` di agent_runner.py:
+   - Jika `agent_ids` kosong → auto-load 5 hardcoded system sub-agents (tidak dari DB).
+   - Jika `agent_ids` diisi → load agent dari DB by UUID, construct ChatOpenAI instance per sub-agent.
+   - Setiap sub-agent punya isolated sandbox workspace: `{session_id}_sys_{name}/` atau `{session_id}_sub_{agent_id}/`.
+   - Invalid UUID di whitelist: log warning dan skip — tidak crash.
+
+2. 5 System Sub-agents (hardcoded di `_SYSTEM_SUBAGENTS`, tidak bergantung DB):
+   - `sys_critic`     → quality reviewer, approve/reject output, model: gpt-4o-mini
+   - `sys_researcher` → riset via HTTP, model: gpt-4o-mini
+   - `sys_coder`      → Python sandbox, tulis + jalankan kode, model: gpt-4o-mini
+   - `sys_writer`     → tulis/edit/terjemah konten, model: gpt-4o-mini
+   - `sys_analyst`    → analisis data pandas/numpy di sandbox, model: gpt-4o-mini
+   Model bisa diubah di `app/core/agent_runner.py` baris ~592–658 field `"model"` per entry.
+
+3. Integrasi ke `run_agent()`:
+   - Panggil `build_subagents()` tanpa guard `if agent_ids:` — auto-discover aktif meski agent_ids kosong.
+   - Pass `subagents=subagent_list or None` ke `create_deep_agent()`.
+   - Sub-sandboxes di-close di finally block (success dan error path).
+
+4. System prompt update: blok `## Available Subagents` di-inject otomatis saat subagent_list tidak kosong.
+
+5. `tools_config.subagents` schema:
+   ```json
+   { "subagents": { "enabled": true } }                          // auto-load 5 system sub-agents
+   { "subagents": { "enabled": true, "agent_ids": ["uuid"] } }  // load dari DB
+   ```
+
+6. Bug fix: SDK tidak bisa resolve OpenRouter model string (`openai/gpt-4o-mini`).
+   Fix: selalu construct `ChatOpenAI(model=..., base_url="https://openrouter.ai/api/v1")` dan pass instance, bukan string.
+
+7. Loop protection: tidak perlu guard manual — SDK tidak auto-invoke subagent config milik subagent yang dipanggil.
+   Backstop: `recursion_limit = agent_max_steps * 2` via LangGraph.
+
+Phase 3 — Quality Gate & Memory Summarizer:
+
+1. Critic (sys_critic) — Opsi B (sub-agent eksplisit):
+   - Main agent memanggil sys_critic secara eksplisit setelah executor selesai.
+   - Output critic: `VERDICT: APPROVED` atau `VERDICT: REJECTED` + feedback spesifik.
+   - Loop protection via recursion_limit; tidak perlu depth guard tambahan.
+
+2. Memory Summarizer:
+   - Trigger: `_SUMMARY_TRIGGER = 10` user messages dalam session.
+   - Cache di `session.metadata_["context_summary"]` — tidak perlu migrasi DB.
+   - Di-inject ke system prompt sebagai `## Conversation Context Summary` block.
+   - Re-summarize setiap 10 pesan berikutnya secara kumulatif.
+   - `_maybe_summarize_context()` dipanggil di `run_agent()` setelah LLM creation.
+
+Update Postman + UI-DEV (24 Apr 2026):
+- Postman: Orchestrator Agent request body pakai `subagents: { "enabled": true }` (tanpa agent_ids),
+  instructions diupdate mencantumkan semua 5 system sub-agents dan pola critic review.
+- UI-DEV/index.html: hint text diupdate — jelaskan auto-load 5 system sub-agents vs UUID custom.
+- UI-DEV/app.js: default tools_config sudah include `subagents: { enabled: false, agent_ids: [] }`.
+
+Fix Scheduler/Reminder (24 Apr 2026):
+
+Bug 1 — Reminder meleset jam (timezone):
+Root cause: ISO datetime yang diisi agent selalu dianggap UTC, padahal user minta jam WIB.
+Contoh: user minta jam 15:00 WIB → agent nulis "2026-04-24T15:00:00" → dieksekusi 15:00 UTC = 22:00 WIB (7 jam meleset).
+Fix:
+- scheduler_tool.py: ISO datetime parse sekarang dianggap WIB (UTC+7), dikonversi ke UTC sebelum disimpan.
+- scheduler_tool.py: _compute_next_run() untuk cron expression dievaluasi dalam basis waktu WIB.
+- scheduler_service.py: croniter di _run_job() juga dievaluasi WIB untuk next_run_at.
+- Docstring diupdate: inject "Waktu sekarang (WIB): ..." agar agent pakai waktu lokal sebagai acuan.
+
+Bug 2 — Tidak bisa lebih dari 1 reminder:
+Root cause: _set_reminder() cancel reminder lama jika label sama. Agent LLM cenderung pakai label
+generik ("reminder") untuk semua reminder → reminder pertama hilang saat reminder kedua dibuat.
+Fix: jika label sudah ada dan aktif, otomatis append suffix _2/_3/dst. daripada cancel.
+Docstring diupdate: jelaskan ke LLM bahwa label berbeda direkomendasikan, tapi label duplikat
+tidak akan menghapus yang lama — akan dibuat sebagai reminder terpisah dengan suffix otomatis.
+
+Typing Indicator WhatsApp (24 Apr 2026):
+
+Tambah efek "sedang mengetik..." di kedua WA service agar user tahu AI sedang memproses.
+
+wa-service/device_manager.go:
+- handleIncoming(): kirim ChatPresenceComposing ke chat yang sama sesaat setelah pesan diterima,
+  sebelum payload diteruskan ke Python webhook.
+- SendMessage(): kirim ChatPresencePaused sebelum mengirim pesan balasan.
+
+wa-dev-service/whatsapp.go:
+- handleMessage(): kirim ChatPresenceComposing sebelum onMessage dipanggil.
+- SendText(): kirim ChatPresencePaused sebelum mengirim pesan balasan.
+
+Efek: user melihat "sedang mengetik..." sejak pesan diterima sampai AI selesai memproses.
+Rebuild binary diperlukan setelah update: make wa-build dan rebuild wa-dev-service.

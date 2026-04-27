@@ -213,6 +213,32 @@
           }
         },
         {
+          "name": "POST /v1/agents — Buat Orchestrator Agent (dengan subagents)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Orchestrator Agent\",\n  \"description\": \"Agent orkestrator yang mendelegasikan task ke sub-agent spesialis.\",\n  \"instructions\": \"Kamu adalah orchestrator agent. Untuk setiap task kompleks:\\n1. Gunakan write_todos untuk breakdown task menjadi langkah-langkah\\n2. Delegate ke sub-agent yang sesuai menggunakan task(name=..., task=...):\\n   - sys_researcher: riset informasi dari internet atau API\\n   - sys_coder: tulis dan jalankan kode di sandbox\\n   - sys_writer: tulis dan edit dokumen\\n   - sys_analyst: analisis data dan buat laporan\\n   - sys_critic: review dan validasi output sub-agent lain\\n3. Setelah executor selesai, panggil sys_critic untuk review hasilnya\\n4. Jika critic REJECTED, perbaiki dan retry. Jika APPROVED, lanjut ke langkah berikutnya\\n5. Kompilasi hasil dari semua sub-agent menjadi jawaban final terstruktur\\n\\nTips: agent_ids kosong = otomatis load semua 5 system sub-agents.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.5,\n  \"tools_config\": {\n    \"memory\": false,\n    \"skills\": false,\n    \"escalation\": false,\n    \"sandbox\": false,\n    \"subagents\": {\n      \"enabled\": true\n    }\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
           "name": "POST /v1/agents — Buat WhatsApp Agent (scan QR)",
           "request": {
             "method": "POST",

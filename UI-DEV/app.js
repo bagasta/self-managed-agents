@@ -244,7 +244,8 @@ function setAgentFormDefaults() {
   document.getElementById('a-tools').value = JSON.stringify({
     memory: true, skills: true, escalation: true,
     sandbox: false, tool_creator: false, scheduler: false,
-    rag: false, http: false, mcp: false, wa_agent_manager: false
+    rag: false, http: false, mcp: false, wa_agent_manager: false,
+    subagents: { enabled: false, agent_ids: [] }
   }, null, 2);
   document.getElementById('a-escalation').value = JSON.stringify({
     channel_type: "whatsapp",

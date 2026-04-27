@@ -16,7 +16,11 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
+
+# Timezone lokal platform (WIB = UTC+7)
+_LOCAL_TZ = timezone(timedelta(hours=7))
+_LOCAL_TZ_NAME = "WIB (UTC+7)"
 
 import structlog
 from langchain_core.tools import tool
@@ -70,10 +74,10 @@ def _parse_schedule(schedule: str) -> tuple[str | None, datetime | None]:
     if s.lower() in _SHORTHAND_MAP:
         return _SHORTHAND_MAP[s.lower()], None
 
-    # ISO datetime
+    # ISO datetime — dianggap waktu lokal (WIB), dikonversi ke UTC
     for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
         try:
-            dt = datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
+            dt = datetime.strptime(s, fmt).replace(tzinfo=_LOCAL_TZ).astimezone(timezone.utc)
             return None, dt
         except ValueError:
             continue
@@ -92,35 +96,50 @@ def _parse_schedule(schedule: str) -> tuple[str | None, datetime | None]:
 
 
 def _compute_next_run(cron_expr: str) -> datetime:
-    """Hitung next_run_at dari cron expression menggunakan croniter."""
+    """Hitung next_run_at dari cron expression (WIB) dan konversi ke UTC."""
     try:
         from croniter import croniter
-        return croniter(cron_expr, datetime.now(timezone.utc)).get_next(datetime)
+        now_local = datetime.now(_LOCAL_TZ)
+        next_local = croniter(cron_expr, now_local).get_next(datetime)
+        return next_local.astimezone(timezone.utc)
     except ImportError:
-        # Fallback: 1 menit dari sekarang jika croniter belum terinstall
-        from datetime import timedelta
         return datetime.now(timezone.utc) + timedelta(minutes=1)
 
 
 def build_scheduler_tools(session_id: uuid.UUID, agent_id: uuid.UUID, db: AsyncSession) -> list:
 
-    _now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    _now_local = datetime.now(_LOCAL_TZ).strftime("%Y-%m-%dT%H:%M:%S")
 
     # --- set_reminder ---
     # Docstring di-inject secara dinamis agar LLM tahu waktu sekarang
 
     async def _set_reminder(label: str, message: str, schedule: str) -> str:
-        # Hapus job lama dengan label yang sama jika ada
-        existing = await db.execute(
+        # Jika label sudah ada, buat label baru dengan suffix unik agar reminder lama tidak di-cancel
+        base_label = label
+        existing_result = await db.execute(
             select(ScheduledJob).where(
                 ScheduledJob.session_id == session_id,
                 ScheduledJob.label == label,
                 ScheduledJob.status == "active",
             )
         )
-        old = existing.scalar_one_or_none()
-        if old:
-            old.status = "cancelled"
+        existing_job = existing_result.scalar_one_or_none()
+        if existing_job:
+            # Auto-suffix: cari label yang belum dipakai
+            suffix = 2
+            while True:
+                candidate = f"{base_label}_{suffix}"
+                check = await db.execute(
+                    select(ScheduledJob).where(
+                        ScheduledJob.session_id == session_id,
+                        ScheduledJob.label == candidate,
+                        ScheduledJob.status == "active",
+                    )
+                )
+                if check.scalar_one_or_none() is None:
+                    label = candidate
+                    break
+                suffix += 1
 
         try:
             cron_expr, run_once_at = _parse_schedule(schedule)
@@ -142,22 +161,28 @@ def build_scheduler_tools(session_id: uuid.UUID, agent_id: uuid.UUID, db: AsyncS
         db.add(job)
         await db.flush()
 
-        kind = f"cron ({cron_expr})" if cron_expr else f"sekali pada {run_once_at.isoformat()}"
+        local_time = next_run.astimezone(_LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S") if next_run else "-"
+        kind = f"cron ({cron_expr})" if cron_expr else f"sekali pada {local_time} {_LOCAL_TZ_NAME}"
         logger.info("scheduler_tool.set_reminder", label=label, kind=kind)
         return f"Reminder '{label}' berhasil di-set. Jadwal: {kind}. Pesan: \"{message}\""
 
     _set_reminder.__doc__ = (
         "Set jadwal pengiriman pesan otomatis (reminder/proactive message).\n\n"
-        f"Waktu sekarang (UTC): {_now_utc}\n"
-        "Gunakan waktu ini sebagai acuan saat menghitung jadwal relatif atau ISO datetime.\n\n"
+        f"Waktu sekarang ({_LOCAL_TZ_NAME}): {_now_local}\n"
+        "Gunakan waktu lokal ini sebagai acuan. ISO datetime diinterpretasi sebagai waktu lokal (WIB), "
+        "BUKAN UTC.\n"
+        "Untuk beberapa reminder sekaligus, gunakan label BERBEDA untuk tiap reminder "
+        "(contoh: 'pagi', 'siang', 'malam') — label yang sama akan dibuat sebagai reminder terpisah "
+        "dengan suffix otomatis.\n\n"
         "Args:\n"
-        "    label    : Nama unik untuk job ini (contoh: 'daily_report', 'followup_user')\n"
+        "    label    : Nama untuk job ini. Jika label sudah ada, suffix _2/_3 ditambah otomatis.\n"
+        "               Contoh: 'pagi', 'siang', 'malam', 'daily_report', 'followup'\n"
         "    message  : Pesan yang akan dikirim ke user saat jadwal tiba\n"
         "    schedule : Jadwal pengiriman. Format yang didukung:\n"
         "               - Relative dari sekarang: 'in 2m', 'in 30m', 'in 1h', 'in 2h', 'in 3d'\n"
         "               - Shorthand berulang: 'every 1m', 'every 5m', 'every 30m', 'every 1h', 'every 1d'\n"
-        "               - Cron expression: '0 9 * * 1-5' (hari kerja jam 9 pagi)\n"
-        "               - ISO datetime UTC (sekali jalan): '2026-04-21T09:00:00'"
+        "               - Cron expression WIB: '0 9 * * 1-5' (hari kerja jam 9 pagi WIB)\n"
+        f"               - ISO datetime lokal WIB (sekali jalan): '2026-04-24T15:00:00' = jam 15:00 WIB"
     )
     set_reminder = tool(_set_reminder)
 

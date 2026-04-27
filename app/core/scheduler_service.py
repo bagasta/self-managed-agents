@@ -123,8 +123,13 @@ async def _run_job(job_id) -> None:
 
             if job.cron_expr:
                 try:
+                    from datetime import timedelta
                     from croniter import croniter
-                    job.next_run_at = croniter(job.cron_expr, now).get_next(datetime)
+                    # Cron dievaluasi dalam WIB (UTC+7), lalu konversi ke UTC untuk disimpan
+                    local_tz = timezone(timedelta(hours=7))
+                    now_local = now.astimezone(local_tz)
+                    next_local = croniter(job.cron_expr, now_local).get_next(datetime)
+                    job.next_run_at = next_local.astimezone(timezone.utc)
                 except ImportError:
                     from datetime import timedelta
                     job.next_run_at = now + timedelta(hours=1)

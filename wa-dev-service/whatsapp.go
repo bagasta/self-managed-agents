@@ -168,6 +168,8 @@ func (wa *WhatsAppClient) SendText(chatID, text string) error {
 	if err != nil {
 		return err
 	}
+	// Stop typing indicator before sending the actual reply.
+	_ = wa.client.SendChatPresence(context.Background(), jid, types.ChatPresencePaused, types.ChatPresenceMediaText)
 	_, err = wa.client.SendMessage(context.Background(), jid, &waE2E.Message{
 		Conversation: proto.String(text),
 	})
@@ -418,6 +420,9 @@ func (wa *WhatsAppClient) handleMessage(evt *events.Message) {
 	if msg.Text == "" && msg.MediaType == "" {
 		return
 	}
+
+	// Send typing indicator so the user sees "typing..." while AI processes.
+	_ = wa.client.SendChatPresence(context.Background(), chatJID, types.ChatPresenceComposing, types.ChatPresenceMediaText)
 
 	if wa.onMessage != nil {
 		go wa.onMessage(msg)
