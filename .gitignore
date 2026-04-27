@@ -57,5 +57,7 @@ wa-dev-service/wa-dev-store/
 # wa-dev runtime state
 wa-dev-service/connections.json
 
-# Notes / Sensitive Info
+# Notes / Sensitive Info (contain server IP, passwords, API keys)
 deploy/note-deploy.md
+deploy/SOP-deploy.md
+deploy_paramiko.py
