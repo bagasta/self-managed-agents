@@ -526,3 +526,27 @@ Bug yang ditemukan & diperbaiki:
 Status production-plan:
 - Fase 2 (Code Quality) 100% selesai.
 - Next: Sprint 2 - 3.3 Rate Limiter (Redis sliding window) atau Sprint 2 - 4.3 Observability (Grafana dashboard).
+
+Implementasi Fase 3 — Scaling Architecture (27 Apr 2026):
+
+Sprint 2 untuk Phase 3 (Scaling Foundation) telah diimplementasi untuk menjamin stabilitas saat traffic mencapai ~500 concurrent users. 
+
+1. **3.3 Rate Limiting Berbasis Redis**
+   - **Hotfix (Deploy):** Mengembalikan koneksi `slowapi` pada `app/main.py` menggunakan standard sinkronous `redis://` alih-alih `async+redis://` (yang menuntut dependensi tambahan `coredis` sehingga mengakibatkan API crash). Rate limit ini sangat optimal secara latensi sehingga `redis://` memadai.
+   
+2. **3.4 PgBouncer Connection Pooling**
+   - Menambahkan container `pgbouncer` ke `docker-compose.prod.yml` dengan transaction pooling mode (`POOL_MODE: transaction`) dan `MAX_CLIENT_CONN: 1000`.
+   - Melakukan tuning pool SQLAlchemy API (`pool_size=5`, `max_overflow=10`, `pool_timeout=30`, `pool_recycle=1800`) agar kompatibel dengan limit rate database yang melalui PgBouncer.
+
+3. **3.6 Resource Limits (Docker Sandbox)**
+   - Menambahkan pengecekan label `managed-agent-sandbox=true` di `DockerSandbox` (`app/core/sandbox.py`) agar saat eksekusi mencapai `max_concurrent_sandboxes` (`get_settings().max_concurrent_sandboxes`), Sandbox otomatis decline eksekusi. Ini mencegah server hang karena CPU/Memory exhaustion dari infinite loop.
+
+4. **3.7 WA Deduplication (Idempotency)**
+   - Implementasi `is_duplicate_message` di `app/api/wa_helpers.py` menggunakan cache Redis TTL 300s (5 menit) (+ fallback In-Memory Cache) sebagai lock mekanisme idempotency WA.
+   - Dipanggil di `wa_incoming()` untuk mendrop pengulangan otomatis dari trigger Webhook yang double-delivery.
+
+5. **Shared Redis Pool**
+   - Refactor `app/core/event_bus_redis.py` dan membuat modul global connection pooling Redis di `app/core/redis_client.py`.
+
+Next Action:
+Untuk 3.5 (Background Tasks via Celery) tidak dilakukan langsung sekarang karena akan mengubah signature API (Response dari `{"reply":"..."}` menjadi `{"status":"pending","run_id":"..."}`). Bila ingin diterapkan, semua HTTP client Frontend/Bot harus disesuaikan menjadi cara asinkronus (long-polling HTTP / WebSocket). Bila saat ini performance block sudah terbantu PgBouncer, 3.5 dapat ditunda sementara.

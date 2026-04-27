@@ -91,6 +91,15 @@ class DockerSandbox:
         The sandbox workspace is mounted at /workspace inside the container.
         """
         client = self._get_client()
+        
+        # Check concurrent limits to prevent host CPU/Memory exhaustion
+        try:
+            running = client.containers.list(filters={"label": "managed-agent-sandbox=true"})
+            if len(running) >= self._settings.max_concurrent_sandboxes:
+                return f"[sandbox error] Too many concurrent sandbox executions ({len(running)}). Try again later."
+        except Exception as e:
+            logger.warning("sandbox.bash.check_running_failed", error=str(e))
+
         log = logger.bind(session_id=self.session_id, cmd_preview=cmd[:120])
         log.debug("sandbox.bash.start")
 
@@ -109,6 +118,7 @@ class DockerSandbox:
             network_mode="none",
             security_opt=["no-new-privileges:true"],
             cap_drop=["ALL"],
+            labels={"managed-agent-sandbox": "true"},
             remove=True,
             stdout=True,
             stderr=True,

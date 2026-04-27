@@ -31,5 +31,6 @@ sentry-sdk[fastapi]>=1.40.0
 prometheus-fastapi-instrumentator>=6.0.0
 prometheus-client>=0.20.0
 redis[hiredis]>=5.0.0          # optional: untuk Redis-backed event bus (multi-process SSE)
+coredis>=3.4.0                 # required by slowapi for async redis rate limiting
 
 python-dotenv==1.0.1

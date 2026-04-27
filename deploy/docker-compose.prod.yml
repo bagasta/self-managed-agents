@@ -110,6 +110,22 @@ services:
       - "traefik.http.services.wa-dev.loadbalancer.server.port=8081"
       - "traefik.docker.network=root_default"
 
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    restart: unless-stopped
+    env_file:
+      - .env.prod
+    environment:
+      # Pgbouncer needs to know where to route
+      DB_HOST: host.docker.internal
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 1000
+      DEFAULT_POOL_SIZE: 20
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - internal
+
 volumes:
   wa_store:
   wa_dev_store:

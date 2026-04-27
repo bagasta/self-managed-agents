@@ -53,6 +53,7 @@ from app.api.wa_helpers import (
     get_wa_lookup_user_id,
     is_operator_message,
     process_wa_media,
+    is_duplicate_message,
 )
 
 _settings = get_settings()
@@ -229,8 +230,13 @@ async def wa_incoming(
         raise HTTPException(status_code=404, detail="No agent found for this WhatsApp device")
 
     from_phone = body.from_
-    # reply_target: JID tujuan untuk kirim balasan (grup JID atau DM)
     reply_target = body.chat_id or body.from_
+
+    # 1.5. Cek deduplikasi WA (handling multiple webhook calls for the same message)
+    if body.timestamp:
+        if await is_duplicate_message(body.device_id, from_phone, body.timestamp, db):
+            log.info("wa_incoming.duplicate_ignored")
+            return {"status": "ignored", "reason": "duplicate message"}
 
     # 2. Cek apakah pesan dari operator
     _is_operator = is_operator_message(from_phone, reply_target, agent)

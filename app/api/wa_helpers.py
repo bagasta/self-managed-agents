@@ -22,6 +22,44 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
+# Fallback in-memory cache jika Redis mati/tidak ada.
+# Menghindari db.execute (lambat) untuk deduplikasi.
+_mem_dedup_cache: dict[str, float] = {}
+
+async def is_duplicate_message(device_id: str, from_phone: str, timestamp: int, db: AsyncSession) -> bool:
+    """
+    Cek apakah pesan WhatsApp (berdasarkan identitas pengirim dan timestamp)
+    sudah pernah diproses dalam 5 menit terakhir.
+    """
+    import time
+    from app.core.redis_client import get_redis
+    
+    key = f"wa_dedup:{device_id}:{from_phone}:{timestamp}"
+    r = await get_redis()
+    
+    if r:
+        try:
+            # redis.set returns None if NX fails
+            is_new = await r.set(key, "1", ex=300, nx=True)
+            return not bool(is_new)
+        except Exception as exc:
+            log.warning("wa_dedup.redis_fail", error=str(exc))
+    
+    # Fallback to in-memory TTL mechanism
+    now = time.time()
+    
+    # Prune old cache to avoid memory leak
+    if len(_mem_dedup_cache) > 5000:
+        keys_to_delete = [k for k, v in _mem_dedup_cache.items() if now - v > 300]
+        for k in keys_to_delete:
+            _mem_dedup_cache.pop(k, None)
+            
+    if key in _mem_dedup_cache:
+        # Cache hit - duplicate
+        return True
+        
+    _mem_dedup_cache[key] = now
+    return False
 
 async def find_agent_by_device(device_id: str, db: AsyncSession):
     """

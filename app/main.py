@@ -52,8 +52,11 @@ if settings.sentry_dsn:
         environment=settings.environment,
     )
 
-limiter = Limiter(key_func=get_remote_address)
+limiter_opts = {"key_func": get_remote_address}
+if getattr(settings, "redis_url", ""):
+    limiter_opts["storage_uri"] = settings.redis_url
 
+limiter = Limiter(**limiter_opts)
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):

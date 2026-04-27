@@ -21,27 +21,11 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
-async def _get_redis():
-    """Dapatkan Redis connection. Returns None jika Redis tidak dikonfigurasi/tersedia."""
-    try:
-        import redis.asyncio as aioredis
-        from app.config import get_settings
-
-        settings = get_settings()
-        redis_url = getattr(settings, "redis_url", "")
-        if not redis_url:
-            return None
-        r = aioredis.from_url(redis_url, decode_responses=True)
-        await r.ping()
-        return r
-    except Exception as exc:
-        log.debug("event_bus_redis: Redis not available, falling back to in-memory: %s", exc)
-        return None
-
+from app.core.redis_client import get_redis
 
 async def publish(session_id: str, event: dict[str, Any]) -> None:
     """Publish event ke channel Redis. Fallback ke in-memory jika Redis tidak tersedia."""
-    r = await _get_redis()
+    r = await get_redis()
     if r:
         try:
             async with r:
@@ -64,7 +48,7 @@ async def subscribe_generator(session_id: str) -> AsyncGenerator[dict[str, Any],
         async for event in subscribe_generator(session_id):
             yield f"data: {json.dumps(event)}\n\n"
     """
-    r = await _get_redis()
+    r = await get_redis()
     if r:
         try:
             async with r.pubsub() as pubsub:
