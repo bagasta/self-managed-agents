@@ -1,0 +1,143 @@
+{
+  "info": {
+    "name": "WA Dev Service",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8081" }
+  ],
+  "item": [
+    {
+      "name": "System",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/health"
+          }
+        },
+        {
+          "name": "Get WhatsApp Status",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/status",
+            "description": "Cek status koneksi (waiting_qr / connected / disconnected). Jika waiting_qr, field 'qr' berisi base64 PNG QR code."
+          }
+        },
+        {
+          "name": "Connect WhatsApp (Get QR)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/connect-wa",
+            "description": "Inisiasi koneksi WhatsApp. Mengembalikan QR code base64 jika belum scan. Jika sudah terhubung, qr kosong."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Connections",
+      "item": [
+        {
+          "name": "List Active Connections",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/connections",
+            "description": "Tampilkan semua user yang terhubung ke agent. Key = nomor HP (+62xxx), value = agent_id, agent_key, session_id, connected_at, chat_id."
+          }
+        },
+        {
+          "name": "Force Disconnect User",
+          "request": {
+            "method": "DELETE",
+            "url": "{{base_url}}/connections/%2B62895619356936",
+            "description": "Paksa disconnect user dari agentnya. Ganti %2B62895619356936 dengan nomor HP user (URL-encoded: + = %2B)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Send Messages",
+      "item": [
+        {
+          "name": "Send Text",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/send/text",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"to\": \"+6281234567890\",\n  \"text\": \"Halo dari WA Dev Service!\"\n}"
+            },
+            "description": "Kirim pesan teks ke nomor WhatsApp. 'to' bisa berupa +62xxx atau chat_id@s.whatsapp.net."
+          }
+        },
+        {
+          "name": "Send Image (Base64)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/send/image",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"to\": \"+6281234567890\",\n  \"image\": \"<base64-encoded-image>\",\n  \"caption\": \"Ini gambarnya\",\n  \"mimetype\": \"image/jpeg\"\n}"
+            },
+            "description": "Kirim gambar dalam format base64. Mimetype default: image/jpeg. Mendukung image/png, image/webp."
+          }
+        },
+        {
+          "name": "Send Image (URL)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/send/image/url",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"to\": \"+6281234567890\",\n  \"url\": \"https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/280px-PNG_transparency_demonstration_1.png\",\n  \"caption\": \"Gambar dari URL\",\n  \"mimetype\": \"image/png\"\n}"
+            },
+            "description": "Kirim gambar dari URL publik. Service akan download lalu upload ke WhatsApp."
+          }
+        },
+        {
+          "name": "Send Document (Base64)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/send/document",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"to\": \"+6281234567890\",\n  \"data\": \"<base64-encoded-file>\",\n  \"filename\": \"laporan.pdf\",\n  \"caption\": \"Ini dokumennya\",\n  \"mimetype\": \"application/pdf\"\n}"
+            },
+            "description": "Kirim dokumen (PDF, DOCX, dll) dalam format base64."
+          }
+        },
+        {
+          "name": "Send Document (URL)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/send/document/url",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"to\": \"+6281234567890\",\n  \"url\": \"https://www.w3.org/WAI/WCAG21/Techniques/pdf/PDF2.pdf\",\n  \"filename\": \"dokumen.pdf\",\n  \"caption\": \"Dokumen dari URL\",\n  \"mimetype\": \"application/pdf\"\n}"
+            },
+            "description": "Kirim dokumen dari URL publik. Service akan download lalu upload ke WhatsApp."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Receive Messages (Incoming)",
+      "item": [
+        {
+          "name": "ℹ️ Cara Kerja Incoming",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/health",
+            "description": "Incoming messages TIDAK diakses via HTTP pull. Service menerima pesan secara real-time dari WhatsApp lalu:\n\n1. [Auto] Routing ke agent: pesan diteruskan ke main API berdasarkan mapping phone→agent di /connections.\n\n2. [Optional] Raw webhook forward: set env WEBHOOK_URL=http://your-server/webhook, maka setiap pesan masuk akan di-POST ke URL tersebut dengan payload:\n{\n  \"from\": \"+62xxx\",\n  \"chat_id\": \"62xxx@s.whatsapp.net\",\n  \"text\": \"isi pesan\",\n  \"media_type\": \"image|document|audio|sticker|\\\"\\\"\",\n  \"media_data\": \"<base64 jika ada>\",\n  \"media_filename\": \"file.jpg\",\n  \"media_mimetype\": \"image/jpeg\",\n  \"timestamp\": 1234567890\n}"
+          }
+        }
+      ]
+    }
+  ]
+}

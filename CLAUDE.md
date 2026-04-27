@@ -36,7 +36,7 @@ make format           # ruff format app/ alembic/
 docker compose up --build
 ```
 
-There are no automated tests. Manual test scripts: `test_db.py`. A Postman collection exists at `managed-agents.postman_collection.json`.
+There are no automated tests. Manual test scripts in `scripts/` (test_db.py, test_script.py, list_sessions.py). Postman collections at `docs/postman/`.
 
 ### Required Environment Variables
 

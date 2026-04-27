@@ -1,0 +1,1813 @@
+{
+  "info": {
+    "name": "Managed Agent Platform",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000"
+    },
+    {
+      "key": "api_key",
+      "value": "42523db14d86f993409fba4984764be01fb169ddf7e5e401efab2f33442c9a7b"
+    },
+    {
+      "key": "agent_id",
+      "value": ""
+    },
+    {
+      "key": "agent_key",
+      "value": "",
+      "description": "Per-agent API key — auto-saved saat create agent, dipakai di endpoint /messages"
+    },
+    {
+      "key": "session_id",
+      "value": ""
+    },
+    {
+      "key": "doc_id",
+      "value": ""
+    },
+    {
+      "key": "run_id",
+      "value": ""
+    },
+    {
+      "key": "wa_device_id",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "GET /health — Cek status server",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/health"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Agents",
+      "item": [
+        {
+          "name": "POST /v1/agents — Buat CS Agent (default: memory+skills+escalation)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"CS Agent\",\n  \"description\": \"Agent customer service dengan kemampuan eskalasi ke operator manusia.\",\n  \"instructions\": \"Kamu adalah agen CS yang ramah dan profesional. Bantu user dengan pertanyaan mereka. Jika ada permintaan yang tidak bisa kamu tangani (refund, komplain besar, dll), gunakan tool escalate_to_human.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"tools_config\": {\n    \"memory\": true,\n    \"skills\": true,\n    \"escalation\": true,\n    \"sandbox\": false,\n    \"tool_creator\": false,\n    \"scheduler\": false,\n    \"rag\": false,\n    \"http\": false,\n    \"mcp\": false,\n    \"wa_agent_manager\": false\n  },\n  \"sandbox_config\": {},\n  \"safety_policy\": {\n    \"rules\": [\n      \"Jangan pernah mengeksekusi perintah sistem yang berbahaya.\",\n      \"Tolak permintaan yang melanggar hukum atau tidak etis.\"\n    ]\n  },\n  \"escalation_config\": {\n    \"channel_type\": \"whatsapp\",\n    \"operator_phone\": \"+62811000000\"\n  },\n  \"token_quota\": 4000000,\n  \"quota_period_days\": 30,\n  \"operator_ids\": [\n    \"+62811000000\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  const json = pm.response.json();",
+                  "  pm.collectionVariables.set('agent_id', json.id);",
+                  "  pm.collectionVariables.set('agent_key', json.api_key);",
+                  "  pm.test('agent_id tersimpan: ' + json.id, () => pm.expect(json.id).to.be.a('string'));",
+                  "  pm.test('agent_key tersimpan', () => pm.expect(json.api_key).to.be.a('string'));",
+                  "  pm.test('token_quota = 4000000', () => pm.expect(json.token_quota).to.eql(4000000));",
+                  "  pm.test('active_until ada', () => pm.expect(json.active_until).to.be.a('string'));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /v1/agents — Buat Coding Agent (sandbox+memory, eskalasi OFF)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Coding Agent\",\n  \"description\": \"Agent untuk menulis dan menjalankan kode Python di sandbox Docker yang aman.\",\n  \"instructions\": \"Kamu adalah coding assistant yang ahli Python. Saat menjawab pertanyaan kode:\\n1. Tulis kode yang bersih dan mudah dibaca.\\n2. Selalu jalankan kode terlebih dahulu untuk memverifikasi hasilnya.\\n3. Jelaskan output yang dihasilkan dengan singkat.\\n4. Jika ada error, perbaiki dan coba lagi.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"tools_config\": {\n    \"memory\": true,\n    \"skills\": true,\n    \"escalation\": false,\n    \"sandbox\": true,\n    \"tool_creator\": true,\n    \"scheduler\": false,\n    \"rag\": false,\n    \"http\": false,\n    \"mcp\": false\n  },\n  \"sandbox_config\": {\n    \"memory\": \"512m\",\n    \"cpu\": \"1.0\"\n  },\n  \"safety_policy\": {\n    \"rules\": [\n      \"Jangan pernah mengeksekusi perintah sistem yang berbahaya (rm -rf, shutdown, dll).\",\n      \"Jangan mengakses atau memodifikasi file di luar direktori kerja.\",\n      \"Tolak permintaan yang melanggar hukum atau tidak etis.\"\n    ],\n    \"max_output_length\": 4000\n  },\n  \"escalation_config\": {},\n  \"token_quota\": 4000000,\n  \"quota_period_days\": 30,\n  \"operator_ids\": []\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "POST /v1/agents — Buat RAG Knowledge Agent (Telegram operator)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Knowledge Agent\",\n  \"description\": \"Agent berbasis RAG — menjawab dari dokumen internal yang diupload.\",\n  \"instructions\": \"Kamu adalah asisten internal perusahaan. Dokumen relevan dari knowledge base sudah otomatis tersedia di konteksmu — gunakan sebagai sumber utama. Jika informasi tidak ada, katakan dengan jujur.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.3,\n  \"tools_config\": {\n    \"memory\": true,\n    \"skills\": false,\n    \"escalation\": true,\n    \"sandbox\": false,\n    \"tool_creator\": false,\n    \"scheduler\": false,\n    \"rag\": true,\n    \"http\": true,\n    \"mcp\": false\n  },\n  \"sandbox_config\": {},\n  \"safety_policy\": {\n    \"rules\": [\n      \"Jangan pernah mengungkapkan informasi rahasia kepada pihak luar.\",\n      \"Jangan membuat klaim yang tidak didukung dokumen yang tersedia.\"\n    ]\n  },\n  \"escalation_config\": {\n    \"channel_type\": \"telegram\",\n    \"operator_phone\": \"123456789\"\n  },\n  \"token_quota\": 2000000,\n  \"quota_period_days\": 30,\n  \"operator_ids\": [\n    \"+628xxxx_telegram_admin\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "POST /v1/agents — Buat MCP Agent (remote SSE server)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"MCP Agent\",\n  \"description\": \"Agent dengan akses ke tool eksternal via MCP server (SSE/HTTP atau stdio).\",\n  \"instructions\": \"Kamu adalah asisten yang dapat menggunakan tool dari server MCP eksternal. Gunakan tool yang tersedia untuk membantu user.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"tools_config\": {\n    \"memory\": true,\n    \"tool_creator\": false,\n    \"rag\": false,\n    \"sandbox\": false,\n    \"skills\": false,\n    \"scheduler\": false,\n    \"escalation\": false,\n    \"http\": false,\n    \"mcp\": {\n      \"enabled\": true,\n      \"servers\": {\n        \"filesystem\": {\n          \"url\": \"http://localhost:8080/mcp\",\n          \"transport\": \"streamable_http\"\n        },\n        \"github\": {\n          \"url\": \"http://localhost:8081/sse\",\n          \"transport\": \"sse\"\n        }\n      }\n    }\n  },\n  \"sandbox_config\": {},\n  \"safety_policy\": {},\n  \"escalation_config\": {},\n  \"operator_ids\": []\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "POST /v1/agents — Buat MCP Agent (stdio local process)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Filesystem Agent\",\n  \"description\": \"Agent dengan akses ke filesystem lokal via MCP stdio server.\",\n  \"instructions\": \"Kamu bisa membaca dan menulis file. Gunakan tool filesystem untuk membantu user mengelola file.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"tools_config\": {\n    \"memory\": true,\n    \"tool_creator\": false,\n    \"rag\": false,\n    \"sandbox\": false,\n    \"skills\": false,\n    \"scheduler\": false,\n    \"escalation\": false,\n    \"http\": false,\n    \"mcp\": {\n      \"enabled\": true,\n      \"servers\": {\n        \"filesystem\": {\n          \"command\": \"npx\",\n          \"args\": [\n            \"-y\",\n            \"@modelcontextprotocol/server-filesystem\",\n            \"/tmp\"\n          ],\n          \"env\": {}\n        }\n      }\n    }\n  },\n  \"sandbox_config\": {},\n  \"safety_policy\": {},\n  \"escalation_config\": {},\n  \"operator_ids\": []\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "POST /v1/agents — Buat Orchestrator Agent (dengan subagents)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Orchestrator Agent\",\n  \"description\": \"Agent orkestrator yang mendelegasikan task ke sub-agent spesialis.\",\n  \"instructions\": \"Kamu adalah orchestrator agent. Untuk setiap task kompleks:\\n1. Gunakan write_todos untuk breakdown task menjadi langkah-langkah\\n2. Delegate ke sub-agent yang sesuai menggunakan task(name=..., task=...):\\n   - sys_researcher: riset informasi dari internet atau API\\n   - sys_coder: tulis dan jalankan kode di sandbox\\n   - sys_writer: tulis dan edit dokumen\\n   - sys_analyst: analisis data dan buat laporan\\n   - sys_critic: review dan validasi output sub-agent lain\\n3. Setelah executor selesai, panggil sys_critic untuk review hasilnya\\n4. Jika critic REJECTED, perbaiki dan retry. Jika APPROVED, lanjut ke langkah berikutnya\\n5. Kompilasi hasil dari semua sub-agent menjadi jawaban final terstruktur\\n\\nTips: agent_ids kosong = otomatis load semua 5 system sub-agents.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.5,\n  \"tools_config\": {\n    \"memory\": false,\n    \"skills\": false,\n    \"escalation\": false,\n    \"sandbox\": false,\n    \"subagents\": {\n      \"enabled\": true\n    }\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "POST /v1/agents — Buat WhatsApp Agent (scan QR)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"WhatsApp CS Agent\",\n  \"description\": \"Agent yang terhubung ke WhatsApp via QR scan\",\n  \"instructions\": \"Kamu adalah customer service yang membalas pesan WhatsApp dengan ramah dan informatif.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"channel_type\": \"whatsapp\",\n  \"tools_config\": {\n    \"memory\": true,\n    \"skills\": true,\n    \"escalation\": true,\n    \"sandbox\": false,\n    \"tool_creator\": false,\n    \"scheduler\": false,\n    \"rag\": false,\n    \"http\": false,\n    \"mcp\": false,\n    \"whatsapp_media\": true,\n    \"wa_agent_manager\": false\n  },\n  \"sandbox_config\": {},\n  \"safety_policy\": {},\n  \"escalation_config\": {\n    \"channel_type\": \"whatsapp\",\n    \"operator_phone\": \"+628xxxx\"\n  },\n  \"token_quota\": 4000000,\n  \"quota_period_days\": 30,\n  \"operator_ids\": [\n    \"+628xxxx\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/agents",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "agents"
+              ]
+            },
+            "description": "Buat agent dengan channel WhatsApp. Response berisi `qr_image` (base64 PNG) yang harus di-scan dalam 30 detik. Simpan `agent_id` dan `api_key` dari response.\n\nCara decode QR: `data:image/png;base64,{qr_image}` bisa langsung ditampilkan di browser atau diconvert ke gambar."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "    var json = pm.response.json();",
+                  "    pm.collectionVariables.set('agent_id', json.id);",
+                  "    pm.collectionVariables.set('agent_key', json.api_key);",
+                  "    pm.collectionVariables.set('wa_device_id', json.wa_device_id || '');",
+                  "    console.log('Agent ID:', json.id);",
+                  "    console.log('Agent API Key:', json.api_key);",
+                  "    console.log('WA Device ID:', json.wa_device_id);",
+                  "    if (json.qr_image) {",
+                  "        console.log('QR Image (copy & paste to browser):');",
+                  "        console.log('data:image/png;base64,' + json.qr_image);",
+                  "    }",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /v1/agents — List semua agent",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/agents?limit=20&offset=0",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "agents"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "20"
+                },
+                {
+                  "key": "offset",
+                  "value": "0"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "GET /v1/agents/:agent_id — Detail agent",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}"
+          }
+        },
+        {
+          "name": "POST /v1/agents — Buat CS Agent (default: memory+skills+escalation)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"CS Agent v2\",\n  \"model\": \"openai/gpt-4.1\",\n  \"temperature\": 0.5,\n  \"operator_ids\": [\n    \"+62811000000\"\n  ],\n  \"tools_config\": {\n    \"memory\": true,\n    \"skills\": true,\n    \"escalation\": true,\n    \"sandbox\": false,\n    \"tool_creator\": false,\n    \"scheduler\": false,\n    \"rag\": false,\n    \"http\": false,\n    \"mcp\": false,\n    \"wa_agent_manager\": false\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "PATCH /v1/agents/:agent_id — Update escalation_config (WhatsApp)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"escalation_config\": {\n    \"channel_type\": \"whatsapp\",\n    \"operator_phone\": \"+62811000000\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "PATCH /v1/agents/:agent_id — Update escalation_config (Telegram)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"escalation_config\": {\n    \"channel_type\": \"telegram\",\n    \"operator_phone\": \"987654321\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "PATCH /v1/agents/:agent_id — Aktifkan MCP tool",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tools_config\": {\n    \"memory\": true,\n    \"tool_creator\": true,\n    \"rag\": true,\n    \"sandbox\": true,\n    \"skills\": true,\n    \"scheduler\": true,\n    \"escalation\": true,\n    \"http\": false,\n    \"mcp\": {\n      \"enabled\": true,\n      \"servers\": {\n        \"my-server\": {\n          \"url\": \"http://localhost:9000/mcp\",\n          \"transport\": \"streamable_http\"\n        }\n      }\n    }\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "POST /v1/agents/:agent_id/renew — Perpanjang masa aktif & reset token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}",
+                "description": "Platform API key (admin only)"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/renew",
+            "description": "Perpanjang active_until sebesar quota_period_days dari sekarang dan reset tokens_used ke 0. Gunakan ini saat subscription agent habis atau quota token terpakai."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const json = pm.response.json();",
+                  "  pm.test('tokens_used direset ke 0', () => pm.expect(json.tokens_used).to.eql(0));",
+                  "  pm.test('active_until diperbarui', () => pm.expect(json.active_until).to.be.a('string'));",
+                  "  pm.test('api_key tetap sama', () => pm.expect(json.api_key).to.be.a('string'));",
+                  "  pm.test('message ada', () => pm.expect(json.message).to.be.a('string'));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /v1/agents/:agent_id/whatsapp/qr — Ambil QR terbaru",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/agents/{{agent_id}}/whatsapp/qr",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "agents",
+                "{{agent_id}}",
+                "whatsapp",
+                "qr"
+              ]
+            },
+            "description": "Ambil QR code terbaru jika belum scan atau QR sudah expired. Response: `{device_id, qr_image, status}`."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /v1/agents/:agent_id/whatsapp/status — Cek status koneksi",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/agents/{{agent_id}}/whatsapp/status",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "agents",
+                "{{agent_id}}",
+                "whatsapp",
+                "status"
+              ]
+            },
+            "description": "Cek apakah WhatsApp sudah terkoneksi. Status: `waiting_qr` | `connected` | `disconnected`. Jika `connected` response juga berisi `phone_number`."
+          },
+          "response": []
+        },
+        {
+          "name": "DELETE /v1/agents/:agent_id/whatsapp — Disconnect WhatsApp",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/agents/{{agent_id}}/whatsapp",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "agents",
+                "{{agent_id}}",
+                "whatsapp"
+              ]
+            },
+            "description": "Logout dari WhatsApp dan hapus device dari agent. Agent masih bisa digunakan via endpoint lain."
+          },
+          "response": []
+        },
+        {
+          "name": "DELETE /v1/agents/:agent_id — Hapus agent (soft delete)",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Sessions",
+      "item": [
+        {
+          "name": "POST /v1/agents/:agent_id/sessions — Tanpa channel (dev/internal)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/sessions",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"external_user_id\": \"user-bagas-001\",\n  \"metadata\": {\n    \"source_app\": \"internal-dashboard\",\n    \"locale\": \"id-ID\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  const json = pm.response.json();",
+                  "  pm.collectionVariables.set('session_id', json.id);",
+                  "  pm.test('session_id tersimpan: ' + json.id, () => pm.expect(json.id).to.be.a('string'));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /v1/agents/:agent_id/sessions — Channel WhatsApp",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/sessions",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"external_user_id\": \"+62812000000\",\n  \"channel_type\": \"whatsapp\",\n  \"channel_config\": {\n    \"user_phone\": \"+62812000000\",\n    \"api_key\": \"WABA_TOKEN_ANDA\",\n    \"phone_number_id\": \"12345678\"\n  },\n  \"metadata\": {\n    \"source_app\": \"whatsapp-webhook\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  const json = pm.response.json();",
+                  "  pm.collectionVariables.set('session_id', json.id);",
+                  "  pm.test('session_id tersimpan: ' + json.id, () => pm.expect(json.id).to.be.a('string'));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /v1/agents/:agent_id/sessions — Channel Telegram",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/sessions",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"external_user_id\": \"telegram-user-123\",\n  \"channel_type\": \"telegram\",\n  \"channel_config\": {\n    \"chat_id\": \"123456789\",\n    \"bot_token\": \"BOT_TOKEN_ANDA\"\n  },\n  \"metadata\": {\n    \"source_app\": \"telegram-webhook\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "POST /v1/agents/:agent_id/sessions — Channel Slack",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/sessions",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"external_user_id\": \"slack-U123456\",\n  \"channel_type\": \"slack\",\n  \"channel_config\": {\n    \"webhook_url\": \"https://hooks.slack.com/services/T000/B000/xxxx\"\n  },\n  \"metadata\": {\n    \"source_app\": \"slack-bot\",\n    \"channel\": \"#support\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "POST /v1/agents/:agent_id/sessions — Channel Generic Webhook",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/sessions",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"external_user_id\": \"webhook-user-abc\",\n  \"channel_type\": \"webhook\",\n  \"channel_config\": {\n    \"url\": \"https://myapp.com/api/agent-reply\",\n    \"method\": \"POST\",\n    \"headers\": {\n      \"Authorization\": \"Bearer TOKEN_ANDA\",\n      \"X-Source\": \"managed-agent\"\n    }\n  },\n  \"metadata\": {\n    \"source_app\": \"custom-integration\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "GET /v1/agents/:agent_id/sessions/:session_id — Detail session",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/sessions/{{session_id}}"
+          }
+        },
+        {
+          "name": "PATCH /v1/agents/:agent_id/sessions/:session_id — Aktifkan eskalasi",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/sessions/{{session_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"escalation_active\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "PATCH /v1/agents/:agent_id/sessions/:session_id — Nonaktifkan eskalasi",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/sessions/{{session_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"escalation_active\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Messages",
+      "item": [
+        {
+          "name": "POST .../messages — Tanya biasa",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Agent-Key",
+                "value": "{{agent_key}}",
+                "description": "Per-agent API key (dari field api_key saat create agent)"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/sessions/{{session_id}}/messages",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"Halo! Siapa kamu dan apa saja yang bisa kamu bantu?\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const json = pm.response.json();",
+                  "  pm.collectionVariables.set('run_id', json.run_id);",
+                  "  pm.test('run_id tersimpan: ' + json.run_id, () => pm.expect(json.run_id).to.be.a('string'));",
+                  "  pm.test('reply ada', () => pm.expect(json.reply).to.be.a('string'));",
+                  "  pm.test('steps adalah array', () => pm.expect(json.steps).to.be.an('array'));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST .../messages — Eksekusi kode Python (sandbox)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Agent-Key",
+                "value": "{{agent_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/sessions/{{session_id}}/messages",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"Buatkan script Python untuk menghitung bilangan prima antara 1 sampai 100, lalu jalankan dan tampilkan hasilnya.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "POST .../messages — Set reminder (scheduler tool)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Agent-Key",
+                "value": "{{agent_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/sessions/{{session_id}}/messages",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"Tolong ingatkan saya setiap hari kerja jam 9 pagi untuk cek laporan penjualan. Pesan remindernya: 'Waktunya cek laporan penjualan hari ini!'\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "POST .../messages — Trigger eskalasi ke operator",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Agent-Key",
+                "value": "{{agent_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/sessions/{{session_id}}/messages",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"Saya mau minta refund untuk order #12345 senilai Rp 500.000 yang sudah 2 minggu belum diproses. Ini tidak bisa diterima!\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "POST .../messages — Dengan metadata tambahan",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Agent-Key",
+                "value": "{{agent_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/sessions/{{session_id}}/messages",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"Analisis data penjualan bulan ini dan buat ringkasannya.\",\n  \"metadata\": {\n    \"source\": \"dashboard\",\n    \"user_tier\": \"premium\",\n    \"locale\": \"id-ID\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Channels (Incoming)",
+      "item": [
+        {
+          "name": "POST /v1/channels/incoming/:session_id — Pesan dari user biasa",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/channels/incoming/{{session_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"Halo, saya mau tanya soal status pesanan saya\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const json = pm.response.json();",
+                  "  if (json.run_id) pm.collectionVariables.set('run_id', json.run_id);",
+                  "  pm.test('status ok', () => pm.expect(json.status).to.eql('ok'));",
+                  "  pm.test('reply ada', () => pm.expect(json.reply).to.be.a('string'));",
+                  "  pm.test('messages_to_user adalah array', () => pm.expect(json.messages_to_user).to.be.an('array'));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /v1/channels/incoming/:session_id — Pesan dari user (dengan from_phone)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/channels/incoming/{{session_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"from_phone\": \"+62812000000\",\n  \"message\": \"Halo, kapan pesanan saya tiba?\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "POST /v1/channels/incoming/:session_id — Pesan user saat eskalasi aktif",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/channels/incoming/{{session_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"from_phone\": \"+62812000000\",\n  \"message\": \"Kapan masalah saya diselesaikan?\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "POST /v1/channels/incoming/:session_id — Operator: balas ke customer",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/channels/incoming/{{session_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"from_phone\": \"+62811000000\",\n  \"message\": \"Kirim ke customer: Mohon maaf atas ketidaknyamanannya. Refund Anda sedang kami proses dan akan selesai dalam 1-2 hari kerja.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const json = pm.response.json();",
+                  "  pm.test('messages_to_user ada', () => pm.expect(json.messages_to_user).to.be.an('array'));",
+                  "  pm.test('Ada pesan ke customer', () => pm.expect(json.messages_to_user.length).to.be.above(0));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /v1/channels/incoming/:session_id — Operator: kirim ke nomor lain",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/channels/incoming/{{session_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"from_phone\": \"+62811000000\",\n  \"message\": \"Kirim ke +62899000000: Tolong follow up customer ini, kasusnya urgent.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "POST /v1/channels/incoming/:session_id — Operator: nonaktifkan eskalasi",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/channels/incoming/{{session_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"from_phone\": \"+62811000000\",\n  \"message\": \"Selesai, tangani sendiri sekarang.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "POST /v1/channels/wa/incoming — Webhook WhatsApp (dari wa-service)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"device_id\": \"{{wa_device_id}}\",\n  \"from\": \"+628123456789\",\n  \"message\": \"Halo, saya ingin tanya tentang produk\",\n  \"timestamp\": 1713600000\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/channels/wa/incoming",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "channels",
+                "wa",
+                "incoming"
+              ]
+            },
+            "description": "Dipanggil otomatis oleh Go wa-service ketika ada pesan WhatsApp masuk. Body dikirim oleh wa-service, bukan manual. Endpoint ini melakukan lookup agent by device_id, find/create session, jalankan agent, dan reply ke WhatsApp pengirim."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "History",
+      "item": [
+        {
+          "name": "GET /v1/sessions/:session_id/history — Riwayat percakapan",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/sessions/{{session_id}}/history?limit=50",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "sessions",
+                "{{session_id}}",
+                "history"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Runs",
+      "item": [
+        {
+          "name": "GET /v1/runs/:run_id — Detail semua tool step dalam satu run",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": "{{base_url}}/v1/runs/{{run_id}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const json = pm.response.json();",
+                  "  pm.test('run_id cocok', () => pm.expect(json.run_id).to.be.a('string'));",
+                  "  pm.test('messages adalah array', () => pm.expect(json.messages).to.be.an('array'));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Memory",
+      "item": [
+        {
+          "name": "GET /v1/agents/:agent_id/memory — List semua memory",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/memory"
+          }
+        },
+        {
+          "name": "POST /v1/agents/:agent_id/memory — Simpan nama user",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/memory",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"key\": \"user_name\",\n  \"value\": \"Bagas\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "POST /v1/agents/:agent_id/memory — Simpan preferensi user",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/memory",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"key\": \"user_preferences\",\n  \"value\": \"Lebih suka jawaban singkat dan langsung ke poin. Gunakan bahasa Indonesia.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "POST /v1/agents/:agent_id/memory — Simpan konteks bisnis (value JSON)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/memory",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"key\": \"business_context\",\n  \"value\": \"{\\\"company\\\": \\\"Toko Bagas\\\", \\\"policy_refund_days\\\": 30, \\\"working_hours\\\": \\\"08:00-17:00 WIB\\\"}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "DELETE /v1/agents/:agent_id/memory/:key — Hapus memory entry",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/memory/user_name"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Skills",
+      "item": [
+        {
+          "name": "GET /v1/agents/:agent_id/skills — List semua skill",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/skills"
+          }
+        },
+        {
+          "name": "POST /v1/agents/:agent_id/skills — Buat skill: handle refund",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/skills",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"handle_refund\",\n  \"description\": \"Panduan standar menangani permintaan refund customer\",\n  \"content_md\": \"## Handle Refund\\n\\n1. Verifikasi order ID dan status pembayaran\\n2. Cek apakah refund masuk dalam policy (maks 30 hari sejak pembelian)\\n3. Jika eligible: informasikan timeline refund (3-5 hari kerja)\\n4. Jika tidak eligible: jelaskan alasan dengan sopan\\n5. Jika kasus kompleks: escalate ke operator dengan ringkasan lengkap\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "POST /v1/agents/:agent_id/skills — Buat skill: analisis CSV",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/skills",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"csv_analysis\",\n  \"description\": \"Panduan standar untuk menganalisis file CSV menggunakan Python pandas\",\n  \"content_md\": \"## CSV Analysis Skill\\n\\n1. Load: `pd.read_csv('data.csv')`\\n2. Eksplorasi: `df.shape`, `df.dtypes`, `df.head()`\\n3. Statistik: `df.describe()`, `df.isnull().sum()`\\n4. Visualisasi: `df.hist()` atau `df.plot()`\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "GET /v1/agents/:agent_id/skills/:name — Detail skill",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/skills/handle_refund"
+          }
+        },
+        {
+          "name": "DELETE /v1/agents/:agent_id/skills/:name — Hapus skill",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/skills/handle_refund"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Custom Tools",
+      "item": [
+        {
+          "name": "GET /v1/agents/:agent_id/custom-tools — List semua custom tool",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/custom-tools"
+          }
+        },
+        {
+          "name": "POST /v1/agents/:agent_id/custom-tools — Buat tool: hitung fibonacci",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/custom-tools",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"fibonacci\",\n  \"description\": \"Hitung angka Fibonacci ke-n. Parameter: n (int)\",\n  \"code\": \"def fibonacci(n: int) -> int:\\n    if n < 0:\\n        raise ValueError(f'n harus >= 0, dapat: {n}')\\n    if n <= 1:\\n        return n\\n    a, b = 0, 1\\n    for _ in range(2, n + 1):\\n        a, b = b, a + b\\n    return b\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "POST /v1/agents/:agent_id/custom-tools — Buat tool: konversi suhu",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/custom-tools",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"convert_temperature\",\n  \"description\": \"Konversi suhu antar satuan. Parameter: value (float), from_unit (str: celsius|fahrenheit|kelvin), to_unit (str: celsius|fahrenheit|kelvin)\",\n  \"code\": \"def convert_temperature(value: float, from_unit: str, to_unit: str) -> float:\\n    from_unit = from_unit.lower()\\n    to_unit = to_unit.lower()\\n    if from_unit == 'fahrenheit':\\n        celsius = (value - 32) * 5 / 9\\n    elif from_unit == 'kelvin':\\n        celsius = value - 273.15\\n    else:\\n        celsius = value\\n    if to_unit == 'fahrenheit':\\n        return celsius * 9 / 5 + 32\\n    elif to_unit == 'kelvin':\\n        return celsius + 273.15\\n    return celsius\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "POST /v1/agents/:agent_id/custom-tools — Buat tool: cek hari libur",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/custom-tools",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"is_weekend\",\n  \"description\": \"Cek apakah tanggal tertentu adalah akhir pekan (Sabtu/Minggu). Parameter: date_str (str, format YYYY-MM-DD)\",\n  \"code\": \"from datetime import datetime\\n\\ndef is_weekend(date_str: str) -> dict:\\n    dt = datetime.strptime(date_str, '%Y-%m-%d')\\n    day_name = dt.strftime('%A')\\n    is_we = dt.weekday() >= 5\\n    return {'date': date_str, 'day': day_name, 'is_weekend': is_we}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "GET /v1/agents/:agent_id/custom-tools/:name — Detail custom tool",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/custom-tools/fibonacci"
+          }
+        },
+        {
+          "name": "DELETE /v1/agents/:agent_id/custom-tools/:name — Hapus custom tool",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/custom-tools/fibonacci"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Documents / RAG",
+      "item": [
+        {
+          "name": "POST /v1/agents/:agent_id/documents — Tambah dokumen teks",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/documents",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"FAQ Produk — Managed Agent Platform\",\n  \"content\": \"Q: Apa itu Managed Agent Platform?\\nA: Platform internal untuk membuat dan menjalankan AI agent yang dapat diakses via API.\\n\\nQ: Model AI apa saja yang didukung?\\nA: Semua model via OpenRouter: Claude, GPT-4, Gemini, Llama, DeepSeek, Mistral.\\n\\nQ: Bagaimana cara eskalasi ke operator?\\nA: Agent akan otomatis memanggil tool escalate_to_human() jika tidak bisa menangani permintaan.\",\n  \"source\": \"internal/faq\",\n  \"doc_metadata\": {\n    \"category\": \"product-faq\",\n    \"language\": \"id\",\n    \"version\": \"1.0\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  const json = pm.response.json();",
+                  "  pm.collectionVariables.set('doc_id', json.id);",
+                  "  pm.test('doc_id tersimpan: ' + json.id, () => pm.expect(json.id).to.be.a('string'));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /v1/agents/:agent_id/documents — Tambah SOP internal",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/documents",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"SOP Penanganan Komplain Customer\",\n  \"content\": \"1. Dengarkan keluhan customer dengan empati.\\n2. Minta maaf atas ketidaknyamanan.\\n3. Identifikasi akar masalah dalam 5 menit pertama.\\n4. Tawarkan solusi: penggantian produk, refund, atau diskon.\\n5. Jika tidak bisa diselesaikan sendiri: eskalasi ke supervisor dalam 10 menit.\\n6. Follow up ke customer maksimal 24 jam setelah kasus selesai.\",\n  \"source\": \"internal/sop-komplain-v2\",\n  \"doc_metadata\": {\n    \"category\": \"sop\",\n    \"department\": \"customer-service\",\n    \"last_updated\": \"2024-01-15\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "GET /v1/agents/:agent_id/documents — List semua dokumen",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/agents/{{agent_id}}/documents?limit=20&offset=0",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "agents",
+                "{{agent_id}}",
+                "documents"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "20"
+                },
+                {
+                  "key": "offset",
+                  "value": "0"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "GET /v1/agents/:agent_id/documents/:doc_id — Detail dokumen",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/documents/{{doc_id}}"
+          }
+        },
+        {
+          "name": "PATCH /v1/agents/:agent_id/documents/:doc_id — Update dokumen",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/documents/{{doc_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"FAQ Produk — Versi Terbaru\",\n  \"content\": \"Konten yang sudah diperbarui dengan informasi terkini.\",\n  \"source\": \"internal/faq-v2\",\n  \"doc_metadata\": {\n    \"category\": \"product-faq\",\n    \"version\": \"2.0\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "DELETE /v1/agents/:agent_id/documents/:doc_id — Hapus dokumen",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/documents/{{doc_id}}"
+          }
+        },
+        {
+          "name": "POST /v1/agents/:agent_id/documents/search — Pencarian semantik",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/documents/search",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"cara eskalasi ke operator manusia\",\n  \"max_results\": 3\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "POST /v1/agents/:agent_id/documents/upload — Upload file PDF/DOCX/PPTX/TXT",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": "{{base_url}}/v1/agents/{{agent_id}}/documents/upload",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "description": "File yang diupload: PDF, DOCX, PPTX, TXT, atau MD. Akan di-chunk otomatis."
+                },
+                {
+                  "key": "title",
+                  "value": "Panduan Internal Q2 2024",
+                  "type": "text"
+                },
+                {
+                  "key": "source",
+                  "value": "notion/handbook",
+                  "type": "text"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  const json = pm.response.json();",
+                  "  pm.test('chunks ada', () => pm.expect(json.chunks).to.be.an('array'));",
+                  "  pm.test('total_chunks > 0', () => pm.expect(json.total_chunks).to.be.above(0));",
+                  "  pm.test('original_filename ada', () => pm.expect(json.original_filename).to.be.a('string'));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Models",
+      "item": [
+        {
+          "name": "GET /v1/models — Daftar model OpenRouter yang tersedia",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": "{{base_url}}/v1/models"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Response adalah array/object', () => pm.expect(pm.response.json()).to.be.an('object'));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -21,7 +21,7 @@ from app.core.custom_tool_service import (
 from app.database import get_db
 from app.deps import verify_api_key
 from app.models.agent import Agent
-from app.schemas.m2 import CustomToolCreate, CustomToolResponse
+from app.schemas.internal import CustomToolCreate, CustomToolResponse
 
 router = APIRouter(prefix="/v1/agents", tags=["custom-tools"])
 

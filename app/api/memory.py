@@ -15,7 +15,7 @@ from app.core.memory_service import upsert_memory, list_memories, delete_memory
 from app.database import get_db
 from app.deps import verify_api_key
 from app.models.agent import Agent
-from app.schemas.m2 import MemoryCreate, MemoryResponse
+from app.schemas.internal import MemoryCreate, MemoryResponse
 
 router = APIRouter(prefix="/v1/agents", tags=["memory"])
 

@@ -45,3 +45,14 @@ alembic/versions/__pycache__/
 # Logs
 *.log
 logs/
+
+# Go compiled binaries
+wa-service/wa-service
+wa-dev-service/wa-dev-service
+
+# WhatsApp SQLite session stores (runtime data, never commit)
+wa-service/wa-store/
+wa-dev-service/wa-dev-store/
+
+# wa-dev runtime state
+wa-dev-service/connections.json
