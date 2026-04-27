@@ -378,7 +378,9 @@
 <div id="toast"></div>
 
 <script>
-  const API = '/wa-dev';  // subpath via Traefik
+  // Di production (via Traefik), dashboard diakses lewat subpath /wa-dev/
+  // Di localhost, wa-dev-service jalan langsung di port 8081 tanpa subpath
+  const API = window.location.pathname.startsWith('/wa-dev') ? '/wa-dev' : '';
 
   let autoRefreshInterval = null;
 

@@ -114,6 +114,7 @@ func (r *Router) forwardToAgent(agentID string, msg IncomingMessage) {
 		"chat_id":        msg.ChatID,
 		"message":        msg.Text,
 		"timestamp":      msg.Timestamp,
+		"push_name":      msg.PushName,
 		"media_type":     msg.MediaType,
 		"media_data":     msg.MediaData,
 		"media_filename": msg.MediaFilename,

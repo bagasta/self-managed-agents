@@ -34,6 +34,7 @@ type IncomingMessage struct {
 	From          string
 	ChatID        string
 	Text          string
+	PushName      string // WhatsApp display name of sender
 	MediaType     string // "image" | "document" | "sticker" | ""
 	MediaData     string // base64
 	MediaFilename string
@@ -301,6 +302,7 @@ func (wa *WhatsAppClient) handleMessage(evt *events.Message) {
 	msg := IncomingMessage{
 		From:      "+" + evt.Info.Sender.User,
 		ChatID:    chatJID.String(),
+		PushName:  evt.Info.PushName,
 		Timestamp: evt.Info.Timestamp.Unix(),
 	}
 

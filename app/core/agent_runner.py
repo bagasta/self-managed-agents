@@ -992,6 +992,7 @@ def _build_agent_context_block(
     active_groups: list[str],
     custom_tools_db: list,
     subagent_list: list | None = None,
+    sender_name: str | None = None,
 ) -> str:
     agent_id = session.agent_id
     _raw_cfg = session.channel_config
@@ -1023,6 +1024,8 @@ def _build_agent_context_block(
     lines.append(f"- Channel: {channel_type}")
     if user_phone:
         lines.append(f"- Current User Phone: {user_phone}")
+    if sender_name:
+        lines.append(f"- Current User Name: {sender_name}")
     lines.append(f"- Current User Role: {user_role}")
     lines.append(f"- Session ID: {session.id}")
 
@@ -1052,6 +1055,7 @@ async def run_agent(
     escalation_context: str | None = None,
     media_image_b64: str | None = None,
     media_image_mime: str | None = None,
+    sender_name: str | None = None,
 ) -> dict[str, Any]:
     run_id = uuid.uuid4()
     agent_id: uuid.UUID = session.agent_id
@@ -1176,7 +1180,8 @@ async def run_agent(
 
     # --- Agent Context Block (PRD2 §3.3 + §3.4) ---
     context_block = _build_agent_context_block(
-        agent_model, session, active_groups, saved_custom_tools, subagent_list
+        agent_model, session, active_groups, saved_custom_tools, subagent_list,
+        sender_name=sender_name,
     )
 
     # --- System prompt ---
@@ -1207,11 +1212,16 @@ async def run_agent(
     is_whatsapp = getattr(session, "channel_type", None) == "whatsapp"
 
     if is_whatsapp and not is_operator_message and not escalation_user_jid:
+        _name_hint = (
+            f" Nama user saat ini adalah **{sender_name}** — gunakan namanya saat menyapa atau membalas."
+            if sender_name else ""
+        )
         system_prompt += (
             "\n\n## WhatsApp Channel\n"
             "Balas user LANGSUNG dengan teks biasa sebagai output akhirmu. "
             "JANGAN gunakan tool `reply_to_user` untuk menjawab user secara normal — cukup tulis jawabanmu. "
-            "Tool `reply_to_user` dan `send_to_number` HANYA dipakai saat menerima perintah dari OPERATOR.\n\n"
+            "Tool `reply_to_user` dan `send_to_number` HANYA dipakai saat menerima perintah dari OPERATOR.\n"
+            f"{_name_hint}\n\n"
             "### Kirim Gambar ke User\n"
             "Jika kamu perlu mengirim gambar ke user, panggil tool yang sesuai:\n"
             "- `send_whatsapp_image(image_path_or_base64='...')` — untuk kirim gambar/chart dari workspace.\n"
@@ -1382,20 +1392,11 @@ async def run_agent(
             )
         except Exception as exc:
             log.error("agent_run.error", error=str(exc))
-            final_reply = f"Agent error: {exc}"
-            db.add(Message(
-                session_id=session.id,
-                role="agent",
-                content=final_reply,
-                step_index=step_counter,
-                run_id=run_id,
-            ))
-            await db.flush()
             if sandbox:
                 sandbox.close()
             for _ssb in sub_sandboxes:
                 _ssb.close()
-            return {"reply": final_reply, "steps": [], "run_id": run_id, "tokens_used": 0}
+            raise
 
         # --- Parse result messages ---
         all_messages: list[BaseMessage] = result.get("messages", [])

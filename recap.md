@@ -354,3 +354,46 @@ wa-dev-service/whatsapp.go:
 
 Efek: user melihat "sedang mengetik..." sejak pesan diterima sampai AI selesai memproses.
 Rebuild binary diperlukan setelah update: make wa-build dan rebuild wa-dev-service.
+
+WhatsApp User Name Recognition + Error Handling (27 Apr 2026):
+
+1. Agent mengenali nama WhatsApp user (push_name):
+   - wa-service/device_manager.go: tambah `push_name: evt.Info.PushName` ke webhook payload.
+   - wa-dev-service/whatsapp.go: tambah field PushName ke struct IncomingMessage, diisi dari evt.Info.PushName.
+   - wa-dev-service/router.go: teruskan push_name ke Python saat forwardToAgent().
+   - app/api/channels.py: tambah field push_name di WAIncomingMessage, pass ke run_agent sebagai sender_name.
+   - app/core/agent_runner.py: _build_agent_context_block() menerima sender_name dan inject sebagai
+     "Current User Name" di Agent Context Block. WhatsApp system prompt juga di-inject hint nama user
+     agar agent menyapa user dengan namanya.
+   Rebuild Go binary diperlukan: make wa-build + make wa-dev-build.
+
+2. Error handling WhatsApp — pesan generik ke user, detail ke developer:
+   - app/core/agent_runner.py: exception di graph.ainvoke() sekarang di-raise (bukan return sebagai final_reply)
+     agar channels.py bisa menangkap dan menentukan respons.
+   - app/api/channels.py (wa_incoming): saat run_agent raise exception:
+     a. Kirim traceback lengkap ke nomor developer 62895619356936 via send_wa_message dari device agent.
+     b. Kirim pesan generik ke user: "Maaf, terjadi gangguan sementara. Silakan coba lagi dalam beberapa saat."
+     c. Return HTTP 200 (bukan 500) agar Go service tidak retry.
+
+Klarifikasi perilaku sandbox vs virtual FS (27 Apr 2026):
+
+Agent dengan `sandbox: true` menggunakan DockerBackend sebagai filesystem backend deepagents SDK —
+artinya tools `write_file`, `read_file`, dll. dari deepagents SDK jalan lewat Docker, bukan in-memory.
+Jika Docker mati, semua operasi file gagal meski task-nya hanya "tulis file".
+
+Agent tanpa `sandbox: true` menggunakan StateBackend (in-memory virtual FS) — tidak butuh Docker,
+file hanya ada di memory selama session dan tidak bisa dieksekusi sungguhan.
+
+Ini bukan bug — by design. Prerequisite: Docker harus aktif untuk agent yang punya sandbox: true.
+Error handling sudah benar: jika Docker mati, traceback dikirim ke developer number dan user
+menerima pesan generik.
+
+Bug fix wa-dev-service dashboard QR tidak muncul di localhost (27 Apr 2026):
+
+Root cause: `const API = '/wa-dev'` di dashboard/index.html di-hardcode untuk Traefik production.
+Saat akses langsung ke localhost:8081, fetch ke `/wa-dev/connect-wa` menghasilkan 404 plain text,
+bukan JSON — JS crash saat `.json()` dengan "Unexpected non-whitespace character after JSON".
+
+Fix: deteksi otomatis berdasarkan pathname:
+  const API = window.location.pathname.startsWith('/wa-dev') ? '/wa-dev' : '';
+Production (via Traefik /wa-dev/) tetap pakai prefix, localhost jalan tanpa prefix.

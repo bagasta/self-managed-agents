@@ -705,6 +705,7 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 		"chat_id":        chatID,
 		"message":        text,
 		"timestamp":      evt.Info.Timestamp.Unix(),
+		"push_name":      evt.Info.PushName,
 		"media_type":     mediaType,
 		"media_data":     mediaData,
 		"media_filename": mediaFilename,

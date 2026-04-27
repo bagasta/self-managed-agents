@@ -83,6 +83,7 @@ class WAIncomingMessage(BaseModel):
     chat_id: str | None = None  # group JID (xxx@g.us) atau nomor DM; kalau None fallback ke from_
     message: str
     timestamp: int | None = None
+    push_name: str | None = None       # WhatsApp display name of sender
     # Media fields — diisi oleh Go service saat pesan mengandung gambar/dokumen/sticker
     media_type: str | None = None      # "image" | "document" | "sticker" | None
     media_data: str | None = None      # base64-encoded raw bytes
@@ -444,8 +445,13 @@ async def wa_incoming(
         user_message = raw_message + media_context
         log.info("wa_incoming.normal")
 
+    sender_name: str | None = body.push_name or None
+
     # Run agent
     from app.core.agent_runner import run_agent
+
+    _DEVELOPER_PHONE = "62895619356936"
+    _GENERIC_ERROR_MSG = "Maaf, terjadi gangguan sementara. Silakan coba lagi dalam beberapa saat."
 
     try:
         result = await run_agent(
@@ -457,10 +463,28 @@ async def wa_incoming(
             escalation_context=escalation_context,
             media_image_b64=media_image_b64,
             media_image_mime=media_image_mime,
+            sender_name=sender_name,
         )
     except Exception as exc:
         log.error("wa_incoming.agent_error", error=str(exc), exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Agent error: {exc}")
+        # Kirim error detail ke developer, pesan generik ke user
+        try:
+            from app.core.wa_client import send_wa_message
+            import traceback as _tb
+            err_detail = _tb.format_exc()
+            await send_wa_message(
+                body.device_id,
+                _DEVELOPER_PHONE,
+                f"⚠️ *Agent Error*\nAgent: {agent.name}\nFrom: {from_phone}\n\n```\n{err_detail[:3000]}\n```",
+            )
+        except Exception:
+            pass
+        try:
+            from app.core.wa_client import send_wa_message
+            await send_wa_message(body.device_id, effective_reply_target, _GENERIC_ERROR_MSG)
+        except Exception:
+            pass
+        return {"status": "error", "reply": _GENERIC_ERROR_MSG, "run_id": "", "steps": [], "messages_to_user": []}
 
     reply = result.get("reply", "")
 
