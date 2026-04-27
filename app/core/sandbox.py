@@ -115,7 +115,7 @@ class DockerSandbox:
             environment={},
             mem_limit="256m",
             nano_cpus=int(0.25e9),  # 25% CPU
-            network_mode="none",
+            network_mode="bridge",
             security_opt=["no-new-privileges:true"],
             cap_drop=["ALL"],
             labels={"managed-agent-sandbox": "true"},

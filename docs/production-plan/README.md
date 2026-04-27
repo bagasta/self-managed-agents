@@ -13,6 +13,7 @@ yang mampu melayani 500+ user aktif secara andal.
 | [04-observability.md](04-observability.md) | Monitoring, alerting, dan debugging di production |
 | [05-security.md](05-security.md) | Hardening keamanan sebelum expose ke public |
 | [06-roadmap.md](06-roadmap.md) | Urutan pengerjaan dan estimasi effort |
+| [07-ai-staff-features.md](07-ai-staff-features.md) | Fitur baru: allowlist, on/off chat, voice note |
 
 ## Prioritas Singkat
 
