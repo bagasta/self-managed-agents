@@ -114,57 +114,61 @@ def build_scheduler_tools(session_id: uuid.UUID, agent_id: uuid.UUID, db: AsyncS
     # Docstring di-inject secara dinamis agar LLM tahu waktu sekarang
 
     async def _set_reminder(label: str, message: str, schedule: str) -> str:
-        # Jika label sudah ada, buat label baru dengan suffix unik agar reminder lama tidak di-cancel
-        base_label = label
-        existing_result = await db.execute(
-            select(ScheduledJob).where(
-                ScheduledJob.session_id == session_id,
-                ScheduledJob.label == label,
-                ScheduledJob.status == "active",
-            )
-        )
-        existing_job = existing_result.scalar_one_or_none()
-        if existing_job:
-            # Auto-suffix: cari label yang belum dipakai
-            suffix = 2
-            while True:
-                candidate = f"{base_label}_{suffix}"
-                check = await db.execute(
-                    select(ScheduledJob).where(
-                        ScheduledJob.session_id == session_id,
-                        ScheduledJob.label == candidate,
-                        ScheduledJob.status == "active",
-                    )
+        from app.database import AsyncSessionLocal
+
+        # Gunakan session terpisah agar tidak conflict dengan DB session agent_runner
+        # (LangGraph bisa menjalankan beberapa tool call concurrent via asyncio.gather)
+        async with AsyncSessionLocal() as own_db:
+            base_label = label
+            existing_result = await own_db.execute(
+                select(ScheduledJob).where(
+                    ScheduledJob.session_id == session_id,
+                    ScheduledJob.label == label,
+                    ScheduledJob.status == "active",
                 )
-                if check.scalar_one_or_none() is None:
-                    label = candidate
-                    break
-                suffix += 1
+            )
+            existing_job = existing_result.scalar_one_or_none()
+            if existing_job:
+                suffix = 2
+                while True:
+                    candidate = f"{base_label}_{suffix}"
+                    check = await own_db.execute(
+                        select(ScheduledJob).where(
+                            ScheduledJob.session_id == session_id,
+                            ScheduledJob.label == candidate,
+                            ScheduledJob.status == "active",
+                        )
+                    )
+                    if check.scalar_one_or_none() is None:
+                        label = candidate
+                        break
+                    suffix += 1
 
-        try:
-            cron_expr, run_once_at = _parse_schedule(schedule)
-        except ValueError as exc:
-            return f"[error] {exc}"
+            try:
+                cron_expr, run_once_at = _parse_schedule(schedule)
+            except ValueError as exc:
+                return f"[error] {exc}"
 
-        next_run = _compute_next_run(cron_expr) if cron_expr else run_once_at
+            next_run = _compute_next_run(cron_expr) if cron_expr else run_once_at
 
-        job = ScheduledJob(
-            agent_id=agent_id,
-            session_id=session_id,
-            label=label,
-            cron_expr=cron_expr,
-            run_once_at=run_once_at,
-            payload=message,
-            status="active",
-            next_run_at=next_run,
-        )
-        db.add(job)
-        await db.flush()
+            job = ScheduledJob(
+                agent_id=agent_id,
+                session_id=session_id,
+                label=label,
+                cron_expr=cron_expr,
+                run_once_at=run_once_at,
+                payload=message,
+                status="active",
+                next_run_at=next_run,
+            )
+            own_db.add(job)
+            await own_db.flush()
+            await own_db.commit()
 
-        local_time = next_run.astimezone(_LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S") if next_run else "-"
-        kind = f"cron ({cron_expr})" if cron_expr else f"sekali pada {local_time} {_LOCAL_TZ_NAME}"
-        logger.info("scheduler_tool.set_reminder", label=label, kind=kind)
-        return f"Reminder '{label}' berhasil di-set. Jadwal: {kind}. Pesan: \"{message}\""
+            local_time = next_run.astimezone(_LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S") if next_run else "-"
+            kind = f"cron ({cron_expr})" if cron_expr else f"sekali pada {local_time} {_LOCAL_TZ_NAME}"
+            logger.info("scheduler_tool.set_reminder", label=label, kind=kind)
+            return f"Reminder '{label}' berhasil di-set. Jadwal: {kind}. Pesan: \"{message}\""
 
     _set_reminder.__doc__ = (
         "Set jadwal pengiriman pesan otomatis (reminder/proactive message).\n\n"

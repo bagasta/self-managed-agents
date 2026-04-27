@@ -477,8 +477,8 @@ async def wa_incoming(
                 _DEVELOPER_PHONE,
                 f"⚠️ *Agent Error*\nAgent: {agent.name}\nFrom: {from_phone}\n\n```\n{err_detail[:3000]}\n```",
             )
-        except Exception:
-            pass
+        except Exception as _notify_exc:
+            log.warning("wa_incoming.developer_notify_failed", error=str(_notify_exc))
         try:
             from app.core.wa_client import send_wa_message
             await send_wa_message(body.device_id, effective_reply_target, _GENERIC_ERROR_MSG)

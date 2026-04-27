@@ -397,3 +397,18 @@ bukan JSON — JS crash saat `.json()` dengan "Unexpected non-whitespace charact
 Fix: deteksi otomatis berdasarkan pathname:
   const API = window.location.pathname.startsWith('/wa-dev') ? '/wa-dev' : '';
 Production (via Traefik /wa-dev/) tetap pakai prefix, localhost jalan tanpa prefix.
+
+Bug fix scheduler concurrent + developer notify via wa-dev (27 Apr 2026):
+
+Bug 1 — "Session is already flushing" saat set 2 reminder sekaligus:
+Root cause: _set_reminder() memakai DB session yang di-pass dari agent_runner.
+LangGraph menjalankan beberapa tool call secara concurrent (asyncio.gather) —
+kedua _set_reminder() memanggil db.flush() pada session yang sama bersamaan → crash.
+Fix: _set_reminder() kini membuat session sendiri via AsyncSessionLocal() di dalam fungsi,
+isolated dari concurrent calls lain. Session di-commit di dalam async with block sendiri.
+
+Bug 2 — Developer tidak diberitahu saat error via wa-dev:
+Root cause: exception di blok send_wa_message(device_id, _DEVELOPER_PHONE, ...) ditelan
+diam-diam oleh `except Exception: pass` tanpa logging.
+Fix: ganti dengan `log.warning("wa_incoming.developer_notify_failed", error=str(_notify_exc))`
+agar error notifikasi developer tampil di log dan bisa di-debug.
