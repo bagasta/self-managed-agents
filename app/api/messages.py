@@ -1,7 +1,9 @@
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,13 +14,16 @@ from app.models.session import Session
 from app.schemas.message import MessageCreate, MessageResponse, StepSummary
 
 router = APIRouter(prefix="/v1/agents", tags=["messages"])
+limiter = Limiter(key_func=get_remote_address)
 
 
 @router.post(
     "/{agent_id}/sessions/{session_id}/messages",
     response_model=MessageResponse,
 )
+@limiter.limit("20/minute")
 async def send_message(
+    request: Request,
     agent_id: uuid.UUID,
     session_id: uuid.UUID,
     payload: MessageCreate,

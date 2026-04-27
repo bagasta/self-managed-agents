@@ -85,7 +85,7 @@ Hari 3:
   ✓ 3.6 Resource limits untuk sandbox containers
 
 Hari 4-5:
-  ✓ 2.3 Pecah wa_incoming() handler menjadi helper functions
+  ✓ 2.3 Pecah wa_incoming() handler menjadi helper functions — app/api/wa_helpers.py
   ✓ 2.7 Perbaiki type hints di run_agent()
 ```
 
@@ -98,9 +98,11 @@ Hari 4-5:
 
 ```
 Hari 1-2:
-  ✓ 3.1 Tambahkan Redis ke stack
-  ✓ 3.2 Migrasi event_bus.py ke Redis pub/sub
-  ✓ 3.3 Rate limiting berbasis Redis (gantikan slowapi sederhana)
+  ✓ 3.1 Tambahkan Redis ke stack — deploy/docker-compose.prod.yml + service redis:7-alpine
+  ✓ 3.2 Migrasi event_bus.py ke Redis pub/sub — app/core/event_bus_redis.py (auto-fallback ke in-memory)
+  ✓ config.py: redis_url, max_concurrent_sandboxes
+  ✓ requirements.txt: redis[hiredis]>=5.0.0
+  ✗ 3.3 Rate limiting berbasis Redis (slowapi masih dipakai — fine untuk sekarang)
 
 Hari 3:
   ✓ 3.4 Setup PgBouncer

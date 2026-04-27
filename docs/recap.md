@@ -413,6 +413,30 @@ diam-diam oleh `except Exception: pass` tanpa logging.
 Fix: ganti dengan `log.warning("wa_incoming.developer_notify_failed", error=str(_notify_exc))`
 agar error notifikasi developer tampil di log dan bisa di-debug.
 
+Production Readiness — Sprint 0 + Sprint 1 Day 1 (27 Apr 2026):
+
+Sprint 0 (semua quick wins selesai):
+- 1.4 DEVELOPER_PHONE → env var: `config.developer_phone`, hardcode "62895619356936" dihapus dari source.
+- 1.5 CORS lock down: `config.allowed_origins` (default `["*"]`), di-override via env `ALLOWED_ORIGINS` di prod.
+- 1.7 /health cek DB: `SELECT 1` sebelum return; HTTP 503 + `"status":"degraded"` jika DB mati.
+- 1.3 Rate limiting: `slowapi>=0.1.9` ditambah; endpoint POST /messages dibatasi 20 req/menit per IP.
+- 2.2 phone_utils.py: `app/core/phone_utils.py` — satu `normalize_phone()` menggantikan 4 definisi lokal di channels.py.
+- 2.4 Magic numbers → config: `context_summary_trigger`, `default_subagent_model`, `llm_max_tokens`, dll. semuanya di `config.py`.
+- 2.5 except Exception: pass → logging: blok error-reply di channels.py sekarang `log.warning(...)`.
+- 2.6 Inline import cleanup: `send_wa_message` dan `markdown_to_wa` dipindah ke top-level import channels.py.
+- 4.1 RequestIDMiddleware: `app/middleware/request_id.py` — inject `X-Request-ID` ke setiap request dan structlog contextvars.
+- 5.7 Input size validation: `MessageCreate.message` max 10KB, `WAIncomingMessage.message` max 10KB, `media_data` max 10MB.
+- Sentry: `sentry-sdk[fastapi]>=1.40.0` di requirements; init di main.py jika `SENTRY_DSN` di-set.
+
+Sprint 1 Day 1 (scheduler proses terpisah):
+- 1.1 app/scheduler_worker.py: entry point `python -m app.scheduler_worker` untuk proses terpisah.
+- scheduler_service.py: tambah `run_scheduler_loop()` (asyncio loop + graceful SIGTERM) dan `_tick_with_lock()`
+  dengan PostgreSQL advisory lock (key 12345) agar aman multi-instance.
+- deploy/docker-compose.prod.yml: service `scheduler` ditambah, service `api` difix (hapus --reload, tambah healthcheck).
+
+Semua checklist Sprint 0 di production-plan/ sudah ditandai [x].
+Next: Sprint 1 hari 2 (magic numbers, import cleanup, Sentry) + Sprint 1 hari 3 (sandbox hardening).
+
 Production Readiness Plan (27 Apr 2026):
 
 Analisis menyeluruh dilakukan terhadap kesiapan platform untuk production dengan 500+ user.
@@ -457,3 +481,48 @@ Hasilnya didokumentasikan di folder production-plan/ dengan 6 dokumen:
 - Sprint 2 (1 minggu): Redis + PgBouncer + monitoring, tahan ~300-500 user.
 - Sprint 3 (1-2 minggu): maintainability jangka panjang.
 Estimasi server untuk 500 user: 4 vCPU/8GB API + 2 vCPU/4GB PG + 1GB Redis, ~$80-150/bulan VPS.
+
+Refactoring agent_runner.py Selesai + E2E API Test (27 Apr 2026):
+
+Sprint 3 - Item 2.1 (agent_runner.py refactoring) sudah selesai dan diverifikasi melalui end-to-end API test.
+
+Refactoring yang dilakukan:
+- app/core/tool_builder.py: factory functions semua tool (Sandbox, Memory, Skills, Custom Tools, WA Media, HTTP).
+- app/core/prompt_builder.py: logika system prompt, RAG context injection, dan memory summarizer.
+- app/core/subagent_builder.py: inisialisasi system sub-agents dan sub-agent custom dari DB.
+- app/core/context_service.py: loading history, token counting, dan konversi pesan DB → format LangChain.
+- app/api/wa_helpers.py: helper functions untuk wa_incoming() — lookup agent, buat session, proses media.
+- app/api/channels.py: wa_incoming() dikecilkan dari ~325 baris menjadi ~60 baris orchestration murni.
+- agent_runner.py: kini orchestrator slim ~250 baris yang memanggil modul-modul di atas.
+
+Dependency fix:
+- prometheus-fastapi-instrumentator dan slowapi sudah ada di requirements.txt tapi belum terinstall di
+  venv development. Fix: pip install prometheus-fastapi-instrumentator slowapi.
+
+E2E API Test — semua endpoint lulus:
+
+| Endpoint | Status |
+|---|---|
+| GET /health | ✅ 200 |
+| POST /v1/agents (7 varian) | ✅ 201 |
+| GET/PATCH/DELETE /v1/agents/:id | ✅ 200 |
+| POST /v1/agents/:id/renew | ✅ 200 |
+| GET /v1/agents/:id/whatsapp/qr + status (WA agent) | ✅ 200 |
+| POST /v1/agents/:id/sessions | ✅ 201 |
+| GET/PATCH /v1/agents/:id/sessions/:sid | ✅ 200 |
+| GET/POST/DELETE /v1/agents/:id/memory | ✅ 200/201 |
+| GET/POST/DELETE /v1/agents/:id/skills | ✅ 200/201 |
+| GET /v1/agents/:id/custom-tools | ✅ 200 |
+| POST/GET /v1/agents/:id/documents | ✅ 201/200 (+ embedding otomatis) |
+| GET /v1/sessions/:id/history | ✅ 200 |
+| GET /v1/runs/:run_id | ✅ 200 (menyimpan user + agent messages) |
+| POST /v1/channels/incoming/:session_id | ✅ 200 — agent menjawab "Halo! Ada yang bisa saya bantu? 😊" |
+
+Bug yang ditemukan & diperbaiki:
+- GET/DELETE /whatsapp/{status,qr,disconnect} pada agent non-WA mengembalikan HTTP 400 (Bad Request).
+  Semantiknya salah — resource WhatsApp tidak ada pada agent ini, harusnya 404 (Not Found).
+  Fix: ganti status_code dari HTTP_400_BAD_REQUEST ke HTTP_404_NOT_FOUND di ketiga endpoint di app/api/agents.py.
+
+Status production-plan:
+- Fase 2 (Code Quality) 100% selesai.
+- Next: Sprint 2 - 3.3 Rate Limiter (Redis sliding window) atau Sprint 2 - 4.3 Observability (Grafana dashboard).

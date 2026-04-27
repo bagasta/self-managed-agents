@@ -175,7 +175,7 @@ async def get_whatsapp_qr(
     agent = await _get_active_agent(agent_id, db)
     if not agent.wa_device_id:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=status.HTTP_404_NOT_FOUND,
             detail="Agent does not have a WhatsApp channel configured",
         )
     try:
@@ -201,7 +201,7 @@ async def get_whatsapp_status(
     agent = await _get_active_agent(agent_id, db)
     if not agent.wa_device_id:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=status.HTTP_404_NOT_FOUND,
             detail="Agent does not have a WhatsApp channel configured",
         )
     try:
@@ -227,7 +227,7 @@ async def disconnect_whatsapp(
     agent = await _get_active_agent(agent_id, db)
     if not agent.wa_device_id:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=status.HTTP_404_NOT_FOUND,
             detail="Agent does not have a WhatsApp channel configured",
         )
     try:

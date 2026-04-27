@@ -2,11 +2,11 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class MessageCreate(BaseModel):
-    message: str
+    message: str = Field(..., max_length=10_000)
     metadata: dict[str, Any] = {}
 
 

@@ -38,6 +38,30 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = "INFO"
 
+    # CORS — comma-separated or JSON list; default allows all (dev only)
+    allowed_origins: list[str] = ["*"]
+
+    # Developer notification phone (WhatsApp) for error alerts
+    developer_phone: str = ""
+
+    # Error tracking
+    sentry_dsn: str = ""
+    environment: str = "development"
+
+    # Redis — dipakai untuk event bus multi-process dan rate limiting
+    # Set ke "" untuk disable Redis (fallback ke in-memory, single-worker only)
+    redis_url: str = ""
+
+    # Tunable limits
+    context_summary_trigger: int = 10      # summarize after N user messages
+    default_subagent_model: str = "openai/gpt-4o-mini"
+    default_subagent_max_tokens: int = 4096
+    media_doc_max_chars: int = 12000
+    llm_max_tokens: int = 4096
+    message_max_length: int = 10_000       # max chars per user message
+    media_max_length: int = 10_000_000     # max chars for base64 media payload
+    max_concurrent_sandboxes: int = 10     # max Docker sandbox containers running simultaneously
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -278,10 +278,11 @@ async def _is_duplicate_message(device_id: str, from_phone: str, timestamp: int,
 
 ## Checklist Fase 3
 
-- [ ] 3.1 Tambahkan Redis ke docker-compose.prod.yml
-- [ ] 3.2 Migrasi event_bus.py ke Redis pub/sub
-- [ ] 3.3 Implementasi rate limiter berbasis Redis
+- [x] 3.1 Tambahkan Redis ke docker-compose.prod.yml — service `redis:7-alpine`, persistent volume, healthcheck, depends_on dari api dan scheduler
+- [x] 3.2 Migrasi event_bus.py ke Redis pub/sub — `app/core/event_bus_redis.py` dengan fallback ke in-memory jika REDIS_URL kosong; channels.py docstring dokumentasikan constraint
+- [ ] 3.3 Implementasi rate limiter berbasis Redis (gantikan slowapi yang per-IP menjadi Redis sliding window)
 - [ ] 3.4 Setup PgBouncer dan tuning SQLAlchemy pool
 - [ ] 3.5 Background task untuk agent execution (non-WA channel)
-- [ ] 3.6 Tambahkan resource limits ke DockerSandbox
+- [ ] 3.6 Tambahkan resource limits ke DockerSandbox — `max_concurrent_sandboxes` sudah ada di config.py
 - [ ] 3.7 Implementasi WA message deduplication
+

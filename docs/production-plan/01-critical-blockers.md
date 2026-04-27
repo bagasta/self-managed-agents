@@ -83,8 +83,12 @@ _subscribers: dict[str, list[asyncio.Queue]] = {}
 
 ### Solusi
 
-**Jangka pendek:** Pastikan hanya 1 worker (`--workers 1`) dan dokumentasikan keterbatasan ini.
-Ini acceptable untuk early production dengan traffic rendah.
+**Jangka pendek (DONE):** `--workers 1` sudah di-enforce di `docker-compose.prod.yml`.
+Keterbatasan ini didokumentasikan di `channels.py` module docstring.
+
+Event bus sekarang punya Redis fallback: jika `REDIS_URL` di-set,
+`app/core/event_bus_redis.py` dipakai — aman untuk multi-process.
+Jika `REDIS_URL` kosong, fallback ke in-memory (single-worker only).
 
 **Jangka menengah:** Ganti `event_bus.py` dengan Redis pub/sub.
 
@@ -317,10 +321,10 @@ async def health(db: AsyncSession = Depends(get_db)) -> dict:
 
 ## Checklist Fase 1
 
-- [ ] 1.1 Pisahkan scheduler jadi proses terpisah (atau minimal tambahkan advisory lock)
-- [ ] 1.2 Dokumentasikan single-worker constraint; roadmap Redis pub/sub
-- [ ] 1.3 Tambahkan rate limiting di endpoint message
-- [ ] 1.4 Pindahkan `DEVELOPER_PHONE` ke env var
-- [ ] 1.5 Lock down CORS origins via config
-- [ ] 1.6 Buat `docker-compose.prod.yml` dengan restart policy + production command
-- [ ] 1.7 Perbaiki `/health` endpoint agar cek DB
+- [x] 1.1 Pisahkan scheduler jadi proses terpisah (atau minimal tambahkan advisory lock) — `app/scheduler_worker.py` + `run_scheduler_loop()` + `_tick_with_lock()` dengan pg advisory lock
+- [x] 1.2 Dokumentasikan single-worker constraint; Redis pub/sub tersedia via `app/core/event_bus_redis.py` (fallback ke in-memory jika REDIS_URL kosong)
+- [x] 1.3 Tambahkan rate limiting di endpoint message — slowapi 20 req/menit per IP
+- [x] 1.4 Pindahkan `DEVELOPER_PHONE` ke env var — `config.developer_phone`, hardcode dihapus
+- [x] 1.5 Lock down CORS origins via config — `config.allowed_origins`, default `["*"]` bisa di-override via env
+- [x] 1.6 Buat `docker-compose.prod.yml` dengan restart policy + production command — hapus --reload, tambah healthcheck, tambah service `scheduler`
+- [x] 1.7 Perbaiki `/health` endpoint agar cek DB — return 503 jika DB unreachable

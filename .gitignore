@@ -56,3 +56,6 @@ wa-dev-service/wa-dev-store/
 
 # wa-dev runtime state
 wa-dev-service/connections.json
+
+# Notes / Sensitive Info
+deploy/note-deploy.md

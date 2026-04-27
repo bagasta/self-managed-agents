@@ -36,7 +36,7 @@ make format           # ruff format app/ alembic/
 docker compose up --build
 ```
 
-There are no automated tests. Manual test scripts in `scripts/` (test_db.py, test_script.py, list_sessions.py). Postman collections at `docs/postman/`.
+There are no automated tests. Manual test scripts: `test_db.py`. A Postman collection exists at `managed-agents.postman_collection.json`.
 
 ### Required Environment Variables
 
@@ -57,24 +57,13 @@ WA_SERVICE_URL=http://localhost:8080
 ```
 Client (X-API-Key header required)
   → FastAPI router (app/api/)
-    → agent_runner.run_agent()
-      → Load agent config + session from DB
-      → Lazy-init DockerSandbox (only if tools_config.sandbox=true)
-      → Load short-term message history from DB
-      → Build system prompt:
-          1. Agent Context Block (auto-metadata header)
-          2. Base instructions (agent.instructions)
-          3. Long-term memories (agent_memories table, scoped by external_user_id)
-          4. Custom tools list (active tools created by agent)
-          5. RAG context (top-3 similar docs, pre-injected, no tool call needed)
-          6. Safety policy rules
-      → Assemble tool stack from tools_config
-      → create_deep_agent(model, tools, system_prompt)
-          ↳ deepagents always injects: write_todos, ls, read_file, write_file, edit_file, grep, glob, execute
-          ↳ Our tools added on top
-      → graph.ainvoke({"messages": history})
+    → agent_runner.py (core orchestration)
+      → Load agent config from DB
+      → Build system prompt: instructions + long-term memories + RAG context + safety policy
+      → Assemble tool stack from tools_config (see below)
+      → Deep Agents SDK create_deep_agent → ainvoke (write_todos + filesystem tools built-in)
       → Persist all messages/tool calls to DB
-      → Every Nth user message: extract long-term memories via LLM
+      → (every Nth user message) extract long-term memories via LLM
 ```
 
 ### Key Modules
@@ -94,36 +83,30 @@ Client (X-API-Key header required)
 | `app/core/custom_tool_service.py` | CRUD for agent-created Python tools stored in DB |
 | `app/core/tools/` | Self-contained tool modules; each returns LangChain-compatible tools |
 | `app/core/deep_agent_backend.py` | `DockerBackend` — adapts `DockerSandbox` to Deep Agents `SandboxBackendProtocol`; activates built-in `write_file`, `read_file`, `edit_file`, `ls`, `glob`, `grep`, `execute` tools |
-| `wa-dev-service/` | Go microservice for managing WA dev/test numbers (port 8081); includes web dashboard |
 
 ### Tool Stack (enabled per-agent via `tools_config`)
 
-**Always-on by deepagents SDK** (cannot disable):
-- `write_todos` — planning/task list
-- `ls`, `glob`, `grep` — virtual filesystem browse
-- `read_file`, `write_file`, `edit_file` — deepagents in-memory virtual FS (NOT the Docker sandbox)
-- `execute` — deepagents execute (separate from our `bash` sandbox tool)
-
-**Our tools — ON by default** (`tools_config` key omitted or `true`):
+Always-on tools:
 - **Memory**: `remember`, `recall`, `forget` — persisted to `agent_memories` table, scoped by `external_user_id`
 - **Skills**: `create_skill`, `use_skill`, `list_skills`
-- **Escalation**: `escalate_to_human`, `reply_to_user`, `send_to_number` — requires prior escalation in session
+- **Escalation**: `escalate_to_human`, `reply_to_user`, `send_to_number` — human handoff flow with draft-confirm-send
 
-**Our tools — OFF by default** (must set `true` in `tools_config`):
+When `sandbox: true`, Deep Agents SDK activates automatically via `DockerBackend`:
+- `write_todos` — task planning / decomposition (always active when backend is set)
+- `write_file`, `read_file`, `edit_file`, `ls`, `glob`, `grep` — filesystem in workspace dir
+- `execute` — bash in ephemeral Docker container
+- `sandbox_write_binary_file` — custom tool for base64 binary writes (not in BackendProtocol)
 
-| Key | Tools | Notes |
-|-----|-------|-------|
-| `sandbox` | `bash`, `sandbox_write_file`, `sandbox_read_file`, `sandbox_write_binary_file`, `list_files` | Docker containers, workspace at `{SANDBOX_BASE_DIR}/{session_id}/` |
-| `tool_creator` | `create_tool`, `list_tools`, `run_custom_tool` | Agent creates Python tools; requires sandbox |
-| `scheduler` | `set_reminder`, `list_reminders`, `cancel_reminder` | APScheduler background jobs |
-| `http` | `http_get`, `http_post` | Outbound HTTP |
-| `rag` | `search_documents` | RAG also pre-injected automatically into system prompt |
-| `whatsapp_media` | `send_whatsapp_image`, `send_whatsapp_document` | WA channel only |
-| `wa_agent_manager` | `send_agent_wa_qr` | For agent-manager bots only |
-| `mcp` | dynamic | Tools from external MCP servers |
-| `subagents` | `task()` | Delegate to sub-agents |
-
-**Tool name conflict note**: deepagents' `FilesystemMiddleware` always registers `read_file` and `write_file` using its own `StateBackend`. Our Docker sandbox tools are named `sandbox_read_file` / `sandbox_write_file` to avoid conflicts.
+Opt-in tools (enabled in `tools_config`):
+- **Sandbox**: `sandbox: true` — Docker containers, workspace at `{SANDBOX_BASE_DIR}/{session_id}/`
+- **Tool Creator**: `tool_creator: true` — `create_tool`, `list_tools`, `run_custom_tool`; requires sandbox
+- **Scheduler**: `scheduler: true` — `set_reminder`, `list_reminders`, `cancel_reminder`
+- **HTTP**: `http: true` — `http_get`, `http_post`
+- **RAG**: `rag: true` — `search_documents`
+- **WhatsApp media**: `whatsapp_media: true` — `send_whatsapp_image`, `send_whatsapp_document`
+- **WA Agent Manager**: `wa_agent_manager: true` — `send_agent_wa_qr`
+- **MCP**: `mcp: {...}` — tools from external MCP servers
+- **Subagents**: `subagents: { "enabled": true }` — delegate tasks to specialist sub-agents via `task()` tool
 
 ### Subagents (`tools_config.subagents`)
 
@@ -177,7 +160,7 @@ Device state is in memory + SQLite (`{WA_STORE_DIR}/{device_id}.db`). On incomin
 
 ### LLM Access
 
-All LLMs accessed via OpenRouter (`langchain-openai` with base_url override). Model is set per-agent (e.g. `anthropic/claude-sonnet-4-6`, `openai/gpt-4.1-mini`). List available models: `GET /v1/models`.
+All LLMs accessed via OpenRouter (`langchain-openai` with base_url override). Model is set per-agent (e.g. `openai/gpt-5.1`, `openai/gpt-4.1-mini`). List available models: `GET /v1/models`.
 
 ## API Surface
 

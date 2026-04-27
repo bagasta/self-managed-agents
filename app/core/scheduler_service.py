@@ -155,3 +155,54 @@ def stop_scheduler() -> None:
     if _scheduler and _scheduler.running:
         _scheduler.shutdown(wait=False)
         logger.info("scheduler_service.stopped")
+
+
+def is_scheduler_running() -> bool:
+    return _scheduler is not None and _scheduler.running
+
+
+async def _tick_with_lock() -> None:
+    """Advisory-lock-guarded tick — safe for multi-instance deployments."""
+    from sqlalchemy import text
+    from app.database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(text("SELECT pg_try_advisory_lock(12345)"))
+        acquired = result.scalar()
+        if not acquired:
+            return  # another instance is already ticking
+
+    try:
+        await _tick()
+    finally:
+        async with AsyncSessionLocal() as db:
+            await db.execute(text("SELECT pg_advisory_unlock(12345)"))
+            await db.commit()
+
+
+async def run_scheduler_loop() -> None:
+    """Entry point for the standalone scheduler worker process."""
+    import signal
+
+    loop = asyncio.get_event_loop()
+    stop_event = asyncio.Event()
+
+    def _handle_signal():
+        stop_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, _handle_signal)
+
+    logger.info("scheduler_worker.started")
+
+    while not stop_event.is_set():
+        try:
+            await _tick_with_lock()
+        except Exception as exc:
+            logger.error("scheduler_worker.tick_error", error=str(exc))
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=60)
+        except asyncio.TimeoutError:
+            pass
+
+    logger.info("scheduler_worker.stopped")

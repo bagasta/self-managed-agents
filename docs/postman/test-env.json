@@ -1,0 +1,14 @@
+{
+  "id": "local-test-env",
+  "name": "Local Dev",
+  "values": [
+    { "key": "base_url", "value": "http://127.0.0.1:8000", "enabled": true },
+    { "key": "api_key",  "value": "42523db14d86f993409fba4984764be01fb169ddf7e5e401efab2f33442c9a7b", "enabled": true },
+    { "key": "agent_id",  "value": "", "enabled": true },
+    { "key": "agent_key", "value": "", "enabled": true },
+    { "key": "session_id","value": "", "enabled": true },
+    { "key": "doc_id",    "value": "", "enabled": true },
+    { "key": "run_id",    "value": "", "enabled": true },
+    { "key": "wa_device_id","value":"","enabled": true }
+  ]
+}

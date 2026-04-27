@@ -104,10 +104,11 @@ class DockerSandbox:
             },
             working_dir="/workspace",
             environment={},
-            mem_limit="512m",
-            nano_cpus=int(1e9),  # 1 CPU
-            network_mode="bridge",
-            extra_hosts={"host.docker.internal": "host-gateway"},
+            mem_limit="256m",
+            nano_cpus=int(0.25e9),  # 25% CPU
+            network_mode="none",
+            security_opt=["no-new-privileges:true"],
+            cap_drop=["ALL"],
             remove=True,
             stdout=True,
             stderr=True,

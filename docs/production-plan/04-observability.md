@@ -291,9 +291,9 @@ async def health_detailed(db: AsyncSession = Depends(get_db)):
 
 ## Checklist Fase 4
 
-- [ ] 4.1 Tambahkan RequestIDMiddleware dan custom AccessLogMiddleware
-- [ ] 4.2 Setup Prometheus metrics (instrumentator + custom metrics)
+- [x] 4.1 Tambahkan RequestIDMiddleware — `app/middleware/request_id.py`, ditambah ke main.py
+- [x] 4.2 Setup Prometheus metrics (instrumentator + custom metrics) — `app/core/metrics.py`, prometheus-fastapi-instrumentator di requirements.txt, Instrumentator().instrument(app) di main.py, endpoint /metrics
 - [ ] 4.3 Buat Grafana dashboard dengan 5 panel kunci
 - [ ] 4.4 Setup alerting untuk error rate dan scheduler lag
-- [ ] 4.5 Integrasikan Sentry untuk error tracking
-- [ ] 4.6 Perluas `/health` endpoint ke `/health/detailed`
+- [x] 4.5 Integrasikan Sentry untuk error tracking — conditional init di main.py berdasarkan `settings.sentry_dsn`, FastApiIntegration + SqlalchemyIntegration
+- [x] 4.6 Perluas `/health` endpoint ke `/health/detailed` — endpoint baru di main.py, cek database + scheduler + wa_service, return 503 jika ada yang degraded

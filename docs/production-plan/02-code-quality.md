@@ -221,10 +221,10 @@ class AgentRunResult(TypedDict):
 
 ## Checklist Fase 2
 
-- [ ] 2.1 Pecah `agent_runner.py` → `tool_builder.py`, `prompt_builder.py`, `subagent_builder.py`, `context_service.py`
-- [ ] 2.2 Buat `phone_utils.py`, dedup `_normalize_phone` dari 4 tempat jadi 1
-- [ ] 2.3 Pecah `wa_incoming()` handler jadi helper functions
-- [ ] 2.4 Pindahkan semua magic numbers ke `config.py`
-- [ ] 2.5 Ganti semua `except Exception: pass` dengan logging atau komentar jelas
-- [ ] 2.6 Hilangkan import di dalam fungsi (terutama duplikat)
-- [ ] 2.7 Tambah type hints untuk `run_agent()` dan fungsi publik lainnya
+- [x] 2.1 Pecah `agent_runner.py` → `tool_builder.py`, `prompt_builder.py`, `subagent_builder.py`, `context_service.py` — dari 1488 baris jadi ~250 baris pure orchestration
+- [x] 2.2 Buat `phone_utils.py`, dedup `_normalize_phone` dari 4 tempat jadi 1 — `app/core/phone_utils.py`, semua lokal diganti import
+- [x] 2.3 Pecah `wa_incoming()` handler jadi helper functions — `app/api/wa_helpers.py` (7 fungsi: find_agent_by_device, find_or_create_wa_session, find_escalation_context, process_wa_media, is_operator_message, get_wa_lookup_user_id, extract_messages_to_user); `wa_incoming()` sekarang ~60 baris orchestration
+- [x] 2.4 Pindahkan semua magic numbers ke `config.py` — `context_summary_trigger`, `default_subagent_model`, `default_subagent_max_tokens`, `media_doc_max_chars`, `llm_max_tokens`, `message_max_length`, `media_max_length`
+- [x] 2.5 Ganti semua `except Exception: pass` dengan logging atau komentar jelas — channels.py error-reply block diganti `log.warning`
+- [x] 2.6 Hilangkan import di dalam fungsi (terutama duplikat) — `send_wa_message`, `markdown_to_wa` dipindah ke top-level; `run_agent` tetap deferred (circular) dengan komentar
+- [x] 2.7 Tambah type hints untuk `run_agent()` dan fungsi publik lainnya — `AgentRunResult` TypedDict ditambah, `agent_model: Any` → `agent_model: AgentModel`, return type `AgentRunResult`

@@ -4,18 +4,30 @@ services:
       context: ..
       dockerfile: Dockerfile
     restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
     env_file:
       - .env.prod
     environment:
       WA_SERVICE_URL: http://wa-service:8080
+      WA_DEV_SERVICE_URL: http://wa-dev-service:8081
+      REDIS_URL: redis://redis:6379/0
     volumes:
       - /tmp/agent-sandboxes:/tmp/agent-sandboxes
       - /var/run/docker.sock:/var/run/docker.sock
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
     networks:
       - internal
       - root_default
+    depends_on:
+      redis:
+        condition: service_healthy
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.managed-agents.rule=Host(`managed-agent.chiefaiofficer.id`)"
@@ -24,6 +36,38 @@ services:
       - "traefik.http.routers.managed-agents.tls.certresolver=mytlschallenge"
       - "traefik.http.services.managed-agents.loadbalancer.server.port=8000"
       - "traefik.docker.network=root_default"
+
+  scheduler:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: python -m app.scheduler_worker
+    env_file:
+      - .env.prod
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - internal
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --save 60 1
+    volumes:
+      - redis_data:/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 
   wa-service:
     build:
@@ -37,7 +81,7 @@ services:
     volumes:
       - wa_store:/data/wa-store
     networks:
-      - internal
+      - internal   # hanya akses internal, tidak expose ke internet langsung
 
   wa-dev-service:
     build:
@@ -69,9 +113,11 @@ services:
 volumes:
   wa_store:
   wa_dev_store:
+  redis_data:       # persistent Redis data (survives restart)
 
 networks:
   internal:
     driver: bridge
+    # Network isolation: postgres tidak di-expose, hanya api yang perlu akses
   root_default:
     external: true

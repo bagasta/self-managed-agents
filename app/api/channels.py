@@ -18,10 +18,14 @@ Desain operator session (WhatsApp):
       → Forward pesan user ke operator (via channel_service) sebagai notifikasi.
       → Jalankan agent dengan pesan [USER_IN_ESCALATION] untuk konteks.
   - Selain itu → proses normal per-user.
+
+Single-worker constraint:
+  Event bus (SSE) masih in-memory dengan Redis fallback (jika REDIS_URL di-set).
+  Jangan jalankan lebih dari 1 uvicorn worker sampai Redis terkonfigurasi penuh.
+  Lihat docs/production-plan/01-critical-blockers.md#1.2 untuk detail.
 """
 from __future__ import annotations
 
-import re as _re
 import uuid
 
 import structlog
@@ -30,10 +34,30 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.core.channel_service import send_message
+from app.core.input_sanitizer import sanitize_user_input
+from app.core.phone_utils import normalize_phone
+from app.core.text_utils import markdown_to_wa
+from app.core.wa_client import send_wa_message
 from app.database import get_db
 from app.models.agent import Agent
 from app.models.session import Session
+
+# Helper functions untuk wa_incoming — dipecah agar bisa di-test secara independen
+from app.api.wa_helpers import (
+    extract_messages_to_user,
+    find_agent_by_device,
+    find_escalation_context,
+    find_or_create_wa_session,
+    get_wa_lookup_user_id,
+    is_operator_message,
+    process_wa_media,
+)
+
+_settings = get_settings()
+_DEVELOPER_PHONE: str = _settings.developer_phone
+_GENERIC_ERROR_MSG = "Maaf, terjadi gangguan sementara. Silakan coba lagi dalam beberapa saat."
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/v1/channels", tags=["channels"])
@@ -50,10 +74,7 @@ async def wa_dev_operator_route(
     This allows wa-dev to auto-route operator messages without requiring the operator
     to do 'connect {agentID}' explicitly.
     """
-    def _norm(p: str) -> str:
-        return p.lstrip("+").split("@")[0]
-
-    normalized = _norm(phone)
+    normalized = normalize_phone(phone)
     agents_result = await db.execute(
         select(Agent).where(Agent.is_deleted.is_(False))
     )
@@ -62,9 +83,9 @@ async def wa_dev_operator_route(
         esc_cfg: dict = agent.escalation_config or {}
         op_phone: str = esc_cfg.get("operator_phone", "")
 
-        all_ops = {_norm(p) for p in op_ids if p}
+        all_ops = {normalize_phone(p) for p in op_ids if p}
         if op_phone:
-            all_ops.add(_norm(op_phone))
+            all_ops.add(normalize_phone(op_phone))
 
         if normalized in all_ops:
             return {"agent_id": str(agent.id), "agent_name": agent.name}
@@ -74,19 +95,19 @@ async def wa_dev_operator_route(
 
 class IncomingMessage(BaseModel):
     from_phone: str | None = None
-    message: str
+    message: str = Field(..., max_length=10_000)
 
 
 class WAIncomingMessage(BaseModel):
     device_id: str
     from_: str = Field(..., alias="from")
     chat_id: str | None = None  # group JID (xxx@g.us) atau nomor DM; kalau None fallback ke from_
-    message: str
+    message: str = Field(..., max_length=10_000)
     timestamp: int | None = None
     push_name: str | None = None       # WhatsApp display name of sender
     # Media fields — diisi oleh Go service saat pesan mengandung gambar/dokumen/sticker
     media_type: str | None = None      # "image" | "document" | "sticker" | None
-    media_data: str | None = None      # base64-encoded raw bytes
+    media_data: str | None = Field(None, max_length=10_000_000)  # base64-encoded raw bytes
     media_filename: str | None = None  # original filename (dokumen) atau generated (gambar)
 
     model_config = {"populate_by_name": True}
@@ -121,27 +142,22 @@ async def incoming_message(
 
     log = logger.bind(session_id=str(session_id), from_phone=from_phone)
 
-    def _norm(p: str) -> str:
-        return p.lstrip("+").split("@")[0]
-
-    # --- Tentukan jenis pengirim: cek operator_ids + operator_phone legacy ---
+    # --- Tentukan jenis pengirim ---
     _op_ids: list = getattr(agent, "operator_ids", None) or []
-    _norm_op_ids = {_norm(oid) for oid in _op_ids if oid}
+    _norm_op_ids = {normalize_phone(oid) for oid in _op_ids if oid}
     if operator_phone:
-        _norm_op_ids.add(_norm(operator_phone))
-    is_operator = bool(_norm_op_ids and from_phone and _norm(from_phone) in _norm_op_ids)
+        _norm_op_ids.add(normalize_phone(operator_phone))
+    is_operator = bool(_norm_op_ids and from_phone and normalize_phone(from_phone) in _norm_op_ids)
 
     if is_operator:
-        # Pesan dari operator → inject sebagai perintah operator ke agent
         user_message = f"[OPERATOR] {raw_message}"
         log.info("channels.incoming.operator_command")
     else:
-        # Pesan normal dari user
         user_message = raw_message
         log.info("channels.incoming.normal")
 
     # --- Jalankan agent ---
-    from app.core.agent_runner import run_agent
+    from app.core.agent_runner import run_agent  # deferred to avoid circular import
 
     try:
         result = await run_agent(
@@ -157,12 +173,9 @@ async def incoming_message(
     reply = result.get("reply", "")
 
     # --- Kirim reply ke channel ---
-    # Untuk perintah operator: reply dikirim ke operator (bukan ke user)
-    # Untuk pesan user: reply dikirim ke user
     if session.channel_type and reply:
         try:
             if is_operator:
-                # Balas ke operator
                 op_cfg = {**escalation_cfg, "user_phone": operator_phone}
                 await send_message(
                     channel_type=escalation_cfg.get("channel_type", session.channel_type),
@@ -170,7 +183,6 @@ async def incoming_message(
                     text=reply,
                 )
             else:
-                # Balas ke user
                 await send_message(
                     channel_type=session.channel_type,
                     channel_config=session.channel_config if isinstance(session.channel_config, dict) else {},
@@ -179,33 +191,13 @@ async def incoming_message(
         except Exception as exc:
             log.warning("channels.incoming.send_reply_failed", error=str(exc))
 
-    # Ekstrak pesan yang dikirim ke user dari tool calls
     steps = result.get("steps", [])
-    messages_to_user = []
-    for step in steps:
-        if step.get("tool") == "reply_to_user":
-            msg = step.get("args", {}).get("message") or ""
-            if not msg:
-                # fallback: parse dari result string
-                res_str = step.get("result", "")
-                import re
-                m = re.search(r'\[SENT_TO_USER\]\s*(.+)', res_str, re.DOTALL)
-                if m:
-                    msg = m.group(1).strip()
-            if msg:
-                messages_to_user.append({"type": "reply_to_user", "message": msg})
-        elif step.get("tool") == "send_to_number":
-            msg = step.get("args", {}).get("message") or ""
-            target = step.get("args", {}).get("phone_or_target") or ""
-            if msg:
-                messages_to_user.append({"type": "send_to_number", "message": msg, "target": target})
-
     return {
         "status": "ok",
         "reply": reply,
         "run_id": str(result.get("run_id", "")),
         "steps": steps,
-        "messages_to_user": messages_to_user,
+        "messages_to_user": extract_messages_to_user(steps),
     }
 
 
@@ -218,240 +210,84 @@ async def wa_incoming(
     Webhook called by the Go wa-service when a WhatsApp message arrives.
     Finds the agent by device_id, finds or creates a session for the sender,
     runs the agent, and replies via wa-service.
+
+    Flow:
+    1. Find agent by device_id (via find_agent_by_device)
+    2. Check if sender is operator (via is_operator_message)
+    3. If operator: load escalation context (via find_escalation_context)
+    4. Find or create WA session (via find_or_create_wa_session)
+    5. Process media if any (via process_wa_media)
+    6. Run agent
+    7. Send reply via wa-service
     """
     log = logger.bind(device_id=body.device_id, from_phone=body.from_)
 
-    # Find agent by wa_device_id.
-    # Virtual "wadev_{agent_id}" device IDs come from wa-dev-service — look up by agent ID directly.
-    if body.device_id.startswith("wadev_"):
-        import uuid as _uuid
-        try:
-            _agent_uuid = _uuid.UUID(body.device_id[len("wadev_"):])
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid wadev_ device_id format")
-        agent_result = await db.execute(
-            select(Agent).where(
-                Agent.id == _agent_uuid,
-                Agent.is_deleted.is_(False),
-            )
-        )
-    else:
-        agent_result = await db.execute(
-            select(Agent).where(
-                Agent.wa_device_id == body.device_id,
-                Agent.is_deleted.is_(False),
-            )
-        )
-    agent = agent_result.scalar_one_or_none()
+    # 1. Find agent
+    agent = await find_agent_by_device(body.device_id, db)
     if not agent:
         log.warning("wa_incoming.agent_not_found")
         raise HTTPException(status_code=404, detail="No agent found for this WhatsApp device")
 
     from_phone = body.from_
-    # chat_id: target untuk mengirim reply (grup JID atau nomor DM)
+    # reply_target: JID tujuan untuk kirim balasan (grup JID atau DM)
     reply_target = body.chat_id or body.from_
-    raw_message = body.message
-    escalation_cfg: dict = agent.escalation_config or {}
-    operator_phone: str = escalation_cfg.get("operator_phone", "")
 
-    # Normalisasi: strip "+" prefix dan "@domain" suffix (WA JID: 62xxx@s.whatsapp.net, @g.us, @lid, dll)
-    def _normalize_phone(p: str) -> str:
-        return p.lstrip("+").split("@")[0]
+    # 2. Cek apakah pesan dari operator
+    _is_operator = is_operator_message(from_phone, reply_target, agent)
 
-    # Kumpulkan semua ID operator: dari operator_ids (field baru) + operator_phone (legacy)
-    _operator_ids: list = getattr(agent, "operator_ids", None) or []
-    _normalized_operator_ids = {_normalize_phone(oid) for oid in _operator_ids if oid}
-    if operator_phone:
-        _normalized_operator_ids.add(_normalize_phone(operator_phone))
-
-    # Pesan dianggap dari operator jika from_ ATAU chat_id cocok dengan salah satu operator ID.
-    is_operator = bool(
-        _normalized_operator_ids and (
-            (_normalize_phone(from_phone) in _normalized_operator_ids)
-            or (reply_target and _normalize_phone(reply_target) in _normalized_operator_ids)
-        )
-    )
-
-    # Cari user JID yang sedang dalam eskalasi (untuk context operator)
+    # 3. Jika operator, cari context eskalasi
     escalation_user_jid: str | None = None
     escalation_context: str | None = None
-    if is_operator:
-        from app.models.message import Message as _Msg
-        from sqlalchemy import desc as _desc
-        
-        esc_result = await db.execute(
-            select(Session)
-            .join(_Msg, _Msg.session_id == Session.id)
-            .where(
-                Session.agent_id == agent.id,
-                _Msg.role == "escalation"
-            )
-            .order_by(_desc(_Msg.timestamp))
-            .limit(1)
-        )
-        esc_session = esc_result.scalars().first()
-        if esc_session:
-            _raw_ch = esc_session.channel_config
-            ch = _raw_ch if isinstance(_raw_ch, dict) else {}
-            escalation_user_jid = ch.get("user_phone") or esc_session.external_user_id
+    if _is_operator:
+        escalation_user_jid, escalation_context = await find_escalation_context(agent, db)
+        log.info("wa_incoming.operator_session", escalation_user_jid=escalation_user_jid)
 
-            # Ambil pesan user terkini dari sesi eskalasi agar agent punya konteks
-            from app.models.message import Message as _Msg
-            from sqlalchemy import desc as _desc
-            _recent = await db.execute(
-                select(_Msg)
-                .where(
-                    _Msg.session_id == esc_session.id,
-                    _Msg.role == "user",
-                )
-                .order_by(_desc(_Msg.step_index))
-                .limit(5)
-            )
-            recent_msgs = list(reversed(_recent.scalars().all()))
-            if recent_msgs:
-                lines = []
-                for m in recent_msgs:
-                    content = m.content or ""
-                    # Strip internal prefix agar operator lihat pesan asli user
-                    content = content.removeprefix("[USER_IN_ESCALATION] ").strip()
-                    if content:
-                        lines.append(f"- {content}")
-                if lines:
-                    escalation_context = "\n".join(lines)
-
-    # Tentukan external_user_id untuk session lookup:
-    # - operator → pakai operator_phone (session milik operator sendiri)
-    # - pesan grup → pakai group JID (chat_id berakhiran @g.us) agar semua member berbagi satu session grup
-    # - DM → pakai nomor pengirim (body.from_)
-    is_group = bool(body.chat_id and body.chat_id.endswith("@g.us"))
-    if is_operator:
-        lookup_user_id = operator_phone
-    elif is_group:
-        lookup_user_id = body.chat_id
-    else:
-        lookup_user_id = body.from_
-
-    session = None
-    # Cari session berdasarkan agent_id + external_user_id
-    # Operator → lookup by operator_phone (session milik operator sendiri)
-    # User biasa → lookup by body.from_
-    session_result = await db.execute(
-        select(Session).where(
-            Session.agent_id == agent.id,
-            Session.channel_type == "whatsapp",
-            Session.external_user_id == lookup_user_id,
-        )
+    # Tentukan lookup_user_id untuk session
+    lookup_user_id = get_wa_lookup_user_id(
+        from_phone=from_phone,
+        chat_id=body.chat_id,
+        is_operator=_is_operator,
+        agent=agent,
     )
-    session = session_result.scalars().first()
 
-    # effective_reply_target: JID tujuan saat membalas.
-    # Selalu pakai reply_target (= chat_id for DM/group, from_ sebagai fallback).
-    # chat_id dari wa-service/wa-dev sudah mengandung server info yang benar (@s.whatsapp.net atau @lid).
-    # Menggunakan body.from_ (format "+LIDnumber") untuk akun @lid akan menyebabkan
-    # pesan/gambar dikirim ke JID yang salah karena LID number bukan nomor HP.
+    # effective_reply_target: selalu pakai chat_id (atau from_ fallback).
+    # chat_id dari wa-service sudah mengandung server info yang benar (@s.whatsapp.net atau @lid).
     effective_reply_target = reply_target
 
-    if session:
-        # Pastikan device_id dan user_phone (reply JID) selalu up-to-date
-        _raw_cfg = session.channel_config
-        new_config = dict(_raw_cfg) if isinstance(_raw_cfg, dict) else {}
-        if new_config.get("device_id") != body.device_id or new_config.get("user_phone") != effective_reply_target:
-            new_config["device_id"] = body.device_id
-            new_config["user_phone"] = effective_reply_target
-            session.channel_config = new_config
-            await db.flush()
+    # 4. Find or create session
+    session, was_created = await find_or_create_wa_session(
+        agent=agent,
+        lookup_user_id=lookup_user_id,
+        effective_reply_target=effective_reply_target,
+        device_id=body.device_id,
+        db=db,
+        is_operator=_is_operator,
+    )
+    if was_created:
+        log.info("wa_incoming.session_created", session_id=str(session.id), is_operator=_is_operator)
 
-    if session is None:
-        session = Session(
-            agent_id=agent.id,
-            external_user_id=lookup_user_id,
-            channel_type="whatsapp",
-            channel_config={
-                "user_phone": effective_reply_target,
-                "device_id": body.device_id,
-            },
-        )
-        db.add(session)
-        await db.flush()
-        await db.refresh(session)
-        log.info("wa_incoming.session_created", session_id=str(session.id), is_operator=is_operator)
-
-    # --- Proses media (gambar/dokumen) jika ada ---
+    # 5. Proses media jika ada
     media_context = ""
     media_image_b64: str | None = None
     media_image_mime: str | None = None
 
     if body.media_type and body.media_data:
-        try:
-            import base64 as _b64
-            from app.core.sandbox import get_workspace_dir
+        media_context, media_image_b64, media_image_mime = await process_wa_media(
+            media_type=body.media_type,
+            media_data=body.media_data,
+            media_filename=body.media_filename,
+            session_id=session.id,
+            logger=log,
+        )
 
-            raw_bytes = _b64.b64decode(body.media_data)
-            workspace = get_workspace_dir(session.id)
-            filename = body.media_filename or f"incoming_{body.media_type}"
-            if "." not in filename:
-                ext_map = {"image": ".jpg", "document": ".bin", "sticker": ".webp"}
-                filename += ext_map.get(body.media_type, ".bin")
-            target_path = workspace / filename
-            target_path.write_bytes(raw_bytes)
-            log.info("wa_incoming.media_saved", media_type=body.media_type, filename=filename)
-
-            if body.media_type == "image":
-                # Kirim gambar sebagai konten multimodal ke LLM
-                ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "jpg"
-                mime_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
-                media_image_mime = mime_map.get(ext, "image/jpeg")
-                media_image_b64 = body.media_data
-                media_context = f"\n[Gambar diterima dan ditampilkan di atas. File juga tersimpan di /workspace/{filename}]"
-
-            elif body.media_type == "document":
-                # Ekstrak teks dari dokumen dan sertakan dalam pesan
-                ext = ("." + filename.rsplit(".", 1)[-1].lower()) if "." in filename else ""
-                doc_extractable = {".pdf", ".docx", ".pptx", ".txt", ".md", ".csv"}
-                if ext in doc_extractable:
-                    try:
-                        from app.core.file_processor import extract_text
-                        from app.config import get_settings as _get_settings
-                        extracted = await extract_text(
-                            content=raw_bytes,
-                            filename=filename,
-                            content_type=None,
-                            mistral_api_key=_get_settings().mistral_api_key,
-                        )
-                        # Batasi panjang teks agar tidak membanjiri konteks
-                        MAX_CHARS = 12000
-                        if len(extracted) > MAX_CHARS:
-                            extracted = extracted[:MAX_CHARS] + f"\n... [dipotong, total {len(extracted)} karakter]"
-                        media_context = (
-                            f"\n[Dokumen diterima: {filename}]\n"
-                            f"Isi dokumen:\n```\n{extracted}\n```"
-                        )
-                    except Exception as exc:
-                        log.warning("wa_incoming.doc_extract_failed", error=str(exc))
-                        media_context = f"\n[Dokumen diterima: {filename}, tersimpan di /workspace/{filename}]"
-                else:
-                    media_context = f"\n[Dokumen diterima: {filename}, tersimpan di /workspace/{filename}]"
-
-            elif body.media_type == "sticker":
-                media_context = f"\n[Stiker diterima, tersimpan di /workspace/{filename}]"
-
-        except Exception as exc:
-            log.warning("wa_incoming.media_save_failed", error=str(exc))
-
-    if is_operator:
-        user_message = raw_message + media_context
-        log.info("wa_incoming.operator_session", escalation_user_jid=escalation_user_jid)
-    else:
-        user_message = raw_message + media_context
+    user_message = sanitize_user_input(body.message) + media_context
+    if not _is_operator:
         log.info("wa_incoming.normal")
 
     sender_name: str | None = body.push_name or None
 
-    # Run agent
-    from app.core.agent_runner import run_agent
-
-    _DEVELOPER_PHONE = "62895619356936"
-    _GENERIC_ERROR_MSG = "Maaf, terjadi gangguan sementara. Silakan coba lagi dalam beberapa saat."
+    # 6. Run agent
+    from app.core.agent_runner import run_agent  # deferred to avoid circular import
 
     try:
         result = await run_agent(
@@ -467,59 +303,40 @@ async def wa_incoming(
         )
     except Exception as exc:
         log.error("wa_incoming.agent_error", error=str(exc), exc_info=True)
-        # Kirim error detail ke developer, pesan generik ke user
+        import traceback as _tb
+        err_detail = _tb.format_exc()
+        if _DEVELOPER_PHONE:
+            try:
+                await send_wa_message(
+                    body.device_id,
+                    _DEVELOPER_PHONE,
+                    f"⚠️ *Agent Error*\nAgent: {agent.name}\nFrom: {from_phone}\n\n```\n{err_detail[:3000]}\n```",
+                )
+            except Exception as _notify_exc:
+                log.warning("wa_incoming.developer_notify_failed", error=str(_notify_exc))
         try:
-            from app.core.wa_client import send_wa_message
-            import traceback as _tb
-            err_detail = _tb.format_exc()
-            await send_wa_message(
-                body.device_id,
-                _DEVELOPER_PHONE,
-                f"⚠️ *Agent Error*\nAgent: {agent.name}\nFrom: {from_phone}\n\n```\n{err_detail[:3000]}\n```",
-            )
-        except Exception as _notify_exc:
-            log.warning("wa_incoming.developer_notify_failed", error=str(_notify_exc))
-        try:
-            from app.core.wa_client import send_wa_message
             await send_wa_message(body.device_id, effective_reply_target, _GENERIC_ERROR_MSG)
-        except Exception:
-            pass
+        except Exception as _send_exc:
+            log.warning("wa_incoming.error_reply_failed", error=str(_send_exc))
         return {"status": "error", "reply": _GENERIC_ERROR_MSG, "run_id": "", "steps": [], "messages_to_user": []}
 
     reply = result.get("reply", "")
-
     steps = result.get("steps", [])
-    messages_to_user = []
-    for step in steps:
-        if step.get("tool") == "reply_to_user":
-            msg = step.get("args", {}).get("message") or ""
-            if not msg:
-                res_str = step.get("result", "")
-                m = _re.search(r'\[SENT_TO_USER\]\s*(.+)', res_str, _re.DOTALL)
-                if m:
-                    msg = m.group(1).strip()
-            if msg:
-                messages_to_user.append({"type": "reply_to_user", "message": msg})
-        elif step.get("tool") == "send_to_number":
-            msg = step.get("args", {}).get("message") or ""
-            target = step.get("args", {}).get("phone_or_target") or ""
-            if msg:
-                messages_to_user.append({"type": "send_to_number", "message": msg, "target": target})
 
-    # --- Kirim reply ke channel ---
+    # 7. Kirim reply ke channel
     if reply:
         try:
-            from app.core.text_utils import markdown_to_wa
-            from app.core.wa_client import send_wa_message
             wa_reply = markdown_to_wa(reply)
-            if is_operator:
-                # Kirim final reply ke operator (session milik operator sendiri)
-                # Jika agent juga memanggil reply_to_user, pesan itu sudah dikirim oleh tool
+            escalation_cfg: dict = agent.escalation_config or {}
+            operator_phone: str = escalation_cfg.get("operator_phone", "")
+
+            if _is_operator:
+                # Kirim final reply ke operator
                 await send_wa_message(body.device_id, reply_target, wa_reply)
             else:
-                # Balas ke user; guard: jangan kirim ke nomor operator
-                normalized_target = reply_target.lstrip("+").split("@")[0]
-                normalized_operator = operator_phone.lstrip("+").split("@")[0] if operator_phone else ""
+                # Guard: jangan kirim ke nomor operator
+                normalized_target = normalize_phone(reply_target)
+                normalized_operator = normalize_phone(operator_phone) if operator_phone else ""
                 if normalized_operator and normalized_target == normalized_operator:
                     log.warning("wa_incoming.reply_target_is_operator_suppressed", reply_target=reply_target)
                 else:
@@ -532,5 +349,5 @@ async def wa_incoming(
         "reply": reply,
         "run_id": str(result.get("run_id", "")),
         "steps": steps,
-        "messages_to_user": messages_to_user,
+        "messages_to_user": extract_messages_to_user(steps),
     }

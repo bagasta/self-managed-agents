@@ -327,10 +327,10 @@ class WAIncomingMessage(BaseModel):
 ## Checklist Fase 5
 
 - [ ] 5.1 Implementasi multi-key API key system dengan key_hash storage
-- [ ] 5.2 Hardening Docker sandbox: drop capabilities, disable network, resource limits
-- [ ] 5.3 Tambahkan input sanitizer dan PII logger redaction
+- [x] 5.2 Hardening Docker sandbox: drop capabilities, disable network, resource limits — `network_mode="none"`, `cap_drop=["ALL"]`, `security_opt=["no-new-privileges:true"]`, `mem_limit="256m"`, `nano_cpus=0.25e9`
+- [x] 5.3 Tambahkan input sanitizer dan PII logger redaction — `app/core/input_sanitizer.py`, `app/core/log_sanitizer.py`, diintegrasikan ke channels.py dan agent_runner.py
 - [ ] 5.4 Audit semua secret: pastikan tidak ada di git, pindah ke env injection
 - [ ] 5.5 Ganti default PostgreSQL password, buat dedicated DB user
 - [ ] 5.6 Setup network isolation di docker-compose.prod.yml
-- [ ] 5.7 Tambahkan input size validation di semua schema
+- [x] 5.7 Tambahkan input size validation di semua schema — `MessageCreate`, `IncomingMessage`, `WAIncomingMessage` semua pakai `Field(max_length=...)`
 - [ ] 5.8 Review dan hapus docker socket mount — ganti dengan rootless approach
