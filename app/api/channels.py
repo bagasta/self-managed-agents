@@ -271,6 +271,8 @@ async def wa_incoming(
     )
     if was_created:
         log.info("wa_incoming.session_created", session_id=str(session.id), is_operator=_is_operator)
+        # Commit agar session_id visible ke koneksi DB terpisah (e.g. scheduler_tool)
+        await db.commit()
 
     # 5. Proses media jika ada
     media_context = ""
