@@ -21,7 +21,7 @@ func main() {
 		Port:       getEnv("PORT", "8081"),
 		StoreDir:   getEnv("WA_DEV_STORE_DIR", "wa-dev-store"),
 		MainAPIURL: getEnv("MAIN_API_URL", "http://localhost:8000"),
-		MainAPIKey: getEnv("MAIN_API_KEY", ""),
+		MainAPIKey: getEnv("MAIN_API_KEY", getEnv("API_KEY", "")),
 		StoreFile:  getEnv("CONNECTIONS_FILE", "connections.json"),
 		WebhookURL: getEnv("WEBHOOK_URL", ""),
 	}
