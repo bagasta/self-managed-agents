@@ -310,8 +310,12 @@ async def process_wa_media(
                 audio_format=audio_format,
                 openrouter_api_key=get_settings().openrouter_api_key,
             )
-            label = "Voice note" if media_type == "ptt" else "Audio"
-            media_context = f"\n[{label}: {transcript}]"
+            label = "pesan suara" if media_type == "ptt" else "file audio"
+            media_context = (
+                f"\n[Sistem: Pengguna mengirim {label}. "
+                f"Berikut hasil transkripsi otomatis — balas berdasarkan isi ini]\n"
+                f"Transkripsi: {transcript}"
+            )
             logger.info(
                 "wa_incoming.audio_transcribed",
                 media_type=media_type,
