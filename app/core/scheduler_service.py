@@ -92,8 +92,19 @@ async def _run_job(job_id) -> None:
             )
             reply = result.get("reply", "")
 
+            # Fallback: jika agent tidak menghasilkan reply teks, kirim payload langsung
+            # Ini terjadi jika LLM salah menginterpretasi [SCHEDULED] dan tidak membuat reply
+            if not reply:
+                reply = job.payload
+                log.warning(
+                    "scheduler_service.empty_reply_fallback",
+                    label=job.label,
+                    note="agent returned empty reply, sending payload directly",
+                )
+
             # Publish ke SSE event bus (in-app / UI real-time)
-            if reply:
+            # Diisolasi: error event_bus tidak boleh memblokir pengiriman ke channel eksternal
+            try:
                 from app.core import event_bus
                 await event_bus.publish(str(job.session_id), {
                     "_event_type": "message",
@@ -103,18 +114,37 @@ async def _run_job(job_id) -> None:
                     "run_id": str(result.get("run_id", "")),
                 })
                 log.info("scheduler_service.event_published")
+            except Exception as bus_exc:
+                log.warning("scheduler_service.event_bus_failed", error=str(bus_exc))
 
-            # Kirim reply ke channel eksternal jika dikonfigurasi
-            if session.channel_type and reply:
-                await send_message(
-                    channel_type=session.channel_type,
-                    channel_config=session.channel_config if isinstance(session.channel_config, dict) else {},
-                    text=reply,
+            # Kirim reply ke channel eksternal (WhatsApp / wa-dev / dll)
+            # channel_config harus punya device_id agar wa_client bisa routing yang benar
+            if session.channel_type:
+                cfg = session.channel_config if isinstance(session.channel_config, dict) else {}
+                device_id = cfg.get("device_id", "")
+                log.info(
+                    "scheduler_service.sending_reply",
+                    channel=session.channel_type,
+                    device_id=device_id,
+                    is_wadev=device_id.startswith("wadev_"),
                 )
-                log.info("scheduler_service.reply_sent", channel=session.channel_type)
+                try:
+                    await send_message(
+                        channel_type=session.channel_type,
+                        channel_config=cfg,
+                        text=reply,
+                    )
+                    log.info("scheduler_service.reply_sent", channel=session.channel_type, device_id=device_id)
+                except Exception as send_exc:
+                    log.error(
+                        "scheduler_service.reply_send_failed",
+                        channel=session.channel_type,
+                        device_id=device_id,
+                        error=str(send_exc),
+                    )
 
         except Exception as exc:
-            log.error("scheduler_service.job_error", error=str(exc))
+            log.error("scheduler_service.job_error", error=str(exc), exc_info=True)
 
         finally:
             # Update job: next_run atau done
