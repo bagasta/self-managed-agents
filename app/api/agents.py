@@ -42,6 +42,7 @@ async def create_agent(
         safety_policy=payload.safety_policy,
         escalation_config=payload.escalation_config,
         operator_ids=payload.operator_ids,
+        allowed_senders=payload.allowed_senders,
         token_quota=payload.token_quota,
         quota_period_days=payload.quota_period_days,
         active_until=active_until,

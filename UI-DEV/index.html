@@ -128,6 +128,23 @@
                 Contoh: <code>{"channel_type":"whatsapp","operator_phone":"+62811xxx"}</code>
               </div>
             </div>
+            <div class="form-group">
+              <label>Operator IDs <span class="text-muted">(JSON array, opsional)</span></label>
+              <textarea id="a-operator-ids" rows="2" placeholder='["+628111000", "+628222000"]'></textarea>
+              <div class="tools-config-hint">
+                👨‍💼 Daftar nomor WA/JID yang punya akses <strong>operator</strong>.
+                Kosongkan untuk tidak ada operator khusus.
+              </div>
+            </div>
+            <div class="form-group">
+              <label>Allowed Senders <span class="text-muted">(JSON array, opsional)</span></label>
+              <textarea id="a-allowed-senders" rows="2" placeholder='null  ← kosongkan/null = semua diizinkan'></textarea>
+              <div class="tools-config-hint">
+                🛡️ <strong>Fitur 1 — Allowlist.</strong>
+                <code>null</code> atau kosong = semua nomor diizinkan.
+                Isi array nomor untuk membatasi: <code>["+62811xxx", "+62822xxx"]</code>
+              </div>
+            </div>
             <div class="form-group full">
               <label>Safety Policy (JSON)</label>
               <textarea id="a-safety" rows="2">{}</textarea>

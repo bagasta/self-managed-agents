@@ -81,7 +81,7 @@
             "url": "{{base_url}}/v1/agents",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"CS Agent\",\n  \"description\": \"Agent customer service dengan kemampuan eskalasi ke operator manusia.\",\n  \"instructions\": \"Kamu adalah agen CS yang ramah dan profesional. Bantu user dengan pertanyaan mereka. Jika ada permintaan yang tidak bisa kamu tangani (refund, komplain besar, dll), gunakan tool escalate_to_human.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"tools_config\": {\n    \"memory\": true,\n    \"skills\": true,\n    \"escalation\": true,\n    \"sandbox\": false,\n    \"tool_creator\": false,\n    \"scheduler\": false,\n    \"rag\": false,\n    \"http\": false,\n    \"mcp\": false,\n    \"wa_agent_manager\": false\n  },\n  \"sandbox_config\": {},\n  \"safety_policy\": {\n    \"rules\": [\n      \"Jangan pernah mengeksekusi perintah sistem yang berbahaya.\",\n      \"Tolak permintaan yang melanggar hukum atau tidak etis.\"\n    ]\n  },\n  \"escalation_config\": {\n    \"channel_type\": \"whatsapp\",\n    \"operator_phone\": \"+62811000000\"\n  },\n  \"token_quota\": 4000000,\n  \"quota_period_days\": 30,\n  \"operator_ids\": [\n    \"+62811000000\"\n  ]\n}",
+              "raw": "{\n  \"name\": \"CS Agent\",\n  \"description\": \"Agent customer service dengan kemampuan eskalasi ke operator manusia.\",\n  \"instructions\": \"Kamu adalah agen CS yang ramah dan profesional. Bantu user dengan pertanyaan mereka. Jika ada permintaan yang tidak bisa kamu tangani (refund, komplain besar, dll), gunakan tool escalate_to_human.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"tools_config\": {\n    \"memory\": true,\n    \"skills\": true,\n    \"escalation\": true,\n    \"sandbox\": false,\n    \"tool_creator\": false,\n    \"scheduler\": false,\n    \"rag\": false,\n    \"http\": false,\n    \"mcp\": false,\n    \"wa_agent_manager\": false\n  },\n  \"sandbox_config\": {},\n  \"safety_policy\": {\n    \"rules\": [\n      \"Jangan pernah mengeksekusi perintah sistem yang berbahaya.\",\n      \"Tolak permintaan yang melanggar hukum atau tidak etis.\"\n    ]\n  },\n  \"escalation_config\": {\n    \"channel_type\": \"whatsapp\",\n    \"operator_phone\": \"+62811000000\"\n  },\n  \"token_quota\": 4000000,\n  \"quota_period_days\": 30,\n  \"operator_ids\": [\n    \"+62811000000\"\n  ],\n  \"allowed_senders\": null\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -125,7 +125,7 @@
             "url": "{{base_url}}/v1/agents",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"Coding Agent\",\n  \"description\": \"Agent untuk menulis dan menjalankan kode Python di sandbox Docker yang aman.\",\n  \"instructions\": \"Kamu adalah coding assistant yang ahli Python. Saat menjawab pertanyaan kode:\\n1. Tulis kode yang bersih dan mudah dibaca.\\n2. Selalu jalankan kode terlebih dahulu untuk memverifikasi hasilnya.\\n3. Jelaskan output yang dihasilkan dengan singkat.\\n4. Jika ada error, perbaiki dan coba lagi.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"tools_config\": {\n    \"memory\": true,\n    \"skills\": true,\n    \"escalation\": false,\n    \"sandbox\": true,\n    \"tool_creator\": true,\n    \"scheduler\": false,\n    \"rag\": false,\n    \"http\": false,\n    \"mcp\": false\n  },\n  \"sandbox_config\": {\n    \"memory\": \"512m\",\n    \"cpu\": \"1.0\"\n  },\n  \"safety_policy\": {\n    \"rules\": [\n      \"Jangan pernah mengeksekusi perintah sistem yang berbahaya (rm -rf, shutdown, dll).\",\n      \"Jangan mengakses atau memodifikasi file di luar direktori kerja.\",\n      \"Tolak permintaan yang melanggar hukum atau tidak etis.\"\n    ],\n    \"max_output_length\": 4000\n  },\n  \"escalation_config\": {},\n  \"token_quota\": 4000000,\n  \"quota_period_days\": 30,\n  \"operator_ids\": []\n}",
+              "raw": "{\n  \"name\": \"Coding Agent\",\n  \"description\": \"Agent untuk menulis dan menjalankan kode Python di sandbox Docker yang aman.\",\n  \"instructions\": \"Kamu adalah coding assistant yang ahli Python. Saat menjawab pertanyaan kode:\\n1. Tulis kode yang bersih dan mudah dibaca.\\n2. Selalu jalankan kode terlebih dahulu untuk memverifikasi hasilnya.\\n3. Jelaskan output yang dihasilkan dengan singkat.\\n4. Jika ada error, perbaiki dan coba lagi.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"tools_config\": {\n    \"memory\": true,\n    \"skills\": true,\n    \"escalation\": false,\n    \"sandbox\": true,\n    \"tool_creator\": true,\n    \"scheduler\": false,\n    \"rag\": false,\n    \"http\": false,\n    \"mcp\": false\n  },\n  \"sandbox_config\": {\n    \"memory\": \"512m\",\n    \"cpu\": \"1.0\"\n  },\n  \"safety_policy\": {\n    \"rules\": [\n      \"Jangan pernah mengeksekusi perintah sistem yang berbahaya (rm -rf, shutdown, dll).\",\n      \"Jangan mengakses atau memodifikasi file di luar direktori kerja.\",\n      \"Tolak permintaan yang melanggar hukum atau tidak etis.\"\n    ],\n    \"max_output_length\": 4000\n  },\n  \"escalation_config\": {},\n  \"token_quota\": 4000000,\n  \"quota_period_days\": 30,\n  \"operator_ids\": [],\n  \"allowed_senders\": null\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -151,7 +151,7 @@
             "url": "{{base_url}}/v1/agents",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"Knowledge Agent\",\n  \"description\": \"Agent berbasis RAG — menjawab dari dokumen internal yang diupload.\",\n  \"instructions\": \"Kamu adalah asisten internal perusahaan. Dokumen relevan dari knowledge base sudah otomatis tersedia di konteksmu — gunakan sebagai sumber utama. Jika informasi tidak ada, katakan dengan jujur.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.3,\n  \"tools_config\": {\n    \"memory\": true,\n    \"skills\": false,\n    \"escalation\": true,\n    \"sandbox\": false,\n    \"tool_creator\": false,\n    \"scheduler\": false,\n    \"rag\": true,\n    \"http\": true,\n    \"mcp\": false\n  },\n  \"sandbox_config\": {},\n  \"safety_policy\": {\n    \"rules\": [\n      \"Jangan pernah mengungkapkan informasi rahasia kepada pihak luar.\",\n      \"Jangan membuat klaim yang tidak didukung dokumen yang tersedia.\"\n    ]\n  },\n  \"escalation_config\": {\n    \"channel_type\": \"telegram\",\n    \"operator_phone\": \"123456789\"\n  },\n  \"token_quota\": 2000000,\n  \"quota_period_days\": 30,\n  \"operator_ids\": [\n    \"+628xxxx_telegram_admin\"\n  ]\n}",
+              "raw": "{\n  \"name\": \"Knowledge Agent\",\n  \"description\": \"Agent berbasis RAG — menjawab dari dokumen internal yang diupload.\",\n  \"instructions\": \"Kamu adalah asisten internal perusahaan. Dokumen relevan dari knowledge base sudah otomatis tersedia di konteksmu — gunakan sebagai sumber utama. Jika informasi tidak ada, katakan dengan jujur.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.3,\n  \"tools_config\": {\n    \"memory\": true,\n    \"skills\": false,\n    \"escalation\": true,\n    \"sandbox\": false,\n    \"tool_creator\": false,\n    \"scheduler\": false,\n    \"rag\": true,\n    \"http\": true,\n    \"mcp\": false\n  },\n  \"sandbox_config\": {},\n  \"safety_policy\": {\n    \"rules\": [\n      \"Jangan pernah mengungkapkan informasi rahasia kepada pihak luar.\",\n      \"Jangan membuat klaim yang tidak didukung dokumen yang tersedia.\"\n    ]\n  },\n  \"escalation_config\": {\n    \"channel_type\": \"telegram\",\n    \"operator_phone\": \"123456789\"\n  },\n  \"token_quota\": 2000000,\n  \"quota_period_days\": 30,\n  \"operator_ids\": [\n    \"+628xxxx_telegram_admin\"\n  ],\n  \"allowed_senders\": null\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -177,7 +177,7 @@
             "url": "{{base_url}}/v1/agents",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"MCP Agent\",\n  \"description\": \"Agent dengan akses ke tool eksternal via MCP server (SSE/HTTP atau stdio).\",\n  \"instructions\": \"Kamu adalah asisten yang dapat menggunakan tool dari server MCP eksternal. Gunakan tool yang tersedia untuk membantu user.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"tools_config\": {\n    \"memory\": true,\n    \"tool_creator\": false,\n    \"rag\": false,\n    \"sandbox\": false,\n    \"skills\": false,\n    \"scheduler\": false,\n    \"escalation\": false,\n    \"http\": false,\n    \"mcp\": {\n      \"enabled\": true,\n      \"servers\": {\n        \"filesystem\": {\n          \"url\": \"http://localhost:8080/mcp\",\n          \"transport\": \"streamable_http\"\n        },\n        \"github\": {\n          \"url\": \"http://localhost:8081/sse\",\n          \"transport\": \"sse\"\n        }\n      }\n    }\n  },\n  \"sandbox_config\": {},\n  \"safety_policy\": {},\n  \"escalation_config\": {},\n  \"operator_ids\": []\n}",
+              "raw": "{\n  \"name\": \"MCP Agent\",\n  \"description\": \"Agent dengan akses ke tool eksternal via MCP server (SSE/HTTP atau stdio).\",\n  \"instructions\": \"Kamu adalah asisten yang dapat menggunakan tool dari server MCP eksternal. Gunakan tool yang tersedia untuk membantu user.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"tools_config\": {\n    \"memory\": true,\n    \"tool_creator\": false,\n    \"rag\": false,\n    \"sandbox\": false,\n    \"skills\": false,\n    \"scheduler\": false,\n    \"escalation\": false,\n    \"http\": false,\n    \"mcp\": {\n      \"enabled\": true,\n      \"servers\": {\n        \"filesystem\": {\n          \"url\": \"http://localhost:8080/mcp\",\n          \"transport\": \"streamable_http\"\n        },\n        \"github\": {\n          \"url\": \"http://localhost:8081/sse\",\n          \"transport\": \"sse\"\n        }\n      }\n    }\n  },\n  \"sandbox_config\": {},\n  \"safety_policy\": {},\n  \"escalation_config\": {},\n  \"operator_ids\": [],\n  \"allowed_senders\": null\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -203,7 +203,7 @@
             "url": "{{base_url}}/v1/agents",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"Filesystem Agent\",\n  \"description\": \"Agent dengan akses ke filesystem lokal via MCP stdio server.\",\n  \"instructions\": \"Kamu bisa membaca dan menulis file. Gunakan tool filesystem untuk membantu user mengelola file.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"tools_config\": {\n    \"memory\": true,\n    \"tool_creator\": false,\n    \"rag\": false,\n    \"sandbox\": false,\n    \"skills\": false,\n    \"scheduler\": false,\n    \"escalation\": false,\n    \"http\": false,\n    \"mcp\": {\n      \"enabled\": true,\n      \"servers\": {\n        \"filesystem\": {\n          \"command\": \"npx\",\n          \"args\": [\n            \"-y\",\n            \"@modelcontextprotocol/server-filesystem\",\n            \"/tmp\"\n          ],\n          \"env\": {}\n        }\n      }\n    }\n  },\n  \"sandbox_config\": {},\n  \"safety_policy\": {},\n  \"escalation_config\": {},\n  \"operator_ids\": []\n}",
+              "raw": "{\n  \"name\": \"Filesystem Agent\",\n  \"description\": \"Agent dengan akses ke filesystem lokal via MCP stdio server.\",\n  \"instructions\": \"Kamu bisa membaca dan menulis file. Gunakan tool filesystem untuk membantu user mengelola file.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"tools_config\": {\n    \"memory\": true,\n    \"tool_creator\": false,\n    \"rag\": false,\n    \"sandbox\": false,\n    \"skills\": false,\n    \"scheduler\": false,\n    \"escalation\": false,\n    \"http\": false,\n    \"mcp\": {\n      \"enabled\": true,\n      \"servers\": {\n        \"filesystem\": {\n          \"command\": \"npx\",\n          \"args\": [\n            \"-y\",\n            \"@modelcontextprotocol/server-filesystem\",\n            \"/tmp\"\n          ],\n          \"env\": {}\n        }\n      }\n    }\n  },\n  \"sandbox_config\": {},\n  \"safety_policy\": {},\n  \"escalation_config\": {},\n  \"operator_ids\": [],\n  \"allowed_senders\": null\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -229,7 +229,7 @@
             "url": "{{base_url}}/v1/agents",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"Orchestrator Agent\",\n  \"description\": \"Agent orkestrator yang mendelegasikan task ke sub-agent spesialis.\",\n  \"instructions\": \"Kamu adalah orchestrator agent. Untuk setiap task kompleks:\\n1. Gunakan write_todos untuk breakdown task menjadi langkah-langkah\\n2. Delegate ke sub-agent yang sesuai menggunakan task(name=..., task=...):\\n   - sys_researcher: riset informasi dari internet atau API\\n   - sys_coder: tulis dan jalankan kode di sandbox\\n   - sys_writer: tulis dan edit dokumen\\n   - sys_analyst: analisis data dan buat laporan\\n   - sys_critic: review dan validasi output sub-agent lain\\n3. Setelah executor selesai, panggil sys_critic untuk review hasilnya\\n4. Jika critic REJECTED, perbaiki dan retry. Jika APPROVED, lanjut ke langkah berikutnya\\n5. Kompilasi hasil dari semua sub-agent menjadi jawaban final terstruktur\\n\\nTips: agent_ids kosong = otomatis load semua 5 system sub-agents.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.5,\n  \"tools_config\": {\n    \"memory\": false,\n    \"skills\": false,\n    \"escalation\": false,\n    \"sandbox\": false,\n    \"subagents\": {\n      \"enabled\": true\n    }\n  }\n}",
+              "raw": "{\n  \"name\": \"Orchestrator Agent\",\n  \"description\": \"Agent orkestrator yang mendelegasikan task ke sub-agent spesialis.\",\n  \"instructions\": \"Kamu adalah orchestrator agent. Untuk setiap task kompleks:\\n1. Gunakan write_todos untuk breakdown task menjadi langkah-langkah\\n2. Delegate ke sub-agent yang sesuai menggunakan task(name=..., task=...):\\n   - sys_researcher: riset informasi dari internet atau API\\n   - sys_coder: tulis dan jalankan kode di sandbox\\n   - sys_writer: tulis dan edit dokumen\\n   - sys_analyst: analisis data dan buat laporan\\n   - sys_critic: review dan validasi output sub-agent lain\\n3. Setelah executor selesai, panggil sys_critic untuk review hasilnya\\n4. Jika critic REJECTED, perbaiki dan retry. Jika APPROVED, lanjut ke langkah berikutnya\\n5. Kompilasi hasil dari semua sub-agent menjadi jawaban final terstruktur\\n\\nTips: agent_ids kosong = otomatis load semua 5 system sub-agents.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.5,\n  \"tools_config\": {\n    \"memory\": false,\n    \"skills\": false,\n    \"escalation\": false,\n    \"sandbox\": false,\n    \"subagents\": {\n      \"enabled\": true\n    }\n  },\n  \"operator_ids\": [],\n  \"allowed_senders\": null\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -254,7 +254,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"WhatsApp CS Agent\",\n  \"description\": \"Agent yang terhubung ke WhatsApp via QR scan\",\n  \"instructions\": \"Kamu adalah customer service yang membalas pesan WhatsApp dengan ramah dan informatif.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"channel_type\": \"whatsapp\",\n  \"tools_config\": {\n    \"memory\": true,\n    \"skills\": true,\n    \"escalation\": true,\n    \"sandbox\": false,\n    \"tool_creator\": false,\n    \"scheduler\": false,\n    \"rag\": false,\n    \"http\": false,\n    \"mcp\": false,\n    \"whatsapp_media\": true,\n    \"wa_agent_manager\": false\n  },\n  \"sandbox_config\": {},\n  \"safety_policy\": {},\n  \"escalation_config\": {\n    \"channel_type\": \"whatsapp\",\n    \"operator_phone\": \"+628xxxx\"\n  },\n  \"token_quota\": 4000000,\n  \"quota_period_days\": 30,\n  \"operator_ids\": [\n    \"+628xxxx\"\n  ]\n}",
+              "raw": "{\n  \"name\": \"WhatsApp CS Agent\",\n  \"description\": \"Agent yang terhubung ke WhatsApp via QR scan\",\n  \"instructions\": \"Kamu adalah customer service yang membalas pesan WhatsApp dengan ramah dan informatif.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"channel_type\": \"whatsapp\",\n  \"tools_config\": {\n    \"memory\": true,\n    \"skills\": true,\n    \"escalation\": true,\n    \"sandbox\": false,\n    \"tool_creator\": false,\n    \"scheduler\": false,\n    \"rag\": false,\n    \"http\": false,\n    \"mcp\": false,\n    \"whatsapp_media\": true,\n    \"wa_agent_manager\": false\n  },\n  \"sandbox_config\": {},\n  \"safety_policy\": {},\n  \"escalation_config\": {\n    \"channel_type\": \"whatsapp\",\n    \"operator_phone\": \"+628xxxx\"\n  },\n  \"token_quota\": 4000000,\n  \"quota_period_days\": 30,\n  \"operator_ids\": [\n    \"+628xxxx\"\n  ],\n  \"allowed_senders\": null\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -297,6 +297,43 @@
               }
             }
           ]
+        },
+        {
+          "name": "POST /v1/agents — Buat Agent dengan Allowlist (Fitur 1)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"CS Agent (Allowlist Only)\",\n  \"description\": \"Agent yang hanya membalas nomor yang terdaftar\",\n  \"instructions\": \"Kamu adalah customer service. Hanya balas pesan dari daftar nomor yang diizinkan.\",\n  \"model\": \"anthropic/claude-sonnet-4-6\",\n  \"temperature\": 0.7,\n  \"tools_config\": {\n    \"memory\": true,\n    \"skills\": true,\n    \"escalation\": true,\n    \"sandbox\": false,\n    \"scheduler\": false\n  },\n  \"escalation_config\": {\n    \"channel_type\": \"whatsapp\",\n    \"operator_phone\": \"+62811000000\"\n  },\n  \"operator_ids\": [\n    \"+62811000000\"\n  ],\n  \"allowed_senders\": [\n    \"+628111111111\",\n    \"+628222222222\"\n  ],\n  \"channel_type\": \"whatsapp\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/agents",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "agents"
+              ]
+            },
+            "description": "Fitur 1 — Buat agent dengan allowlist aktif.\n\n`allowed_senders`: hanya nomor dalam list yang akan dibalas oleh agent.\nNomor operator (`operator_ids`) selalu lolos cek allowlist."
+          },
+          "response": []
         },
         {
           "name": "GET /v1/agents — List semua agent",
@@ -360,7 +397,7 @@
             "url": "{{base_url}}/v1/agents/{{agent_id}}",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"CS Agent v2\",\n  \"model\": \"openai/gpt-4.1\",\n  \"temperature\": 0.5,\n  \"operator_ids\": [\n    \"+62811000000\"\n  ],\n  \"tools_config\": {\n    \"memory\": true,\n    \"skills\": true,\n    \"escalation\": true,\n    \"sandbox\": false,\n    \"tool_creator\": false,\n    \"scheduler\": false,\n    \"rag\": false,\n    \"http\": false,\n    \"mcp\": false,\n    \"wa_agent_manager\": false\n  }\n}",
+              "raw": "{\n  \"name\": \"CS Agent v2\",\n  \"model\": \"openai/gpt-4.1\",\n  \"temperature\": 0.5,\n  \"operator_ids\": [\n    \"+62811000000\"\n  ],\n  \"tools_config\": {\n    \"memory\": true,\n    \"skills\": true,\n    \"escalation\": true,\n    \"sandbox\": false,\n    \"tool_creator\": false,\n    \"scheduler\": false,\n    \"rag\": false,\n    \"http\": false,\n    \"mcp\": false,\n    \"wa_agent_manager\": false\n  },\n  \"allowed_senders\": null\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -386,7 +423,7 @@
             "url": "{{base_url}}/v1/agents/{{agent_id}}",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"escalation_config\": {\n    \"channel_type\": \"whatsapp\",\n    \"operator_phone\": \"+62811000000\"\n  }\n}",
+              "raw": "{\n  \"escalation_config\": {\n    \"channel_type\": \"whatsapp\",\n    \"operator_phone\": \"+62811000000\"\n  },\n  \"operator_ids\": null,\n  \"allowed_senders\": null\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -412,7 +449,7 @@
             "url": "{{base_url}}/v1/agents/{{agent_id}}",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"escalation_config\": {\n    \"channel_type\": \"telegram\",\n    \"operator_phone\": \"987654321\"\n  }\n}",
+              "raw": "{\n  \"escalation_config\": {\n    \"channel_type\": \"telegram\",\n    \"operator_phone\": \"987654321\"\n  },\n  \"operator_ids\": null,\n  \"allowed_senders\": null\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -438,7 +475,7 @@
             "url": "{{base_url}}/v1/agents/{{agent_id}}",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"tools_config\": {\n    \"memory\": true,\n    \"tool_creator\": true,\n    \"rag\": true,\n    \"sandbox\": true,\n    \"skills\": true,\n    \"scheduler\": true,\n    \"escalation\": true,\n    \"http\": false,\n    \"mcp\": {\n      \"enabled\": true,\n      \"servers\": {\n        \"my-server\": {\n          \"url\": \"http://localhost:9000/mcp\",\n          \"transport\": \"streamable_http\"\n        }\n      }\n    }\n  }\n}",
+              "raw": "{\n  \"tools_config\": {\n    \"memory\": true,\n    \"tool_creator\": true,\n    \"rag\": true,\n    \"sandbox\": true,\n    \"skills\": true,\n    \"scheduler\": true,\n    \"escalation\": true,\n    \"http\": false,\n    \"mcp\": {\n      \"enabled\": true,\n      \"servers\": {\n        \"my-server\": {\n          \"url\": \"http://localhost:9000/mcp\",\n          \"transport\": \"streamable_http\"\n        }\n      }\n    }\n  },\n  \"operator_ids\": null,\n  \"allowed_senders\": null\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -446,6 +483,82 @@
               }
             }
           }
+        },
+        {
+          "name": "PATCH /v1/agents/:agent_id — Set Allowed Senders (Fitur 1 - Allowlist)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"allowed_senders\": [\n    \"+628111000001\",\n    \"+628222000002\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/agents/{{agent_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "agents",
+                "{{agent_id}}"
+              ]
+            },
+            "description": "Fitur 1 — Allowlist Pengirim.\n\nSet `allowed_senders` ke array nomor yang diizinkan. Pesan dari nomor di luar list akan di-ignore.\n\nSet ke `null` untuk menonaktifkan allowlist (semua nomor diizinkan kembali).\n\nContoh payload untuk menonaktifkan:\n```json\n{\"allowed_senders\": null}\n```"
+          },
+          "response": []
+        },
+        {
+          "name": "PATCH /v1/agents/:agent_id — Nonaktifkan Allowlist (izinkan semua)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"allowed_senders\": null\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/agents/{{agent_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "agents",
+                "{{agent_id}}"
+              ]
+            },
+            "description": "Fitur 1 — Nonaktifkan Allowlist.\n\nSet `allowed_senders` ke `null` → semua nomor WhatsApp diizinkan (default)."
+          },
+          "response": []
         },
         {
           "name": "POST /v1/agents/:agent_id/renew — Perpanjang masa aktif & reset token",

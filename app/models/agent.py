@@ -51,6 +51,11 @@ class Agent(Base):
     # --- operator access ---
     operator_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
 
+    # --- allowlist ---
+    # null = semua nomor diizinkan (default)
+    # ["628111", "628222"] = hanya nomor ini yang dibalas (non-operator)
+    allowed_senders: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+
     # --- subscription / quota ---
     api_key: Mapped[str] = mapped_column(
         String(64), nullable=False, default=_generate_api_key

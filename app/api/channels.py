@@ -241,6 +241,16 @@ async def wa_incoming(
     # 2. Cek apakah pesan dari operator
     _is_operator = is_operator_message(from_phone, reply_target, agent)
 
+    # 2.5. Fitur 1 — cek allowlist (hanya untuk non-operator)
+    if not _is_operator:
+        allowed = getattr(agent, "allowed_senders", None)
+        if allowed:  # null/[] = semua diizinkan
+            normalized_sender = normalize_phone(from_phone)
+            allowed_set = {normalize_phone(p) for p in allowed if p}
+            if normalized_sender not in allowed_set:
+                log.info("wa_incoming.blocked_sender", from_phone=from_phone)
+                return {"status": "ignored", "reason": "sender not in allowlist"}
+
     # 3. Jika operator, cari context eskalasi
     escalation_user_jid: str | None = None
     escalation_context: str | None = None
@@ -273,6 +283,11 @@ async def wa_incoming(
         log.info("wa_incoming.session_created", session_id=str(session.id), is_operator=_is_operator)
         # Commit agar session_id visible ke koneksi DB terpisah (e.g. scheduler_tool)
         await db.commit()
+
+    # 4.5. Fitur 2 — cek ai_disabled (hanya untuk non-operator)
+    if not _is_operator and getattr(session, "ai_disabled", False):
+        log.info("wa_incoming.ai_disabled", session_id=str(session.id))
+        return {"status": "ai_disabled"}
 
     # 5. Proses media jika ada
     media_context = ""

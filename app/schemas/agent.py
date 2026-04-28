@@ -28,6 +28,13 @@ class AgentCreate(BaseModel):
         default_factory=list,
         description="Daftar external_user_id (nomor WA/JID) yang punya akses operator.",
     )
+    allowed_senders: list[str] | None = Field(
+        None,
+        description=(
+            "Allowlist nomor pengirim. null = semua diizinkan. "
+            "Isi dengan list nomor (e.g. ['628111', '628222']) untuk membatasi."
+        ),
+    )
     token_quota: int = Field(
         _DEFAULT_TOKEN_QUOTA,
         ge=1,
@@ -55,6 +62,7 @@ class AgentUpdate(BaseModel):
     safety_policy: dict[str, Any] | None = None
     escalation_config: dict[str, Any] | None = None
     operator_ids: list[str] | None = None
+    allowed_senders: list[str] | None = None
 
 
 class AgentResponse(BaseModel):
@@ -71,6 +79,7 @@ class AgentResponse(BaseModel):
     safety_policy: dict[str, Any]
     escalation_config: dict[str, Any]
     operator_ids: list[str]
+    allowed_senders: list[str] | None
     version: int
     is_deleted: bool
 

@@ -329,13 +329,18 @@ function editAgent(a) {
   document.getElementById('a-escalation').value = JSON.stringify(a.escalation_config || {}, null, 2);
   document.getElementById('a-safety').value = JSON.stringify(a.safety_policy || {}, null, 2);
   document.getElementById('a-channel-type').value = a.channel_type || '';
+  // Fitur 1 & 2 fields
+  document.getElementById('a-operator-ids').value =
+    a.operator_ids?.length ? JSON.stringify(a.operator_ids, null, 2) : '[]';
+  document.getElementById('a-allowed-senders').value =
+    a.allowed_senders ? JSON.stringify(a.allowed_senders, null, 2) : '';
   document.getElementById('a-name').scrollIntoView({ behavior: 'smooth' });
 }
 
 function resetAgentForm() {
   document.getElementById('agent-form-title').textContent = '➕ Create Agent';
   document.getElementById('agent-edit-id').value = '';
-  ['a-name', 'a-desc', 'a-instructions'].forEach(id => document.getElementById(id).value = '');
+  ['a-name', 'a-desc', 'a-instructions', 'a-operator-ids', 'a-allowed-senders'].forEach(id => document.getElementById(id).value = '');
   document.getElementById('a-model').value = 'anthropic/claude-sonnet-4-6';
   document.getElementById('a-temp').value = '0.7';
   document.getElementById('a-channel-type').value = '';
@@ -355,6 +360,18 @@ async function submitAgent() {
     escalation_config: parseJson(document.getElementById('a-escalation').value),
     safety_policy: parseJson(document.getElementById('a-safety').value),
   };
+  // Operator IDs
+  const opIdsRaw = document.getElementById('a-operator-ids').value.trim();
+  if (opIdsRaw) {
+    try { payload.operator_ids = JSON.parse(opIdsRaw); } catch { alert('Operator IDs: format JSON tidak valid'); return; }
+  }
+  // Allowed Senders (Fitur 1)
+  const allowedRaw = document.getElementById('a-allowed-senders').value.trim();
+  if (allowedRaw && allowedRaw !== 'null') {
+    try { payload.allowed_senders = JSON.parse(allowedRaw); } catch { alert('Allowed Senders: format JSON tidak valid'); return; }
+  } else {
+    payload.allowed_senders = null;  // null = semua diizinkan
+  }
   if (!editId && channelType) payload.channel_type = channelType;
   if (!payload.name) return alert('Name wajib diisi');
 

@@ -29,6 +29,7 @@ class Session(Base):
     channel_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
     channel_config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     escalation_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    ai_disabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

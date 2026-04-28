@@ -172,6 +172,13 @@ async def run_agent(
         tools.extend(build_escalation_tools(session.id, agent_id, db, user_jid=_user_jid))
         active_groups.append("escalation")
 
+    # Operator tools: hanya aktif di session operator (is_op_msg = True)
+    is_op_msg_early = user_message.startswith("[OPERATOR] ")
+    if is_op_msg_early:
+        from app.core.tools.operator_tools import build_operator_tools
+        tools.extend(build_operator_tools(agent_id=agent_id, db=db))
+        active_groups.append("operator")
+
     if _is_enabled(tools_config, "http", default=False):
         tools.extend(build_http_tools(tools_config))
         active_groups.append("http")
