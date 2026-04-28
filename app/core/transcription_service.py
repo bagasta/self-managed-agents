@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import io
+import shutil
 import structlog
 import httpx
 
@@ -45,9 +45,12 @@ _OPENAI_SUPPORTED_FORMATS = {"mp3", "wav"}
 
 async def _convert_to_mp3(audio_b64: str) -> str:
     """Convert base64 audio (any format) to base64 mp3 via ffmpeg."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg not found in PATH — install ffmpeg in the container")
     audio_bytes = base64.b64decode(audio_b64)
     proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-y", "-i", "pipe:0", "-f", "mp3", "-codec:a", "libmp3lame", "-q:a", "4", "pipe:1",
+        ffmpeg, "-y", "-i", "pipe:0", "-f", "mp3", "-codec:a", "libmp3lame", "-q:a", "4", "pipe:1",
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
