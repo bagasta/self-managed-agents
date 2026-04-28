@@ -245,10 +245,16 @@ async def wa_incoming(
     if not _is_operator:
         allowed = getattr(agent, "allowed_senders", None)
         if allowed:  # null/[] = semua diizinkan
-            normalized_sender = normalize_phone(from_phone)
             allowed_set = {normalize_phone(p) for p in allowed if p}
-            if normalized_sender not in allowed_set:
-                log.info("wa_incoming.blocked_sender", from_phone=from_phone)
+            # Cek terhadap from_phone DAN chat_id/reply_target
+            # Untuk akun LID: Sender.User bisa berisi LID (bukan phone number).
+            # chat_id (dari evt.Info.Chat.String()) mengandung format asli WA.
+            # Salah satu dari keduanya pasti cocok dengan nomor yang user daftarkan.
+            candidates = {normalize_phone(from_phone)}
+            if reply_target:
+                candidates.add(normalize_phone(reply_target))
+            if not candidates.intersection(allowed_set):
+                log.info("wa_incoming.blocked_sender", from_phone=from_phone, chat_id=reply_target)
                 return {"status": "ignored", "reason": "sender not in allowlist"}
 
     # 3. Jika operator, cari context eskalasi
