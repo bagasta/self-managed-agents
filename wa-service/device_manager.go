@@ -691,6 +691,22 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 	// Reconstructing from Sender.User loses the server info and breaks LID accounts.
 	chatID := chatJID.String()
 
+	// phone_from: resolved phone number, always in "+phone" format.
+	// For LID accounts, Sender.User contains a LID number (not the phone number).
+	// We attempt to resolve it using the local LID→PN map. If the map has the entry
+	// (populated when WA sends contact data), phoneFrom will be the real phone number.
+	// Falls back to `from` if resolution fails or is unavailable.
+	phoneFrom := from
+	dm.mu.RLock()
+	resolveInfo, resolveOk := dm.devices[deviceID]
+	dm.mu.RUnlock()
+	if resolveOk && resolveInfo.Client.Store != nil {
+		if pnJID, err := resolveInfo.Client.Store.LIDs.GetPNForLID(context.Background(), evt.Info.Sender); err == nil && pnJID.User != "" {
+			phoneFrom = "+" + pnJID.User
+			log.Printf("[%s] resolved LID %s -> phone %s", deviceID, from, phoneFrom)
+		}
+	}
+
 	// Send typing indicator immediately so the user sees "typing..." while AI processes.
 	dm.mu.RLock()
 	typingInfo, typingOk := dm.devices[deviceID]
@@ -702,6 +718,7 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 	payload := map[string]interface{}{
 		"device_id":      deviceID,
 		"from":           from,
+		"phone_from":     phoneFrom, // resolved phone number (same as from for non-LID accounts)
 		"chat_id":        chatID,
 		"message":        text,
 		"timestamp":      evt.Info.Timestamp.Unix(),

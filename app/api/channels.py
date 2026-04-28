@@ -102,6 +102,7 @@ class IncomingMessage(BaseModel):
 class WAIncomingMessage(BaseModel):
     device_id: str
     from_: str = Field(..., alias="from")
+    phone_from: str | None = None      # resolved phone number from Go (LID → phone); fallback ke from_
     chat_id: str | None = None  # group JID (xxx@g.us) atau nomor DM; kalau None fallback ke from_
     message: str = Field(..., max_length=10_000)
     timestamp: int | None = None
@@ -229,7 +230,10 @@ async def wa_incoming(
         log.warning("wa_incoming.agent_not_found")
         raise HTTPException(status_code=404, detail="No agent found for this WhatsApp device")
 
-    from_phone = body.from_
+    # phone_from: phone number yang sudah di-resolve dari LID oleh Go wa-service.
+    # Untuk akun LID: body.from_ berisi LID number, body.phone_from berisi phone number asli.
+    # Gunakan phone_from sebagai identifier utama untuk allowlist & operator check.
+    from_phone = body.phone_from or body.from_
     reply_target = body.chat_id or body.from_
 
     # 1.5. Cek deduplikasi WA (handling multiple webhook calls for the same message)
