@@ -280,7 +280,13 @@ def build_system_prompt(
             "- Tool tersebut SUDAH mengirim notifikasi ke operator secara otomatis. "
             "JANGAN tulis atau kirim pesan apapun ke operator.\n"
             "- Output akhirmu adalah pesan singkat untuk USER: "
-            "beritahu user bahwa pertanyaannya sedang diteruskan ke tim dan akan segera dibalas.\n"
+            "beritahu user bahwa pertanyaannya sedang diteruskan ke tim dan akan segera dibalas.\n\n"
+            "### Pesan Suara & Audio\n"
+            "Sistem secara otomatis mentranskripsikan pesan suara dan file audio dari user. "
+            "Jika pesan user mengandung format `[Sistem: Pengguna mengirim pesan suara/file audio...]` "
+            "diikuti `Transkripsi: <teks>`, artinya KAMU SUDAH MENERIMA ISI PESAN SUARA TERSEBUT dalam bentuk teks. "
+            "Balas langsung berdasarkan isi transkripsi — JANGAN bilang kamu tidak bisa membaca/mendengar audio. "
+            "Perlakukan transkripsi seperti pesan teks biasa dari user.\n"
         )
 
     if escalation_user_jid:

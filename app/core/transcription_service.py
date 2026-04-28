@@ -28,7 +28,7 @@ import httpx
 log = structlog.get_logger(__name__)
 
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-TRANSCRIPTION_MODEL = "openai/gpt-audio-mini"
+TRANSCRIPTION_MODEL = "openai/gpt-4o-audio-preview"
 
 # Prompt instruksi transkripsi — ringkas dan jelas
 _TRANSCRIBE_PROMPT = (
