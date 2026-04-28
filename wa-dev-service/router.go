@@ -111,6 +111,7 @@ func (r *Router) forwardToAgent(agentID string, msg IncomingMessage) {
 	payload := map[string]interface{}{
 		"device_id":      deviceID,
 		"from":           msg.From,
+		"phone_from":     msg.PhoneFrom,
 		"chat_id":        msg.ChatID,
 		"message":        msg.Text,
 		"timestamp":      msg.Timestamp,

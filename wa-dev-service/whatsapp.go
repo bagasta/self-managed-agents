@@ -32,6 +32,7 @@ const (
 
 type IncomingMessage struct {
 	From          string
+	PhoneFrom     string // resolved phone (LID → PN); falls back to From if unresolvable
 	ChatID        string
 	Text          string
 	PushName      string // WhatsApp display name of sender
@@ -343,8 +344,18 @@ func (wa *WhatsAppClient) handleMessage(evt *events.Message) {
 
 	isGroup := chatJID.Server == types.GroupServer
 
+	from := "+" + evt.Info.Sender.User
+	phoneFrom := from
+	if wa.client.Store != nil {
+		if pnJID, err := wa.client.Store.LIDs.GetPNForLID(context.Background(), evt.Info.Sender); err == nil && pnJID.User != "" {
+			phoneFrom = "+" + pnJID.User
+			log.Printf("wa-dev resolved LID %s -> phone %s", from, phoneFrom)
+		}
+	}
+
 	msg := IncomingMessage{
-		From:      "+" + evt.Info.Sender.User,
+		From:      from,
+		PhoneFrom: phoneFrom,
 		ChatID:    chatJID.String(),
 		PushName:  evt.Info.PushName,
 		Timestamp: evt.Info.Timestamp.Unix(),
