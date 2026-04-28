@@ -5,6 +5,49 @@
 
 ---
 
+# Recap: Bug Voice Note Transcription — OGG Format Not Supported
+
+**Tanggal**: 2026-04-28  
+**Status**: ✅ Terselesaikan — Verified working in production
+
+## Gejala
+
+Kirim voice note (PTT) di WhatsApp → transcription gagal dengan error 400 dari OpenRouter:
+```
+"Invalid value: 'ogg'. Supported values are: 'wav' and 'mp3'."
+```
+Agent menerima fallback `[Voice note: tidak dapat ditranskripsi]` dan tidak bisa baca isi VN.
+
+## Root Cause
+
+Model `openai/gpt-audio-mini` via OpenRouter hanya support format `wav` dan `mp3`. WhatsApp PTT dikirim sebagai `.ogg`. Kode sebelumnya langsung kirim format `ogg` ke API tanpa konversi.
+
+## Fix
+
+### 1. `app/core/transcription_service.py`
+- Tambah `_OPENAI_SUPPORTED_FORMATS = {"mp3", "wav"}`
+- Tambah `_convert_to_mp3(audio_b64)` — konversi via `ffmpeg` menggunakan `asyncio.create_subprocess_exec`
+- Pakai `shutil.which("ffmpeg")` untuk resolve path binary
+- Di `transcribe_audio()`: auto-konversi jika format bukan mp3/wav sebelum kirim ke API
+
+### 2. `Dockerfile`
+- Tambah `ffmpeg` ke `apt-get install` block
+
+### 3. `tests/test_transcription_service.py`
+- 2 test baru: `test_ogg_converted_to_mp3`, `test_ogg_conversion_failure_returns_fallback`
+- Existing tests ganti ke format `"mp3"`
+- `TestProcessWaMediaAudio` tests: monkeypatch `_convert_to_mp3`
+- **13/13 tests passed**
+
+## Deploy
+```bash
+cd deploy && docker compose -f docker-compose.prod.yml up --build -d api
+```
+
+---
+
+---
+
 ## Deskripsi Bug
 
 Fitur `allowed_senders` pada agent tidak berfungsi dengan benar untuk akun WhatsApp modern yang menggunakan sistem **LID (Linked ID)**.

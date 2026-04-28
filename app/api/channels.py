@@ -327,7 +327,12 @@ async def wa_incoming(
             logger=log,
         )
 
-    user_message = sanitize_user_input(body.message) + media_context
+    # For audio/ptt, media_context already contains the full transcript label —
+    # drop the raw "[Voice note]"/"[Audio]" placeholder from Go to avoid confusion.
+    if body.media_type in ("ptt", "audio") and media_context:
+        user_message = media_context.strip()
+    else:
+        user_message = sanitize_user_input(body.message) + media_context
     if not _is_operator:
         log.info("wa_incoming.normal")
 
