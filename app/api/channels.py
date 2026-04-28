@@ -39,7 +39,7 @@ from app.core.channel_service import send_message
 from app.core.input_sanitizer import sanitize_user_input
 from app.core.phone_utils import normalize_phone
 from app.core.text_utils import markdown_to_wa
-from app.core.wa_client import send_wa_message
+from app.core.wa_client import resolve_wa_phones, send_wa_message
 from app.database import get_db
 from app.models.agent import Agent
 from app.models.session import Session
@@ -249,11 +249,25 @@ async def wa_incoming(
     if not _is_operator:
         allowed = getattr(agent, "allowed_senders", None)
         if allowed:  # null/[] = semua diizinkan
-            allowed_set = {normalize_phone(p) for p in allowed if p}
-            # Cek terhadap from_phone DAN chat_id/reply_target
-            # Untuk akun LID: Sender.User bisa berisi LID (bukan phone number).
-            # chat_id (dari evt.Info.Chat.String()) mengandung format asli WA.
-            # Salah satu dari keduanya pasti cocok dengan nomor yang user daftarkan.
+            # Resolve setiap phone number di allowed_senders ke WA JID via Go IsOnWhatsApp.
+            # Ini krusial untuk akun LID: phone +6282xxx bisa jadi JID "9876@lid" di WA.
+            # resolved: {"6282xxx": "9876@lid", "1234": "1234@s.whatsapp.net", ...}
+            resolved = await resolve_wa_phones(body.device_id, [p for p in allowed if p])
+
+            # Bangun allowed_set berisi SEMUA identifier yang valid:
+            # - JID yang di-resolve oleh WA (bisa @s.whatsapp.net atau @lid)
+            # - Phone number asli (normalized, fallback jika resolve gagal)
+            allowed_set: set[str] = set()
+            for p in allowed:
+                if not p:
+                    continue
+                normalized = normalize_phone(p)
+                allowed_set.add(normalized)                      # raw phone
+                jid = resolved.get(normalized)                   # resolved JID
+                if jid:
+                    allowed_set.add(normalize_phone(jid))        # JID user part (strip @domain)
+
+            # Cek: incoming sender (from_phone atau chat_id) ada di allowed_set?
             candidates = {normalize_phone(from_phone)}
             if reply_target:
                 candidates.add(normalize_phone(reply_target))

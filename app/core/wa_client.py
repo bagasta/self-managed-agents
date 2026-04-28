@@ -132,3 +132,26 @@ async def delete_wa_device(device_id: str) -> None:
         resp = await client.delete(f"{_base_url()}/devices/{device_id}")
         if resp.status_code not in (200, 204, 404):
             resp.raise_for_status()
+
+
+async def resolve_wa_phones(device_id: str, phones: list[str]) -> dict[str, str]:
+    """Resolve phone numbers to their actual WA JIDs via Go IsOnWhatsApp API.
+
+    Returns dict: normalized_phone -> JID string (e.g. "6282xxx" -> "9876@lid" or "6282xxx@s.whatsapp.net").
+    Falls back to empty dict on error (caller should treat unresolved phones as @s.whatsapp.net).
+    Only works for production wa-service devices (wadev_ prefix uses a stub).
+    """
+    if device_id.startswith("wadev_"):
+        # wa-dev stub — no IsOnWhatsApp available; return empty (caller uses raw comparison)
+        return {}
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            resp = await client.post(
+                f"{_base_url()}/devices/{device_id}/resolve-phones",
+                json={"phones": phones},
+            )
+            if resp.status_code == 200:
+                return resp.json().get("resolved", {})
+    except Exception:
+        pass
+    return {}

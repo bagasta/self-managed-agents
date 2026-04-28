@@ -211,6 +211,84 @@ func (h *Handlers) sendDocumentMessage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
 }
 
+// POST /devices/{id}/resolve-phones
+// Body: {"phones": ["+628xxx", "+1234"]}
+// Response: {"628xxx": "628xxx@s.whatsapp.net", "1234": "9876@lid"}  (phone_key -> resolved WA JID string)
+// Dipakai Python untuk resolve allowed_senders phone numbers ke WA JIDs (support LID accounts).
+func (h *Handlers) resolvePhones(w http.ResponseWriter, r *http.Request) {
+	deviceID := r.PathValue("id")
+	if deviceID == "" {
+		writeError(w, http.StatusBadRequest, "device id required")
+		return
+	}
+
+	var req struct {
+		Phones []string `json:"phones"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Phones) == 0 {
+		writeError(w, http.StatusBadRequest, "phones array required")
+		return
+	}
+
+	h.dm.mu.RLock()
+	info, ok := h.dm.devices[deviceID]
+	h.dm.mu.RUnlock()
+	if !ok {
+		writeError(w, http.StatusNotFound, "device not found")
+		return
+	}
+	if info.Status != StatusConnected {
+		writeError(w, http.StatusServiceUnavailable, "device not connected")
+		return
+	}
+
+	// Strip + prefix, collect unique numbers
+	stripped := make([]string, 0, len(req.Phones))
+	originalMap := make(map[string]string) // stripped -> original
+	seen := make(map[string]bool)
+	for _, p := range req.Phones {
+		s := p
+		if len(s) > 0 && s[0] == '+' {
+			s = s[1:]
+		}
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		stripped = append(stripped, s)
+		originalMap[s] = p
+	}
+
+	// Query WA servers — returns the real JID (may be @lid for LID accounts)
+	results, err := info.Client.IsOnWhatsApp(r.Context(), stripped)
+	resolved := make(map[string]string)
+	if err != nil {
+		log.Printf("[%s] resolve-phones IsOnWhatsApp err: %v", deviceID, err)
+		// Fallback: return phone@s.whatsapp.net for each
+		for _, s := range stripped {
+			resolved[s] = s + "@s.whatsapp.net"
+		}
+	} else {
+		for _, res := range results {
+			if res.IsIn {
+				resolved[res.Query] = res.JID.String()
+			} else {
+				// Not on WA — store as-is
+				resolved[res.Query] = res.Query + "@s.whatsapp.net"
+			}
+		}
+		// Fill any missing queries
+		for _, s := range stripped {
+			if _, found := resolved[s]; !found {
+				resolved[s] = s + "@s.whatsapp.net"
+			}
+		}
+	}
+
+	log.Printf("[%s] resolve-phones: %v -> %v", deviceID, stripped, resolved)
+	writeJSON(w, http.StatusOK, map[string]interface{}{"resolved": resolved})
+}
+
 // DELETE /devices/{id}
 func (h *Handlers) deleteDevice(w http.ResponseWriter, r *http.Request) {
 	deviceID := r.PathValue("id")
