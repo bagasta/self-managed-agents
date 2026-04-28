@@ -107,12 +107,17 @@ async def find_or_create_wa_session(
     Returns (session, was_created: bool)
     """
     from app.models.session import Session
+    from app.core.phone_utils import normalize_phone
+
+    # Normalize agar konsisten dengan format yang dipakai operator_tools
+    # (strip '+' dan '@s.whatsapp.net' / '@lid' suffix)
+    normalized_lookup = normalize_phone(lookup_user_id)
 
     result = await db.execute(
         select(Session).where(
             Session.agent_id == agent.id,
             Session.channel_type == "whatsapp",
-            Session.external_user_id == lookup_user_id,
+            Session.external_user_id == normalized_lookup,
         )
     )
     session = result.scalars().first()
@@ -131,10 +136,10 @@ async def find_or_create_wa_session(
             await db.flush()
         return session, False
 
-    # Buat session baru
+    # Buat session baru — simpan dalam format normalized
     session = Session(
         agent_id=agent.id,
-        external_user_id=lookup_user_id,
+        external_user_id=normalized_lookup,
         channel_type="whatsapp",
         channel_config={
             "user_phone": effective_reply_target,

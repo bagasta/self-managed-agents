@@ -55,17 +55,29 @@ def build_operator_tools(agent_id: uuid.UUID, db: AsyncSession) -> list:
         session = result.scalar_one_or_none()
 
         if not session:
-            log.info("operator_tools.disable_ai.session_not_found")
+            # Buat session baru dengan ai_disabled=True (pre-block)
+            # Ini memungkinkan operator mem-block nomor yang belum pernah chat
+            from app.models.session import Session as SessionModel
+            session = SessionModel(
+                agent_id=agent_id,
+                external_user_id=normalized,
+                channel_type="whatsapp",
+                channel_config={"user_phone": normalized},
+                ai_disabled=True,
+            )
+            db.add(session)
+            await db.commit()
+            log.info("operator_tools.disable_ai.session_created_blocked", phone=normalized)
             return (
-                f"❌ Tidak ditemukan sesi untuk nomor {phone}. "
-                "Pengguna ini belum pernah mengirim pesan ke agent."
+                f"✅ Nomor {phone} telah di-blokir. "
+                "AI tidak akan membalas pesan dari nomor ini (bahkan jika belum pernah chat sebelumnya)."
             )
 
         if session.ai_disabled:
             return f"ℹ️ AI untuk nomor {phone} sudah dalam keadaan nonaktif."
 
         session.ai_disabled = True
-        await db.flush()
+        await db.commit()
         log.info("operator_tools.disable_ai.done", session_id=str(session.id))
         return (
             f"✅ AI dinonaktifkan untuk nomor {phone}. "
@@ -104,7 +116,7 @@ def build_operator_tools(agent_id: uuid.UUID, db: AsyncSession) -> list:
             return f"ℹ️ AI untuk nomor {phone} sudah dalam keadaan aktif."
 
         session.ai_disabled = False
-        await db.flush()
+        await db.commit()
         log.info("operator_tools.enable_ai.done", session_id=str(session.id))
         return (
             f"✅ AI diaktifkan kembali untuk nomor {phone}. "
