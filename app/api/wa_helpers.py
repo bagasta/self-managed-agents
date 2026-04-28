@@ -216,7 +216,14 @@ async def process_wa_media(
     logger: structlog.BoundLogger,
 ) -> tuple[str, str | None, str | None]:
     """
-    Proses media (gambar/dokumen/stiker) dari pesan WhatsApp.
+    Proses media (gambar/dokumen/stiker/audio) dari pesan WhatsApp.
+
+    media_type yang didukung:
+    - "image"    : gambar (dikirim ke LLM sebagai multimodal input)
+    - "document" : dokumen (teks diekstrak jika memungkinkan)
+    - "sticker"  : stiker
+    - "audio"    : file audio biasa
+    - "ptt"      : push-to-talk / voice note
 
     Returns (media_context, media_image_b64, media_image_mime)
     - media_context: teks tambahan untuk disertakan ke LLM
@@ -283,6 +290,33 @@ async def process_wa_media(
 
         elif media_type == "sticker":
             media_context = f"\n[Stiker diterima, tersimpan di /workspace/{filename}]"
+
+        elif media_type in ("audio", "ptt"):
+            # Transkripsi audio/voice note menggunakan openai/gpt-audio-mini via OpenRouter
+            from app.core.transcription_service import transcribe_audio
+
+            # Tentukan format audio dari ekstensi filename
+            audio_format = "ogg"  # default WhatsApp voice note
+            if filename and "." in filename:
+                audio_format = filename.rsplit(".", 1)[-1].lower()
+                # Normalisasi format yang dikenal
+                if audio_format in ("oga",):
+                    audio_format = "ogg"
+                elif audio_format not in ("ogg", "mp3", "wav", "m4a", "flac", "aac", "mp4"):
+                    audio_format = "ogg"  # fallback
+
+            transcript = await transcribe_audio(
+                audio_b64=media_data,
+                audio_format=audio_format,
+                openrouter_api_key=get_settings().openrouter_api_key,
+            )
+            label = "Voice note" if media_type == "ptt" else "Audio"
+            media_context = f"\n[{label}: {transcript}]"
+            logger.info(
+                "wa_incoming.audio_transcribed",
+                media_type=media_type,
+                transcript_length=len(transcript),
+            )
 
     except Exception as exc:
         logger.warning("wa_incoming.media_save_failed", error=str(exc))

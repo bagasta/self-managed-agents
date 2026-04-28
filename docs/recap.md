@@ -1,7 +1,7 @@
 # Recap: Bug Allowlist & WhatsApp LID Accounts
 
 **Tanggal**: 2026-04-28  
-**Status**: ✅ Terselesaikan
+**Status**: ✅ Terselesaikan — Verified working in production
 
 ---
 
@@ -121,6 +121,9 @@ else:
 
 ### Deploy
 Rebuild wa-dev-service binary: `make wa-dev-build`
+
+### Hasil
+✅ **Verified working** — nomor phone biasa (`+6282299312107`) di `allowed_senders` berhasil dikenali meskipun incoming adalah LID account.
 
 ---
 

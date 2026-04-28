@@ -1243,7 +1243,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"device_id\": \"{{wa_device_id}}\",\n  \"from\": \"+628123456789\",\n  \"message\": \"Halo, saya ingin tanya tentang produk\",\n  \"timestamp\": 1713600000\n}",
+              "raw": "{\n  \"device_id\": \"{{wa_device_id}}\",\n  \"from\": \"+628123456789\",\n  \"phone_from\": \"+628123456789\",\n  \"chat_id\": \"628123456789@s.whatsapp.net\",\n  \"message\": \"Halo, saya ingin tanya tentang produk\",\n  \"timestamp\": 1713600000,\n  \"push_name\": \"Nama User\",\n  \"media_type\": null,\n  \"media_data\": null,\n  \"media_filename\": null\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -1262,7 +1262,7 @@
                 "incoming"
               ]
             },
-            "description": "Dipanggil otomatis oleh Go wa-service ketika ada pesan WhatsApp masuk. Body dikirim oleh wa-service, bukan manual. Endpoint ini melakukan lookup agent by device_id, find/create session, jalankan agent, dan reply ke WhatsApp pengirim."
+            "description": "Dipanggil otomatis oleh Go wa-service ketika ada pesan WhatsApp masuk. Body dikirim oleh wa-service, bukan manual.\n\nField penting:\n- `from`: sender JID/LID (e.g. `+236116347228384` untuk akun LID)\n- `phone_from`: phone number yang sudah di-resolve dari LID (sama dengan `from` jika resolusi gagal)\n- `chat_id`: full JID dengan server suffix (`@s.whatsapp.net` atau `@lid` atau `@g.us` untuk grup)\n- `media_type`: `image` | `document` | `sticker` | null\n\nEndpoint ini melakukan lookup agent by device_id, allowlist check (support LID via IsOnWhatsApp), find/create session, jalankan agent, dan reply ke WhatsApp pengirim."
           },
           "response": []
         }

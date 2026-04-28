@@ -116,7 +116,7 @@ if is_operator_session:
 
 ## 3. Voice Note Transcription
 
-Pesan suara (PTT/voice note) dari WhatsApp dikonversi ke teks menggunakan Whisper sebelum dikirim ke agent, sehingga agent memahami konteks percakapan suara.
+Pesan suara (PTT/voice note) dari WhatsApp dikonversi ke teks menggunakan model audio dan dijadikan base64 sebelum dikirim ke agent, sehingga agent memahami konteks percakapan suara.
 
 ### File yang diubah
 

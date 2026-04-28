@@ -413,11 +413,20 @@ func (wa *WhatsAppClient) handleMessage(evt *events.Message) {
 		raw, err := wa.client.Download(context.Background(), audio)
 		if err == nil {
 			msg.MediaData = base64.StdEncoding.EncodeToString(raw)
-			msg.MediaType = "audio"
 			msg.MediaMimetype = audio.GetMimetype()
-			msg.MediaFilename = "audio.ogg"
+			if audio.GetPTT() {
+				msg.MediaType = "ptt" // push-to-talk / voice note
+				msg.MediaFilename = "voice.ogg"
+				msg.Text = "[Voice note]"
+			} else {
+				msg.MediaType = "audio" // file audio biasa
+				msg.MediaFilename = "audio.ogg"
+				msg.Text = "[Audio]"
+			}
+		} else {
+			log.Printf("[wa-dev] download audio err: %v", err)
+			msg.Text = "[Audio]"
 		}
-		msg.Text = "[Audio]"
 
 	case evt.Message.GetStickerMessage() != nil:
 		sticker := evt.Message.GetStickerMessage()

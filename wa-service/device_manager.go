@@ -632,6 +632,28 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 			}
 		}
 		text = "[Sticker]"
+	} else if audio := evt.Message.GetAudioMessage(); audio != nil {
+		// Voice note (PTT) atau file audio biasa
+		dm.mu.RLock()
+		info, ok := dm.devices[deviceID]
+		dm.mu.RUnlock()
+		if ok {
+			raw, err := info.Client.Download(context.Background(), audio)
+			if err == nil {
+				mediaData = base64.StdEncoding.EncodeToString(raw)
+				if audio.GetPTT() {
+					mediaType = "ptt" // push-to-talk / voice note
+					mediaFilename = "voice.ogg"
+					text = "[Voice note]"
+				} else {
+					mediaType = "audio" // file audio biasa
+					mediaFilename = "audio.ogg"
+					text = "[Audio]"
+				}
+			} else {
+				log.Printf("[%s] download audio err: %v", deviceID, err)
+			}
+		}
 	}
 
 	// Skip if no text and no media

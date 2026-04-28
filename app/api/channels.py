@@ -107,10 +107,10 @@ class WAIncomingMessage(BaseModel):
     message: str = Field(..., max_length=10_000)
     timestamp: int | None = None
     push_name: str | None = None       # WhatsApp display name of sender
-    # Media fields — diisi oleh Go service saat pesan mengandung gambar/dokumen/sticker
-    media_type: str | None = None      # "image" | "document" | "sticker" | None
+    # Media fields — diisi oleh Go service saat pesan mengandung gambar/dokumen/sticker/audio
+    media_type: str | None = None      # "image" | "document" | "sticker" | "audio" | "ptt" | None
     media_data: str | None = Field(None, max_length=10_000_000)  # base64-encoded raw bytes
-    media_filename: str | None = None  # original filename (dokumen) atau generated (gambar)
+    media_filename: str | None = None  # original filename (dokumen) atau generated (gambar/audio)
 
     model_config = {"populate_by_name": True}
 
