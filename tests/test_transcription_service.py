@@ -17,6 +17,10 @@ import pytest_asyncio
 
 FAKE_KEY = "sk-or-test-123"
 FAKE_B64 = "SGVsbG8gV29ybGQ="  # "Hello World" in base64
+
+
+async def _async_identity(b64: str) -> str:
+    return b64
 SUCCESS_RESPONSE = {
     "choices": [{"message": {"content": "Halo, ini transkrip audio."}}]
 }
@@ -42,7 +46,7 @@ class TestTranscribeAudio:
         )
 
         result = await transcribe_audio(
-            FAKE_B64, "ogg", openrouter_api_key=FAKE_KEY
+            FAKE_B64, "mp3", openrouter_api_key=FAKE_KEY
         )
         assert result == "Halo, ini transkrip audio."
 
@@ -56,7 +60,7 @@ class TestTranscribeAudio:
         )
 
         result = await transcribe_audio(
-            FAKE_B64, "ogg", openrouter_api_key=FAKE_KEY
+            FAKE_B64, "mp3", openrouter_api_key=FAKE_KEY
         )
         assert result == TRANSCRIPTION_FALLBACK
 
@@ -65,7 +69,7 @@ class TestTranscribeAudio:
         """Harus mengembalikan fallback jika api_key tidak disediakan."""
         from app.core.transcription_service import transcribe_audio, TRANSCRIPTION_FALLBACK
 
-        result = await transcribe_audio(FAKE_B64, "ogg", openrouter_api_key="")
+        result = await transcribe_audio(FAKE_B64, "mp3", openrouter_api_key="")
         assert result == TRANSCRIPTION_FALLBACK
 
     @pytest.mark.asyncio
@@ -78,7 +82,7 @@ class TestTranscribeAudio:
         )
 
         result = await transcribe_audio(
-            FAKE_B64, "ogg", openrouter_api_key=FAKE_KEY
+            FAKE_B64, "mp3", openrouter_api_key=FAKE_KEY
         )
         assert result == TRANSCRIPTION_FALLBACK
 
@@ -92,7 +96,7 @@ class TestTranscribeAudio:
         )
 
         result = await transcribe_audio(
-            FAKE_B64, "ogg", openrouter_api_key=FAKE_KEY
+            FAKE_B64, "mp3", openrouter_api_key=FAKE_KEY
         )
         assert result == TRANSCRIPTION_FALLBACK
 
@@ -101,7 +105,52 @@ class TestTranscribeAudio:
         """Harus mengembalikan fallback jika audio_b64 kosong."""
         from app.core.transcription_service import transcribe_audio, TRANSCRIPTION_FALLBACK
 
-        result = await transcribe_audio("", "ogg", openrouter_api_key=FAKE_KEY)
+        result = await transcribe_audio("", "mp3", openrouter_api_key=FAKE_KEY)
+        assert result == TRANSCRIPTION_FALLBACK
+
+    @pytest.mark.asyncio
+    async def test_ogg_converted_to_mp3(self, respx_mock, monkeypatch):
+        """Format ogg harus dikonversi ke mp3 sebelum dikirim ke API."""
+        import json
+        from app.core import transcription_service
+        from app.core.transcription_service import transcribe_audio
+
+        async def fake_convert(audio_b64: str) -> str:
+            return FAKE_B64 + "converted"
+
+        monkeypatch.setattr(transcription_service, "_convert_to_mp3", fake_convert)
+
+        captured = {}
+
+        def capture_request(request):
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, json=SUCCESS_RESPONSE)
+
+        respx_mock.post("https://openrouter.ai/api/v1/chat/completions").mock(
+            side_effect=capture_request
+        )
+
+        result = await transcribe_audio(FAKE_B64, "ogg", openrouter_api_key=FAKE_KEY)
+
+        body = captured["body"]
+        content = body["messages"][0]["content"]
+        audio_part = next(p for p in content if p["type"] == "input_audio")
+        assert audio_part["input_audio"]["format"] == "mp3"
+        assert audio_part["input_audio"]["data"] == FAKE_B64 + "converted"
+        assert result == "Halo, ini transkrip audio."
+
+    @pytest.mark.asyncio
+    async def test_ogg_conversion_failure_returns_fallback(self, monkeypatch):
+        """Jika konversi ogg gagal, harus return fallback."""
+        from app.core import transcription_service
+        from app.core.transcription_service import transcribe_audio, TRANSCRIPTION_FALLBACK
+
+        async def fail_convert(audio_b64: str) -> str:
+            raise RuntimeError("ffmpeg not found")
+
+        monkeypatch.setattr(transcription_service, "_convert_to_mp3", fail_convert)
+
+        result = await transcribe_audio(FAKE_B64, "ogg", openrouter_api_key=FAKE_KEY)
         assert result == TRANSCRIPTION_FALLBACK
 
     @pytest.mark.asyncio
@@ -144,7 +193,7 @@ class TestTranscribeAudio:
 
         from app.core.transcription_service import transcribe_audio
 
-        await transcribe_audio(FAKE_B64, "ogg", openrouter_api_key=FAKE_KEY)
+        await transcribe_audio(FAKE_B64, "mp3", openrouter_api_key=FAKE_KEY)
         assert captured["headers"].get("authorization") == f"Bearer {FAKE_KEY}"
 
 
@@ -156,9 +205,8 @@ class TestProcessWaMediaAudio:
         """Voice note (PTT) harus diberi label [Voice note: ...]."""
         import uuid
         from app.api.wa_helpers import process_wa_media
+        from app.core import transcription_service
 
-        # get_workspace_dir dan get_settings diimport lokal di dalam fungsi,
-        # jadi mock harus di modul asal (source module), bukan di wa_helpers
         monkeypatch.setattr(
             "app.core.sandbox.get_workspace_dir",
             lambda sid: tmp_path,
@@ -166,6 +214,9 @@ class TestProcessWaMediaAudio:
         class FakeSettings:
             openrouter_api_key = FAKE_KEY
         monkeypatch.setattr("app.config.get_settings", lambda: FakeSettings())
+        monkeypatch.setattr(transcription_service, "_convert_to_mp3", lambda b: _async_identity(b))
+
+
 
         respx_mock.post("https://openrouter.ai/api/v1/chat/completions").mock(
             return_value=httpx.Response(200, json=SUCCESS_RESPONSE)
@@ -190,6 +241,7 @@ class TestProcessWaMediaAudio:
         """Audio file biasa harus diberi label [Audio: ...]."""
         import uuid
         from app.api.wa_helpers import process_wa_media
+        from app.core import transcription_service
 
         monkeypatch.setattr(
             "app.core.sandbox.get_workspace_dir",
@@ -198,6 +250,7 @@ class TestProcessWaMediaAudio:
         class FakeSettings:
             openrouter_api_key = FAKE_KEY
         monkeypatch.setattr("app.config.get_settings", lambda: FakeSettings())
+        monkeypatch.setattr(transcription_service, "_convert_to_mp3", lambda b: _async_identity(b))
 
         respx_mock.post("https://openrouter.ai/api/v1/chat/completions").mock(
             return_value=httpx.Response(200, json=SUCCESS_RESPONSE)
@@ -220,6 +273,7 @@ class TestProcessWaMediaAudio:
         """Jika transkripsi gagal, harus return fallback tapi tidak raise exception."""
         import uuid
         from app.api.wa_helpers import process_wa_media
+        from app.core import transcription_service
         from app.core.transcription_service import TRANSCRIPTION_FALLBACK
 
         monkeypatch.setattr(
@@ -229,6 +283,7 @@ class TestProcessWaMediaAudio:
         class FakeSettings:
             openrouter_api_key = FAKE_KEY
         monkeypatch.setattr("app.config.get_settings", lambda: FakeSettings())
+        monkeypatch.setattr(transcription_service, "_convert_to_mp3", lambda b: _async_identity(b))
 
         respx_mock.post("https://openrouter.ai/api/v1/chat/completions").mock(
             return_value=httpx.Response(500, json={"error": "server error"})

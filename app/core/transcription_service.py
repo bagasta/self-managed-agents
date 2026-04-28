@@ -19,6 +19,9 @@ Format request:
 """
 from __future__ import annotations
 
+import asyncio
+import base64
+import io
 import structlog
 import httpx
 
@@ -35,6 +38,24 @@ _TRANSCRIBE_PROMPT = (
 
 # Fallback text jika transkripsi gagal
 TRANSCRIPTION_FALLBACK = "[Voice note: tidak dapat ditranskripsi]"
+
+# Formats natively supported by OpenAI audio input
+_OPENAI_SUPPORTED_FORMATS = {"mp3", "wav"}
+
+
+async def _convert_to_mp3(audio_b64: str) -> str:
+    """Convert base64 audio (any format) to base64 mp3 via ffmpeg."""
+    audio_bytes = base64.b64decode(audio_b64)
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-y", "-i", "pipe:0", "-f", "mp3", "-codec:a", "libmp3lame", "-q:a", "4", "pipe:1",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate(input=audio_bytes)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg conversion failed: {stderr.decode()[-300:]}")
+    return base64.b64encode(stdout).decode()
 
 
 async def transcribe_audio(
@@ -62,6 +83,15 @@ async def transcribe_audio(
 
     if not audio_b64:
         return TRANSCRIPTION_FALLBACK
+
+    # OpenAI only accepts mp3/wav — convert everything else
+    if audio_format not in _OPENAI_SUPPORTED_FORMATS:
+        try:
+            audio_b64 = await _convert_to_mp3(audio_b64)
+            audio_format = "mp3"
+        except Exception as exc:
+            log.error("transcription_service.conversion_error", error=str(exc))
+            return TRANSCRIPTION_FALLBACK
 
     payload = {
         "model": TRANSCRIPTION_MODEL,
