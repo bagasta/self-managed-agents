@@ -241,6 +241,50 @@ func (wa *WhatsAppClient) SendDocument(to string, docData []byte, filename, capt
 	return err
 }
 
+// ResolvePhones resolves phone numbers to their WA JIDs via IsOnWhatsApp.
+// Returns map of stripped_phone -> JID string (e.g. "628xxx" -> "9876@lid").
+func (wa *WhatsAppClient) ResolvePhones(phones []string) (map[string]string, error) {
+	wa.mu.RLock()
+	client := wa.client
+	wa.mu.RUnlock()
+	if client == nil || wa.status != WAStatusConnected {
+		return nil, fmt.Errorf("not connected")
+	}
+
+	stripped := make([]string, 0, len(phones))
+	seen := make(map[string]bool)
+	for _, p := range phones {
+		s := strings.TrimPrefix(p, "+")
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		stripped = append(stripped, s)
+	}
+
+	results, err := client.IsOnWhatsApp(context.Background(), stripped)
+	resolved := make(map[string]string)
+	if err != nil {
+		for _, s := range stripped {
+			resolved[s] = s + "@s.whatsapp.net"
+		}
+		return resolved, nil
+	}
+	for _, res := range results {
+		if res.IsIn {
+			resolved[res.Query] = res.JID.String()
+		} else {
+			resolved[res.Query] = res.Query + "@s.whatsapp.net"
+		}
+	}
+	for _, s := range stripped {
+		if _, found := resolved[s]; !found {
+			resolved[s] = s + "@s.whatsapp.net"
+		}
+	}
+	return resolved, nil
+}
+
 func (wa *WhatsAppClient) checkConnected() error {
 	wa.mu.RLock()
 	defer wa.mu.RUnlock()

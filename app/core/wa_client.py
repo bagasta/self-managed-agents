@@ -139,17 +139,15 @@ async def resolve_wa_phones(device_id: str, phones: list[str]) -> dict[str, str]
 
     Returns dict: normalized_phone -> JID string (e.g. "6282xxx" -> "9876@lid" or "6282xxx@s.whatsapp.net").
     Falls back to empty dict on error (caller should treat unresolved phones as @s.whatsapp.net).
-    Only works for production wa-service devices (wadev_ prefix uses a stub).
     """
-    if device_id.startswith("wadev_"):
-        # wa-dev stub — no IsOnWhatsApp available; return empty (caller uses raw comparison)
-        return {}
     try:
         async with httpx.AsyncClient(timeout=8) as client:
-            resp = await client.post(
-                f"{_base_url()}/devices/{device_id}/resolve-phones",
-                json={"phones": phones},
-            )
+            if device_id.startswith("wadev_"):
+                # wa-dev-service uses a shared WA connection; resolve via its own endpoint
+                url = f"{_wa_dev_base_url()}/resolve-phones"
+            else:
+                url = f"{_base_url()}/devices/{device_id}/resolve-phones"
+            resp = await client.post(url, json={"phones": phones})
             if resp.status_code == 200:
                 return resp.json().get("resolved", {})
     except Exception:

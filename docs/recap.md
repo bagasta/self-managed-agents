@@ -1,552 +1,181 @@
-  Building a self-hosted managed agent platform using LangChain DeepAgents, OpenRouter for multi-model support, and Daytona or Docker+gVisor as a free sandbox. PRD is finalized — next step is scaffolding the Milestone 1 FastAPI skeleton.
-  
-  -Building a self-hosted multi-model agent platform inspired by Claude Managed Agents, using FastAPI, LangChain, OpenRouter, and Docker sandbox. Milestone 1 scaffold is complete — next step is installing dependencies and running the stack.
+# Recap: Bug Allowlist & WhatsApp LID Accounts
 
-  - Platform managed agent sudah berjalan penuh — LLM, tool calling, database, dan Docker sandbox dengan internet aktif semua    
-     berfungsi. Milestone 1 selesai, langkah berikutnya adalah memulai Milestone 2. 
+**Tanggal**: 2026-04-28  
+**Status**: ✅ Terselesaikan
 
-  -  Platform managed agent Milestone 1 selesai dan berjalan penuh. PRD Milestone 2 sudah diupdate dengan memory system dan
-     skill/tool creator. Next: mulai implementasi fitur-fitur Milestone 2.    
+---
 
-  - Milestone 2 selesai diimplementasi. Fitur baru: Memory System (remember/recall/forget + inject ke system prompt), Skill Library (create_skill/list_skills/use_skill), Self-Extending Tool Creator (create_tool/list_tools/run_custom_tool + dynamic load), API endpoints baru (/memory, /skills, /custom-tools per agent), dan Alembic migration (agent_memories, skills, custom_tools tables). Next: Milestone 3 — API key auth, basic web admin, LangSmith.
+## Deskripsi Bug
 
-  - Perbaikan flow Self-Extending Capabilities: Fix ValueError pada pembuatan docstring dinamis untuk `create_tool`. Peningkatan *System Prompt* secara strict agar Agent diwajibkan menggunakan `use_skill(name="X")` jika diminta memakai skill, dan wajib menggunakan `run_custom_tool()` untuk langsung mengeksekusi tool baru dalam satu sesi yang sama (karena belum diregistrasikan ke LangChain toolkit pada runtime saat ini). Kodingan sudah di-push ke Github.
+Fitur `allowed_senders` pada agent tidak berfungsi dengan benar untuk akun WhatsApp modern yang menggunakan sistem **LID (Linked ID)**.
 
-  - Milestone 2 lanjutan: Multi-model diperkuat (temperature per-agent, default model diupdate ke claude-sonnet-4-6). Tambah /v1/models endpoint dengan 15+ model dari Anthropic/OpenAI/Google/Meta/Mistral/DeepSeek/Qwen. HTTP Tool (http_get/http_post dengan allowed_hosts, timeout) dan RAG Tool (search_knowledge_base via PostgreSQL ILIKE) ditambahkan sebagai opt-in di tools_config. Document management API (/v1/agents/{id}/documents) untuk knowledge base RAG. tools_config sekarang benar-benar mengontrol tool mana yang aktif per agent. Migration 003 untuk tabel documents dan kolom temperature.
+### Gejala
 
-  Building a managed agent platform. RAG is now working after enabling it on the CV agent. Next: continue testing or move to the next milestone feature.  
+- User isi `allowed_senders` dengan format nomor biasa: `+6282299312107`
+- Agent **tetap memblokir** nomor tersebut (seharusnya diizinkan)
+- Agent juga **memblokir nomor lain** yang tidak ada di allowlist (seharusnya benar)
+- Kedua nomor diblokir dengan log yang sama
 
-  Building a managed agent platform. RAG is now working correctly. Next: continue with anyremaining Milestone 2 features or fixes
+### Log Error di Server
 
+```json
+{"device_id": "wadev_b76b7e02-...", "from_phone": "+236116347228384", "chat_id": "236116347228384@lid", "event": "wa_incoming.blocked_sender"}
+{"device_id": "wadev_b76b7e02-...", "from_phone": "+151414827434073", "chat_id": "151414827434073@lid", "event": "wa_incoming.blocked_sender"}
+```
 
-Building a managed AI agent platform with proactive scheduling, human escalation via channels, and MCP tool support. Dev
-  UI is functional with escalation simulator. Next: run the server and verify the operator-to-customer message flow works end to
-  end.
+---
 
-  Membangun platform managed AI agent berbasis FastAPI. Semua TODO selesai dan Postman collection baru saja diperbarui     
-  dengan contoh lengkap untuk semua endpoint, termasuk MCP config, Slack/webhook session, dan semua default tools. Tidak ada task 
-  pending. 
+## Root Cause
 
-  Working on real-time delivery of scheduled agent reminders to the dev UI. Added SSE endpoint and wired it into the chat  
-  section — restart the server to test.
+WhatsApp modern menggunakan dua sistem identifikasi berbeda:
 
-Building a managed agent platform. Just fixed scheduled reminders so they appear in the dev UI chat in real-time via SSE. No
-     pending tasks — all features are working.      
+| Format | Contoh | Keterangan |
+|--------|--------|-----------|
+| **Phone JID** | `6282299312107@s.whatsapp.net` | Akun WA lama |
+| **LID** | `236116347228384@lid` | Akun WA baru (Linked ID) |
 
-Adding per-agent subscription with token quota, expiry period, and unique API key per agent. Migration 007 is ready —    
-  next step is running alembic upgrade 007 to apply it. (disable recaps in /config)
+Untuk akun LID:
+- `evt.Info.Sender.User` di Go berisi **LID number** (`236116347228384`), **bukan phone number**
+- `evt.Info.Chat.String()` juga berisi LID format (`236116347228384@lid`)
+- **Tidak ada field yang berisi phone number asli** dalam message event
 
-   Built a WhatsApp integration using a Go microservice (whatsmeow) in wa-service/ and updated the Python API. Next step:   
-  run `alembic upgrade 008` to apply the database migration. (disable recaps in /config)
+Sehingga:
+- `allowed_senders = ["+6282299312107"]` → normalized: `6282299312107`
+- Incoming `from_phone = "+236116347228384"` → normalized: `236116347228384`
+- **Tidak pernah match** karena keduanya adalah identifier berbeda
 
-  Built a Go WhatsApp microservice using whatsmeow in the wa-service folder, plus Python integration endpoints. Next action:
-     run alembic upgrade head to apply migration 008.
+---
 
-     Working on a managed agent platform's WhatsApp integration. All bugs are fixed and confirmed working. No immediate next   
-     action needed.                                                                                                          
-                      
-   Redesign eskalasi WhatsApp: Operator kini punya **session sendiri** (bukan inject [OPERATOR] ke session user).
-   - channels.py: `lookup_user_id = operator_phone` untuk operator — session terpisah per pengirim.
-   - `escalation_user_jid` dicari dari session user yang escalation_active=True, diteruskan ke run_agent().
-   - agent_runner.py: jika escalation_user_jid ada, inject prompt "SESI OPERATOR" dan set user_jid closure pada
-     tool reply_to_user sehingga pesan dikirim tepat ke user yang dieskalasi (bukan ke operator).
-   - memory_service: scoped per external_user_id (nomor WA) mencegah kebocoran memori antar user.
-   - Tidak perlu flag routing tambahan — operator cukup baca Chat ID dari history pesan eskalasi.
+## Yang Sudah Dicoba (Gagal)
 
-   Bug Fix eskalasi WhatsApp (21 Apr 2026):
+### Attempt 1: Dual-check from_phone + chat_id
+Cek allowlist terhadap `from_phone` DAN `chat_id`. Gagal karena keduanya sama-sama LID format.
 
-   1. Migration fix: 009_memory_scope.py memakai `down_revision = "008_agent_whatsapp"` (nama file),
-      padahal revision ID di 008_agent_whatsapp.py adalah `"008"` → Alembic KeyError.
-      Fix: ubah ke `down_revision = "008"`. Kolom `scope` di tabel agent_memories sekarang berhasil dibuat.
+### Attempt 2: `GetPNForLID` dari local store
+Gunakan `client.Store.LIDs.GetPNForLID()` di Go untuk resolve LID → phone dari local SQLite cache.  
+Gagal karena: mapping LID↔phone hanya ada di cache jika kontak sudah pernah di-sync WA (akun yang baru pertama kali pesan tidak ada di cache).
 
-   2. Routing bug — reply_to_user kirim ke operator bukan user:
-      Root cause: di sesi operator, session.channel_config["user_phone"] berisi JID operator sendiri.
-      Kode lama meng-override user_jid terlalu terlambat sehingga routing tetap ke operator.
-      Fix (escalation_tool.py): load session hanya untuk ambil device_id; user_jid dari closure
-      langsung di-set ke ch_cfg["user_phone"] sebelum send_message dipanggil.
+### Attempt 3: `IsOnWhatsApp` endpoint
+Tambah endpoint `POST /devices/{id}/resolve-phones` di Go yang query WA server via `IsOnWhatsApp()`.  
+Python panggil endpoint ini saat allowlist check, resolve `+6282299312107` → actual WA JID.  
+**Status**: Kode sudah di-push tapi hasil di server masih sama — kemungkinan:
+- Docker belum rebuild dengan kode terbaru
+- `IsOnWhatsApp` rate-limited atau belum dipanggil dengan benar
+- Masih ada issue di alur resolve
 
-   3. Format notifikasi eskalasi diperbarui agar operator tau Chat ID tujuan:
-        🚨 [CS AI Clevio] Eskalasi pertanyaan customer
-        ID Kasus: esc_<timestamp>_<session_prefix>
-        Chat ID/no wa: <user_wa_jid>
-        Pertanyaan customer: <summary>
-        → Agent akan menyusun draft & minta konfirmasi sebelum kirim.
+---
 
-   4. Flow operator diubah: Draft → Konfirmasi → Kirim (sebelumnya langsung kirim):
-      - Agent susun draft rapi dari jawaban operator (fix format, JANGAN tambah konten)
-      - Agent tampilkan draft ke operator + tanya "Sudah OK? Ketik 'kirim'..."
-      - Setelah operator konfirmasi → reply_to_user(draft) → balas "Terkirim ✓"
-      - Berlaku untuk sesi operator baru maupun legacy [OPERATOR] prefix path.
+## File yang Dimodifikasi
 
-Fixed sandbox so custom tools can install and use third-party
-      packages. No next action needed, all changes are live.      
+| File | Perubahan |
+|------|-----------|
+| `wa-service/handlers.go` | Tambah handler `resolvePhones` — endpoint `POST /devices/{id}/resolve-phones` |
+| `wa-service/main.go` | Register route `resolve-phones` |
+| `wa-service/device_manager.go` | Tambah field `phone_from` di payload, coba `GetPNForLID` |
+| `app/core/wa_client.py` | Tambah fungsi `resolve_wa_phones()` |
+| `app/api/channels.py` | Allowlist check pakai `resolve_wa_phones` + JID comparison |
+| `app/models/agent.py` | Tambah kolom `allowed_senders` (JSONB) |
+| `app/models/session.py` | Tambah kolom `ai_disabled` (Boolean) |
 
-  Fix sandbox agent (21 Apr 2026) — 3 root cause:
+---
 
-  1. Image python:3.12-slim tidak punya curl.
-     Fix: ganti DOCKER_SANDBOX_IMAGE=python:3.12 di .env (full Debian, curl sudah include).
+## Root Cause Sebenarnya (Ditemukan)
 
-  2. PIP_USER=1 + PYTHONUSERBASE=/workspace/.local menyebabkan pip install ke user site,
-     tapi Python menonaktifkan user site saat jalan sebagai root di Docker.
-     Akibatnya import requests/library apapun gagal meski pip install sukses.
-     Fix: hapus PIP_USER=1 dan PYTHONUSERBASE dari environment container — pip install
-     system-wide sebagai root, package langsung bisa diimport.
+`wa-dev-service` menghasilkan device ID dengan prefix `wadev_` (format: `wadev_{agentID}`). Di `app/core/wa_client.py`, fungsi `resolve_wa_phones` langsung return `{}` untuk device ID dengan prefix `wadev_`:
 
-  3. json.dumps(args) menghasilkan JSON literal (false/true/null) yang di-embed langsung
-     sebagai Python code di _all_args = {json.dumps(args)}.
-     Python tidak kenal false — hanya False. Hasilnya NameError tiap tool dipanggil dengan boolean/null args.
-     Fix: double-encode args jadi string (json.dumps(json.dumps(args))), lalu di runtime
-     parse balik dengan json.loads(...) sehingga tipe Python-nya benar.
+```python
+if device_id.startswith("wadev_"):
+    return {}  # ← bypass total, allowed_set hanya berisi phone asli
+```
 
+Akibatnya:
+- `allowed_set = {"6282299312107"}` (phone biasa saja)
+- `candidates = {"236116347228384"}` (LID number dari incoming)
+- **Tidak pernah intersect → selalu blocked**
 
+## Fix yang Diimplementasikan
 
- Memperbaiki flow QR WhatsApp untuk agent Arthur agar QR yang dikirim ke user bisa di-scan dan terhubung. Langkah      
-  berikutnya: update instruksi Arthur di DB agar dia pakai tool send_agent_wa_qr dengan agent_id, bukan membuat device sendiri.
-   (disable recaps in /config)                                                                                                 
+### 1. `wa-dev-service/whatsapp.go`
+Tambah method `ResolvePhones()` ke `WhatsAppClient` yang memanggil `client.IsOnWhatsApp()` — sama persis dengan wa-service.
 
-Fixing WhatsApp bot behavior: blocked broadcast/status messages, fixed group @mention detection via LID mapping, and      
-     scoped sessions by group JID vs sender phone. No pending action needed—all fixes are live and working.
-
-Fixed WhatsApp document sending and a bug where documents were routed to the wrong number via LID JID mismatch. Next:     
-restart the server and test by asking the agent to send a document again. 
-Added WhatsApp media understanding: images are sent as multimodal vision input, documents are text-extracted and included
-     in the message. Fixed a bug where document extraction silently failed due to wrong settings import. No next action needed.
-
-Added markdown-to-WhatsApp conversion so agent replies display cleanly without raw markdown syntax. No further action 
-  needed unless testing reveals edge cases. (disable recaps in /config
-
-Migrasi ke Deep Agents SDK (23 Apr 2026):
-
-1. Migrasi LLM executor dari LangGraph `create_react_agent` ke `deepagents.create_deep_agent`.
-   - deepagents memberi agen kemampuan planning (`write_todos`) dan virtual FS tools (`ls`, `read_file`, `write_file`, `edit_file`, `grep`) secara otomatis.
-   - Fallback ke `create_react_agent` jika deepagents tidak tersedia (try/except).
-   - Rename sandbox tools untuk menghindari konflik nama: `write_file` → `sandbox_write_file`, `read_file` → `sandbox_read_file`.
-
-2. Requirements upgrade ke langchain v1.x ekosistem:
-   - deepagents>=0.5.0, langgraph>=1.0.0, langchain>=1.0.0, langchain-openai>=1.0.0, langchain-mcp-adapters>=0.2.0
-
-3. Agent Context Block: setiap system prompt kini diawali blok metadata otomatis:
-   - Agent ID, Agent Name, Model, Active Tools, Channel, User Phone, User Role (operator/user), Session ID.
-   - Role ditentukan dari `operator_ids` list dan `escalation_config.operator_phone`.
-
-4. `operator_ids` field baru di model Agent (migration 011):
-   - List nomor WA/JID yang punya akses operator per agent.
-   - Dipakai di channels.py untuk deteksi operator di wa/incoming webhook.
-   - Coexist dengan legacy `escalation_config.operator_phone`.
-
-5. Conservative tool defaults:
-   - ON by default: memory, skills, escalation.
-   - OFF by default: sandbox, tool_creator, scheduler, http, mcp, whatsapp_media, wa_agent_manager.
-   - `send_agent_wa_qr` dipindah dari whatsapp_media ke tool group baru `wa_agent_manager` (opt-in).
-
-6. Lazy sandbox init: DockerSandbox hanya dibuat jika `tools_config.sandbox = true`.
-
-Next: jalankan `alembic upgrade head` untuk apply migration 011 (operator_ids column).
-
-Fix TURRRRRR (agent manager) + QR scan (23 Apr 2026):
-
-1. TURRRRRR tidak bisa edit agent karena http_tool.py hanya punya http_get/http_post.
-   Fix: tambah http_patch dan http_delete ke http_tool.py.
-
-2. TURRRRRR pakai sandbox bash untuk hit API dan kirim QR (harusnya pakai tools).
-   Fix: enable http: true dan wa_agent_manager: true di tools_config TURRRRRR.
-   Update instruksi TURRRRRR: wajib pakai http_patch untuk PATCH, send_agent_wa_qr untuk kirim QR.
-
-3. QR tidak bisa di-scan setelah dikirim via WhatsApp.
-   Root cause: QR di-generate 256px dengan qrcode.Medium — terlalu kecil dan rapuh setelah kompresi WA.
-   Fix: ubah ke qrcode.High, 512px di wa-service/device_manager.go dan wa-dev-service/whatsapp.go.
-   Rebuild binary diperlukan: make wa-build.
-
-Update Postman + UI-DEV setelah migrasi Deep Agents (23 Apr 2026):
-
-- Postman collection: semua agent create body diupdate — tools_config pakai defaults baru
-  (sandbox/tool_creator/scheduler OFF, memory/skills/escalation ON), tambah field `operator_ids`,
-  WA agent pakai `whatsapp_media: true`, nama request dirapikan.
-- UI-DEV/app.js: `setAgentFormDefaults()` dan `createWAAgent()` disesuaikan dengan defaults baru.
-- UI-DEV/index.html: hint text tools config diupdate mencerminkan defaults konservatif.
-- wa-dev-service/connections.json: tidak ada perubahan (data runtime).
-
-Upgrade wa-dev-service setara wa-service (23 Apr 2026):
-
-Sebelumnya wa-dev-service tidak bisa kirim reminder, terima gambar/file, atau eskalasi.
-Root cause: wa-dev memanggil /v1/agents/{id}/sessions/{id}/messages langsung — bypass semua
-logika media, session, escalation, dan scheduler di Python.
-
-Fix:
-
-1. wa-dev-service/router.go:
-   - forwardToAgent() menggantikan callAgentAPI(): POST ke /v1/channels/wa/incoming dengan
-     virtual device_id = "wadev_{agentID}". Python menangani session, media, escalation, reminder.
-   - handleConnect() disederhanakan: hanya validasi agent dan simpan {from → agentID, chatID}.
-     Session Python dibuat otomatis saat pesan pertama masuk.
-   - lookupOperatorAgent(): cek apakah pengirim adalah operator di agent manapun via endpoint baru.
-     Jika ya, auto-route tanpa perlu 'connect {agentID}' — eskalasi bisa langsung dibalas operator.
-
-2. wa-dev-service/store.go: hapus AgentKey dan SessionID (tidak diperlukan lagi).
-
-3. wa-dev-service/whatsapp.go: tambah dukungan pesan grup dengan deteksi @mention bot
-   (termasuk LID account mapping), sama persis seperti wa-service.
-
-4. app/api/channels.py:
-   - wa_incoming: agent lookup by agent.id langsung jika device_id berawalan "wadev_".
-   - GET /v1/channels/wa-dev/operator-route?phone=...: endpoint baru, dipakai Go router untuk
-     auto-route operator tanpa perlu connect command.
-
-5. app/core/wa_client.py: send_wa_message/send_wa_image/send_wa_document mendeteksi prefix
-   "wadev_" dan route ke wa-dev-service /send/* alih-alih wa-service /devices/{id}/send*.
-
-6. app/config.py: tambah wa_dev_service_url (default http://localhost:8081).
-
-Hasil: reminder, gambar/dokumen, dan eskalasi semua berfungsi di wa-dev. Cara connect tetap sama
-("connect {agentID}"). Rebuild binary diperlukan: make wa-dev-build (atau go build di wa-dev-service/).
-
-Deploy ke VPS production (23 Apr 2026):
-
-1. Project di-deploy ke VPS `194.238.23.242` (user clevio) via Docker + Traefik.
-   - Domain: https://managed-agent.chiefaiofficer.id
-   - Postgres: pakai instance yang sudah ada di VPS via host.docker.internal
-   - wa-service (Go) jalan sebagai container tersendiri dalam network internal Docker
-   - UI-DEV di-serve sebagai static files di /ui/ via FastAPI StaticFiles
-
-2. Git workflow: VPS clone dari https://github.com/bagasta/self-managed-agents.git
-   Update cukup: git pull → docker compose up -d --build
-
-3. Bug fix @lid JID untuk media WhatsApp:
-   Root cause: whatsmeow otomatis resolve @s.whatsapp.net → @lid untuk pesan teks,
-   tapi TIDAK untuk media (gambar/dokumen). Akibatnya send-image OK tapi gambar tidak sampai.
-   Fix: tambah helper resolveJID() di wa-service/device_manager.go yang pakai IsOnWhatsApp()
-   untuk lookup JID yang benar sebelum upload dan kirim media. Berlaku untuk SendImage dan SendDocument.
-
-4. Bug fix AgentLogger:
-   LangChain terbaru kadang pass None sebagai serialized di on_chain_start callback.
-   Fix: tambah guard `if not serialized: return` sebelum .get() di agent_runner.py.
-
-Deploy wa-dev-service ke production (24 Apr 2026):
-
-1. Tambah wa-dev-service ke docker-compose.prod.yml sebagai container tersendiri.
-   - Dockerfile baru di wa-dev-service/Dockerfile (sama strukturnya dengan wa-service).
-   - Dashboard di-expose via Traefik subpath `/wa-dev/` dengan StripPrefix middleware.
-   - `const API = '/wa-dev'` di dashboard/index.html agar JS API calls ikut subpath.
-   - Volume `deploy_wa_dev_store` untuk persistent SQLite session.
-
-2. Bug fix WA_DEV_SERVICE_URL tidak terbaca:
-   - Default config `http://localhost:8081` — di Docker, localhost adalah API container sendiri.
-   - Fix: tambah `WA_DEV_SERVICE_URL=http://wa-dev-service:8081` ke .env.prod.
-   - `docker compose restart` tidak cukup — harus `up -d` agar container di-recreate dengan env baru.
-
-3. Bug fix send_whatsapp_image / send_whatsapp_document salah deteksi base64 vs file path:
-   - Kondisi lama: `not image_path_or_base64.startswith("/")` selalu True untuk base64 string.
-   - Akibatnya base64 diperlakukan sebagai nama file dan dijalankan sebagai `base64 -w 0 iVBOR...` di sandbox.
-   - Fix: helper `_looks_like_base64(s)` — cek panjang ≥ 50 char dan fullmatch `[A-Za-z0-9+/]+=*`.
-   - Berlaku untuk send_whatsapp_image dan send_whatsapp_document di agent_runner.py.
-
-4. Bug fix sandbox tidak bisa dipakai di VPS (Docker-in-Docker path mismatch):
-   - Root cause: sandbox_data pakai named Docker volume (`deploy_sandbox_data`).
-     Saat sandbox code membuat container baru via docker.sock dan mount `/tmp/agent-sandboxes/...`,
-     path itu tidak ada di host — hanya ada di dalam API container sebagai volume mount.
-   - Fix: ganti ke host bind mount `-v /tmp/agent-sandboxes:/tmp/agent-sandboxes` di compose.
-     Sekarang path sama antara API container dan sandbox container yang dibuat Docker socket.
-   - Pastikan `mkdir -p /tmp/agent-sandboxes` di VPS host sebelum deploy.
-
-Bug fix QR dikirim ke LID number bukan nomor HP (24 Apr 2026):
-
-Root cause: wa-service memformat webhook `from = "+" + evt.Info.Sender.User`.
-Untuk akun @lid, Sender.User adalah LID number (misal 236116347228384), bukan nomor HP.
-Python menyimpannya sebagai user_phone di session. Saat agent kirim QR image,
-resolveJID mencoba lookup `236116347228384` via IsOnWhatsApp() — gagal karena itu bukan nomor HP —
-lalu fallback ke `236116347228384@s.whatsapp.net` yang tidak deliver ke user.
-
-Fix: di channels.py, `effective_reply_target` untuk semua DM sekarang pakai `reply_target`
-(= body.chat_id) bukan body.from_. chat_id dari wa-service sudah berisi full JID yang benar
-(contoh: `236116347228384@lid`) karena diambil dari evt.Info.Chat.String().
-resolveJID menerima JID dengan "@", langsung parse dan kirim ke @lid — deliver benar.
-
-Catatan: sesi existing yang punya user_phone = "+LIDnumber" lama akan otomatis terupdate
-ke chat_id yang benar saat user kirim pesan berikutnya (ada logika update session di channels.py).
-
-Migrasi Deep Agents SDK — Phase 2 & 3: Sub-agents + Quality Gate + Memory Summarizer (24 Apr 2026):
-
-Phase 2 — Sub-agent Spawning:
-
-1. `build_subagents()` di agent_runner.py:
-   - Jika `agent_ids` kosong → auto-load 5 hardcoded system sub-agents (tidak dari DB).
-   - Jika `agent_ids` diisi → load agent dari DB by UUID, construct ChatOpenAI instance per sub-agent.
-   - Setiap sub-agent punya isolated sandbox workspace: `{session_id}_sys_{name}/` atau `{session_id}_sub_{agent_id}/`.
-   - Invalid UUID di whitelist: log warning dan skip — tidak crash.
-
-2. 5 System Sub-agents (hardcoded di `_SYSTEM_SUBAGENTS`, tidak bergantung DB):
-   - `sys_critic`     → quality reviewer, approve/reject output, model: gpt-4o-mini
-   - `sys_researcher` → riset via HTTP, model: gpt-4o-mini
-   - `sys_coder`      → Python sandbox, tulis + jalankan kode, model: gpt-4o-mini
-   - `sys_writer`     → tulis/edit/terjemah konten, model: gpt-4o-mini
-   - `sys_analyst`    → analisis data pandas/numpy di sandbox, model: gpt-4o-mini
-   Model bisa diubah di `app/core/agent_runner.py` baris ~592–658 field `"model"` per entry.
-
-3. Integrasi ke `run_agent()`:
-   - Panggil `build_subagents()` tanpa guard `if agent_ids:` — auto-discover aktif meski agent_ids kosong.
-   - Pass `subagents=subagent_list or None` ke `create_deep_agent()`.
-   - Sub-sandboxes di-close di finally block (success dan error path).
-
-4. System prompt update: blok `## Available Subagents` di-inject otomatis saat subagent_list tidak kosong.
-
-5. `tools_config.subagents` schema:
-   ```json
-   { "subagents": { "enabled": true } }                          // auto-load 5 system sub-agents
-   { "subagents": { "enabled": true, "agent_ids": ["uuid"] } }  // load dari DB
+### 2. `wa-dev-service/api.go`
+Tambah handler `POST /resolve-phones` yang memanggil method di atas.
+
+### 3. `wa-dev-service/main.go`
+Register route `POST /resolve-phones`.
+
+### 4. `app/core/wa_client.py`
+Ganti early-return `wadev_` dengan routing ke `_wa_dev_base_url()/resolve-phones`:
+```python
+if device_id.startswith("wadev_"):
+    url = f"{_wa_dev_base_url()}/resolve-phones"
+else:
+    url = f"{_base_url()}/devices/{device_id}/resolve-phones"
+```
+
+### Setelah fix, flow yang benar:
+1. Incoming: `from_phone = "236116347228384"` (LID)
+2. `resolve_wa_phones(device_id, ["+6282299312107"])` → wa-dev `/resolve-phones` → `IsOnWhatsApp(["6282299312107"])` → `{"6282299312107": "236116347228384@lid"}`
+3. `allowed_set = {"6282299312107", "236116347228384"}` (phone + LID part)
+4. `candidates = {"236116347228384"}` → **intersect! → allowed**
+
+### Deploy
+Rebuild wa-dev-service binary: `make wa-dev-build`
+
+---
+
+## Yang Perlu Diinvestigasi Lebih Lanjut
+
+1. **Verifikasi endpoint resolve-phones berjalan**: Test manual dengan curl dari VPS:
+   ```bash
+   curl -X POST http://localhost:8080/devices/{device_id}/resolve-phones \
+     -H "Content-Type: application/json" \
+     -d '{"phones": ["+6282299312107"]}'
    ```
+   Lihat apakah response-nya mengandung JID yang benar (LID atau phone).
 
-6. Bug fix: SDK tidak bisa resolve OpenRouter model string (`openai/gpt-4o-mini`).
-   Fix: selalu construct `ChatOpenAI(model=..., base_url="https://openrouter.ai/api/v1")` dan pass instance, bukan string.
+2. **Cek apakah `IsOnWhatsApp` return LID JID**: Untuk akun LID, `res.JID` dari `IsOnWhatsApp` seharusnya berisi `236116347228384@lid`. Kalau tidak, berarti WA API tidak mengekspos mapping ini.
 
-7. Loop protection: tidak perlu guard manual — SDK tidak auto-invoke subagent config milik subagent yang dipanggil.
-   Backstop: `recursion_limit = agent_max_steps * 2` via LangGraph.
+3. **Alternatif: Simpan mapping LID↔phone di DB**: Saat session pertama dibuat untuk akun LID, simpan `external_user_id = LID` tapi juga simpan `phone_number` jika tersedia. Operator kemudian bisa query session untuk tahu LID dari phone number.
 
-Phase 3 — Quality Gate & Memory Summarizer:
+4. **Alternatif: Ubah cara input allowed_senders**: Buat operator bisa input dalam format LID juga, atau buat sistem dimana operator bisa "learn" nomor yang masuk sebelum di-allowlist.
 
-1. Critic (sys_critic) — Opsi B (sub-agent eksplisit):
-   - Main agent memanggil sys_critic secara eksplisit setelah executor selesai.
-   - Output critic: `VERDICT: APPROVED` atau `VERDICT: REJECTED` + feedback spesifik.
-   - Loop protection via recursion_limit; tidak perlu depth guard tambahan.
+5. **Cek whatsmeow versi terbaru**: Ada kemungkinan versi terbaru whatsmeow punya API lain untuk resolve LID yang lebih reliable.
 
-2. Memory Summarizer:
-   - Trigger: `_SUMMARY_TRIGGER = 10` user messages dalam session.
-   - Cache di `session.metadata_["context_summary"]` — tidak perlu migrasi DB.
-   - Di-inject ke system prompt sebagai `## Conversation Context Summary` block.
-   - Re-summarize setiap 10 pesan berikutnya secara kumulatif.
-   - `_maybe_summarize_context()` dipanggil di `run_agent()` setelah LLM creation.
+---
 
-Update Postman + UI-DEV (24 Apr 2026):
-- Postman: Orchestrator Agent request body pakai `subagents: { "enabled": true }` (tanpa agent_ids),
-  instructions diupdate mencantumkan semua 5 system sub-agents dan pola critic review.
-- UI-DEV/index.html: hint text diupdate — jelaskan auto-load 5 system sub-agents vs UUID custom.
-- UI-DEV/app.js: default tools_config sudah include `subagents: { enabled: false, agent_ids: [] }`.
+## Context Code Penting
 
-Fix Scheduler/Reminder (24 Apr 2026):
+### Allowlist check saat ini (`app/api/channels.py` ~line 248)
+```python
+if not _is_operator:
+    allowed = getattr(agent, "allowed_senders", None)
+    if allowed:
+        resolved = await resolve_wa_phones(body.device_id, [p for p in allowed if p])
+        allowed_set: set[str] = set()
+        for p in allowed:
+            normalized = normalize_phone(p)
+            allowed_set.add(normalized)
+            jid = resolved.get(normalized)
+            if jid:
+                allowed_set.add(normalize_phone(jid))
+        candidates = {normalize_phone(from_phone)}
+        if reply_target:
+            candidates.add(normalize_phone(reply_target))
+        if not candidates.intersection(allowed_set):
+            return {"status": "ignored", "reason": "sender not in allowlist"}
+```
 
-Bug 1 — Reminder meleset jam (timezone):
-Root cause: ISO datetime yang diisi agent selalu dianggap UTC, padahal user minta jam WIB.
-Contoh: user minta jam 15:00 WIB → agent nulis "2026-04-24T15:00:00" → dieksekusi 15:00 UTC = 22:00 WIB (7 jam meleset).
-Fix:
-- scheduler_tool.py: ISO datetime parse sekarang dianggap WIB (UTC+7), dikonversi ke UTC sebelum disimpan.
-- scheduler_tool.py: _compute_next_run() untuk cron expression dievaluasi dalam basis waktu WIB.
-- scheduler_service.py: croniter di _run_job() juga dievaluasi WIB untuk next_run_at.
-- Docstring diupdate: inject "Waktu sekarang (WIB): ..." agar agent pakai waktu lokal sebagai acuan.
+### Go resolve-phones handler (`wa-service/handlers.go`)
+```go
+results, err := info.Client.IsOnWhatsApp(r.Context(), stripped)
+// stripped = ["6282299312107"]
+// results[0].JID.String() seharusnya = "236116347228384@lid" untuk akun LID
+```
 
-Bug 2 — Tidak bisa lebih dari 1 reminder:
-Root cause: _set_reminder() cancel reminder lama jika label sama. Agent LLM cenderung pakai label
-generik ("reminder") untuk semua reminder → reminder pertama hilang saat reminder kedua dibuat.
-Fix: jika label sudah ada dan aktif, otomatis append suffix _2/_3/dst. daripada cancel.
-Docstring diupdate: jelaskan ke LLM bahwa label berbeda direkomendasikan, tapi label duplikat
-tidak akan menghapus yang lama — akan dibuat sebagai reminder terpisah dengan suffix otomatis.
-
-Typing Indicator WhatsApp (24 Apr 2026):
-
-Tambah efek "sedang mengetik..." di kedua WA service agar user tahu AI sedang memproses.
-
-wa-service/device_manager.go:
-- handleIncoming(): kirim ChatPresenceComposing ke chat yang sama sesaat setelah pesan diterima,
-  sebelum payload diteruskan ke Python webhook.
-- SendMessage(): kirim ChatPresencePaused sebelum mengirim pesan balasan.
-
-wa-dev-service/whatsapp.go:
-- handleMessage(): kirim ChatPresenceComposing sebelum onMessage dipanggil.
-- SendText(): kirim ChatPresencePaused sebelum mengirim pesan balasan.
-
-Efek: user melihat "sedang mengetik..." sejak pesan diterima sampai AI selesai memproses.
-Rebuild binary diperlukan setelah update: make wa-build dan rebuild wa-dev-service.
-
-WhatsApp User Name Recognition + Error Handling (27 Apr 2026):
-
-1. Agent mengenali nama WhatsApp user (push_name):
-   - wa-service/device_manager.go: tambah `push_name: evt.Info.PushName` ke webhook payload.
-   - wa-dev-service/whatsapp.go: tambah field PushName ke struct IncomingMessage, diisi dari evt.Info.PushName.
-   - wa-dev-service/router.go: teruskan push_name ke Python saat forwardToAgent().
-   - app/api/channels.py: tambah field push_name di WAIncomingMessage, pass ke run_agent sebagai sender_name.
-   - app/core/agent_runner.py: _build_agent_context_block() menerima sender_name dan inject sebagai
-     "Current User Name" di Agent Context Block. WhatsApp system prompt juga di-inject hint nama user
-     agar agent menyapa user dengan namanya.
-   Rebuild Go binary diperlukan: make wa-build + make wa-dev-build.
-
-2. Error handling WhatsApp — pesan generik ke user, detail ke developer:
-   - app/core/agent_runner.py: exception di graph.ainvoke() sekarang di-raise (bukan return sebagai final_reply)
-     agar channels.py bisa menangkap dan menentukan respons.
-   - app/api/channels.py (wa_incoming): saat run_agent raise exception:
-     a. Kirim traceback lengkap ke nomor developer 62895619356936 via send_wa_message dari device agent.
-     b. Kirim pesan generik ke user: "Maaf, terjadi gangguan sementara. Silakan coba lagi dalam beberapa saat."
-     c. Return HTTP 200 (bukan 500) agar Go service tidak retry.
-
-Klarifikasi perilaku sandbox vs virtual FS (27 Apr 2026):
-
-Agent dengan `sandbox: true` menggunakan DockerBackend sebagai filesystem backend deepagents SDK —
-artinya tools `write_file`, `read_file`, dll. dari deepagents SDK jalan lewat Docker, bukan in-memory.
-Jika Docker mati, semua operasi file gagal meski task-nya hanya "tulis file".
-
-Agent tanpa `sandbox: true` menggunakan StateBackend (in-memory virtual FS) — tidak butuh Docker,
-file hanya ada di memory selama session dan tidak bisa dieksekusi sungguhan.
-
-Ini bukan bug — by design. Prerequisite: Docker harus aktif untuk agent yang punya sandbox: true.
-Error handling sudah benar: jika Docker mati, traceback dikirim ke developer number dan user
-menerima pesan generik.
-
-Bug fix wa-dev-service dashboard QR tidak muncul di localhost (27 Apr 2026):
-
-Root cause: `const API = '/wa-dev'` di dashboard/index.html di-hardcode untuk Traefik production.
-Saat akses langsung ke localhost:8081, fetch ke `/wa-dev/connect-wa` menghasilkan 404 plain text,
-bukan JSON — JS crash saat `.json()` dengan "Unexpected non-whitespace character after JSON".
-
-Fix: deteksi otomatis berdasarkan pathname:
-  const API = window.location.pathname.startsWith('/wa-dev') ? '/wa-dev' : '';
-Production (via Traefik /wa-dev/) tetap pakai prefix, localhost jalan tanpa prefix.
-
-Bug fix scheduler concurrent + developer notify via wa-dev (27 Apr 2026):
-
-Bug 1 — "Session is already flushing" saat set 2 reminder sekaligus:
-Root cause: _set_reminder() memakai DB session yang di-pass dari agent_runner.
-LangGraph menjalankan beberapa tool call secara concurrent (asyncio.gather) —
-kedua _set_reminder() memanggil db.flush() pada session yang sama bersamaan → crash.
-Fix: _set_reminder() kini membuat session sendiri via AsyncSessionLocal() di dalam fungsi,
-isolated dari concurrent calls lain. Session di-commit di dalam async with block sendiri.
-
-Bug 2 — Developer tidak diberitahu saat error via wa-dev:
-Root cause: exception di blok send_wa_message(device_id, _DEVELOPER_PHONE, ...) ditelan
-diam-diam oleh `except Exception: pass` tanpa logging.
-Fix: ganti dengan `log.warning("wa_incoming.developer_notify_failed", error=str(_notify_exc))`
-agar error notifikasi developer tampil di log dan bisa di-debug.
-
-Production Readiness — Sprint 0 + Sprint 1 Day 1 (27 Apr 2026):
-
-Sprint 0 (semua quick wins selesai):
-- 1.4 DEVELOPER_PHONE → env var: `config.developer_phone`, hardcode "62895619356936" dihapus dari source.
-- 1.5 CORS lock down: `config.allowed_origins` (default `["*"]`), di-override via env `ALLOWED_ORIGINS` di prod.
-- 1.7 /health cek DB: `SELECT 1` sebelum return; HTTP 503 + `"status":"degraded"` jika DB mati.
-- 1.3 Rate limiting: `slowapi>=0.1.9` ditambah; endpoint POST /messages dibatasi 20 req/menit per IP.
-- 2.2 phone_utils.py: `app/core/phone_utils.py` — satu `normalize_phone()` menggantikan 4 definisi lokal di channels.py.
-- 2.4 Magic numbers → config: `context_summary_trigger`, `default_subagent_model`, `llm_max_tokens`, dll. semuanya di `config.py`.
-- 2.5 except Exception: pass → logging: blok error-reply di channels.py sekarang `log.warning(...)`.
-- 2.6 Inline import cleanup: `send_wa_message` dan `markdown_to_wa` dipindah ke top-level import channels.py.
-- 4.1 RequestIDMiddleware: `app/middleware/request_id.py` — inject `X-Request-ID` ke setiap request dan structlog contextvars.
-- 5.7 Input size validation: `MessageCreate.message` max 10KB, `WAIncomingMessage.message` max 10KB, `media_data` max 10MB.
-- Sentry: `sentry-sdk[fastapi]>=1.40.0` di requirements; init di main.py jika `SENTRY_DSN` di-set.
-
-Sprint 1 Day 1 (scheduler proses terpisah):
-- 1.1 app/scheduler_worker.py: entry point `python -m app.scheduler_worker` untuk proses terpisah.
-- scheduler_service.py: tambah `run_scheduler_loop()` (asyncio loop + graceful SIGTERM) dan `_tick_with_lock()`
-  dengan PostgreSQL advisory lock (key 12345) agar aman multi-instance.
-- deploy/docker-compose.prod.yml: service `scheduler` ditambah, service `api` difix (hapus --reload, tambah healthcheck).
-
-Semua checklist Sprint 0 di production-plan/ sudah ditandai [x].
-Next: Sprint 1 hari 2 (magic numbers, import cleanup, Sentry) + Sprint 1 hari 3 (sandbox hardening).
-
-Production Readiness Plan (27 Apr 2026):
-
-Analisis menyeluruh dilakukan terhadap kesiapan platform untuk production dengan 500+ user.
-Hasilnya didokumentasikan di folder production-plan/ dengan 6 dokumen:
-
-01-critical-blockers.md — 7 masalah yang harus diselesaikan sebelum go-live:
-- APScheduler in-process: harus jadi proses terpisah agar tidak duplikat job saat multi-instance.
-- Event bus in-memory: tidak bisa multi-process, roadmap ke Redis pub/sub.
-- Tidak ada rate limiting: endpoint /messages bisa di-flood → LLM cost meledak.
-- DEVELOPER_PHONE hardcoded di source code → pindah ke env var.
-- CORS allow_origins=["*"] masih ada meski ada komentar "lock down in production".
-- docker-compose.yml masih pakai --reload dan tidak ada restart policy.
-- /health selalu return OK bahkan saat DB mati.
-
-02-code-quality.md — Refactor maintainability:
-- agent_runner.py 1477 baris → pecah ke tool_builder.py, prompt_builder.py, subagent_builder.py, context_service.py.
-- _normalize_phone didefinisikan 4x di file berbeda → satu phone_utils.py.
-- wa_incoming() 325 baris → extrak helper functions.
-- Magic numbers (_SUMMARY_TRIGGER=10, max_tokens=4096, dll.) → pindah ke config.py.
-
-03-scaling.md — Arsitektur horizontal scaling:
-- Redis untuk event bus, rate limiting, dan distributed scheduler lock.
-- PgBouncer untuk connection pooling (max_client_conn=200, pool_size=20).
-- Resource limits untuk Docker sandbox (256MB RAM, 25% CPU, network disabled).
-- WA message deduplication untuk handle delivery retry.
-
-04-observability.md — Monitoring dan debugging:
-- Prometheus metrics custom (agent_runs_total, agent_run_duration, llm_tokens_used, dll.).
-- Grafana dashboard dengan 5 panel kunci + alerting rules.
-- Sentry integration untuk error tracking.
-- RequestIDMiddleware untuk trace satu request di semua log.
-
-05-security.md — Hardening:
-- Multi-key API system dengan key_hash storage (bukan plaintext).
-- Docker sandbox hardening: drop capabilities, disable network, read-only root.
-- Docker socket mount (/var/run/docker.sock) berbahaya → roadmap rootless Docker.
-- PII redaction di logs, input size validation di semua schema.
-
-06-roadmap.md — Sprint plan:
-- Sprint 0 (1 hari): quick wins, platform aman untuk soft launch.
-- Sprint 1 (3-5 hari): reliability, tahan ~100 concurrent user.
-- Sprint 2 (1 minggu): Redis + PgBouncer + monitoring, tahan ~300-500 user.
-- Sprint 3 (1-2 minggu): maintainability jangka panjang.
-Estimasi server untuk 500 user: 4 vCPU/8GB API + 2 vCPU/4GB PG + 1GB Redis, ~$80-150/bulan VPS.
-
-Refactoring agent_runner.py Selesai + E2E API Test (27 Apr 2026):
-
-Sprint 3 - Item 2.1 (agent_runner.py refactoring) sudah selesai dan diverifikasi melalui end-to-end API test.
-
-Refactoring yang dilakukan:
-- app/core/tool_builder.py: factory functions semua tool (Sandbox, Memory, Skills, Custom Tools, WA Media, HTTP).
-- app/core/prompt_builder.py: logika system prompt, RAG context injection, dan memory summarizer.
-- app/core/subagent_builder.py: inisialisasi system sub-agents dan sub-agent custom dari DB.
-- app/core/context_service.py: loading history, token counting, dan konversi pesan DB → format LangChain.
-- app/api/wa_helpers.py: helper functions untuk wa_incoming() — lookup agent, buat session, proses media.
-- app/api/channels.py: wa_incoming() dikecilkan dari ~325 baris menjadi ~60 baris orchestration murni.
-- agent_runner.py: kini orchestrator slim ~250 baris yang memanggil modul-modul di atas.
-
-Dependency fix:
-- prometheus-fastapi-instrumentator dan slowapi sudah ada di requirements.txt tapi belum terinstall di
-  venv development. Fix: pip install prometheus-fastapi-instrumentator slowapi.
-
-E2E API Test — semua endpoint lulus:
-
-| Endpoint | Status |
-|---|---|
-| GET /health | ✅ 200 |
-| POST /v1/agents (7 varian) | ✅ 201 |
-| GET/PATCH/DELETE /v1/agents/:id | ✅ 200 |
-| POST /v1/agents/:id/renew | ✅ 200 |
-| GET /v1/agents/:id/whatsapp/qr + status (WA agent) | ✅ 200 |
-| POST /v1/agents/:id/sessions | ✅ 201 |
-| GET/PATCH /v1/agents/:id/sessions/:sid | ✅ 200 |
-| GET/POST/DELETE /v1/agents/:id/memory | ✅ 200/201 |
-| GET/POST/DELETE /v1/agents/:id/skills | ✅ 200/201 |
-| GET /v1/agents/:id/custom-tools | ✅ 200 |
-| POST/GET /v1/agents/:id/documents | ✅ 201/200 (+ embedding otomatis) |
-| GET /v1/sessions/:id/history | ✅ 200 |
-| GET /v1/runs/:run_id | ✅ 200 (menyimpan user + agent messages) |
-| POST /v1/channels/incoming/:session_id | ✅ 200 — agent menjawab "Halo! Ada yang bisa saya bantu? 😊" |
-
-Bug yang ditemukan & diperbaiki:
-- GET/DELETE /whatsapp/{status,qr,disconnect} pada agent non-WA mengembalikan HTTP 400 (Bad Request).
-  Semantiknya salah — resource WhatsApp tidak ada pada agent ini, harusnya 404 (Not Found).
-  Fix: ganti status_code dari HTTP_400_BAD_REQUEST ke HTTP_404_NOT_FOUND di ketiga endpoint di app/api/agents.py.
-
-Status production-plan:
-- Fase 2 (Code Quality) 100% selesai.
-- Next: Sprint 2 - 3.3 Rate Limiter (Redis sliding window) atau Sprint 2 - 4.3 Observability (Grafana dashboard).
-
-Implementasi Fase 3 — Scaling Architecture (27 Apr 2026):
-
-Sprint 2 untuk Phase 3 (Scaling Foundation) telah diimplementasi untuk menjamin stabilitas saat traffic mencapai ~500 concurrent users. 
-
-1. **3.3 Rate Limiting Berbasis Redis**
-   - **Hotfix (Deploy):** Mengembalikan koneksi `slowapi` pada `app/main.py` menggunakan standard sinkronous `redis://` alih-alih `async+redis://` (yang menuntut dependensi tambahan `coredis` sehingga mengakibatkan API crash). Rate limit ini sangat optimal secara latensi sehingga `redis://` memadai.
-   
-2. **3.4 PgBouncer Connection Pooling**
-   - Menambahkan container `pgbouncer` ke `docker-compose.prod.yml` dengan transaction pooling mode (`POOL_MODE: transaction`) dan `MAX_CLIENT_CONN: 1000`.
-   - Melakukan tuning pool SQLAlchemy API (`pool_size=5`, `max_overflow=10`, `pool_timeout=30`, `pool_recycle=1800`) agar kompatibel dengan limit rate database yang melalui PgBouncer.
-
-3. **3.6 Resource Limits (Docker Sandbox)**
-   - Menambahkan pengecekan label `managed-agent-sandbox=true` di `DockerSandbox` (`app/core/sandbox.py`) agar saat eksekusi mencapai `max_concurrent_sandboxes` (`get_settings().max_concurrent_sandboxes`), Sandbox otomatis decline eksekusi. Ini mencegah server hang karena CPU/Memory exhaustion dari infinite loop.
-
-4. **3.7 WA Deduplication (Idempotency)**
-   - Implementasi `is_duplicate_message` di `app/api/wa_helpers.py` menggunakan cache Redis TTL 300s (5 menit) (+ fallback In-Memory Cache) sebagai lock mekanisme idempotency WA.
-   - Dipanggil di `wa_incoming()` untuk mendrop pengulangan otomatis dari trigger Webhook yang double-delivery.
-
-5. **Shared Redis Pool**
-   - Refactor `app/core/event_bus_redis.py` dan membuat modul global connection pooling Redis di `app/core/redis_client.py`.
-
-Next Action:
-Untuk 3.5 (Background Tasks via Celery) tidak dilakukan langsung sekarang karena akan mengubah signature API (Response dari `{"reply":"..."}` menjadi `{"status":"pending","run_id":"..."}`). Bila ingin diterapkan, semua HTTP client Frontend/Bot harus disesuaikan menjadi cara asinkronus (long-polling HTTP / WebSocket). Bila saat ini performance block sudah terbantu PgBouncer, 3.5 dapat ditunda sementara.
+### Dari mana `from_phone` di Python
+```
+Go wa-service → body.from_ = "+" + evt.Info.Sender.User  (LID number untuk akun LID)
+Go wa-service → body.phone_from = hasil GetPNForLID (fallback ke from_ jika gagal)
+Python → from_phone = body.phone_from or body.from_
+```

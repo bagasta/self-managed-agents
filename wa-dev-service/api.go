@@ -176,6 +176,25 @@ func (a *API) SendDocumentURL(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "sent"})
 }
 
+// POST /resolve-phones
+// Body: {"phones": ["+628xxx"]}
+// Response: {"resolved": {"628xxx": "628xxx@s.whatsapp.net"}}
+func (a *API) ResolvePhones(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Phones []string `json:"phones"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Phones) == 0 {
+		http.Error(w, `{"error":"phones array required"}`, http.StatusBadRequest)
+		return
+	}
+	resolved, err := a.wa.ResolvePhones(req.Phones)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusServiceUnavailable)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"resolved": resolved})
+}
+
 func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(v)
