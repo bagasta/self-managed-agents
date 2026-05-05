@@ -1,4 +1,4 @@
-.PHONY: help install dev db-up migrate upgrade downgrade lint format wa wa-build dev-all wa-dev-build wa-dev
+.PHONY: help install dev db-up migrate upgrade downgrade lint format wa wa-build dev-all wa-dev-build wa-dev seed-agents
 
 help:
 	@echo "Managed Agent Platform"
@@ -16,6 +16,7 @@ help:
 	@echo "  make downgrade     Rollback one migration"
 	@echo "  make lint          Run ruff linter"
 	@echo "  make format        Run ruff formatter"
+	@echo "  make seed-agents   Seed system sub-agents to DB"
 
 install:
 	pip install -r requirements.txt
@@ -61,3 +62,6 @@ lint:
 
 format:
 	ruff format app/ alembic/
+
+seed-agents:
+	python -m scripts.seed_system_agents

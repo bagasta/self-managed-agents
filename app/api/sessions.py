@@ -37,7 +37,7 @@ async def create_session(
             detail=f"Agent {agent_id} not found",
         )
 
-    from app.core.channel_service import encrypt_channel_config
+    from app.core.infra.channel_service import encrypt_channel_config
     encrypted_channel_config = encrypt_channel_config(payload.channel_config) if payload.channel_config else {}
 
     session = Session(

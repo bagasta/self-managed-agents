@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.memory_service import upsert_memory, list_memories, delete_memory
+from app.core.domain.memory_service import upsert_memory, list_memories, delete_memory
 from app.database import get_db
 from app.deps import verify_api_key
 from app.models.agent import Agent

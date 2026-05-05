@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.custom_tool_service import (
+from app.core.domain.custom_tool_service import (
     create_or_update_custom_tool,
     delete_custom_tool,
     get_custom_tool,

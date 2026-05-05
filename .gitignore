@@ -61,3 +61,16 @@ wa-dev-service/connections.json
 deploy/note-deploy.md
 deploy/SOP-deploy.md
 deploy_paramiko.py
+
+# SQLite DB (runtime data)
+*.db
+
+# Ad-hoc test/debug scripts (may contain hardcoded keys or local paths)
+test_*.py
+check_db.py
+patch_subagents.py
+update_schema.py
+test_out.txt
+
+# System message drafts (large markdown, managed via scripts/seed_*.py)
+system-message-*.md

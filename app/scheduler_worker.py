@@ -8,7 +8,7 @@ reminders are not duplicated when running multiple API workers.
 """
 import asyncio
 
-from app.core.scheduler_service import run_scheduler_loop
+from app.core.workers.scheduler_service import run_scheduler_loop
 
 if __name__ == "__main__":
     asyncio.run(run_scheduler_loop())

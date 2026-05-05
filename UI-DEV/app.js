@@ -73,6 +73,8 @@ function nav(id) {
   if (id !== 'chat') disconnectSSE();
   // Stop WA polling when leaving whatsapp section
   if (id !== 'whatsapp') stopWAPolling();
+  if (id === 'arthur') { arthurLoad(); }
+  if (id !== 'arthur') arthurStopQRPoller();
 }
 
 // ── SSE ────────────────────────────────────────────────────────────
@@ -243,8 +245,8 @@ function toggleLog() {
 function setAgentFormDefaults() {
   document.getElementById('a-tools').value = JSON.stringify({
     memory: true, skills: true, escalation: true,
-    sandbox: false, tool_creator: false, scheduler: false,
-    rag: false, http: false, mcp: false, wa_agent_manager: false,
+    sandbox: false, deploy: false, tool_creator: false, scheduler: false,
+    rag: false, http: false, mcp: {}, wa_agent_manager: false,
     subagents: { enabled: false, agent_ids: [] }
   }, null, 2);
   document.getElementById('a-escalation').value = JSON.stringify({
@@ -261,9 +263,18 @@ function onAgentChannelTypeChange() {
 async function loadAgents() {
   const r = await api('GET', '/v1/agents?limit=100');
   if (!r.ok) { renderAgentsTable([]); return; }
-  S.agents = r.data.items || [];
+  S.agents = (r.data.items || []).filter(a => !(a.capabilities && a.capabilities.includes('subagent')));
   renderAgentsTable(S.agents);
   populateAgentSelects();
+}
+
+function _toolBadges(tc) {
+  if (!tc) return '';
+  const icons = { sandbox: '🐳', deploy: '🚀', tool_creator: '🔧', scheduler: '⏰', rag: '📚', http: '🌐', subagents: '🤖' };
+  return Object.entries(icons)
+    .filter(([k]) => tc[k] && tc[k] !== false && !(k === 'subagents' && !tc[k]?.enabled))
+    .map(([k, icon]) => `<span class="tool-badge">${icon} ${k}</span>`)
+    .join('');
 }
 
 function renderAgentsTable(agents) {
@@ -276,16 +287,18 @@ function renderAgentsTable(agents) {
     <div class="table-wrap">
       <table>
         <thead><tr>
-          <th>Name</th><th>Model</th><th>WhatsApp</th><th>Quota</th><th>Created</th><th>Actions</th>
+          <th>Name</th><th>Model</th><th>Tools</th><th>WhatsApp</th><th>Quota</th><th>Created</th><th>Actions</th>
         </tr></thead>
         <tbody>
           ${agents.map(a => `
             <tr>
               <td>
                 <strong>${escHtml(a.name)}</strong>
+                ${a.capabilities && a.capabilities.includes('system') ? ' <span class="badge badge-blue">system</span>' : ''}
                 ${a.description ? `<br><span class="text-muted">${escHtml(a.description)}</span>` : ''}
               </td>
               <td class="td-mono">${escHtml(a.model)}</td>
+              <td><div class="tool-badges">${_toolBadges(a.tools_config)}</div></td>
               <td>
                 ${a.channel_type === 'whatsapp'
       ? `<button class="btn btn-ghost btn-sm wa-btn" onclick="goToWAAgent('${a.id}')">📱 Kelola WA</button>`
@@ -539,6 +552,13 @@ function clearChatUI() {
   document.getElementById('chat-messages').innerHTML = '<div class="bubble-system">Chat cleared</div>';
 }
 
+function linkify(text) {
+  return escHtml(text || '').replace(
+    /(https?:\/\/[^\s<>"]+)/g,
+    '<a href="$1" target="_blank" rel="noopener" class="chat-link">$1</a>'
+  );
+}
+
 function appendChatBubble(role, content, toolName = null) {
   const chatEl = document.getElementById('chat-messages');
   const div = document.createElement('div');
@@ -547,7 +567,7 @@ function appendChatBubble(role, content, toolName = null) {
     div.innerHTML = `<div class="bubble-label">You</div>${escHtml(content || '')}`;
   } else if (role === 'agent') {
     div.className = 'chat-bubble bubble-agent';
-    div.innerHTML = `<div class="bubble-label">🤖 Agent</div>${escHtml(content || '')}`;
+    div.innerHTML = `<div class="bubble-label">🤖 Agent</div>${linkify(content || '')}`;
   } else if (role === 'tool') {
     div.className = 'chat-bubble bubble-agent';
     div.innerHTML = `<div class="bubble-tools">🔧 Tool: ${escHtml(toolName || 'unknown')}</div>`;
@@ -1086,8 +1106,8 @@ async function createWAAgent() {
     channel_type: 'whatsapp',
     tools_config: {
       memory: true, skills: true, escalation: true,
-      sandbox: false, tool_creator: false, scheduler: false,
-      rag: false, http: false, mcp: false
+      sandbox: false, deploy: false, tool_creator: false, scheduler: false,
+      rag: false, http: false, mcp: {}
     },
     escalation_config: {},
     safety_policy: {},
@@ -1345,4 +1365,346 @@ async function getRun() {
           </tbody>
         </table></div>` : ''}
     </div>`;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   ARTHUR BUILDER
+   ═══════════════════════════════════════════════════════════════════ */
+
+const Arthur = {
+  id: null,
+  apiKey: null,
+  sessionId: null,
+  deviceId: null,
+  qrPoller: null,
+};
+
+// ── Load Arthur agent dari DB ──────────────────────────────────────
+async function arthurLoad() {
+  const panel = document.getElementById('arthur-status-panel');
+  panel.innerHTML = `<div class="text-muted">🔍 Mencari Arthur...</div>`;
+
+  const r = await api('GET', '/v1/agents?limit=100');
+  if (!r.ok) {
+    panel.innerHTML = `<div class="badge badge-red">Error: ${escHtml(JSON.stringify(r.data))}</div>`;
+    return;
+  }
+
+  const agents = r.data.items || [];
+  const arthur = agents.find(a => a.capabilities && a.capabilities.includes('builder') && !a.is_deleted);
+
+  if (!arthur) {
+    panel.innerHTML = `
+      <div class="badge badge-yellow" style="margin-bottom:10px">⚠️ Arthur belum ada di database</div>
+      <p class="text-muted" style="font-size:11px;margin:8px 0">Jalankan seed script untuk membuat Arthur:</p>
+      <code style="background:var(--surface-2);padding:6px 10px;border-radius:4px;font-size:11px;display:block">python scripts/seed_arthur.py</code>
+    `;
+    return;
+  }
+
+  Arthur.id = arthur.id;
+  Arthur.apiKey = arthur.api_key;
+  Arthur.deviceId = arthur.wa_device_id || null;
+
+  const waStatus = arthur.wa_device_id
+    ? `<span class="badge badge-blue">📱 ${escHtml(arthur.wa_device_id)}</span>`
+    : `<span class="badge badge-yellow">⚠️ Belum connect WA</span>`;
+
+  panel.innerHTML = `
+    <div class="info-rows">
+      <div class="info-row"><span class="info-label">ID</span><span class="td-mono" style="font-size:11px">${escHtml(arthur.id)}</span></div>
+      <div class="info-row"><span class="info-label">Name</span><strong>${escHtml(arthur.name)}</strong></div>
+      <div class="info-row"><span class="info-label">Model</span>${escHtml(arthur.model)}</div>
+      <div class="info-row"><span class="info-label">capabilities</span><span class="badge badge-green">✅ system</span></div>
+      <div class="info-row"><span class="info-label">WhatsApp</span>${waStatus}</div>
+      <div class="info-row"><span class="info-label">Quota</span>${(arthur.tokens_used||0).toLocaleString()} / ${(arthur.token_quota||0).toLocaleString()} tokens</div>
+      <div class="info-row"><span class="info-label">API Key</span><span class="td-mono" style="font-size:10px">${escHtml(arthur.api_key)}</span></div>
+    </div>
+  `;
+
+  // Pre-fill config fields
+  document.getElementById('arthur-model').value = arthur.model || '';
+  document.getElementById('arthur-temp').value = arthur.temperature ?? 0.7;
+  const tc = arthur.tools_config || {};
+  if (!('deploy' in tc)) tc.deploy = false;
+  document.getElementById('arthur-tools').value = JSON.stringify(tc, null, 2);
+}
+
+// ── WhatsApp Connect ───────────────────────────────────────────────
+async function arthurConnectWA() {
+  if (!Arthur.id) { alert('Load Arthur dulu'); return; }
+  const qrDiv = document.getElementById('arthur-wa-qr');
+  const statusDiv = document.getElementById('arthur-wa-status');
+  qrDiv.innerHTML = `<div class="text-muted">⏳ Generating QR...</div>`;
+
+  const r = await api('POST', `/v1/agents/${Arthur.id}/whatsapp/connect`);
+  if (!r.ok) {
+    qrDiv.innerHTML = `<div class="badge badge-red">Error: ${escHtml(JSON.stringify(r.data))}</div>`;
+    return;
+  }
+
+  Arthur.deviceId = r.data.device_id || r.data.wa_device_id || Arthur.deviceId;
+  _arthurRenderQR(r.data.qr_image || r.data.qr_base64, r.data.status);
+
+  // Auto-poll QR every 18 seconds
+  arthurStopQRPoller();
+  Arthur.qrPoller = setInterval(() => arthurRefreshQR(), 18000);
+  // Poll status every 3s to detect when connected
+  _arthurPollStatus();
+}
+
+async function arthurRefreshQR() {
+  if (!Arthur.id) return;
+  const r = await api('GET', `/v1/agents/${Arthur.id}/whatsapp/qr`);
+  if (r.ok) _arthurRenderQR(r.data.qr_image || r.data.qr_base64, r.data.status);
+}
+
+async function arthurCheckWAStatus() {
+  if (!Arthur.id) { alert('Load Arthur dulu'); return; }
+  const r = await api('GET', `/v1/agents/${Arthur.id}/whatsapp/status`);
+  if (!r.ok) { document.getElementById('arthur-wa-status').innerHTML = `<div class="badge badge-red">Error</div>`; return; }
+  _arthurSetStatusBadge(r.data.status);
+}
+
+async function arthurDisconnectWA() {
+  if (!Arthur.id) { alert('Load Arthur dulu'); return; }
+  if (!confirm('Disconnect WhatsApp Arthur?')) return;
+  const r = await api('DELETE', `/v1/agents/${Arthur.id}/whatsapp`);
+  arthurStopQRPoller();
+  document.getElementById('arthur-wa-qr').innerHTML = '';
+  document.getElementById('arthur-wa-status').innerHTML = r.ok
+    ? `<span class="badge badge-yellow">⛔ Disconnected</span>`
+    : `<div class="badge badge-red">Error</div>`;
+  if (r.ok) arthurLoad();
+}
+
+function _arthurRenderQR(qrBase64, status) {
+  const qrDiv = document.getElementById('arthur-wa-qr');
+  if (status === 'connected') {
+    arthurStopQRPoller();
+    qrDiv.innerHTML = `<span class="badge badge-green" style="font-size:14px">✅ Connected!</span>`;
+    _arthurSetStatusBadge('connected');
+    arthurLoad();
+    return;
+  }
+  if (qrBase64) {
+    qrDiv.innerHTML = `
+      <img src="data:image/png;base64,${qrBase64}" style="width:220px;height:220px;border-radius:8px;border:2px solid var(--border)" alt="QR">
+      <div class="text-muted" style="font-size:10px;margin-top:6px">Auto-refresh tiap 18 detik · Scan cepat sebelum expire ⚡</div>
+    `;
+  } else {
+    qrDiv.innerHTML = `<div class="text-muted">QR tidak tersedia — status: ${escHtml(status)}</div>`;
+  }
+  _arthurSetStatusBadge(status);
+}
+
+function _arthurSetStatusBadge(status) {
+  const el = document.getElementById('arthur-wa-status');
+  const map = {
+    connected: `<span class="badge badge-green">✅ Connected</span>`,
+    waiting_qr: `<span class="badge badge-yellow">⏳ Menunggu Scan QR</span>`,
+    disconnected: `<span class="badge badge-red">⛔ Disconnected</span>`,
+  };
+  el.innerHTML = map[status] || `<span class="badge badge-blue">${escHtml(status)}</span>`;
+}
+
+async function _arthurPollStatus() {
+  if (!Arthur.id) return;
+  let tries = 0;
+  const poll = async () => {
+    if (tries++ > 30 || !Arthur.id) return; // max ~90 detik
+    const r = await api('GET', `/v1/agents/${Arthur.id}/whatsapp/status`);
+    if (r.ok && r.data.status === 'connected') {
+      arthurStopQRPoller();
+      _arthurRenderQR(null, 'connected');
+    } else {
+      setTimeout(poll, 3000);
+    }
+  };
+  setTimeout(poll, 3000);
+}
+
+function arthurStopQRPoller() {
+  if (Arthur.qrPoller) { clearInterval(Arthur.qrPoller); Arthur.qrPoller = null; }
+}
+
+// ── Chat with Arthur ───────────────────────────────────────────────
+async function arthurNewSession() {
+  if (!Arthur.id) { await arthurLoad(); }
+  if (!Arthur.id) { alert('Arthur belum ada. Jalankan seed script dulu.'); return; }
+
+  const r = await api('POST', `/v1/agents/${Arthur.id}/sessions`, {
+    external_user_id: 'dev-tester',
+    metadata: { source: 'arthur-ui' },
+  });
+
+  if (!r.ok) {
+    _arthurAppendBubble('system', `❌ Gagal buat session: ${JSON.stringify(r.data)}`);
+    return;
+  }
+
+  Arthur.sessionId = r.data.id;
+  document.getElementById('arthur-session-badge').textContent = `Session: ${Arthur.sessionId.slice(0, 8)}...`;
+  document.getElementById('arthur-session-badge').style.display = 'inline';
+  document.getElementById('arthur-chat-messages').innerHTML = '';
+  _arthurAppendBubble('system', '✅ Session baru dibuat. Silakan kirim pesan ke Arthur!');
+}
+
+async function arthurSendMessage() {
+  if (!Arthur.sessionId) {
+    await arthurNewSession();
+    if (!Arthur.sessionId) return;
+  }
+
+  const input = document.getElementById('arthur-chat-input');
+  const msg = input.value.trim();
+  if (!msg) return;
+
+  input.value = '';
+  _arthurAppendBubble('user', msg);
+
+  const btn = document.getElementById('arthur-send-btn');
+  btn.disabled = true;
+  btn.textContent = '...';
+
+  const url = `/v1/agents/${Arthur.id}/sessions/${Arthur.sessionId}/messages`;
+  const headers = { 'X-Agent-Key': Arthur.apiKey, 'Content-Type': 'application/json' };
+  logRequest('POST', `${S.baseUrl}${url}`, { message: msg });
+
+  try {
+    const res = await fetch(`${S.baseUrl}${url}`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ message: msg }),
+    });
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = { reply: text }; }
+    logResponse(res.status, data, 'POST', `${S.baseUrl}${url}`);
+
+    if (res.ok) {
+      _arthurAppendBubble('agent', data.reply || '(no reply)');
+    } else {
+      _arthurAppendBubble('system', `❌ Error ${res.status}: ${JSON.stringify(data)}`);
+    }
+  } catch (err) {
+    _arthurAppendBubble('system', `❌ Network error: ${err.message}`);
+  }
+
+  btn.disabled = false;
+  btn.textContent = 'Send ↑';
+}
+
+function arthurChatKeydown(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); arthurSendMessage(); }
+}
+
+function _arthurAppendBubble(role, text) {
+  const el = document.getElementById('arthur-chat-messages');
+  const div = document.createElement('div');
+  if (role === 'user') {
+    div.className = 'chat-bubble bubble-user';
+    div.textContent = text;
+  } else if (role === 'agent') {
+    div.className = 'chat-bubble bubble-agent';
+    div.innerHTML = `<div class="bubble-label">🏗️ Arthur</div>${linkify(text)}`;
+  } else {
+    div.className = 'bubble-system';
+    div.textContent = text;
+  }
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+}
+
+// ── Instructions ───────────────────────────────────────────────────
+async function arthurLoadInstructions() {
+  if (!Arthur.id) { await arthurLoad(); }
+  if (!Arthur.id) { alert('Arthur belum ditemukan'); return; }
+  const r = await api('GET', `/v1/agents/${Arthur.id}`);
+  if (r.ok) {
+    document.getElementById('arthur-instructions').value = r.data.instructions || '';
+  } else {
+    alert('Gagal load: ' + JSON.stringify(r.data));
+  }
+}
+
+async function arthurLoadRulebookFile() {
+  // Show preview info
+  document.getElementById('arthur-instructions').value =
+    '# system-message-builder.md\n# (file ada di root project — load dari DB untuk edit)\n\n' +
+    'Klik "Load dari DB" untuk memuat instruksi yang sedang aktif di Arthur.\n' +
+    'Edit lalu klik "Save Instructions" untuk update.';
+}
+
+async function arthurSaveInstructions() {
+  if (!Arthur.id) { await arthurLoad(); }
+  if (!Arthur.id) { alert('Arthur belum ditemukan'); return; }
+
+  const instructions = document.getElementById('arthur-instructions').value;
+  const result = document.getElementById('arthur-instructions-result');
+
+  result.innerHTML = `<div class="text-muted">⏳ Saving...</div>`;
+  const r = await api('PATCH', `/v1/agents/${Arthur.id}`, { instructions });
+  result.innerHTML = r.ok
+    ? `<div class="badge badge-green">✅ Instructions berhasil diupdate (${instructions.length} karakter)</div>`
+    : `<div class="badge badge-red">❌ Error: ${escHtml(JSON.stringify(r.data))}</div>`;
+}
+
+// ── Config ─────────────────────────────────────────────────────────
+async function arthurSaveConfig() {
+  if (!Arthur.id) { await arthurLoad(); }
+  if (!Arthur.id) { alert('Arthur belum ditemukan'); return; }
+
+  const result = document.getElementById('arthur-config-result');
+  let tools;
+  try { tools = JSON.parse(document.getElementById('arthur-tools').value); }
+  catch { result.innerHTML = `<div class="badge badge-red">❌ Tools Config bukan JSON valid</div>`; return; }
+
+  const payload = {
+    model: document.getElementById('arthur-model').value,
+    temperature: parseFloat(document.getElementById('arthur-temp').value),
+    tools_config: tools,
+  };
+
+  result.innerHTML = `<div class="text-muted">⏳ Saving...</div>`;
+  const r = await api('PATCH', `/v1/agents/${Arthur.id}`, payload);
+  result.innerHTML = r.ok
+    ? `<div class="badge badge-green">✅ Config berhasil diupdate</div>`
+    : `<div class="badge badge-red">❌ Error: ${escHtml(JSON.stringify(r.data))}</div>`;
+  if (r.ok) arthurLoad();
+}
+
+// ── Simulate Incoming WA ───────────────────────────────────────────
+async function arthurSimulate() {
+  if (!Arthur.id) { await arthurLoad(); }
+  if (!Arthur.id) { alert('Arthur belum ditemukan'); return; }
+
+  const fromPhone = document.getElementById('arthur-sim-from').value.trim();
+  const msg = document.getElementById('arthur-sim-msg').value.trim();
+  const result = document.getElementById('arthur-sim-result');
+
+  if (!fromPhone || !msg) { result.innerHTML = `<div class="badge badge-yellow">⚠️ Isi From Phone dan Pesan</div>`; return; }
+  if (!Arthur.deviceId) { result.innerHTML = `<div class="badge badge-yellow">⚠️ Arthur belum punya WA device — Connect WA dulu atau isi device ID manual</div>`; return; }
+
+  result.innerHTML = `<div class="text-muted">⏳ Mengirim ke Arthur...</div>`;
+
+  const r = await api('POST', '/v1/channels/wa/incoming', {
+    device_id: Arthur.deviceId,
+    from: fromPhone,
+    message: msg,
+    timestamp: Math.floor(Date.now() / 1000),
+  });
+
+  if (r.ok) {
+    result.innerHTML = `
+      <div class="badge badge-green" style="margin-bottom:8px">✅ Diterima</div>
+      <div style="background:var(--surface-2);padding:10px;border-radius:6px;margin-top:8px">
+        <div class="text-muted" style="font-size:10px;margin-bottom:4px">REPLY:</div>
+        <div style="white-space:pre-wrap">${escHtml(r.data.reply || JSON.stringify(r.data))}</div>
+      </div>
+    `;
+  } else {
+    result.innerHTML = `<div class="badge badge-red">❌ Error ${r.status}: ${escHtml(JSON.stringify(r.data))}</div>`;
+  }
 }

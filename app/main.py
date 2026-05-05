@@ -62,11 +62,11 @@ limiter = Limiter(**limiter_opts)
 async def lifespan(_app: FastAPI):
     # Pre-load embedding model so the first request isn't slow.
     # Downloads model files (~130MB) on first run, cached after that.
-    from app.core.embedding_service import warmup_embedding_model
+    from app.core.domain.embedding_service import warmup_embedding_model
     await warmup_embedding_model()
 
     # Start proactive agent scheduler (only in non-worker deployments)
-    from app.core.scheduler_service import start_scheduler, stop_scheduler
+    from app.core.workers.scheduler_service import start_scheduler, stop_scheduler
     start_scheduler()
 
     yield
@@ -139,7 +139,7 @@ async def health_detailed(db: AsyncSession = Depends(get_db)) -> dict:
     except Exception as exc:
         checks["database"] = f"error: {exc}"
 
-    from app.core.scheduler_service import is_scheduler_running
+    from app.core.workers.scheduler_service import is_scheduler_running
     checks["scheduler"] = "ok" if is_scheduler_running() else "stopped"
 
     try:

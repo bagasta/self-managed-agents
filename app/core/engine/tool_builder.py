@@ -12,6 +12,8 @@ Daftar fungsi:
   build_whatsapp_media_tools(session, sandbox)
   build_wa_agent_manager_tools(session)
   build_http_tools(tools_config)
+  build_builder_tools(db, owner_phone)      ← hanya untuk capability "builder"
+  build_deployment_tools(sandbox)           ← opt-in via tools_config deploy: true
   _is_enabled(tools_config, key, default)   ← re-exported untuk backward compat
 """
 from __future__ import annotations
@@ -25,8 +27,8 @@ from typing import Any, Optional
 from langchain_core.tools import tool, StructuredTool
 from pydantic import Field, create_model
 
-from app.core.custom_tool_service import create_or_update_custom_tool, list_custom_tools
-from app.core.memory_service import (
+from app.core.domain.custom_tool_service import create_or_update_custom_tool, list_custom_tools
+from app.core.domain.memory_service import (
     build_memory_context as _build_memory_context,
     delete_memory,
     extract_long_term_memory,
@@ -34,13 +36,13 @@ from app.core.memory_service import (
     list_memories,
     upsert_memory,
 )
-from app.core.sandbox import DockerSandbox
-from app.core.skill_service import (
+from app.core.infra.sandbox import DockerSandbox
+from app.core.domain.skill_service import (
     create_or_update_skill,
     get_skill,
     list_skills as _list_skills,
 )
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 # ---------------------------------------------------------------------------
@@ -79,20 +81,23 @@ def build_sandbox_binary_tool(sandbox: DockerSandbox) -> list:
 # Memory tools
 # ---------------------------------------------------------------------------
 
-def build_memory_tools(agent_id: uuid.UUID, db: AsyncSession, scope: str | None = None) -> list:
+def build_memory_tools(agent_id: uuid.UUID, db_factory: async_sessionmaker, scope: str | None = None) -> list:
     @tool
     async def remember(key: str, value: str) -> str:
         """Store or update a fact in long-term memory. Args: key (short label), value (text to remember)."""
-        await upsert_memory(agent_id, key, value, db, scope=scope)
+        async with db_factory() as db:
+            await upsert_memory(agent_id, key, value, db, scope=scope)
+            await db.commit()
         return f"Remembered: {key} = {value}"
 
     @tool
     async def recall(query: str) -> str:
         """Retrieve a memory entry by its key. Args: query (the key to look up)."""
-        mem = await get_memory(agent_id, query, db, scope=scope)
-        if mem:
-            return f"{mem.key}: {mem.value_data}"
-        all_mems = await list_memories(agent_id, db, scope=scope)
+        async with db_factory() as db:
+            mem = await get_memory(agent_id, query, db, scope=scope)
+            if mem:
+                return f"{mem.key}: {mem.value_data}"
+            all_mems = await list_memories(agent_id, db, scope=scope)
         if not all_mems:
             return "No memories stored yet."
         keys = ", ".join(m.key for m in all_mems)
@@ -101,7 +106,9 @@ def build_memory_tools(agent_id: uuid.UUID, db: AsyncSession, scope: str | None 
     @tool
     async def forget(key: str) -> str:
         """Delete a memory entry by key. Args: key (the key to remove)."""
-        deleted = await delete_memory(agent_id, key, db, scope=scope)
+        async with db_factory() as db:
+            deleted = await delete_memory(agent_id, key, db, scope=scope)
+            await db.commit()
         return f"Forgotten: {key}" if deleted else f"No memory found for key '{key}'"
 
     return [remember, recall, forget]
@@ -111,18 +118,21 @@ def build_memory_tools(agent_id: uuid.UUID, db: AsyncSession, scope: str | None 
 # Skill tools
 # ---------------------------------------------------------------------------
 
-def build_skill_tools(agent_id: uuid.UUID, db: AsyncSession) -> list:
+def build_skill_tools(agent_id: uuid.UUID, db_factory: async_sessionmaker) -> list:
     @tool
     async def create_skill(name: str, description: str, content_md: str) -> str:
         """Save a reusable skill (instruction/prompt block) to the skill library.
         Args: name (unique short identifier), description (what it does), content_md (full instructions in markdown)."""
-        skill = await create_or_update_skill(agent_id, name, description, content_md, db)
+        async with db_factory() as db:
+            skill = await create_or_update_skill(agent_id, name, description, content_md, db)
+            await db.commit()
         return f"Skill '{skill.name}' saved successfully."
 
     @tool
     async def list_skills() -> str:
         """List all available skills for this agent."""
-        skills = await _list_skills(agent_id, db)
+        async with db_factory() as db:
+            skills = await _list_skills(agent_id, db)
         if not skills:
             return "No skills saved yet."
         lines = [f"- **{s.name}**: {s.description}" for s in skills]
@@ -132,7 +142,8 @@ def build_skill_tools(agent_id: uuid.UUID, db: AsyncSession) -> list:
     async def use_skill(name: str) -> str:
         """Load and return the full content of a skill by name to use in current context.
         Args: name (the skill identifier)."""
-        skill = await get_skill(agent_id, name, db)
+        async with db_factory() as db:
+            skill = await get_skill(agent_id, name, db)
         if not skill:
             return f"No skill found with name '{name}'"
         return f"# Skill: {skill.name}\n\n{skill.content_md}"
@@ -192,12 +203,15 @@ def _pip_prefix(code: str) -> str:
     return f"pip install --quiet --root-user-action=ignore {pkg_list} && "
 
 
-def build_tool_creator_tools(agent_id: uuid.UUID, db: AsyncSession, sandbox: DockerSandbox) -> list:
+def build_tool_creator_tools(agent_id: uuid.UUID, db_factory: async_sessionmaker, sandbox: DockerSandbox) -> list:
     @tool
     async def create_tool(name: str, description: str, python_code: str) -> str:
         """Save a new Python tool for this agent. The code must define a function with the same name as `name`.
         Args: name (function name, snake_case), description (what it does), python_code (valid Python code)."""
-        ct, err = await create_or_update_custom_tool(agent_id, name, description, python_code, db)
+        async with db_factory() as db:
+            ct, err = await create_or_update_custom_tool(agent_id, name, description, python_code, db)
+            if not err:
+                await db.commit()
         if err:
             return f"[error] Could not save tool: {err}"
         return f"Tool '{name}' saved successfully. It will be available in future sessions."
@@ -205,7 +219,8 @@ def build_tool_creator_tools(agent_id: uuid.UUID, db: AsyncSession, sandbox: Doc
     @tool
     async def list_tools() -> str:
         """List all custom tools created by this agent."""
-        tools = await list_custom_tools(agent_id, db)
+        async with db_factory() as db:
+            tools = await list_custom_tools(agent_id, db)
         if not tools:
             return "No custom tools created yet."
         lines = [f"- **{t.name}**: {t.description}" for t in tools]
@@ -222,7 +237,8 @@ def build_tool_creator_tools(agent_id: uuid.UUID, db: AsyncSession, sandbox: Doc
                       Call list_tools() first to see available tools, then inspect the tool's
                       function signature to know which keys are required.
                       Example: '{"content": "Hello", "filename": "out.pdf"}'"""
-        tools = await list_custom_tools(agent_id, db)
+        async with db_factory() as db:
+            tools = await list_custom_tools(agent_id, db)
         tool_map = {t.name: t for t in tools}
         if name not in tool_map:
             available = ", ".join(tool_map.keys()) or "none"
@@ -379,7 +395,7 @@ def build_whatsapp_media_tools(session: Any, sandbox: DockerSandbox | None) -> l
             image_b64 = b64_output.strip()
 
         try:
-            from app.core.wa_client import send_wa_image
+            from app.core.infra.wa_client import send_wa_image
             await send_wa_image(device_id, target, image_b64, caption, mimetype)
             return f"[IMAGE_SENT] Gambar dikirim ke {target}" + (f" dengan caption: {caption}" if caption else "")
         except Exception as exc:
@@ -436,7 +452,7 @@ def build_whatsapp_media_tools(session: Any, sandbox: DockerSandbox | None) -> l
             doc_b64 = file_path_or_base64.strip()
 
         try:
-            from app.core.wa_client import send_wa_document
+            from app.core.infra.wa_client import send_wa_document
             await send_wa_document(device_id, target, doc_b64, filename, caption, mimetype)
             return f"[DOCUMENT_SENT] Dokumen '{filename}' dikirim ke {target}" + (f" dengan caption: {caption}" if caption else "")
         except Exception as exc:
@@ -449,7 +465,7 @@ def build_whatsapp_media_tools(session: Any, sandbox: DockerSandbox | None) -> l
 # WA Agent Manager tool
 # ---------------------------------------------------------------------------
 
-def build_wa_agent_manager_tools(session: Any) -> list:
+def build_wa_agent_manager_tools(session: Any, db_factory: async_sessionmaker) -> list:
     """Tool send_agent_wa_qr — hanya untuk agent yang perlu mengelola agent lain (e.g. Arthur)."""
     _raw_cfg = session.channel_config
     channel_cfg: dict = _raw_cfg if isinstance(_raw_cfg, dict) else {}
@@ -480,8 +496,7 @@ def build_wa_agent_manager_tools(session: Any) -> list:
         if not device_id:
             return "[error] Tidak ada device_id WhatsApp pada session ini"
 
-        from app.core.wa_client import create_wa_device, get_wa_qr, send_wa_image
-        from app.database import get_db as _get_db
+        from app.core.infra.wa_client import create_wa_device, get_wa_qr, send_wa_image
         from app.models.agent import Agent as _Agent
         from sqlalchemy import select as _select
         import uuid as _uuid
@@ -491,12 +506,11 @@ def build_wa_agent_manager_tools(session: Any) -> list:
         except ValueError:
             return f"[error] agent_id tidak valid: '{agent_id}' — harus berupa UUID"
 
-        async for _db in _get_db():
+        async with db_factory() as _db:
             result = await _db.execute(
                 _select(_Agent).where(_Agent.id == agent_uuid, _Agent.is_deleted.is_(False))
             )
             agent_row = result.scalar_one_or_none()
-            break
 
         if not agent_row:
             return f"[error] Agent '{agent_id}' tidak ditemukan"
@@ -552,3 +566,42 @@ def build_wa_agent_manager_tools(session: Any) -> list:
 def build_http_tools(tools_config: dict[str, Any]) -> list:
     from app.core.tools.http_tool import build_http_tools as _build
     return _build(tools_config)
+
+
+# ---------------------------------------------------------------------------
+# Builder tools — hanya untuk agent dengan capability "builder"
+# ---------------------------------------------------------------------------
+
+def build_builder_tools(
+    db_factory: async_sessionmaker,
+    owner_phone: str | None = None,
+    self_agent_id: str | None = None,
+    api_key: str | None = None,
+) -> list:
+    """
+    Build tools eksklusif untuk system agent (Agent Builder / Arthur).
+    Dipanggil hanya jika agent_model memiliki capability 'builder'.
+
+    Args:
+        db_factory: async_sessionmaker factory — each tool call opens its own session
+        owner_phone: external_user_id caller (nomor WA/JID) untuk scoping keamanan
+        self_agent_id: UUID agent ini sendiri — untuk self-modification
+        api_key: API key platform — untuk memanggil API platform
+    """
+    from app.core.tools.builder_tools import build_builder_tools as _build
+    return _build(db_factory=db_factory, owner_phone=owner_phone, self_agent_id=self_agent_id, api_key=api_key)
+
+
+def build_deployment_tools(sandbox: "DockerSandbox") -> list:
+    """
+    Build deploy tools untuk agent dengan sandbox aktif + deploy: true di tools_config.
+    Tools: deploy_app, stop_deployment, get_deployment_status, get_deployment_logs.
+    """
+    from app.core.tools.deployment_tools import build_deployment_tools as _build
+    from app.config import get_settings
+    settings = get_settings()
+    return _build(
+        session_id=sandbox.session_id,
+        workspace_dir=sandbox.workspace_dir,
+        sandbox_image=settings.docker_sandbox_image,
+    )

@@ -429,3 +429,61 @@ tr:hover td { background: var(--surface-2); }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* ── Arthur Builder ─────────────────────────────────────────────── */
+#sec-arthur .chat-bubble { max-width: 88%; }
+#arthur-chat-messages .bubble-agent {
+  background: linear-gradient(135deg, var(--surface-2), color-mix(in srgb, var(--accent) 6%, var(--surface-2)));
+  border-left: 3px solid var(--accent);
+  border-radius: 2px 12px 12px 12px;
+  padding: 10px 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  align-self: flex-start;
+}
+#arthur-chat-messages .bubble-user {
+  background: var(--accent);
+  color: #fff;
+  align-self: flex-end;
+  border-radius: 12px 12px 2px 12px;
+  padding: 8px 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+#arthur-chat-messages .bubble-system {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 4px;
+}
+#arthur-chat-messages .bubble-label {
+  font-size: 10px;
+  color: var(--accent);
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+.info-rows { display: flex; flex-direction: column; gap: 8px; }
+.info-row { display: flex; align-items: baseline; gap: 12px; font-size: 12px; }
+.info-label { color: var(--text-muted); min-width: 100px; flex-shrink: 0; }
+
+/* ── Tool badges in agent table ── */
+.tool-badges { display: flex; flex-wrap: wrap; gap: 4px; }
+.tool-badge {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* ── Clickable links in chat bubbles ── */
+.chat-link {
+  color: var(--accent);
+  text-decoration: underline;
+  word-break: break-all;
+}
+.chat-link:hover { color: var(--accent-hover); }

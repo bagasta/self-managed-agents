@@ -10,11 +10,19 @@ captures output, then removes the container.
 Files written in one turn are visible in the next because the directory
 lives on the host between message calls.
 
+Sandbox runs with FULL access:
+  - Full internet connectivity (bridge network, no firewall)
+  - Can install any package via pip/apt/npm (pip installs persist in /workspace/.pyvenv)
+  - 1 CPU core, 1 GB RAM
+  - No capability restrictions
+
 For gVisor isolation in dev: install gVisor (runsc), configure Docker daemon.json,
 then set DOCKER_RUNTIME=runsc. Default is the standard Docker runtime.
 """
 from __future__ import annotations
 
+import asyncio
+import functools
 import os
 import uuid
 from pathlib import Path
@@ -103,8 +111,10 @@ class DockerSandbox:
         log = logger.bind(session_id=self.session_id, cmd_preview=cmd[:120])
         log.debug("sandbox.bash.start")
 
-        # PYTHONUSERBASE points inside /workspace so pip installs survive across
-        # ephemeral container runs (only /workspace is mounted on the host).
+        # PYTHONUSERBASE points inside /workspace/.pyvenv so pip installs
+        # survive across ephemeral container runs (only /workspace is mounted
+        # on the host). Agents can install anything — full internet is available.
+        pyvenv_dir = "/workspace/.pyvenv"
         run_kwargs: dict = dict(
             image=self._settings.docker_sandbox_image,
             command=["bash", "-c", cmd],
@@ -112,12 +122,18 @@ class DockerSandbox:
                 str(self.workspace_dir): {"bind": "/workspace", "mode": "rw"}
             },
             working_dir="/workspace",
-            environment={},
-            mem_limit="256m",
-            nano_cpus=int(0.25e9),  # 25% CPU
+            environment={
+                # Pip installs land here and persist between messages
+                "PYTHONUSERBASE": pyvenv_dir,
+                "PATH": f"{pyvenv_dir}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "PIP_USER": "1",
+            },
+            # Full resource headroom — agents can build/compile/install freely
+            mem_limit="1g",
+            nano_cpus=int(1.0e9),  # 1 full CPU core
+            # Full internet — bridge network with no firewall restrictions
             network_mode="bridge",
-            security_opt=["no-new-privileges:true"],
-            cap_drop=["ALL"],
+            # No capability restrictions: agents have full container privileges
             labels={"managed-agent-sandbox": "true"},
             remove=True,
             stdout=True,
@@ -186,6 +202,11 @@ class DockerSandbox:
         lines = [str(p.relative_to(self.workspace_dir)) for p in entries]
         return "\n".join(lines) if lines else "(empty)"
 
+    async def abash(self, cmd: str) -> str:
+        """Non-blocking wrapper around bash() for use in async contexts."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, functools.partial(self.bash, cmd))
+
     def close(self) -> None:
         if self._client:
             try:
@@ -193,3 +214,7 @@ class DockerSandbox:
             except Exception:
                 pass
             self._client = None
+
+    async def aclose(self) -> None:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self.close)

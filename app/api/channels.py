@@ -35,11 +35,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.core.channel_service import send_message
-from app.core.input_sanitizer import sanitize_user_input
-from app.core.phone_utils import normalize_phone
-from app.core.text_utils import markdown_to_wa
-from app.core.wa_client import resolve_wa_phones, send_wa_message
+from app.core.engine.session_lock import session_run_lock
+from app.core.infra.channel_service import send_message
+from app.core.utils.input_sanitizer import sanitize_user_input
+from app.core.utils.phone_utils import normalize_phone
+from app.core.utils.text_utils import markdown_to_wa
+from app.core.infra.wa_client import resolve_wa_phones, send_wa_message
 from app.database import get_db
 from app.models.agent import Agent
 from app.models.session import Session
@@ -159,15 +160,16 @@ async def incoming_message(
         log.info("channels.incoming.normal")
 
     # --- Jalankan agent ---
-    from app.core.agent_runner import run_agent  # deferred to avoid circular import
+    from app.core.engine.agent_runner import run_agent  # deferred to avoid circular import
 
     try:
-        result = await run_agent(
-            agent_model=agent,
-            session=session,
-            user_message=user_message,
-            db=db,
-        )
+        async with session_run_lock(session.id):
+            result = await run_agent(
+                agent_model=agent,
+                session=session,
+                user_message=user_message,
+                db=db,
+            )
     except Exception as exc:
         log.error("channels.incoming.agent_error", error=str(exc))
         raise HTTPException(status_code=500, detail=f"Agent error: {exc}")
@@ -339,20 +341,21 @@ async def wa_incoming(
     sender_name: str | None = body.push_name or None
 
     # 6. Run agent
-    from app.core.agent_runner import run_agent  # deferred to avoid circular import
+    from app.core.engine.agent_runner import run_agent  # deferred to avoid circular import
 
     try:
-        result = await run_agent(
-            agent_model=agent,
-            session=session,
-            user_message=user_message,
-            db=db,
-            escalation_user_jid=escalation_user_jid,
-            escalation_context=escalation_context,
-            media_image_b64=media_image_b64,
-            media_image_mime=media_image_mime,
-            sender_name=sender_name,
-        )
+        async with session_run_lock(session.id):
+            result = await run_agent(
+                agent_model=agent,
+                session=session,
+                user_message=user_message,
+                db=db,
+                escalation_user_jid=escalation_user_jid,
+                escalation_context=escalation_context,
+                media_image_b64=media_image_b64,
+                media_image_mime=media_image_mime,
+                sender_name=sender_name,
+            )
     except Exception as exc:
         log.error("wa_incoming.agent_error", error=str(exc), exc_info=True)
         import traceback as _tb

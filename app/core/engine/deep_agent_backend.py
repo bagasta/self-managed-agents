@@ -28,7 +28,7 @@ from deepagents.backends.protocol import (
 from deepagents.backends.protocol import FileData  # TypedDict
 
 if TYPE_CHECKING:
-    from app.core.sandbox import DockerSandbox
+    from app.core.infra.sandbox import DockerSandbox
 
 
 def _now() -> str:
@@ -60,8 +60,18 @@ class DockerBackend(SandboxBackendProtocol):
     # ------------------------------------------------------------------
 
     def _resolve(self, path: str) -> Path:
-        """Resolve a path (absolute or relative) to inside workspace_dir."""
+        """Resolve a path (absolute or relative) to inside workspace_dir.
+
+        Inside Docker containers the workspace is mounted at /workspace.
+        Strip that prefix so host-side paths resolve correctly:
+          /workspace        → self._root
+          /workspace/a.txt  → self._root/a.txt
+          /             → self._root
+        """
         clean = path.lstrip("/")
+        # Map container path /workspace/* to the actual host workspace root
+        if clean == "workspace" or clean.startswith("workspace/"):
+            clean = clean[len("workspace"):].lstrip("/")
         resolved = (self._root / clean).resolve()
         if not str(resolved).startswith(str(self._root.resolve())):
             raise ValueError(f"Path traversal blocked: {path!r}")
@@ -80,7 +90,9 @@ class DockerBackend(SandboxBackendProtocol):
         return ExecuteResponse(output=output[:50_000], exit_code=None, truncated=truncated)
 
     async def aexecute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
-        return self.execute(command, timeout=timeout)
+        output = await self._sandbox.abash(command)
+        truncated = len(output) > 50_000
+        return ExecuteResponse(output=output[:50_000], exit_code=None, truncated=truncated)
 
     # ------------------------------------------------------------------
     # read

@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Managed Agents API Test Dashboard</title>
+  <link rel="stylesheet" href="test-dashboard.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>🧪 Managed Agents Test Dashboard</h1>
+      <p>Quick tester buat endpoint yang dipakai UI-DEV.</p>
+    </div>
+    <div class="topbar-actions">
+      <button id="save-config-btn">Save Config</button>
+      <button id="run-smoke-btn" class="ghost">Run Smoke Test</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <section class="panel">
+        <h2>Config</h2>
+        <label>Base URL</label>
+        <input id="base-url" type="text" value="http://localhost:8000" />
+
+        <label>API Key</label>
+        <input id="api-key" type="text" placeholder="X-API-Key" />
+
+        <label>WA Service URL</label>
+        <input id="wa-url" type="text" value="http://localhost:8080" />
+
+        <div class="hint">Config disimpan di localStorage browser.</div>
+      </section>
+
+      <section class="panel">
+        <h2>Quick IDs</h2>
+        <label>Agent ID</label>
+        <input id="agent-id" type="text" placeholder="contoh: agent-123" />
+
+        <label>Session ID</label>
+        <input id="session-id" type="text" placeholder="contoh: session-123" />
+
+        <label>Run ID</label>
+        <input id="run-id" type="text" placeholder="opsional" />
+
+        <label>Device ID</label>
+        <input id="device-id" type="text" placeholder="untuk WA incoming" />
+      </section>
+
+      <section class="panel">
+        <h2>Common Payload</h2>
+        <label>Message</label>
+        <textarea id="message-text" rows="4" placeholder="Halo test"></textarea>
+
+        <label>From Phone</label>
+        <input id="from-phone" type="text" placeholder="+62812xxxx" />
+      </section>
+    </aside>
+
+    <section class="content">
+      <div class="grid two">
+        <section class="panel">
+          <h2>Smoke / Basic</h2>
+          <div class="button-grid">
+            <button data-action="health-main">GET /health</button>
+            <button data-action="health-wa">GET WA /health</button>
+            <button data-action="agents-list">GET /v1/agents</button>
+            <button data-action="run-detail">GET /v1/runs/{runId}</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Sessions / Chat</h2>
+          <div class="button-grid">
+            <button data-action="session-history">GET /v1/sessions/{sessionId}/history</button>
+            <button data-action="incoming-session">POST /v1/channels/incoming/{sessionId}</button>
+            <button data-action="agent-message">POST /v1/agents/{agentId}/sessions/{sessionId}/messages</button>
+          </div>
+        </section>
+      </div>
+
+      <div class="grid two">
+        <section class="panel">
+          <h2>Agent Scoped</h2>
+          <div class="button-grid">
+            <button data-action="agent-detail">GET /v1/agents/{agentId}</button>
+            <button data-action="agent-docs">GET /v1/agents/{agentId}/documents</button>
+            <button data-action="agent-memory">GET /v1/agents/{agentId}/memory</button>
+            <button data-action="agent-skills">GET /v1/agents/{agentId}/skills</button>
+            <button data-action="agent-custom-tools">GET /v1/agents/{agentId}/custom-tools</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>WhatsApp</h2>
+          <div class="button-grid">
+            <button data-action="wa-status">GET /v1/agents/{agentId}/whatsapp/status</button>
+            <button data-action="wa-qr">GET /v1/agents/{agentId}/whatsapp/qr</button>
+            <button data-action="wa-incoming">POST /v1/channels/wa/incoming</button>
+          </div>
+        </section>
+      </div>
+
+      <section class="panel">
+        <h2>Endpoint Catalog dari UI-DEV</h2>
+        <div class="catalog" id="endpoint-catalog"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Custom Request Runner</h2>
+        <div class="grid custom-grid">
+          <div>
+            <label>Method</label>
+            <select id="custom-method">
+              <option>GET</option>
+              <option>POST</option>
+              <option>PATCH</option>
+              <option>DELETE</option>
+            </select>
+          </div>
+          <div class="grow">
+            <label>Path</label>
+            <input id="custom-path" type="text" placeholder="/v1/agents?limit=100" />
+          </div>
+        </div>
+        <label>JSON Body</label>
+        <textarea id="custom-body" rows="8" placeholder='{"message":"hello"}'></textarea>
+        <div class="button-row">
+          <button id="custom-send-btn">Send Request</button>
+        </div>
+      </section>
+
+      <section class="panel result-panel">
+        <div class="result-header">
+          <h2>Result</h2>
+          <div id="last-status" class="status idle">idle</div>
+        </div>
+        <div id="result-meta" class="meta">Belum ada request.</div>
+        <pre id="result-output">{}</pre>
+      </section>
+    </section>
+  </main>
+
+  <script src="test-dashboard.js"></script>
+</body>
+</html>

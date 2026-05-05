@@ -14,7 +14,7 @@ import structlog
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.phone_utils import normalize_phone
+from app.core.utils.phone_utils import normalize_phone
 
 if TYPE_CHECKING:
     from app.models.agent import Agent
@@ -32,7 +32,7 @@ async def is_duplicate_message(device_id: str, from_phone: str, timestamp: int, 
     sudah pernah diproses dalam 5 menit terakhir.
     """
     import time
-    from app.core.redis_client import get_redis
+    from app.core.infra.redis_client import get_redis
     
     key = f"wa_dedup:{device_id}:{from_phone}:{timestamp}"
     r = await get_redis()
@@ -107,7 +107,7 @@ async def find_or_create_wa_session(
     Returns (session, was_created: bool)
     """
     from app.models.session import Session
-    from app.core.phone_utils import normalize_phone
+    from app.core.utils.phone_utils import normalize_phone
 
     # Normalize agar konsisten dengan format yang dipakai operator_tools
     # (strip '+' dan '@s.whatsapp.net' / '@lid' suffix)
@@ -231,7 +231,7 @@ async def process_wa_media(
     - media_image_mime: MIME type gambar (hanya untuk image)
     """
     from app.config import get_settings
-    from app.core.sandbox import get_workspace_dir
+    from app.core.infra.sandbox import get_workspace_dir
 
     media_context = ""
     media_image_b64: str | None = None
@@ -268,7 +268,7 @@ async def process_wa_media(
             doc_extractable = {".pdf", ".docx", ".pptx", ".txt", ".md", ".csv"}
             if ext in doc_extractable:
                 try:
-                    from app.core.file_processor import extract_text
+                    from app.core.domain.file_processor import extract_text
                     extracted = await extract_text(
                         content=raw_bytes,
                         filename=filename,
@@ -293,7 +293,7 @@ async def process_wa_media(
 
         elif media_type in ("audio", "ptt"):
             # Transkripsi audio/voice note menggunakan openai/gpt-audio-mini via OpenRouter
-            from app.core.transcription_service import transcribe_audio
+            from app.core.infra.transcription_service import transcribe_audio
 
             # Tentukan format audio dari ekstensi filename
             audio_format = "ogg"  # default WhatsApp voice note

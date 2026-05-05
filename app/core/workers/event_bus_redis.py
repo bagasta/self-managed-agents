@@ -21,7 +21,7 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
-from app.core.redis_client import get_redis
+from app.core.infra.redis_client import get_redis
 
 async def publish(session_id: str, event: dict[str, Any]) -> None:
     """Publish event ke channel Redis. Fallback ke in-memory jika Redis tidak tersedia."""
@@ -35,7 +35,7 @@ async def publish(session_id: str, event: dict[str, Any]) -> None:
             log.warning("event_bus_redis.publish_failed: %s, falling back to in-memory", exc)
 
     # Fallback ke in-memory bus
-    from app.core import event_bus
+    from app.core.workers import event_bus
     await event_bus.publish(session_id, event)
 
 
@@ -64,7 +64,7 @@ async def subscribe_generator(session_id: str) -> AsyncGenerator[dict[str, Any],
             log.warning("event_bus_redis.subscribe_failed: %s, falling back to in-memory", exc)
 
     # Fallback ke in-memory bus
-    from app.core import event_bus
+    from app.core.workers import event_bus
     q = event_bus.subscribe(session_id)
     try:
         while True:

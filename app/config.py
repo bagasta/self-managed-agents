@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     # Sandbox
     sandbox_base_dir: str = "/tmp/agent-sandboxes"
-    docker_sandbox_image: str = "python:3.12"
+    docker_sandbox_image: str = "nikolaik/python-nodejs:python3.12-nodejs22"
     docker_host: str = "unix:///run/docker.sock"
 
     # Agent limits
@@ -28,8 +28,8 @@ class Settings(BaseSettings):
     agent_timeout_seconds: int = 300
 
     # Memory
-    short_term_memory_turns: int = 10   # conversation turns kept in LLM context
-    ltm_extraction_every: int = 10      # extract LTM every N user messages
+    short_term_memory_turns: int = 20   # conversation turns kept in LLM context
+    ltm_extraction_every: int = 5       # extract LTM every N user messages
 
     # WhatsApp microservice
     wa_service_url: str = "http://localhost:8080"
@@ -55,9 +55,9 @@ class Settings(BaseSettings):
     # Tunable limits
     context_summary_trigger: int = 10      # summarize after N user messages
     default_subagent_model: str = "openai/gpt-4o-mini"
-    default_subagent_max_tokens: int = 4096
+    default_subagent_max_tokens: int = 512
     media_doc_max_chars: int = 12000
-    llm_max_tokens: int = 4096
+    llm_max_tokens: int = 1024
     message_max_length: int = 10_000       # max chars per user message
     media_max_length: int = 10_000_000     # max chars for base64 media payload
     max_concurrent_sandboxes: int = 10     # max Docker sandbox containers running simultaneously

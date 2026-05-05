@@ -35,6 +35,18 @@ class AgentCreate(BaseModel):
             "Isi dengan list nomor (e.g. ['628111', '628222']) untuk membatasi."
         ),
     )
+    capabilities: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Daftar kapabilitas RBAC untuk agent (misal: ['builder']). "
+            "Menggantikan flag is_system_agent untuk akses granular."
+        ),
+    )
+    max_tokens: int | None = Field(
+        None,
+        ge=64,
+        description="Max output tokens per LLM call. null = pakai default global (1024). WA agent: 512-800, builder: 2048.",
+    )
     token_quota: int = Field(
         _DEFAULT_TOKEN_QUOTA,
         ge=1,
@@ -57,12 +69,14 @@ class AgentUpdate(BaseModel):
     instructions: str | None = None
     model: str | None = None
     temperature: float | None = Field(None, ge=0.0, le=2.0)
+    max_tokens: int | None = Field(None, ge=64)
     tools_config: dict[str, Any] | None = None
     sandbox_config: dict[str, Any] | None = None
     safety_policy: dict[str, Any] | None = None
     escalation_config: dict[str, Any] | None = None
     operator_ids: list[str] | None = None
     allowed_senders: list[str] | None = None
+    capabilities: list[str] | None = None
 
 
 class AgentResponse(BaseModel):
@@ -80,8 +94,12 @@ class AgentResponse(BaseModel):
     escalation_config: dict[str, Any]
     operator_ids: list[str]
     allowed_senders: list[str] | None
+    capabilities: list[str]
     version: int
     is_deleted: bool
+
+    # output token limit
+    max_tokens: int | None
 
     # subscription / quota
     api_key: str

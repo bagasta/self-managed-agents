@@ -17,8 +17,8 @@ from typing import Any
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.context_service import count_user_messages, load_history
-from app.core.phone_utils import normalize_phone
+from app.core.engine.context_service import count_user_messages, load_history
+from app.core.utils.phone_utils import normalize_phone
 
 
 # ---------------------------------------------------------------------------
@@ -68,11 +68,23 @@ def build_agent_context_block(
     lines.append(f"- Current User Role: {user_role}")
     lines.append(f"- Session ID: {session.id}")
 
+
     if subagent_list:
         lines.append("\n## Available Subagents")
         lines.append(
             "Delegate specific tasks using `task(name=..., task=...)`. "
-            "Always use write_todos to plan before delegating."
+            "Always use write_todos to plan before delegating.\n"
+            "DELEGATION RULES:\n"
+            "- Web/coding/deploy tasks → delegate to sys_coder immediately, do NOT attempt yourself\n"
+            "- sys_coder returns: STATUS: SUCCESS/FAILED | DEPLOY_URL: <url> | BLOCKER: <error>\n"
+            "- Your final reply to user: relay the URL or blocker from sys_coder, max 3 lines\n"
+            "- Do NOT re-explain or expand the code sys_coder produced\n\n"
+            "CRITICAL — NO PROGRESS MESSAGES:\n"
+            "- NEVER write text output before all tool calls are complete\n"
+            "- Any text you write WITHOUT a tool call becomes your FINAL reply and ends the task immediately\n"
+            "- If you write 'sedang mengerjakan...' without calling tools, task ENDS there — user gets that as response\n"
+            "- Correct flow: call tools first → all work done → THEN write one final reply with the result\n"
+            "- WRONG: write 'sedang proses...' → call tools (too late, already ended)"
         )
         for sa in subagent_list:
             lines.append(f"- **{sa['name']}**: {sa['description']}")
@@ -96,11 +108,11 @@ async def build_rag_context(
     max_results: int = int(cfg.get("max_results", 3))
 
     try:
-        from app.core.document_service import (
+        from app.core.domain.document_service import (
             search_documents_keyword,
             search_documents_vector,
         )
-        from app.core.embedding_service import embed_text
+        from app.core.domain.embedding_service import embed_text
 
         query_embedding = await embed_text(user_message)
         docs = await search_documents_vector(agent_id, query_embedding, db, max_results)
@@ -272,6 +284,16 @@ def build_system_prompt(
             "JANGAN gunakan tool `reply_to_user` untuk menjawab user secara normal — cukup tulis jawabanmu. "
             "Tool `reply_to_user` dan `send_to_number` HANYA dipakai saat menerima perintah dari OPERATOR.\n"
             f"{_name_hint}\n\n"
+            "### ⚠️ ATURAN PALING KRITIS: JANGAN PERNAH KIRIM PROGRESS UPDATE\n"
+            "CARA KERJA SISTEM:\n"
+            "- Setiap kali kamu menulis teks TANPA memanggil tool, sistem langsung mengirimkan teks itu ke user dan task SELESAI\n"
+            "- Jika kamu tulis 'Sedang kubikinin portfoliomu...' tanpa tool call → user dapat pesan itu → task berakhir di situ\n"
+            "- User yang balas 'ok' = trigger invocation BARU, bukan lanjutan task yang sama\n\n"
+            "ATURAN:\n"
+            "- LANGSUNG panggil tool pertama tanpa menulis teks apapun dulu\n"
+            "- Kerjakan seluruh task sampai tuntas (tulis semua file, deploy, verifikasi URL)\n"
+            "- BARU setelah semua selesai, tulis SATU pesan akhir dengan hasilnya (URL, ringkasan singkat)\n"
+            "- DILARANG KERAS: 'Sedang diproses...', 'Tunggu sebentar', 'Step 1 selesai', 'Langkah selanjutnya:', dll\n\n"
             "### Kirim Gambar ke User\n"
             "Jika kamu perlu mengirim gambar ke user, panggil tool yang sesuai:\n"
             "- `send_whatsapp_image(image_path_or_base64='...')` — untuk kirim gambar/chart dari workspace.\n"
@@ -343,6 +365,30 @@ def build_system_prompt(
         cap_parts.append("WhatsApp media tools (send_whatsapp_image, send_whatsapp_document)")
     if "wa_agent_manager" in active_groups:
         cap_parts.append("WA agent manager (send_agent_wa_qr)")
+    if "deploy" in active_groups:
+        cap_parts.append("deployment tools (deploy_app/stop_deployment/get_deployment_status/get_deployment_logs)")
+
+    if "deploy" in active_groups:
+        system_prompt += (
+            "\n\n## Deploy Instructions\n"
+            "Kamu memiliki kemampuan deploy app ke public URL via Cloudflare tunnel.\n"
+            "ALUR WAJIB — ikuti urutan ini tanpa skip:\n"
+            "1. Tulis semua file ke workspace (write_file)\n"
+            "2. Panggil get_deployment_status()\n"
+            "   - Status 'running' → JANGAN deploy ulang, gunakan URL yang ada\n"
+            "   - Status 'not_deployed' → lanjut ke langkah 3\n"
+            "3. Panggil deploy_app(command, port)\n"
+            "4. Verifikasi: panggil get_deployment_status() lagi — pastikan URL ada dan status 'running'\n"
+            "   - Jika URL kosong atau error → panggil get_deployment_logs() → debug → perbaiki\n"
+            "5. Sampaikan URL ke user secara natural — task BELUM selesai sebelum URL dikonfirmasi\n\n"
+            "ATURAN OUTPUT:\n"
+            "- Respond naturally, seperti developer yang selesai mengerjakan sesuatu\n"
+            "- Selalu sertakan URL deploy di respons akhir\n"
+            "- JANGAN tampilkan source code lengkap kecuali user eksplisit minta\n"
+            "- JANGAN gunakan format STATUS:/DEPLOY_URL:/BLOCKER: — terlalu kaku\n"
+            "- npm, npx, node tersedia di sandbox\n"
+            "- Static file server: edit file tidak perlu restart, deploy_app ulang HANYA jika ganti command/port/dependency\n"
+        )
 
     if cap_parts:
         system_prompt += (
@@ -352,6 +398,25 @@ def build_system_prompt(
             "1. To apply a skill: call `use_skill(name='X')` first — never guess its content.\n"
             "2. After creating a new tool with `create_tool`, use `run_custom_tool(name, args_json)` "
             "to execute it in this session (it won't be a direct tool yet)."
+        )
+
+    if "memory" in active_groups:
+        system_prompt += (
+            "\n\n## Aturan Memori Jangka Panjang (WAJIB)\n"
+            "Kamu HARUS aktif menyimpan konteks penting ke long-term memory. "
+            "Jangan andalkan conversation history saja — pesan lama bisa terpotong.\n\n"
+            "**Simpan dengan `remember(key, value)` segera setelah:**\n"
+            "- User mengirim CV/resume → simpan: nama, posisi terakhir, skill utama, pendidikan\n"
+            "- User menyebut nama/profil dirinya → simpan: user_name, pekerjaan, dll\n"
+            "- Kamu berhasil deploy → simpan: deploy_url, nama project, tanggal\n"
+            "- Kamu membuat file/project penting → simpan: nama file, lokasi, tujuannya\n"
+            "- User menyatakan preferensi/gaya → simpan: bahasa forehand, framework favorit, dll\n"
+            "- Ada keputusan/kesepakatan penting → simpan ringkasannya\n\n"
+            "**Format key yang disarankan:** `cv_name`, `cv_skills`, `cv_education`, "
+            "`deploy_url`, `project_name`, `user_preference_language`, dll\n\n"
+            "**Recall dulu sebelum bekerja:** Jika user minta sesuatu yang mungkin pernah dibahas "
+            "(edit portfolio, update deploy, dll), panggil `recall()` atau `recall(key)` dulu "
+            "untuk memeriksa apa yang sudah tersimpan — jangan mulai dari nol jika sudah ada konteks."
         )
 
     return system_prompt

@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.core.document_service import (
+from app.core.domain.document_service import (
     create_document,
     delete_document,
     get_document,
@@ -13,8 +13,8 @@ from app.core.document_service import (
     search_documents_vector,
     update_document,
 )
-from app.core.embedding_service import embed_text
-from app.core.file_processor import SUPPORTED_EXTENSIONS, chunk_text, extract_text
+from app.core.domain.embedding_service import embed_text
+from app.core.domain.file_processor import SUPPORTED_EXTENSIONS, chunk_text, extract_text
 from app.database import get_db
 from app.deps import verify_api_key
 from app.models.agent import Agent

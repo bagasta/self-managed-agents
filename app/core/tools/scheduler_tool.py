@@ -26,7 +26,7 @@ _LOCAL_TZ_NAME = "WIB (UTC+7)"
 import structlog
 from langchain_core.tools import tool
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models.scheduled_job import ScheduledJob
 
@@ -107,7 +107,7 @@ def _compute_next_run(cron_expr: str) -> datetime:
         return datetime.now(timezone.utc) + timedelta(minutes=1)
 
 
-def build_scheduler_tools(session_id: uuid.UUID, agent_id: uuid.UUID, db: AsyncSession) -> list:
+def build_scheduler_tools(session_id: uuid.UUID, agent_id: uuid.UUID, db_factory: async_sessionmaker) -> list:
 
     _now_local = datetime.now(_LOCAL_TZ).strftime("%Y-%m-%dT%H:%M:%S")
 
@@ -115,11 +115,7 @@ def build_scheduler_tools(session_id: uuid.UUID, agent_id: uuid.UUID, db: AsyncS
     # Docstring di-inject secara dinamis agar LLM tahu waktu sekarang
 
     async def _set_reminder(label: str, message: str, schedule: str) -> str:
-        from app.database import AsyncSessionLocal
-
-        # Gunakan session terpisah agar tidak conflict dengan DB session agent_runner
-        # (LangGraph bisa menjalankan beberapa tool call concurrent via asyncio.gather)
-        async with AsyncSessionLocal() as own_db:
+        async with db_factory() as own_db:
             base_label = label
             existing_result = await own_db.execute(
                 select(ScheduledJob).where(
@@ -209,10 +205,8 @@ def build_scheduler_tools(session_id: uuid.UUID, agent_id: uuid.UUID, db: AsyncS
                                        ("in 2h", "every 1d", "0 9 * * *", "2026-05-01T09:00:00")
                 }
         """
-        from app.database import AsyncSessionLocal
-
         results = []
-        async with AsyncSessionLocal() as own_db:
+        async with db_factory() as own_db:
             for item in reminders:
                 label = item.get("label", "").strip()
                 message = item.get("message", "").strip()
@@ -301,13 +295,14 @@ def build_scheduler_tools(session_id: uuid.UUID, agent_id: uuid.UUID, db: AsyncS
     @tool
     async def list_reminders() -> str:
         """Tampilkan semua reminder/job terjadwal yang aktif untuk sesi ini."""
-        result = await db.execute(
-            select(ScheduledJob).where(
-                ScheduledJob.session_id == session_id,
-                ScheduledJob.status == "active",
-            ).order_by(ScheduledJob.created_at)
-        )
-        jobs = list(result.scalars().all())
+        async with db_factory() as db:
+            result = await db.execute(
+                select(ScheduledJob).where(
+                    ScheduledJob.session_id == session_id,
+                    ScheduledJob.status == "active",
+                ).order_by(ScheduledJob.created_at)
+            )
+            jobs = list(result.scalars().all())
         if not jobs:
             return "Tidak ada reminder aktif."
 
@@ -328,18 +323,19 @@ def build_scheduler_tools(session_id: uuid.UUID, agent_id: uuid.UUID, db: AsyncS
         Args:
             label: Nama reminder yang ingin dibatalkan
         """
-        result = await db.execute(
-            select(ScheduledJob).where(
-                ScheduledJob.session_id == session_id,
-                ScheduledJob.label == label,
-                ScheduledJob.status == "active",
+        async with db_factory() as db:
+            result = await db.execute(
+                select(ScheduledJob).where(
+                    ScheduledJob.session_id == session_id,
+                    ScheduledJob.label == label,
+                    ScheduledJob.status == "active",
+                )
             )
-        )
-        job = result.scalar_one_or_none()
-        if not job:
-            return f"Tidak ada reminder aktif dengan label '{label}'."
-        job.status = "cancelled"
-        await db.flush()
+            job = result.scalar_one_or_none()
+            if not job:
+                return f"Tidak ada reminder aktif dengan label '{label}'."
+            job.status = "cancelled"
+            await db.commit()
         logger.info("scheduler_tool.cancelled", label=label)
         return f"Reminder '{label}' berhasil dibatalkan."
 

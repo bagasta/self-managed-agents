@@ -69,6 +69,10 @@
       <div class="nav-item" onclick="nav('channels')"><span class="icon">📡</span> Incoming Msg</div>
       <div class="nav-item" onclick="nav('runs')"><span class="icon">🔍</span> Runs</div>
     </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Platform</div>
+      <div class="nav-item" onclick="nav('arthur')" style="color:var(--accent);font-weight:600"><span class="icon">🏗️</span> Arthur Builder</div>
+    </div>
   </nav>
 
   <!-- ── Main ── -->
@@ -118,7 +122,7 @@
             <div class="form-group full">
               <label>Tools Config (JSON)</label>
               <textarea id="a-tools" rows="6"></textarea>
-              <div class="tools-config-hint">Default ON: memory, skills, escalation | Default OFF: sandbox, tool_creator, scheduler, rag, http, mcp, wa_agent_manager, subagents | subagents: { "enabled": true } → auto-load 5 system sub-agents (sys_critic, sys_researcher, sys_coder, sys_writer, sys_analyst) | subagents: { "enabled": true, "agent_ids": ["uuid"] } → load agent dari DB</div>
+              <div class="tools-config-hint">Default ON: memory, skills, escalation | Default OFF: sandbox, deploy, tool_creator, scheduler, rag, http, wa_agent_manager, subagents | ⚠️ mcp harus berupa object {} bukan false — contoh: "mcp": {} atau "mcp": {"server1": {"url": "..."}} | 🚀 deploy: true (+ sandbox: true wajib) → deploy app ke public URL via Cloudflare tunnel — URL aktif 1 jam lalu mati otomatis | subagents: { "enabled": true } → auto-load system sub-agents | subagents: { "enabled": true, "agent_ids": ["uuid"] } → load dari DB</div>
             </div>
             <div class="form-group full">
               <label>Escalation Config (JSON)</label>
@@ -585,6 +589,135 @@
           </div>
         </div>
         <div id="run-result"></div>
+      </div>
+
+      <!-- ═══════════════════════════ ARTHUR BUILDER ═══════════════════════════ -->
+      <div class="section" id="sec-arthur">
+        <div class="section-title">🏗️ Arthur — Agent Builder</div>
+        <p class="text-muted" style="margin-bottom:16px">
+          Manage Arthur (system agent). Setup instruksi, hubungkan ke WhatsApp, dan chat langsung untuk testing.
+        </p>
+
+        <!-- ── Status & Quick Actions ── -->
+        <div class="card-grid" style="margin-bottom:16px">
+
+          <div class="card" style="margin:0">
+            <div class="card-title">⚡ Status Arthur
+              <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="arthurLoad()">🔄 Refresh</button>
+            </div>
+            <div id="arthur-status-panel">
+              <div class="empty-state text-muted">Klik Refresh untuk cari Arthur di database</div>
+            </div>
+          </div>
+
+          <div class="card" style="margin:0">
+            <div class="card-title">📱 WhatsApp Arthur</div>
+            <div id="arthur-wa-panel">
+              <div class="text-muted" style="font-size:12px;margin-bottom:12px">Hubungkan Arthur ke nomor WA dev untuk testing.</div>
+              <div class="btn-group" style="flex-wrap:wrap">
+                <button class="btn btn-primary btn-sm" onclick="arthurConnectWA()">🔗 Connect / Generate QR</button>
+                <button class="btn btn-ghost btn-sm" onclick="arthurCheckWAStatus()">📊 Cek Status WA</button>
+                <button class="btn btn-danger btn-sm" onclick="arthurDisconnectWA()">⛔ Disconnect WA</button>
+              </div>
+              <div id="arthur-wa-qr" style="margin-top:12px;text-align:center"></div>
+              <div id="arthur-wa-status" style="margin-top:8px;text-align:center"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── Chat with Arthur ── -->
+        <div class="card" style="margin-bottom:16px">
+          <div class="card-title">
+            💬 Chat dengan Arthur
+            <span id="arthur-session-badge" class="badge badge-blue" style="margin-left:8px;display:none"></span>
+            <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="arthurNewSession()">➕ Session Baru</button>
+          </div>
+          <p class="text-muted" style="font-size:11px;margin-bottom:10px">
+            Minta Arthur buatkan agent — misalnya: <em>"Buatkan CS agent untuk toko baju, bahasa Indonesia, santai"</em>
+          </p>
+          <div id="arthur-chat-messages" style="min-height:260px;max-height:420px;overflow-y:auto;background:var(--surface-2);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:8px;margin-bottom:10px">
+            <div class="bubble-system">Buat session baru untuk mulai chat dengan Arthur</div>
+          </div>
+          <div style="display:flex;gap:8px">
+            <textarea id="arthur-chat-input" rows="2" placeholder="Ketik pesan ke Arthur... (Enter kirim, Shift+Enter baris baru)" style="flex:1;resize:none" onkeydown="arthurChatKeydown(event)"></textarea>
+            <button class="btn btn-primary" onclick="arthurSendMessage()" id="arthur-send-btn" style="align-self:flex-end">Send ↑</button>
+          </div>
+        </div>
+
+        <!-- ── Update Instructions ── -->
+        <div class="card" style="margin-bottom:16px">
+          <div class="card-title">✏️ Update Instruksi Arthur (System Prompt)</div>
+          <p class="text-muted" style="font-size:11px;margin-bottom:10px">
+            Edit langsung system prompt Arthur. Load dari DB terlebih dahulu, edit, lalu save.
+          </p>
+          <div class="btn-group" style="margin-bottom:8px">
+            <button class="btn btn-ghost btn-sm" onclick="arthurLoadInstructions()">📥 Load dari DB</button>
+            <button class="btn btn-ghost btn-sm" onclick="arthurLoadRulebookFile()">📄 Preview system-message-builder.md</button>
+          </div>
+          <textarea id="arthur-instructions" rows="16" placeholder="Klik 'Load dari DB' untuk memuat instruksi Arthur..." style="font-family:monospace;font-size:11px"></textarea>
+          <div class="btn-group" style="margin-top:8px">
+            <button class="btn btn-success" onclick="arthurSaveInstructions()">💾 Save Instructions</button>
+          </div>
+          <div id="arthur-instructions-result" class="mt-8"></div>
+        </div>
+
+        <!-- ── Config Panel ── -->
+        <div class="card" style="margin-bottom:16px">
+          <div class="card-title">⚙️ Konfigurasi Arthur</div>
+          <div class="card-grid">
+            <div class="form-group">
+              <label>Model</label>
+              <input id="arthur-model" type="text" value="openai/gpt-4.1">
+            </div>
+            <div class="form-group">
+              <label>Temperature</label>
+              <input id="arthur-temp" type="number" value="0.7" min="0" max="2" step="0.1">
+            </div>
+            <div class="form-group full">
+              <label>Tools Config (JSON)</label>
+              <textarea id="arthur-tools" rows="6" style="font-family:monospace;font-size:11px">{
+  "memory": true,
+  "skills": true,
+  "escalation": true,
+  "http": true,
+  "whatsapp_media": true,
+  "wa_agent_manager": true,
+  "scheduler": false,
+  "sandbox": false,
+  "deploy": false,
+  "rag": false,
+  "subagents": { "enabled": false }
+}</textarea>
+            </div>
+          </div>
+          <div class="btn-group">
+            <button class="btn btn-success" onclick="arthurSaveConfig()">💾 Save Config</button>
+          </div>
+          <div id="arthur-config-result" class="mt-8"></div>
+        </div>
+
+        <!-- ── Simulate Incoming ── -->
+        <div class="card">
+          <div class="card-title">🧪 Simulasi Pesan Masuk ke Arthur (via WA Webhook)</div>
+          <p class="text-muted" style="font-size:11px;margin-bottom:10px">
+            Test Arthur tanpa WA fisik — kirim pesan seolah-olah dari nomor WhatsApp tertentu.
+          </p>
+          <div class="card-grid">
+            <div class="form-group">
+              <label>From Phone (nomor pengirim)</label>
+              <input id="arthur-sim-from" type="text" placeholder="+6282299312107">
+            </div>
+            <div class="form-group full">
+              <label>Pesan</label>
+              <textarea id="arthur-sim-msg" rows="3" placeholder="Halo Arthur, saya punya toko baju online dan butuh CS agent..."></textarea>
+            </div>
+          </div>
+          <div class="btn-group">
+            <button class="btn btn-primary" onclick="arthurSimulate()">📤 Kirim ke Arthur</button>
+          </div>
+          <div id="arthur-sim-result" class="mt-8"></div>
+        </div>
+
       </div>
 
     </div><!-- /content -->

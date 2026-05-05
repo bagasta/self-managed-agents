@@ -202,7 +202,12 @@ class TestProcessWaMediaAudio:
 
     @pytest.mark.asyncio
     async def test_ptt_returns_voice_note_label(self, respx_mock, tmp_path, monkeypatch):
-        """Voice note (PTT) harus diberi label [Voice note: ...]."""
+        """Voice note (PTT) harus menggunakan format label Sistem yang baru.
+
+        Format label diupdate di 'context poisoning fix' (2026-04-28):
+        sebelumnya: '[Voice note: transcript]'
+        sekarang  : '[Sistem: Pengguna mengirim pesan suara...] Transkripsi: ...'
+        """
         import uuid
         from app.api.wa_helpers import process_wa_media
         from app.core import transcription_service
@@ -215,8 +220,6 @@ class TestProcessWaMediaAudio:
             openrouter_api_key = FAKE_KEY
         monkeypatch.setattr("app.config.get_settings", lambda: FakeSettings())
         monkeypatch.setattr(transcription_service, "_convert_to_mp3", lambda b: _async_identity(b))
-
-
 
         respx_mock.post("https://openrouter.ai/api/v1/chat/completions").mock(
             return_value=httpx.Response(200, json=SUCCESS_RESPONSE)
@@ -231,14 +234,22 @@ class TestProcessWaMediaAudio:
             logger=structlog.get_logger(),
         )
 
-        assert "Voice note" in media_context
+        # Format baru (setelah context poisoning fix)
+        assert "Sistem" in media_context
+        assert "pesan suara" in media_context
+        assert "Transkripsi" in media_context
         assert "Halo, ini transkrip audio." in media_context
         assert img_b64 is None
         assert img_mime is None
 
     @pytest.mark.asyncio
     async def test_audio_returns_audio_label(self, respx_mock, tmp_path, monkeypatch):
-        """Audio file biasa harus diberi label [Audio: ...]."""
+        """Audio file biasa harus menggunakan format label Sistem yang baru.
+
+        Format label diupdate di 'context poisoning fix' (2026-04-28):
+        sebelumnya: '[Audio: transcript]'
+        sekarang  : '[Sistem: Pengguna mengirim file audio...] Transkripsi: ...'
+        """
         import uuid
         from app.api.wa_helpers import process_wa_media
         from app.core import transcription_service
@@ -265,7 +276,10 @@ class TestProcessWaMediaAudio:
             logger=structlog.get_logger(),
         )
 
-        assert "Audio" in media_context
+        # Format baru (setelah context poisoning fix)
+        assert "Sistem" in media_context
+        assert "file audio" in media_context
+        assert "Transkripsi" in media_context
         assert img_b64 is None
 
     @pytest.mark.asyncio

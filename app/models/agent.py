@@ -51,10 +51,21 @@ class Agent(Base):
     # --- operator access ---
     operator_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
 
+    # --- capabilities / RBAC ---
+    # ["builder"] = can use builder tools
+    capabilities: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default='[]'
+    )
+
     # --- allowlist ---
     # null = semua nomor diizinkan (default)
     # ["628111", "628222"] = hanya nomor ini yang dibalas (non-operator)
     allowed_senders: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+
+    # --- output token limit (per-agent override) ---
+    # null = pakai settings.llm_max_tokens (global default)
+    # Isi untuk override per-agent: WA CS agent ~512, builder ~2048
+    max_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # --- subscription / quota ---
     api_key: Mapped[str] = mapped_column(

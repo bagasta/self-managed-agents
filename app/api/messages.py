@@ -7,7 +7,8 @@ from slowapi.util import get_remote_address
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.agent_runner import run_agent
+from app.core.engine.agent_runner import run_agent
+from app.core.engine.session_lock import session_run_lock
 from app.database import get_db
 from app.models.agent import Agent
 from app.models.session import Session
@@ -82,12 +83,13 @@ async def send_message(
             detail=f"Session {session_id} not found for agent {agent_id}",
         )
 
-    result = await run_agent(
-        agent_model=agent,
-        session=session,
-        user_message=payload.message,
-        db=db,
-    )
+    async with session_run_lock(session_id):
+        result = await run_agent(
+            agent_model=agent,
+            session=session,
+            user_message=payload.message,
+            db=db,
+        )
 
     # update consumed tokens
     tokens_this_run: int = result.get("tokens_used", 0)
@@ -99,7 +101,7 @@ async def send_message(
     reply = result["reply"]
     if session.channel_type and reply:
         try:
-            from app.core.channel_service import send_message as channel_send
+            from app.core.infra.channel_service import send_message as channel_send
             await channel_send(
                 channel_type=session.channel_type,
                 channel_config=session.channel_config if isinstance(session.channel_config, dict) else {},

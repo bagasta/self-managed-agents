@@ -1,11 +1,14 @@
 import uuid
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config_schema import ToolsConfig
 from app.database import get_db
 from app.deps import verify_api_key
 from app.models.agent import Agent
@@ -23,12 +26,22 @@ logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/v1/agents", tags=["agents"])
 
 
+def _validate_tools_config(tools_config: dict[str, Any] | None) -> None:
+    if not tools_config:
+        return
+    try:
+        ToolsConfig.model_validate(tools_config)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+
+
 @router.post("", response_model=AgentResponse, status_code=status.HTTP_201_CREATED)
 async def create_agent(
     payload: AgentCreate,
     db: AsyncSession = Depends(get_db),
     _: str = Depends(verify_api_key),
 ) -> AgentResponse:
+    _validate_tools_config(payload.tools_config)
     active_until = datetime.now(timezone.utc) + timedelta(days=payload.quota_period_days)
     device_id = str(uuid.uuid4()) if payload.channel_type == "whatsapp" else None
     agent = Agent(
@@ -37,6 +50,7 @@ async def create_agent(
         instructions=payload.instructions,
         model=payload.model,
         temperature=payload.temperature,
+        max_tokens=payload.max_tokens,
         tools_config=payload.tools_config,
         sandbox_config=payload.sandbox_config,
         safety_policy=payload.safety_policy,
@@ -58,7 +72,7 @@ async def create_agent(
     # If whatsapp channel requested, call Go service to get QR code
     if payload.channel_type == "whatsapp" and device_id:
         try:
-            from app.core.wa_client import create_wa_device
+            from app.core.infra.wa_client import create_wa_device
             wa_result = await create_wa_device(device_id)
             response.qr_image = wa_result.get("qr_image", "")
         except Exception as exc:
@@ -116,6 +130,8 @@ async def update_agent(
     _: str = Depends(verify_api_key),
 ) -> AgentResponse:
     agent = await _get_active_agent(agent_id, db)
+    if payload.tools_config is not None:
+        _validate_tools_config(payload.tools_config)
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(agent, field, value)
     agent.version += 1
@@ -133,7 +149,7 @@ async def delete_agent(
     agent = await _get_active_agent(agent_id, db)
     if agent.wa_device_id:
         try:
-            from app.core.wa_client import delete_wa_device
+            from app.core.infra.wa_client import delete_wa_device
             await delete_wa_device(agent.wa_device_id)
         except Exception as exc:
             logger.warning("delete_agent.wa_disconnect_failed", error=str(exc))
@@ -180,7 +196,7 @@ async def get_whatsapp_qr(
             detail="Agent does not have a WhatsApp channel configured",
         )
     try:
-        from app.core.wa_client import get_wa_qr
+        from app.core.infra.wa_client import get_wa_qr
         result = await get_wa_qr(agent.wa_device_id)
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
@@ -206,7 +222,7 @@ async def get_whatsapp_status(
             detail="Agent does not have a WhatsApp channel configured",
         )
     try:
-        from app.core.wa_client import get_wa_status
+        from app.core.infra.wa_client import get_wa_status
         result = await get_wa_status(agent.wa_device_id)
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
@@ -232,7 +248,7 @@ async def disconnect_whatsapp(
             detail="Agent does not have a WhatsApp channel configured",
         )
     try:
-        from app.core.wa_client import delete_wa_device
+        from app.core.infra.wa_client import delete_wa_device
         await delete_wa_device(agent.wa_device_id)
     except Exception as exc:
         logger.warning("disconnect_whatsapp.wa_service_error", error=str(exc))
@@ -262,7 +278,7 @@ async def connect_whatsapp(
         await db.flush()
 
     try:
-        from app.core.wa_client import create_wa_device
+        from app.core.infra.wa_client import create_wa_device
         wa_result = await create_wa_device(agent.wa_device_id)
     except Exception as exc:
         raise HTTPException(

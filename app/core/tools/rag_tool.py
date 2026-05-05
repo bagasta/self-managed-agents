@@ -22,14 +22,14 @@ import uuid
 from typing import Any
 
 from langchain_core.tools import tool
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.document_service import search_documents
+from app.core.domain.document_service import search_documents
 
 
 def build_rag_tools(
     agent_id: uuid.UUID,
-    db: AsyncSession,
+    db_factory: async_sessionmaker,
     tools_config: dict[str, Any],
 ) -> list:
     """Return LangChain RAG tools bound to this agent's document store."""
@@ -43,7 +43,8 @@ def build_rag_tools(
         Args:
           query — keywords or a natural-language question to search for
         Returns a formatted list of matching document excerpts."""
-        docs = await search_documents(agent_id, query, db, max_results=max_results)
+        async with db_factory() as db:
+            docs = await search_documents(agent_id, query, db, max_results=max_results)
         if not docs:
             return f"No documents found matching: '{query}'"
 
@@ -58,3 +59,4 @@ def build_rag_tools(
         return f"Found {len(docs)} document(s) for '{query}':\n\n" + "\n\n---\n\n".join(parts)
 
     return [search_knowledge_base]
+

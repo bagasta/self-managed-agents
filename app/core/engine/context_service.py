@@ -69,11 +69,22 @@ async def count_user_messages(session_id: uuid.UUID, db: AsyncSession) -> int:
 
 
 def db_messages_to_lc(db_messages: list[Message]) -> list[BaseMessage]:
-    """Konversi Message ORM rows ke list LangChain BaseMessage untuk history injection."""
+    """Konversi Message ORM rows ke list LangChain BaseMessage untuk history injection.
+
+    Menjamin urutan human→ai→human→ai yang valid untuk semua LLM provider.
+    Jika ada dua HumanMessage berturut-turut (terjadi saat agent tidak menghasilkan
+    reply di run sebelumnya), pesan digabung jadi satu HumanMessage.
+    """
     result: list[BaseMessage] = []
     for msg in db_messages:
         if msg.role == "user" and msg.content:
-            result.append(HumanMessage(content=msg.content))
+            lc_msg = HumanMessage(content=msg.content)
+            # Gabung jika pesan terakhir juga HumanMessage (hindari double-human)
+            if result and isinstance(result[-1], HumanMessage):
+                prev = result[-1]
+                result[-1] = HumanMessage(content=f"{prev.content}\n{msg.content}")
+            else:
+                result.append(lc_msg)
         elif msg.role == "agent" and msg.content:
             result.append(AIMessage(content=msg.content))
     return result

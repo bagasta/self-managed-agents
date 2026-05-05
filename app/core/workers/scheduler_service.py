@@ -21,6 +21,10 @@ from sqlalchemy import select
 logger = structlog.get_logger(__name__)
 _scheduler: AsyncIOScheduler | None = None
 
+# Concurrency limit: max parallel scheduler jobs to prevent resource exhaustion
+_MAX_CONCURRENT_JOBS = 5
+_job_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_JOBS)
+
 
 async def _tick() -> None:
     """Cek dan jalankan semua scheduled_jobs yang sudah waktunya."""
@@ -45,14 +49,25 @@ async def _tick() -> None:
 
     logger.info("scheduler_service.tick", due_jobs=len(jobs))
 
+    tasks = []
     for job in jobs:
-        asyncio.create_task(_run_job(job.id))
+        tasks.append(asyncio.create_task(_run_job_guarded(job.id)))
+
+    # Wait for all jobs to finish (or fail) before returning
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _run_job_guarded(job_id) -> None:
+    """Acquire semaphore before running job — bounds concurrent agent runs."""
+    async with _job_semaphore:
+        await _run_job(job_id)
 
 
 async def _run_job(job_id) -> None:
     """Jalankan satu scheduled job: inject payload ke agent, kirim reply ke channel."""
-    from app.core.agent_runner import run_agent
-    from app.core.channel_service import send_message
+    from app.core.engine.agent_runner import run_agent
+    from app.core.infra.channel_service import send_message
     from app.database import AsyncSessionLocal
     from app.models.agent import Agent
     from app.models.scheduled_job import ScheduledJob
@@ -105,7 +120,7 @@ async def _run_job(job_id) -> None:
             # Publish ke SSE event bus (in-app / UI real-time)
             # Diisolasi: error event_bus tidak boleh memblokir pengiriman ke channel eksternal
             try:
-                from app.core import event_bus
+                from app.core.workers import event_bus
                 await event_bus.publish(str(job.session_id), {
                     "_event_type": "message",
                     "type": "scheduled_message",

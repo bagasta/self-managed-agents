@@ -146,13 +146,22 @@ async def extract_long_term_memory(
 
     conv_text = "\n".join(lines)
     prompt = (
-        "Analyze this conversation and extract important facts, preferences, and context "
-        "about the user and their work that are worth remembering long-term. "
-        "Return ONLY a compact JSON object — keys are short snake_case labels, "
-        "values are concise strings.\n\n"
-        "Example: "
-        '{"user_name": "Bagas", "preferred_language": "Python", '
-        '"project": "managed-agent-platform", "coding_style": "modular"}\n\n'
+        "Analyze this conversation and extract ALL important facts worth remembering long-term. "
+        "Focus on actionable context that would help an AI assistant continue work in future sessions.\n\n"
+        "Extract facts from these categories (include ALL that appear in the conversation):\n"
+        "- User identity: name, job, company, phone\n"
+        "- CV/resume content: full_name, job_title, skills, education, work_experience (summarize concisely)\n"
+        "- Deployed apps: deploy_url, project_name, tech_stack, port\n"
+        "- Files/projects created: file names, purpose, workspace location\n"
+        "- User preferences: language, framework, coding style, communication style\n"
+        "- Important decisions or agreements made\n"
+        "- Any task that was completed or is in progress\n\n"
+        "Return ONLY a compact JSON object — keys are short snake_case labels, values are concise strings. "
+        "If a value is long (e.g. CV content), summarize to max 300 chars.\n\n"
+        "Example:\n"
+        '{"user_name": "Bagas", "cv_skills": "Python, FastAPI, Docker, LangChain", '
+        '"cv_education": "S1 Informatika Univ X 2020", "deploy_url": "https://abc.trycloudflare.com", '
+        '"project_name": "portfolio website", "preferred_language": "Indonesian"}\n\n'
         f"Conversation:\n{conv_text}\n\nJSON:"
     )
 

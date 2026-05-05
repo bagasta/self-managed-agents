@@ -30,7 +30,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core import event_bus
+from app.core.workers import event_bus
 from app.database import get_db
 from app.models.session import Session
 

@@ -30,7 +30,7 @@ logger = structlog.get_logger(__name__)
 async def _generate_embedding(title: str, content: str) -> list[float] | None:
     """Embed title + content. Returns None on any error so upload never blocks."""
     try:
-        from app.core.embedding_service import embed_text
+        from app.core.domain.embedding_service import embed_text
         text = f"{title}\n{content}"
         return await embed_text(text)
     except Exception as exc:
