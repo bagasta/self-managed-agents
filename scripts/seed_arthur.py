@@ -22,10 +22,28 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
 RULEBOOK_PATH = pathlib.Path(__file__).parent.parent / "system-message-builder.md"
 
+ARTHUR_SOUL = """\
+Kamu adalah Arthur, AI Agent Builder.
+
+Tugasmu adalah membantu user merancang, membuat, dan mengelola AI agent di platform ini.
+Kamu bekerja seperti seorang arsitek sistem — memahami kebutuhan user, merekomendasikan konfigurasi yang tepat, dan mengeksekusi pembuatan agent secara langsung via tools.
+
+PRINSIP KERJAMU:
+- Resourceful dulu — gunakan get_platform_capabilities(), get_presets(), dan plan_agent() sebelum create
+- Setiap agent yang kamu buat WAJIB punya soul yang jelas — tulis soul ke memory agent baru dengan remember("soul", "...")
+- Catat agent yang sudah dibuat ke daily memory kamu dengan update_daily("Buat agent X untuk user Y")
+- Simpan preferensi arsitektur user ke long-term memory dengan update_longterm("User prefer model X untuk agent tipe Y")
+
+CARA BICARA:
+- Bahasa: Indonesia, profesional tapi santai
+- Konfirmasi plan sebelum eksekusi jika agent yang diminta kompleks
+- Berikan penjelasan singkat kenapa kamu memilih konfigurasi tertentu
+"""
+
 ARTHUR_CONFIG = {
     "name": "Arthur",
     "description": "AI Agent Builder — bantu user buat dan kelola AI agent via WhatsApp",
-    "model": "openai/gpt-5.1",
+    "model": "deepseek/deepseek-v4-flash",
     "temperature": 0.7,
     "max_tokens": 2048,         # Arthur butuh ruang lebih untuk nulis instructions agent
     "capabilities": ["system", "builder"],
@@ -112,6 +130,7 @@ async def seed(dry_run: bool = False) -> None:
             print(f"[UPDATED] Arthur diupdate ke versi {existing.version}")
             print(f"  id     : {existing.id}")
             print(f"  api_key: {existing.api_key}")
+            arthur_id = existing.id
         else:
             arthur = Agent(
                 name=ARTHUR_CONFIG["name"],
@@ -136,6 +155,14 @@ async def seed(dry_run: bool = False) -> None:
             print(f"[CREATED] Arthur berhasil dibuat!")
             print(f"  id     : {arthur.id}")
             print(f"  api_key: {arthur.api_key}")
+            arthur_id = arthur.id
+
+    # Seed Arthur's soul ke agent_memories (scope=None → global per agent)
+    from app.core.domain.memory_service import upsert_memory
+    async with AsyncSessionLocal() as db:
+        await upsert_memory(arthur_id, "soul", ARTHUR_SOUL, db, scope=None)
+        await db.commit()
+    print(f"[OK] Arthur's soul di-seed ke agent_memories")
 
     print("\n=== Langkah selanjutnya ===")
     print("1. Set Arthur's WA device (hubungkan ke wa-dev-service untuk testing):")

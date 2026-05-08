@@ -1,3 +1,150 @@
+# Recap: Arthur End-to-End Test + Sandbox Image Fix + Test Skill
+
+**Tanggal**: 2026-05-06
+**Status**: ✅ Selesai
+
+## Apa yang Ditest
+
+Arthur diuji membuat 3 agent sekaligus via perintah natural language, termasuk 1 request "hard" dari persona orang awam.
+
+## Agent yang Berhasil Dibuat Arthur
+
+| Agent | Perintah Natural | Tools | Hasil |
+|-------|-----------------|-------|-------|
+| WebBuilder | "Buatkan agent untuk prototype website + deploy Cloudflare" | sandbox, deploy, http, memory, scheduler | Auto-deploy + kasih link tanpa diminta ✅ |
+| CS Toko Bagas | "CS toko fashion, eskalasi pembelian ke +6281234567890" | escalation, memory, scheduler | `escalate_to_human` dipanggil + notif terkirim ✅ |
+| DocGen | "Bikin agent yang bisa generate PDF, Excel, CSV, Word" | sandbox, whatsapp_media, memory, http | Generate .xlsx + .pdf via openpyxl + reportlab ✅ |
+| MarketBot | "Pantau BTC/ETH/BBCA tiap hari, notif turun >5%, laporan mingguan" | http, sandbox, scheduler, memory | Harga live CoinGecko + set_reminder cron + baseline disimpan ✅ |
+
+## Perilaku Arthur yang Terverifikasi
+
+- Tanya klarifikasi (nama + channel) jika kurang info — 1 pertanyaan, jawab natural, langsung buat
+- Auto: `plan_agent` → `validate_agent_config` → `create_agent` → `http_post` seed soul → `update_daily`
+- Soul agent baru ter-seed via `http_post("/v1/agents/{id}/memory")` — bukan via `remember()` Arthur sendiri
+- Jika validasi gagal (misal preset butuh RAG), Arthur adjust dan validasi ulang otomatis
+
+## Bug yang Ditemukan & Diperbaiki
+
+| Bug | Root Cause | Fix |
+|-----|-----------|-----|
+| `MultipleResultsFound` saat load soul | Arthur punya 3 duplikat soul record di DB | `get_memory()` di `memory_service.py`: `.scalar_one_or_none()` → `.scalars().first()` |
+| DocGen tidak bisa import openpyxl/reportlab | `.env` override ke `DOCKER_SANDBOX_IMAGE=python:3.12` (image plain) | Buat `sandbox.Dockerfile` + build `managed-agents-sandbox:latest`, update `.env` |
+
+## File yang Dibuat/Diubah
+
+| File | Perubahan |
+|------|-----------|
+| `app/core/domain/memory_service.py` | `get_memory()`: `.scalar_one_or_none()` → `.scalars().first()` untuk handle duplikat |
+| `sandbox.Dockerfile` | **BARU** — extend `nikolaik/python-nodejs:python3.12-nodejs22` + install openpyxl, reportlab, fpdf2, python-docx, pandas, pillow, dll |
+| `.env` | `DOCKER_SANDBOX_IMAGE=managed-agents-sandbox:latest` |
+| `app/config.py` | Default `docker_sandbox_image` update ke `managed-agents-sandbox:latest` |
+| `docs/test-arthur.md` | **BARU** — dokumentasi langkah test Arthur end-to-end |
+| `.claude/commands/test-arthur.md` | **BARU** — slash command `/test-arthur` untuk Claude Code |
+
+## Sandbox Image Baru
+
+```bash
+# Build (butuh internet, ~2 menit):
+DOCKER_HOST=unix:///run/docker.sock docker build -f sandbox.Dockerfile -t managed-agents-sandbox:latest .
+
+# Packages yang tersedia di sandbox sekarang:
+# openpyxl, xlsxwriter, reportlab, fpdf2, python-docx, pandas, pillow,
+# requests, beautifulsoup4, lxml, matplotlib, jinja2
+# + semua bawaan nikolaik/python-nodejs (Python 3.12 + Node 22)
+```
+
+## Test Skill
+
+Dibuat slash command `/test-arthur` di `.claude/commands/test-arthur.md` — berisi checklist lengkap, tabel test per agent type, known issues & fix, catatan arsitektur.
+
+---
+
+# Recap: OpenClaw Memory System — Layered Memory + Heartbeat
+
+**Tanggal**: 2026-05-06
+**Status**: ✅ Implementasi selesai
+
+## Fitur
+
+Adopsi sistem memory OpenClaw ke platform SaaS. Semua agent (termasuk Arthur) kini punya layered memory yang di-inject otomatis ke setiap sesi — tanpa butuh langkah manual dari agent.
+
+## Arsitektur
+
+```
+Setiap sesi agent:
+  agent_runner.py
+    → load_layered_memory(agent_id, scope=external_user_id)
+      → soul          (scope=None, global per agent)
+      → user_profile  (scope=user_phone)
+      → daily:today   (scope=user_phone)
+      → daily:yesterday (scope=user_phone)
+    → build_system_prompt(..., layered_memory=...)
+      → inject "# Panduan Operasional" ke atas system prompt
+        → Identitasmu (soul)
+        → User yang Kamu Bantu (user_profile)
+        → Konteks Hari Ini (daily today + yesterday)
+        → Memory — cara kerja recall/update_daily/update_longterm
+        → Heartbeat — protocol HEARTBEAT_OK
+        → Keamanan & Batasan
+      → dilanjut base_instructions (business logic)
+```
+
+## Memory Layers (key di `agent_memories` table)
+
+| Key | Scope | Auto-inject | Deskripsi |
+|-----|-------|-------------|-----------|
+| `soul` | NULL (global) | ✅ | Identitas agent |
+| `user_profile` | external_user_id | ✅ | Profil user |
+| `daily:YYYY-MM-DD` | external_user_id | ✅ hari ini + kemarin | Catatan harian |
+| `longterm` | external_user_id | ❌ lazy via recall() | Curated memory jangka panjang |
+| `heartbeat:config` | external_user_id | ❌ | Heartbeat interval + quiet hours |
+| `heartbeat:checklist` | external_user_id | ❌ | Checklist yang dijalankan saat heartbeat |
+
+## File yang Dibuat/Diubah
+
+| File | Perubahan |
+|------|-----------|
+| `app/core/domain/memory_service.py` | Tambah `load_layered_memory()`, filter layered keys dari `build_memory_context()` |
+| `app/core/engine/agent_runner.py` | Load `layered_memory`, pass ke `build_system_prompt`, load `build_heartbeat_tools` |
+| `app/core/engine/prompt_builder.py` | `build_system_prompt()` terima `layered_memory`, render `# Panduan Operasional` lengkap |
+| `app/core/engine/tool_builder.py` | Tambah `update_daily`, `update_longterm` ke memory tools; tambah `build_heartbeat_tools()` (`enable_heartbeat`, `disable_heartbeat`) |
+| `app/core/workers/scheduler_service.py` | Tambah `_run_heartbeat_job()`: detect `[HEARTBEAT]` payload, quiet hours check, find last session per user, HEARTBEAT_OK logic, kirim via channel atau SSE |
+| `system-message-builder.md` | Arthur wajib seed soul agent baru via `http_post` ke memory API; wajib `update_daily` + `update_longterm` setelah buat agent |
+| `scripts/seed_arthur.py` | Tambah `ARTHUR_SOUL`, seed ke `agent_memories` scope=NULL setelah create/update |
+
+## Isolasi Memory (Multi-tenant Safety)
+
+Memory tidak bocor antar user karena unique constraint DB: `(agent_id, scope, key)`.
+- `soul` → `scope=NULL` → shared (intentional, identitas agent sama untuk semua user)
+- Semua layer lain → `scope=external_user_id` → terisolasi per user
+
+## Heartbeat System
+
+```
+APScheduler _tick() setiap menit
+  → deteksi job dengan payload="[HEARTBEAT]"
+  → _run_heartbeat_job():
+      1. Cek quiet hours dari heartbeat:config (WIB timezone)
+      2. Find last active session (agent_id + external_user_id)
+      3. Load heartbeat:checklist dari memory
+      4. run_agent() dengan "[HEARTBEAT] {checklist}"
+      5. Reply "HEARTBEAT_OK" → log only (diam)
+         Reply lain → kirim WA (jika channel=whatsapp) atau SSE (webchat/API)
+```
+
+Agent aktifkan heartbeat via tool: `enable_heartbeat(interval_minutes=30, quiet_start="23:00", quiet_end="08:00")`
+
+## Arthur Soul Seeding
+
+Setelah `create_agent()`, Arthur wajib:
+1. `http_post("/v1/agents/{agent_id}/memory", {"key": "soul", "value": "<identitas ringkas>"})` → seed soul agent baru
+2. `update_daily(...)` → catat ke daily log Arthur sendiri
+3. `update_longterm(...)` → simpan preferensi arsitektur user
+
+Arthur's own soul di-seed via `scripts/seed_arthur.py` ke `agent_memories` (scope=NULL).
+
+---
+
 # Recap: Bug Fix — Agent Sandbox & Deploy Missing Tools (Agent "Bodoh")
 
 **Tanggal**: 2026-05-05

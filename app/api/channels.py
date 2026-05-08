@@ -31,7 +31,7 @@ import uuid
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -43,6 +43,7 @@ from app.core.utils.text_utils import markdown_to_wa
 from app.core.infra.wa_client import resolve_wa_phones, send_wa_message
 from app.database import get_db
 from app.models.agent import Agent
+from app.models.message import Message
 from app.models.session import Session
 
 # Helper functions untuk wa_incoming — dipecah agar bisa di-test secara independen
@@ -158,6 +159,14 @@ async def incoming_message(
     else:
         user_message = raw_message
         log.info("channels.incoming.normal")
+
+    # --- /reset intercept ---
+    if not is_operator and user_message.strip().lower() == "/reset":
+        await db.execute(delete(Message).where(Message.session_id == session.id))
+        session.metadata_ = {}
+        db.add(session)
+        await db.commit()
+        return {"status": "ok", "reply": "Percakapan direset.", "run_id": "", "steps": [], "messages_to_user": []}
 
     # --- Jalankan agent ---
     from app.core.engine.agent_runner import run_agent  # deferred to avoid circular import
@@ -340,8 +349,44 @@ async def wa_incoming(
 
     sender_name: str | None = body.push_name or None
 
+    # 5.5. Handle /reset keyword — hapus history sesi, bersihkan metadata
+    _raw_msg_stripped = user_message.strip()
+    if not _is_operator and _raw_msg_stripped.lower() in ("/reset", "/ reset"):
+        log.info("wa_incoming.reset_requested", session_id=str(session.id))
+        await db.execute(delete(Message).where(Message.session_id == session.id))
+        _clean_meta = {}
+        session.metadata_ = _clean_meta
+        db.add(session)
+        await db.commit()
+        try:
+            await send_wa_message(
+                body.device_id,
+                effective_reply_target,
+                "✅ Percakapan direset. Memori sesi ini telah dibersihkan — kita mulai dari awal!",
+            )
+        except Exception as _reset_exc:
+            log.warning("wa_incoming.reset_reply_failed", error=str(_reset_exc))
+        return {"status": "ok", "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
+
     # 6. Run agent
+    import asyncio as _asyncio
     from app.core.engine.agent_runner import run_agent  # deferred to avoid circular import
+    from app.core.engine.session_lock import (
+        cancel_active_run,
+        register_active_task,
+        session_run_lock,
+        unregister_active_task,
+    )
+
+    # Cancel any in-progress run for this session (human interrupt).
+    # Operator messages are never interrupted — they're short command turns.
+    _prior_interrupted = False
+    if not _is_operator:
+        _prior_interrupted = await cancel_active_run(session.id)
+
+    _current_task = _asyncio.current_task()
+    if _current_task and not _is_operator:
+        await register_active_task(session.id, _current_task)
 
     try:
         async with session_run_lock(session.id):
@@ -355,8 +400,14 @@ async def wa_incoming(
                 media_image_b64=media_image_b64,
                 media_image_mime=media_image_mime,
                 sender_name=sender_name,
+                prior_run_was_interrupted=_prior_interrupted,
             )
+    except _asyncio.CancelledError:
+        log.info("wa_incoming.cancelled_by_interrupt", session_id=str(session.id))
+        await unregister_active_task(session.id)
+        return {"status": "cancelled", "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
     except Exception as exc:
+        await unregister_active_task(session.id)
         log.error("wa_incoming.agent_error", error=str(exc), exc_info=True)
         import traceback as _tb
         err_detail = _tb.format_exc()
@@ -374,6 +425,8 @@ async def wa_incoming(
         except Exception as _send_exc:
             log.warning("wa_incoming.error_reply_failed", error=str(_send_exc))
         return {"status": "error", "reply": _GENERIC_ERROR_MSG, "run_id": "", "steps": [], "messages_to_user": []}
+    finally:
+        await unregister_active_task(session.id)
 
     reply = result.get("reply", "")
     steps = result.get("steps", [])
@@ -381,21 +434,24 @@ async def wa_incoming(
     # 7. Kirim reply ke channel
     if reply:
         try:
-            wa_reply = markdown_to_wa(reply)
-            escalation_cfg: dict = agent.escalation_config or {}
-            operator_phone: str = escalation_cfg.get("operator_phone", "")
-
-            if _is_operator:
-                # Kirim final reply ke operator
-                await send_wa_message(body.device_id, reply_target, wa_reply)
+            wa_reply = markdown_to_wa(reply) or reply.strip()
+            if not wa_reply:
+                log.warning("wa_incoming.empty_reply_after_conversion", reply_len=len(reply))
             else:
-                # Guard: jangan kirim ke nomor operator
-                normalized_target = normalize_phone(reply_target)
-                normalized_operator = normalize_phone(operator_phone) if operator_phone else ""
-                if normalized_operator and normalized_target == normalized_operator:
-                    log.warning("wa_incoming.reply_target_is_operator_suppressed", reply_target=reply_target)
-                else:
+                escalation_cfg: dict = agent.escalation_config or {}
+                operator_phone: str = escalation_cfg.get("operator_phone", "")
+
+                if _is_operator:
+                    # Kirim final reply ke operator
                     await send_wa_message(body.device_id, reply_target, wa_reply)
+                else:
+                    # Guard: jangan kirim ke nomor operator
+                    normalized_target = normalize_phone(reply_target)
+                    normalized_operator = normalize_phone(operator_phone) if operator_phone else ""
+                    if normalized_operator and normalized_target == normalized_operator:
+                        log.warning("wa_incoming.reply_target_is_operator_suppressed", reply_target=reply_target)
+                    else:
+                        await send_wa_message(body.device_id, reply_target, wa_reply)
         except Exception as exc:
             log.error("wa_incoming.send_reply_failed", target=reply_target, error=str(exc))
 

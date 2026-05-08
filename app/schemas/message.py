@@ -20,7 +20,7 @@ class StepSummary(BaseModel):
 class MessageResponse(BaseModel):
     reply: str
     steps: list[StepSummary]
-    run_id: uuid.UUID
+    run_id: uuid.UUID | None
 
 
 class HistoryMessage(BaseModel):

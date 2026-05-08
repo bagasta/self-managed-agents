@@ -64,6 +64,105 @@ async def _run_job_guarded(job_id) -> None:
         await _run_job(job_id)
 
 
+async def _run_heartbeat_job(job, agent_model, db) -> None:
+    """Jalankan heartbeat job: find last active session, run checklist, kirim jika perlu."""
+    from app.core.engine.agent_runner import run_agent
+    from app.core.infra.channel_service import send_message
+    from app.core.domain.memory_service import get_memory
+    from app.models.session import Session
+    import json as _json
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+
+    # label = "heartbeat:{external_user_id}"
+    label_prefix = "heartbeat:"
+    external_user_id = job.label[len(label_prefix):] if job.label.startswith(label_prefix) else None
+    if external_user_id == "_global":
+        external_user_id = None
+
+    log = logger.bind(job_id=str(job.id), label=job.label, user=external_user_id)
+
+    # Load heartbeat config untuk quiet hours check
+    config = {"quiet_start": "23:00", "quiet_end": "08:00"}
+    try:
+        cfg_mem = await get_memory(job.agent_id, "heartbeat:config", db, scope=external_user_id)
+        if cfg_mem:
+            config = _json.loads(cfg_mem.value_data)
+    except Exception:
+        pass
+
+    # Quiet hours check (WIB = UTC+7)
+    local_tz = _tz(_td(hours=7))
+    now_local = _dt.now(local_tz)
+    now_time_str = now_local.strftime("%H:%M")
+    q_start = config.get("quiet_start", "23:00")
+    q_end = config.get("quiet_end", "08:00")
+
+    def _in_quiet(t: str, start: str, end: str) -> bool:
+        if start > end:  # overnight: e.g. 23:00 – 08:00
+            return t >= start or t < end
+        return start <= t < end
+
+    if _in_quiet(now_time_str, q_start, q_end):
+        log.info("heartbeat.quiet_hours", time=now_time_str)
+        return
+
+    # Find latest session for this (agent_id, external_user_id)
+    from sqlalchemy import select as _sel, desc as _desc
+    session_q = _sel(Session).where(Session.agent_id == job.agent_id)
+    if external_user_id:
+        session_q = session_q.where(Session.external_user_id == external_user_id)
+    session_q = session_q.order_by(_desc(Session.updated_at)).limit(1)
+    session_result = await db.execute(session_q)
+    session = session_result.scalar_one_or_none()
+    if not session:
+        log.warning("heartbeat.no_session")
+        return
+
+    # Load checklist
+    checklist_mem = await get_memory(job.agent_id, "heartbeat:checklist", db, scope=external_user_id)
+    checklist = (
+        checklist_mem.value_data if checklist_mem
+        else "- Update daily memory jika belum ditulis hari ini\n- Cek apakah ada hal penting yang perlu disampaikan ke user"
+    )
+
+    log.info("heartbeat.running", session_id=str(session.id))
+    result = await run_agent(
+        agent_model=agent_model,
+        session=session,
+        user_message=f"[HEARTBEAT] Jalankan checklist berikut:\n{checklist}",
+        db=db,
+    )
+    reply = (result.get("reply") or "").strip()
+
+    # HEARTBEAT_OK → diam
+    if not reply or reply.upper().startswith("HEARTBEAT_OK"):
+        log.info("heartbeat.ok")
+        return
+
+    log.info("heartbeat.notify", reply_len=len(reply), channel=session.channel_type)
+
+    # Kirim notifikasi via channel
+    if session.channel_type:
+        cfg = session.channel_config if isinstance(session.channel_config, dict) else {}
+        try:
+            await send_message(channel_type=session.channel_type, channel_config=cfg, text=reply)
+            log.info("heartbeat.sent", channel=session.channel_type)
+        except Exception as send_exc:
+            log.error("heartbeat.send_failed", error=str(send_exc))
+    else:
+        # Webchat / API → push via SSE
+        try:
+            from app.core.workers import event_bus
+            await event_bus.publish(str(session.id), {
+                "_event_type": "message",
+                "type": "heartbeat_message",
+                "reply": reply,
+            })
+            log.info("heartbeat.sse_published")
+        except Exception as bus_exc:
+            log.warning("heartbeat.sse_failed", error=str(bus_exc))
+
+
 async def _run_job(job_id) -> None:
     """Jalankan satu scheduled job: inject payload ke agent, kirim reply ke channel."""
     from app.core.engine.agent_runner import run_agent
@@ -79,18 +178,43 @@ async def _run_job(job_id) -> None:
         if not job or job.status != "active":
             return
 
-        session_result = await db.execute(select(Session).where(Session.id == job.session_id))
-        session = session_result.scalar_one_or_none()
-        if not session:
-            logger.warning("scheduler_service.session_not_found", job_id=str(job_id))
-            job.status = "cancelled"
-            await db.commit()
-            return
-
         agent_result = await db.execute(select(Agent).where(Agent.id == job.agent_id))
         agent_model = agent_result.scalar_one_or_none()
         if not agent_model:
             logger.warning("scheduler_service.agent_not_found", job_id=str(job_id))
+            job.status = "cancelled"
+            await db.commit()
+            return
+
+        # Heartbeat jobs ditangani terpisah
+        if job.payload == "[HEARTBEAT]":
+            try:
+                await _run_heartbeat_job(job, agent_model, db)
+            except Exception as exc:
+                logger.error("heartbeat.error", job_id=str(job_id), error=str(exc), exc_info=True)
+            finally:
+                # Update next_run
+                from datetime import timedelta
+                from croniter import croniter
+                now = datetime.now(timezone.utc)
+                job.last_run_at = now
+                if job.cron_expr:
+                    try:
+                        local_tz = timezone(timedelta(hours=7))
+                        now_local = now.astimezone(local_tz)
+                        next_local = croniter(job.cron_expr, now_local).get_next(datetime)
+                        job.next_run_at = next_local.astimezone(timezone.utc)
+                    except Exception:
+                        job.next_run_at = now + timedelta(minutes=30)
+                else:
+                    job.status = "done"
+                await db.commit()
+            return
+
+        session_result = await db.execute(select(Session).where(Session.id == job.session_id))
+        session = session_result.scalar_one_or_none()
+        if not session:
+            logger.warning("scheduler_service.session_not_found", job_id=str(job_id))
             job.status = "cancelled"
             await db.commit()
             return

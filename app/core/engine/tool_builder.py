@@ -9,6 +9,7 @@ Daftar fungsi:
   build_skill_tools(agent_id, db)
   build_tool_creator_tools(agent_id, db, sandbox)
   build_loaded_custom_tools(custom_tools_db, sandbox)
+  build_wa_notify_tool(session)              ← always-on untuk WA sessions
   build_whatsapp_media_tools(session, sandbox)
   build_wa_agent_manager_tools(session)
   build_http_tools(tools_config)
@@ -111,7 +112,155 @@ def build_memory_tools(agent_id: uuid.UUID, db_factory: async_sessionmaker, scop
             await db.commit()
         return f"Forgotten: {key}" if deleted else f"No memory found for key '{key}'"
 
-    return [remember, recall, forget]
+    @tool
+    async def update_daily(content: str) -> str:
+        """Append a note to today's daily memory. Use this to record important events from this session.
+        Args: content (the note to append, one fact or event per call)."""
+        import datetime as _dt
+        today = _dt.date.today().isoformat()
+        key = f"daily:{today}"
+        async with db_factory() as db:
+            existing = await get_memory(agent_id, key, db, scope=scope)
+            new_val = (existing.value_data + f"\n- {content}") if existing else f"- {content}"
+            await upsert_memory(agent_id, key, new_val, db, scope=scope)
+            await db.commit()
+        return f"Daily memory updated ({today})"
+
+    @tool
+    async def update_longterm(content: str) -> str:
+        """Append important information to long-term curated memory (persists across all future sessions).
+        Args: content (the fact or insight to remember long-term)."""
+        key = "longterm"
+        async with db_factory() as db:
+            existing = await get_memory(agent_id, key, db, scope=scope)
+            new_val = (existing.value_data + f"\n- {content}") if existing else f"- {content}"
+            await upsert_memory(agent_id, key, new_val, db, scope=scope)
+            await db.commit()
+        return "Long-term memory updated"
+
+    return [remember, recall, forget, update_daily, update_longterm]
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat tools
+# ---------------------------------------------------------------------------
+
+def build_heartbeat_tools(
+    agent_id: uuid.UUID,
+    session_id: uuid.UUID,
+    db_factory: async_sessionmaker,
+    scope: str | None = None,
+) -> list:
+    """Tools untuk mengaktifkan/menonaktifkan heartbeat proaktif per user."""
+
+    @tool
+    async def enable_heartbeat(
+        interval_minutes: int = 30,
+        quiet_start: str = "23:00",
+        quiet_end: str = "08:00",
+    ) -> str:
+        """Aktifkan heartbeat berkala untuk user ini. Agent akan proaktif cek dan notif jika ada yang penting.
+        Args: interval_minutes (seberapa sering cek, default 30), quiet_start/quiet_end (jam diam, format HH:MM WIB)."""
+        import json as _json
+        from datetime import timedelta as _td, timezone as _tz
+        from app.models.scheduled_job import ScheduledJob
+        from sqlalchemy import select as _select
+
+        # Simpan config ke memory
+        config = {
+            "enabled": True,
+            "interval_minutes": interval_minutes,
+            "quiet_start": quiet_start,
+            "quiet_end": quiet_end,
+        }
+        async with db_factory() as db:
+            await upsert_memory(agent_id, "heartbeat:config", _json.dumps(config), db, scope=scope)
+
+            # Buat cron expression dari interval
+            if interval_minutes < 60:
+                cron_expr = f"*/{interval_minutes} * * * *"
+            else:
+                hours = interval_minutes // 60
+                cron_expr = f"0 */{hours} * * *"
+
+            label = f"heartbeat:{scope or '_global'}"
+
+            # Cancel job lama jika ada
+            old = await db.execute(
+                _select(ScheduledJob).where(
+                    ScheduledJob.agent_id == agent_id,
+                    ScheduledJob.label == label,
+                    ScheduledJob.status == "active",
+                )
+            )
+            old_job = old.scalar_one_or_none()
+            if old_job:
+                old_job.status = "cancelled"
+
+            # Compute next_run
+            from croniter import croniter as _croniter
+            _local_tz = _tz(timedelta(hours=7))
+            from datetime import datetime as _dt
+            now_local = _dt.now(_local_tz)
+            try:
+                next_local = _croniter(cron_expr, now_local).get_next(_dt)
+                next_run = next_local.astimezone(_tz.utc)
+            except Exception:
+                next_run = _dt.now(_tz.utc) + _td(minutes=interval_minutes)
+
+            job = ScheduledJob(
+                agent_id=agent_id,
+                session_id=session_id,
+                label=label,
+                cron_expr=cron_expr,
+                payload="[HEARTBEAT]",
+                status="active",
+                next_run_at=next_run,
+            )
+            db.add(job)
+            await db.commit()
+
+        return (
+            f"Heartbeat aktif: setiap {interval_minutes} menit. "
+            f"Jam diam: {quiet_start}–{quiet_end} WIB. "
+            "Set checklist kamu dengan: remember('heartbeat:checklist', '- cek reminder...')"
+        )
+
+    @tool
+    async def disable_heartbeat() -> str:
+        """Nonaktifkan heartbeat proaktif untuk user ini."""
+        import json as _json
+        from app.models.scheduled_job import ScheduledJob
+        from sqlalchemy import select as _select
+
+        label = f"heartbeat:{scope or '_global'}"
+        async with db_factory() as db:
+            # Update config di memory
+            existing = await get_memory(agent_id, "heartbeat:config", db, scope=scope)
+            if existing:
+                try:
+                    cfg = _json.loads(existing.value_data)
+                    cfg["enabled"] = False
+                    await upsert_memory(agent_id, "heartbeat:config", _json.dumps(cfg), db, scope=scope)
+                except Exception:
+                    pass
+
+            # Cancel scheduled job
+            result = await db.execute(
+                _select(ScheduledJob).where(
+                    ScheduledJob.agent_id == agent_id,
+                    ScheduledJob.label == label,
+                    ScheduledJob.status == "active",
+                )
+            )
+            job = result.scalar_one_or_none()
+            if job:
+                job.status = "cancelled"
+            await db.commit()
+
+        return "Heartbeat dinonaktifkan."
+
+    return [enable_heartbeat, disable_heartbeat]
 
 
 # ---------------------------------------------------------------------------
@@ -342,18 +491,60 @@ if __name__ == "__main__":
 
 
 # ---------------------------------------------------------------------------
-# WhatsApp media tools
+# WhatsApp notify tool (progress updates mid-run)
 # ---------------------------------------------------------------------------
 
-def build_whatsapp_media_tools(session: Any, sandbox: DockerSandbox | None) -> list:
+def build_wa_notify_tool(session: Any) -> list:
     """
-    Tools untuk mengirim gambar dan dokumen ke WhatsApp.
-    send_agent_wa_qr dipisah ke build_wa_agent_manager_tools (opt-in via wa_agent_manager).
+    Tool `notify_user` — kirim pesan progress ke user WA selama agent masih running.
+    Otomatis aktif untuk semua sesi WhatsApp. Tidak butuh escalation.
     """
     _raw_cfg = session.channel_config
     channel_cfg: dict = _raw_cfg if isinstance(_raw_cfg, dict) else {}
     device_id: str = channel_cfg.get("device_id", "")
     default_target: str = channel_cfg.get("user_phone", "")
+
+    @tool
+    async def notify_user(message: str) -> str:
+        """Kirim pesan progress/update ke user WhatsApp saat sedang mengerjakan task panjang.
+        Gunakan ini untuk memberi tahu user bahwa pekerjaan masih berjalan, BUKAN sebagai reply final.
+        Contoh: notify_user('Sedang menulis file HTML...'), notify_user('Deploy sedang berjalan, hampir selesai...')
+        """
+        if not device_id or not default_target:
+            return "[notify_user] no WA device/target configured"
+        try:
+            from app.core.infra.wa_client import send_wa_message
+            await send_wa_message(device_id, default_target, message)
+            return "notifikasi terkirim"
+        except Exception as exc:
+            return f"[notify_user] gagal: {exc}"
+
+    return [notify_user]
+
+
+# ---------------------------------------------------------------------------
+# WhatsApp media tools
+# ---------------------------------------------------------------------------
+
+def build_whatsapp_media_tools(
+    session: Any,
+    sandbox: DockerSandbox | None,
+    *,
+    device_id: str = "",
+    default_target: str = "",
+) -> list:
+    """
+    Tools untuk mengirim gambar dan dokumen ke WhatsApp.
+    send_agent_wa_qr dipisah ke build_wa_agent_manager_tools (opt-in via wa_agent_manager).
+
+    device_id / default_target: kw-args opsional — dipakai saat session=None (misal subagent).
+    Jika session diberikan, device_id/default_target diambil dari session.channel_config.
+    """
+    if session is not None:
+        _raw_cfg = session.channel_config
+        channel_cfg: dict = _raw_cfg if isinstance(_raw_cfg, dict) else {}
+        device_id = channel_cfg.get("device_id", "") or device_id
+        default_target = channel_cfg.get("user_phone", "") or default_target
 
     @tool
     async def send_whatsapp_image(
@@ -496,7 +687,7 @@ def build_wa_agent_manager_tools(session: Any, db_factory: async_sessionmaker) -
         if not device_id:
             return "[error] Tidak ada device_id WhatsApp pada session ini"
 
-        from app.core.infra.wa_client import create_wa_device, get_wa_qr, send_wa_image
+        from app.core.infra.wa_client import create_wa_device, get_wa_qr, refresh_wa_qr, send_wa_image
         from app.models.agent import Agent as _Agent
         from sqlalchemy import select as _select
         import uuid as _uuid
@@ -532,7 +723,8 @@ def build_wa_agent_manager_tools(session: Any, db_factory: async_sessionmaker) -
                 return f"[INFO] Agent '{agent_id}' sudah terhubung ke WhatsApp — tidak perlu scan QR lagi."
 
             if not qr_b64:
-                resp = await create_wa_device(wa_dev_id)
+                # QR kosong: channel mungkin belum ada atau expired. Paksa fresh QR.
+                resp = await refresh_wa_qr(wa_dev_id)
                 qr_status = resp.get("status", "")
                 qr_b64 = resp.get("qr_image", "")
 

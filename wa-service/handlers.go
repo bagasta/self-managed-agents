@@ -56,6 +56,33 @@ func (h *Handlers) createDevice(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// POST /devices/{id}/qr
+// Force a fresh QR scan — disconnects, clears session, returns new QR image.
+func (h *Handlers) refreshQR(w http.ResponseWriter, r *http.Request) {
+	deviceID := r.PathValue("id")
+	if deviceID == "" {
+		writeError(w, http.StatusBadRequest, "device id required")
+		return
+	}
+
+	qrImage, err := h.dm.RefreshQR(deviceID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	status := StatusWaitingQR
+	if qrImage == "" {
+		status = StatusConnected
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"device_id": deviceID,
+		"qr_image":  qrImage,
+		"status":    status,
+	})
+}
+
 // GET /devices/{id}/qr
 // Response: {"device_id": "...", "qr_image": "<base64>", "status": "..."}
 func (h *Handlers) getQR(w http.ResponseWriter, r *http.Request) {

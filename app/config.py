@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     # Sandbox
     sandbox_base_dir: str = "/tmp/agent-sandboxes"
-    docker_sandbox_image: str = "nikolaik/python-nodejs:python3.12-nodejs22"
+    docker_sandbox_image: str = "managed-agents-sandbox:latest"
     docker_host: str = "unix:///run/docker.sock"
 
     # Agent limits
@@ -55,7 +55,7 @@ class Settings(BaseSettings):
     # Tunable limits
     context_summary_trigger: int = 10      # summarize after N user messages
     default_subagent_model: str = "openai/gpt-4o-mini"
-    default_subagent_max_tokens: int = 512
+    default_subagent_max_tokens: int = 2048
     media_doc_max_chars: int = 12000
     llm_max_tokens: int = 1024
     message_max_length: int = 10_000       # max chars per user message

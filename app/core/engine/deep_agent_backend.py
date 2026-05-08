@@ -98,6 +98,18 @@ class DockerBackend(SandboxBackendProtocol):
     # read
     # ------------------------------------------------------------------
 
+    # Extensions whose content the SDK wraps in a binary content block (type != "text").
+    # Reading these via read_file would create a ToolMessage with {"type": "file/image/audio",
+    # "base64": ..., "mime_type": ...} lacking a "filename" field, causing OpenRouter 400.
+    # Return an error instead so the SDK falls back to a plain string result.
+    _BINARY_EXTENSIONS = frozenset({
+        ".pdf", ".ppt", ".pptx",
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp",
+        ".mp3", ".wav", ".ogg", ".m4a", ".flac",
+        ".mp4", ".mov", ".avi", ".webm",
+        ".zip", ".tar", ".gz", ".bin", ".exe",
+    })
+
     def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
         try:
             p = self._resolve(file_path)
@@ -107,6 +119,15 @@ class DockerBackend(SandboxBackendProtocol):
             return ReadResult(error=f"File '{file_path}' not found")
         if not p.is_file():
             return ReadResult(error=f"'{file_path}' is not a file")
+        ext = p.suffix.lower()
+        if ext in self._BINARY_EXTENSIONS:
+            return ReadResult(
+                error=(
+                    f"Binary file '{file_path}' cannot be read as text. "
+                    f"Use execute() to process it — e.g. `python3 -c \"import PyPDF2; ...\"` for PDFs, "
+                    f"or `base64 {file_path}` to get raw bytes."
+                )
+            )
         try:
             lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
             if offset >= len(lines) and len(lines) > 0:
@@ -120,7 +141,7 @@ class DockerBackend(SandboxBackendProtocol):
         return self.read(file_path, offset, limit)
 
     # ------------------------------------------------------------------
-    # write (always overwrites — sandbox semantic, unlike FilesystemBackend)
+    # write (create-only per BackendProtocol spec — use edit() to modify)
     # ------------------------------------------------------------------
 
     def write(self, file_path: str, content: str) -> WriteResult:
@@ -128,6 +149,8 @@ class DockerBackend(SandboxBackendProtocol):
             p = self._resolve(file_path)
         except ValueError as e:
             return WriteResult(path=None, error=str(e), files_update=None)
+        if p.exists():
+            return WriteResult(path=None, error=f"File '{file_path}' already exists. Use edit() to modify it.", files_update=None)
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding="utf-8")

@@ -39,6 +39,14 @@ async def get_wa_qr(device_id: str) -> dict:
         return resp.json()
 
 
+async def refresh_wa_qr(device_id: str) -> dict:
+    """Force a fresh QR scan — disconnects session and returns a new QR image."""
+    async with httpx.AsyncClient(timeout=_WA_TIMEOUT_CREATE) as client:
+        resp = await client.post(f"{_base_url()}/devices/{device_id}/qr")
+        resp.raise_for_status()
+        return resp.json()
+
+
 async def get_wa_status(device_id: str) -> dict:
     """Get connection status for a device."""
     async with httpx.AsyncClient(timeout=_WA_TIMEOUT_DEFAULT) as client:

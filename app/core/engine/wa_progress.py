@@ -1,0 +1,94 @@
+from __future__ import annotations
+
+import ast
+import json
+import re
+from typing import Any
+
+_TOOL_PROGRESS_FALLBACK: dict[str, str] = {
+    "task": "🤖 Mendelegasikan ke subagent...",
+    "http_get": "🔍 Mengambil data dari web...",
+    "http_post": "📡 Mengirim request...",
+    "deploy_app": "🚀 Sedang deploy aplikasi...",
+    "execute": "⚙️ Menjalankan kode...",
+    "write_file": "✏️ Menulis file...",
+    "edit_file": "✏️ Mengedit file...",
+    "read_file": "📖 Membaca file...",
+    "search_documents": "🔎 Mencari dokumen...",
+    "remember": "💾 Menyimpan ke memori...",
+    "set_reminder": "⏰ Mengatur pengingat...",
+    "send_whatsapp_document": "📎 Mengirim file...",
+    "send_whatsapp_image": "🖼️ Mengirim gambar...",
+}
+
+
+def parse_tool_input_payload(input_payload: Any) -> dict[str, Any]:
+    if isinstance(input_payload, dict):
+        return input_payload
+    if not isinstance(input_payload, str):
+        return {}
+    raw = input_payload.strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        pass
+    try:
+        parsed = ast.literal_eval(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def truncate_preview(text: str, max_len: int = 96) -> str:
+    txt = " ".join((text or "").split())
+    if len(txt) <= max_len:
+        return txt
+    return txt[: max_len - 1].rstrip() + "…"
+
+
+def build_progress_message(tool_name: str, input_payload: Any) -> str | None:
+    payload = parse_tool_input_payload(input_payload)
+    if tool_name == "task":
+        subagent_name = str(payload.get("name") or "subagent").strip()
+        task_text = str(payload.get("task") or payload.get("description") or "").strip()
+        if task_text:
+            return f"🤖 Delegasi ke {subagent_name}: {truncate_preview(task_text)}"
+        return f"🤖 Mendelegasikan kerja ke {subagent_name}..."
+
+    if tool_name in {"read_file", "write_file", "edit_file"}:
+        path = str(payload.get("path") or payload.get("file_path") or "").strip()
+        prefix = {
+            "read_file": "📖 Membaca file",
+            "write_file": "✏️ Menulis file",
+            "edit_file": "✏️ Mengedit file",
+        }.get(tool_name, "📄 Memproses file")
+        if path:
+            return f"{prefix}: {path}"
+
+    if tool_name == "http_get":
+        url = str(payload.get("url") or "").strip()
+        if url:
+            return f"🔍 Mengambil data: {truncate_preview(url, 72)}"
+
+    if tool_name == "execute":
+        cmd = str(payload.get("command") or payload.get("cmd") or "").strip()
+        if cmd:
+            return f"⚙️ Menjalankan perintah: {truncate_preview(cmd, 80)}"
+
+    return _TOOL_PROGRESS_FALLBACK.get(tool_name)
+
+
+def build_task_done_message(input_payload: Any, output: Any) -> str:
+    payload = parse_tool_input_payload(input_payload)
+    subagent_name = str(payload.get("name") or "subagent").strip()
+    out = output if isinstance(output, str) else str(output)
+    url_match = re.search(r"https://[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}(?:/[^\s\"']*)?", out)
+    if url_match:
+        return f"✅ {subagent_name} selesai. URL: {url_match.group(0).rstrip('.,)')}"
+    preview = truncate_preview(out, 100)
+    if preview:
+        return f"✅ {subagent_name} selesai: {preview}"
+    return f"✅ {subagent_name} selesai."

@@ -41,6 +41,7 @@ from app.core.engine.tool_builder import (
     build_memory_tools,
     build_sandbox_binary_tool,
     build_skill_tools,
+    build_whatsapp_media_tools,
 )
 
 settings = get_settings()
@@ -94,8 +95,14 @@ _SYSTEM_SUBAGENTS: list[dict] = [
             "Kamu adalah agen programmer full-stack spesialis. Tugasmu adalah menulis, menjalankan, men-debug kode, "
             "dan men-deploy aplikasi/website ke public URL.\n\n"
             "Kamu bisa menggunakan bahasa pemrograman apapun: Python, JavaScript/Node.js, HTML/CSS, Go, Bash, dll.\n\n"
+            "STRUKTUR WORKSPACE — selalu gunakan folder yang benar:\n"
+            "  /workspace/src/       → source code (HTML, Python, JS, dll)\n"
+            "  /workspace/assets/    → gambar, font, file statis\n"
+            "  /workspace/data/      → file input / dataset\n"
+            "  /workspace/output/    → hasil akhir yang akan dikirim ke user (PNG, PDF, ZIP, dll)\n"
+            "  /workspace/tmp/       → file sementara yang tidak perlu disimpan\n\n"
             "ATURAN WAJIB untuk website/web app/aplikasi yang perlu diakses:\n"
-            "1. Tulis semua file yang dibutuhkan ke workspace menggunakan write_file\n"
+            "1. Tulis semua file ke folder yang tepat (src/, assets/)\n"
             "2. Panggil get_deployment_status() — jika 'running' kembalikan URL yang ada, jangan deploy ulang\n"
             "3. Jika belum ada deployment → panggil deploy_app(command, port)\n"
             "   - Static website (HTML/CSS/JS): deploy_app('python3 -m http.server 8080', 8080)\n"
@@ -103,22 +110,24 @@ _SYSTEM_SUBAGENTS: list[dict] = [
             "   - Node.js: deploy_app('npm install && node server.js', 3000)\n"
             "4. Setelah deploy_app() selesai, verifikasi: panggil get_deployment_status() — pastikan status 'running' dan URL ada\n"
             "5. Jika URL kosong atau status bukan 'running', panggil get_deployment_logs() untuk debug, lalu perbaiki\n\n"
+            "MENGIRIM FILE/GAMBAR KE WHATSAPP:\n"
+            "Jika tugasmu menghasilkan gambar, PDF, atau file lain yang harus dikirim ke user:\n"
+            "1. Simpan hasil ke /workspace/output/<filename>\n"
+            "2. Panggil send_whatsapp_image('/workspace/output/<filename>', caption='...') untuk gambar\n"
+            "3. Panggil send_whatsapp_document('/workspace/output/<filename>', filename='...', caption='...') untuk dokumen/ZIP\n"
+            "4. Setelah tool berhasil (hasil '[IMAGE_SENT]' atau '[DOCUMENT_SENT]'), BARU tulis output akhir\n\n"
             "ATURAN OUTPUT — WAJIB diikuti tanpa pengecualian:\n"
             "- JANGAN tulis teks apapun sebelum semua tool selesai dipanggil\n"
             "- Teks output pertama yang kamu tulis = FINAL REPLY = task selesai\n"
-            "- Jadi: tulis semua file → deploy → verifikasi URL → BARU tulis output\n"
+            "- Jadi: tulis semua file → deploy/send → verifikasi → BARU tulis output\n"
             "- Output akhir: maks 5 baris, sertakan URL jika ada\n"
             "- JANGAN dump source code HTML/CSS/JS di output akhir kecuali user EKSPLISIT minta kodenya\n"
             "- JANGAN jelaskan cara kerja kode — langsung eksekusi\n"
-            "- JANGAN cari inspirasi desain dari internet kecuali user minta\n"
-            "- Task BELUM selesai sampai deploy_app() sukses dan URL dikonfirmasi via get_deployment_status()\n\n"
-            "Alur kerja untuk script/komputasi (bukan web):\n"
-            "1. Tulis kode menggunakan write_file, jalankan dengan execute()\n"
-            "2. Debug jika error, kembalikan hasil eksekusi\n"
-            "3. Output akhir: hasil/error saja, bukan listing kode lengkap\n\n"
+            "- Task BELUM selesai sampai deploy_app() sukses atau file sudah dikirim ke user\n\n"
             "Install dependency: execute('pip install <package>') atau execute('npm install <package>')"
         ),
         "model": "deepseek/deepseek-v4-flash",
+        "max_tokens": 4096,
         "tools_config": {"sandbox": True, "deploy": True, "http": False},
     },
     {
@@ -200,22 +209,31 @@ _SYSTEM_SUBAGENTS: list[dict] = [
         "system_prompt": (
             "Kamu adalah agen analis data spesialis. Tugasmu adalah mengolah data, melakukan kalkulasi, "
             "dan membuat laporan analisis.\n\n"
+            "STRUKTUR WORKSPACE:\n"
+            "  /workspace/data/      → file input / dataset\n"
+            "  /workspace/src/       → script analisis Python\n"
+            "  /workspace/output/    → grafik, laporan, CSV hasil yang akan dikirim ke user\n"
+            "  /workspace/tmp/       → file sementara\n\n"
             "Cara kerja:\n"
             "1. Terima data dalam bentuk teks, CSV, JSON, atau format lain\n"
-            "2. Tulis kode Python dengan pandas/numpy menggunakan write_file\n"
+            "2. Tulis kode Python dengan pandas/numpy/matplotlib ke /workspace/src/ menggunakan write_file\n"
             "3. Jalankan analisis di sandbox menggunakan execute\n"
-            "4. Buat ringkasan temuan dan insight yang actionable\n"
-            "5. Format hasil sebagai tabel atau laporan terstruktur\n\n"
-            "Install library: execute('pip install pandas numpy')"
+            "4. Simpan output (grafik PNG, CSV hasil) ke /workspace/output/\n"
+            "5. Jika task meminta kirim grafik atau laporan ke user:\n"
+            "   - send_whatsapp_image('/workspace/output/<chart>.png', caption='...') untuk grafik\n"
+            "   - send_whatsapp_document('/workspace/output/<report>.csv', filename='...') untuk data\n"
+            "6. Buat ringkasan temuan dan insight yang actionable\n\n"
+            "Install library: execute('pip install pandas numpy matplotlib seaborn')"
         ),
         "model": "openai/gpt-4o-mini",
+        "max_tokens": 1024,
         "tools_config": {"sandbox": True, "http": False},
     },
 
 ]
 
 
-def _make_sub_llm(spec_or_model: str | Any) -> ChatOpenAI:
+def _make_sub_llm(spec_or_model: str | Any, max_tokens: int | None = None) -> ChatOpenAI:
     """Build a ChatOpenAI LLM for a subagent, handling mistral prefix."""
     _sm = spec_or_model if isinstance(spec_or_model, str) else (spec_or_model or "")
     _sm_is_mistral = _sm.startswith("mistral/") or _sm.startswith("mistral-")
@@ -224,11 +242,16 @@ def _make_sub_llm(spec_or_model: str | Any) -> ChatOpenAI:
         api_key=settings.mistral_api_key if _sm_is_mistral else settings.openrouter_api_key,
         base_url="https://api.mistral.ai/v1" if _sm_is_mistral else "https://openrouter.ai/api/v1",
         temperature=0.5,
-        max_tokens=settings.default_subagent_max_tokens,
+        max_tokens=max_tokens or settings.default_subagent_max_tokens,
     )
 
 
-def _build_system_subagent(spec: dict, parent_session_id: uuid.UUID) -> tuple[dict, DockerSandbox | None]:
+def _build_system_subagent(
+    spec: dict,
+    parent_session_id: uuid.UUID,
+    wa_device_id: str = "",
+    wa_target: str = "",
+) -> tuple[dict, DockerSandbox | None]:
     """
     Build a SubAgent (or CompiledSubAgent) dict and optional DockerSandbox from a system sub-agent spec.
 
@@ -238,6 +261,9 @@ def _build_system_subagent(spec: dict, parent_session_id: uuid.UUID) -> tuple[di
 
     For non-sandbox subagents:
       Returns a plain SubAgent dict; FilesystemMiddleware from parent backend is sufficient.
+
+    wa_device_id / wa_target: when set, sandbox subagents get send_whatsapp_image and
+      send_whatsapp_document tools so they can deliver output directly to the user.
     """
     sub_cfg = spec.get("tools_config", {})
     extra_tools: list = []
@@ -256,10 +282,23 @@ def _build_system_subagent(spec: dict, parent_session_id: uuid.UUID) -> tuple[di
             # These MUST use sub_sandbox so workspace matches write_file's workspace.
             extra_tools.extend(build_deployment_tools(sub_sandbox))
 
+        # Give sandbox subagents WA media tools when parent session is on WhatsApp.
+        # Subagents write output to /workspace/output/ and call send_whatsapp_image /
+        # send_whatsapp_document to deliver results without routing through main agent.
+        if wa_device_id and wa_target:
+            extra_tools.extend(
+                build_whatsapp_media_tools(
+                    None,
+                    sub_sandbox,
+                    device_id=wa_device_id,
+                    default_target=wa_target,
+                )
+            )
+
     if _is_enabled(sub_cfg, "http", default=False):
         extra_tools.extend(build_http_tools(sub_cfg))
 
-    sub_llm = _make_sub_llm(spec["model"])
+    sub_llm = _make_sub_llm(spec["model"], max_tokens=spec.get("max_tokens"))
 
     # For sandbox-capable subagents: compile as CompiledSubAgent with its own DockerBackend.
     # This is the key fix: the SDK's FilesystemMiddleware inside this compiled agent will
@@ -307,6 +346,8 @@ async def build_subagents(
     parent_session_id: uuid.UUID,
     db: AsyncSession,
     log: Any,
+    wa_device_id: str = "",
+    wa_target: str = "",
 ) -> tuple[list, list[DockerSandbox]]:
     """
     Build SubAgent / CompiledSubAgent list untuk Deep Agents SDK.
@@ -356,10 +397,28 @@ async def build_subagents(
             log.info("build_subagents.from_hardcoded", count=len(specs))
 
         for spec in specs:
-            sa, ssb = _build_system_subagent(spec, parent_session_id)
+            sa, ssb = _build_system_subagent(spec, parent_session_id, wa_device_id, wa_target)
             subagents.append(sa)
             if ssb:
                 sub_sandboxes.append(ssb)
+
+        # Add explicit "general-purpose" spec to prevent SDK from auto-injecting its own
+        # default general-purpose subagent (SDK injects one when no spec with this name exists).
+        # We map it to sys_researcher so the agent has a capable fallback for open-ended tasks.
+        _gp_spec = next((s for s in (_SYSTEM_SUBAGENTS if not db_sys_agents else specs)
+                         if s["name"] == "sys_researcher"), None)
+        if _gp_spec and not any(s.get("name") == "general-purpose" for s in subagents):
+            _gp_sa, _gp_ssb = _build_system_subagent(
+                {**_gp_spec, "name": "general-purpose",
+                 "description": "General purpose agent for research, reasoning, and open-ended tasks."},
+                parent_session_id,
+                wa_device_id,
+                wa_target,
+            )
+            subagents.append(_gp_sa)
+            if _gp_ssb:
+                sub_sandboxes.append(_gp_ssb)
+
         return subagents, sub_sandboxes
 
     from app.models.agent import Agent as AgentModel
@@ -401,6 +460,16 @@ async def build_subagents(
             if _is_enabled(sub_cfg, "deploy", default=False):
                 extra_tools.extend(build_deployment_tools(sub_sandbox))
 
+            if wa_device_id and wa_target:
+                extra_tools.extend(
+                    build_whatsapp_media_tools(
+                        None,
+                        sub_sandbox,
+                        device_id=wa_device_id,
+                        default_target=wa_target,
+                    )
+                )
+
         if _is_enabled(sub_cfg, "memory", default=True):
             extra_tools.extend(build_memory_tools(agent_row.id, AsyncSessionLocal, scope=None))
 
@@ -433,7 +502,10 @@ async def build_subagents(
                 )
                 sa: dict = {
                     "name": agent_row.name,
-                    "description": (agent_row.instructions or "")[:300].replace("\n", " "),
+                    "description": (
+                        agent_row.description
+                        or (agent_row.instructions or "")[:150].replace("\n", " ")
+                    ),
                     "runnable": runnable,
                 }
                 subagents.append(sa)
@@ -450,7 +522,10 @@ async def build_subagents(
         # Non-sandbox custom subagent or fallback: plain SubAgent dict.
         sa = {
             "name": agent_row.name,
-            "description": (agent_row.instructions or "")[:300].replace("\n", " "),
+            "description": (
+                agent_row.description
+                or (agent_row.instructions or "")[:150].replace("\n", " ")
+            ),
             "system_prompt": agent_row.instructions or "You are a helpful assistant.",
             "tools": extra_tools,
             "model": sub_llm,

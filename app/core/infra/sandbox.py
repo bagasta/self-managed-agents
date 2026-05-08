@@ -67,10 +67,15 @@ def _connect_docker(preferred: str) -> docker.DockerClient:
     )
 
 
+_WORKSPACE_SUBDIRS = ("output", "src", "data", "assets", "tmp")
+
+
 def get_workspace_dir(session_id: str | uuid.UUID) -> Path:
     settings = get_settings()
     workspace = Path(settings.sandbox_base_dir) / str(session_id)
     workspace.mkdir(parents=True, exist_ok=True)
+    for sub in _WORKSPACE_SUBDIRS:
+        (workspace / sub).mkdir(exist_ok=True)
     return workspace
 
 

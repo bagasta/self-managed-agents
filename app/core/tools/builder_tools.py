@@ -23,14 +23,17 @@ Keamanan:
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from typing import Any
 
 import structlog
 from langchain_core.tools import tool
+from openai import AsyncOpenAI
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.config import get_settings
 from app.models.agent import Agent
 
 logger = structlog.get_logger(__name__)
@@ -58,9 +61,9 @@ AGENT_PRESETS: dict[str, dict] = {
             "rag": False,
             "http": False,
             "whatsapp_media": False,
-            "subagents": {"enabled": False},
+            "subagents": {"enabled": True},
         },
-        "required_tools": ["sandbox", "deploy"],
+        "required_tools": ["sandbox", "deploy", "subagents"],
         "forbidden_tools": [],
         "channel_requirements": [],
         "runtime_limitations": [
@@ -388,14 +391,16 @@ _TOOLS_CONFIG_DOCS = {
     "whatsapp_media": "Kirim gambar dan dokumen via WhatsApp. Default OFF. Aktifkan untuk agent WA.",
     "wa_agent_manager": "Kelola WA device/QR agent lain. Default OFF. Khusus meta-agent.",
     "subagents": (
-        "Delegasi ke sub-agent spesialis. Default OFF. "
+        "Delegasi ke sub-agent spesialis via tool task(). "
+        "WAJIB aktif (subagents: {enabled: true}) untuk semua coding/deploy agent — "
+        "sys_coder menangani eksekusi sandbox dan deploy ke public URL, main agent jadi orchestrator. "
         "Sub-agent yang tersedia: "
-        "sys_coder (programmer full-stack: tulis kode Python/JS/HTML, jalankan di sandbox, deploy website ke Cloudflare public URL — kembalikan link ke user), "
+        "sys_coder (programmer full-stack: tulis kode Python/JS/HTML, jalankan di sandbox Docker, deploy website ke Cloudflare public URL — kembalikan URL ke user), "
         "sys_researcher (riset internet via HTTP), "
         "sys_writer (tulis/edit konten), "
         "sys_analyst (analisis data dengan pandas/numpy). "
-        "Gunakan subagents:true jika agent perlu kemampuan coding+deploy SEKALIGUS tugas lain (riset, tulis, analisis). "
-        "Jika hanya perlu coding+deploy saja, cukup sandbox:true tanpa subagents."
+        "Jika agent HANYA butuh coding/deploy: aktifkan sandbox+deploy+subagents. "
+        "Jika butuh coding PLUS riset/analisis/tulis: sama, subagents sudah include semua."
     ),
 }
 
@@ -483,6 +488,138 @@ def _get_post_create_steps(preset_id: str, channel: str, tc: dict) -> list[str]:
     return steps
 
 
+_INSTRUCTION_WRITER_MODEL = "deepseek/deepseek-r1"
+# Soul writing is structured text — doesn't need heavy reasoning, use fast model
+_SOUL_WRITER_MODEL = "openai/gpt-4o-mini"
+
+_SOUL_TEMPLATES: dict[str, str] = {
+    "cs_whatsapp_basic": """\
+IDENTITAS
+Nama: {name}
+Peran: {role} dari {business}
+
+KEPRIBADIAN
+{persona}. Bahasa Indonesia, santai tapi sopan. Gunakan sapaan yang hangat. Pesan maks 2-3 kalimat — singkat dan to the point. JANGAN pakai markdown (*, #, **).
+
+TUGAS UTAMA
+{tasks}
+
+INFO BISNIS
+{business_info}
+
+ESKALASI
+{escalation}
+Cara eskalasi WAJIB: panggil tool escalate_to_human(reason, summary) DULU — baru balas user.
+Sebelum eskalasi: catat nama user dan masalah ke memory.
+
+MEMORY
+Saat pertama kali ngobrol dengan user baru: catat namanya dan kebutuhannya ke memory.
+
+LARANGAN
+- Jangan pakai simbol markdown apapun
+- Jangan beri janji yang tidak bisa dipenuhi
+- Jangan bahas hal di luar {business}\
+""",
+    "coding_deploy_agent": """\
+IDENTITAS
+Nama: {name}
+Peran: Orchestrator coding dan web deployment. Terima request dari user, delegasikan eksekusi ke sys_coder, sampaikan hasilnya.
+
+KEPRIBADIAN
+{persona}. Langsung eksekusi — tidak perlu tanya konfirmasi dulu. Jawab singkat dan berikan hasilnya.
+
+CARA KERJA WAJIB untuk setiap task coding/web:
+Delegasikan semua task coding dan deploy ke sys_coder via tool task().
+Contoh: task(name="sys_coder", task="Buat landing page HTML dengan judul 'Halo Dunia', deploy, kembalikan URL")
+
+sys_coder menangani:
+- Menulis semua file kode ke workspace
+- Mengecek dan menjalankan deployment
+- Mendapatkan URL publik yang bisa diakses
+
+Kamu (main agent) menangani:
+- Menerima dan memahami request user
+- Mendelegasikan ke sys_coder dengan instruksi yang jelas
+- Menyampaikan hasil (URL atau error) ke user dengan ramah
+
+ATURAN KERAS
+- JANGAN coba eksekusi kode sendiri — delegasikan ke sys_coder
+- Jangan tampilkan source code di jawaban akhir kecuali user eksplisit minta
+- Task BELUM selesai sampai sys_coder konfirmasi URL
+- Jika sys_coder gagal, relay BLOCKER ke user dan minta mereka coba lagi
+
+{extra_rules}\
+""",
+    "faq_webchat_rag": """\
+IDENTITAS
+Nama: {name}
+Peran: Asisten FAQ dari {business}
+
+KEPRIBADIAN
+{persona}. Bahasa Indonesia, informatif dan ringkas. Jawab berdasarkan dokumen — jangan karang sendiri.
+
+TUGAS UTAMA
+- Jawab pertanyaan user menggunakan tool search_documents untuk mencari di dokumen
+- Jika informasi tidak ada di dokumen: akui terus terang dan tawarkan eskalasi
+- Jangan mengada-ada atau menebak jawaban
+
+INFO BISNIS
+{business_info}
+
+ESKALASI
+{escalation}
+Cara eskalasi: panggil escalate_to_human(reason, summary) lalu beritahu user.
+
+LARANGAN
+- Jangan jawab di luar scope dokumen
+- Jangan buat informasi yang tidak ada di dokumen\
+""",
+    "scheduler_assistant": """\
+IDENTITAS
+Nama: {name}
+Peran: Asisten jadwal dan pengingat pribadi
+
+KEPRIBADIAN
+{persona}. Bahasa Indonesia, santai. Selalu konfirmasi ulang detail reminder sebelum set.
+
+TUGAS UTAMA
+- Set reminder dan pengingat sesuai permintaan user
+- Catat jadwal penting ke memory
+- Ingatkan user saat waktunya tiba dengan pesan yang relevan
+
+CARA KERJA
+Setelah set reminder: konfirmasi waktu, pesan, dan timezone ke user.
+Sebelum set: pastikan waktu sudah jelas (tanggal, jam, timezone jika disebutkan).
+
+LARANGAN
+- Jangan set reminder tanpa konfirmasi waktu yang jelas
+- Jangan lupa konfirmasi setelah berhasil set\
+""",
+}
+
+
+async def _call_instruction_writer(prompt: str, system: str, model: str | None = None) -> str:
+    """Call LLM via OpenRouter for instruction/soul writing."""
+    settings = get_settings()
+    client = AsyncOpenAI(
+        api_key=settings.openrouter_api_key,
+        base_url="https://openrouter.ai/api/v1",
+    )
+    response = await client.chat.completions.create(
+        model=model or _INSTRUCTION_WRITER_MODEL,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ],
+        max_tokens=1500,
+        temperature=0.5,
+    )
+    content = response.choices[0].message.content or ""
+    # Strip reasoning/thinking tags
+    content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+    return content
+
+
 def build_builder_tools(
     db_factory: async_sessionmaker,
     owner_phone: str | None = None,
@@ -541,6 +678,206 @@ def build_builder_tools(
                 "Untuk menambah operator baru: update_agent(agent_id=self_agent_id, add_operator='+62xxx')."
             ),
         }, ensure_ascii=False, indent=2)
+
+    # ------------------------------------------------------------------ #
+    # compose_agent_instructions                                          #
+    # ------------------------------------------------------------------ #
+
+    @tool
+    async def compose_agent_instructions(
+        preset_id: str,
+        agent_name: str,
+        business_context: str,
+        persona: str = "ramah dan profesional",
+        channel: str = "webchat",
+        escalation_info: str = "",
+        extra_rules: str = "",
+    ) -> str:
+        """
+        Tulis system prompt (instructions) berkualitas tinggi untuk agent baru
+        menggunakan model reasoning khusus (deepseek-r1).
+
+        Hasilnya lebih spesifik, lebih kontekstual, dan lebih cerdas dibanding template manual.
+        Tidak ada placeholder yang tersisa — semua diisi dengan info nyata.
+
+        WAJIB dipanggil di Fase 4 step 2, sebelum create_agent. Gunakan hasilnya
+        sebagai parameter `instructions` saat memanggil create_agent.
+
+        Args:
+            preset_id: Preset yang digunakan (coding_deploy_agent, cs_whatsapp_basic, dll)
+            agent_name: Nama agent
+            business_context: Info bisnis lengkap: produk, layanan, jam buka, kebijakan, harga, dll.
+                              Semakin detail semakin baik. Kosong hanya untuk agent coding/general.
+            persona: Gaya bicara dan karakter agent (misal: "hangat, sabar, suka bercanda")
+            channel: Channel: 'whatsapp' atau 'webchat'
+            escalation_info: Kondisi eskalasi dan info operator (misal: "Eskalasi jika komplain besar. Operator: +62812xxx")
+            extra_rules: Aturan tambahan yang diminta user
+        """
+        preset = AGENT_PRESETS.get(preset_id, {})
+        skeleton = preset.get("instruction_skeleton", "")
+        is_whatsapp = channel == "whatsapp"
+
+        system_msg = (
+            "Kamu adalah spesialis menulis system prompt untuk AI agent. "
+            "Tugasmu: tulis system prompt yang kuat, spesifik, dan kontekstual — BUKAN template generik.\n\n"
+            "ATURAN KERAS:\n"
+            "1. JANGAN gunakan placeholder [xxx] atau {xxx} — isi semua dengan informasi nyata\n"
+            f"2. {'JANGAN gunakan markdown (*, #, **) — channel WhatsApp tidak merender markdown' if is_whatsapp else 'Markdown boleh digunakan minimal'}\n"
+            "3. Sertakan 2-3 contoh percakapan konkret (few-shot) yang mencerminkan bisnis ini\n"
+            "4. Identitas harus kuat: nama, peran spesifik, bisnis, kepribadian yang jelas\n"
+            "5. Aturan kerja harus spesifik dan actionable\n"
+            "6. Bahasa Indonesia, natural, sesuai persona yang diminta\n"
+            "7. Panjang ideal: 250-500 kata — cukup detail tapi tidak bloated\n"
+            "8. Mulai langsung dari 'Kamu adalah...' — tanpa intro atau penjelasan"
+        )
+
+        # For coding agents, add sys_coder delegation context
+        coder_note = ""
+        if preset_id == "coding_deploy_agent":
+            coder_note = (
+                "\n\nCATATAN PENTING UNTUK CODING AGENT:\n"
+                "Agent ini memiliki subagent bernama sys_coder yang tugasnya KHUSUS eksekusi kode dan deploy website.\n"
+                "System prompt HARUS instruksikan agent untuk:\n"
+                "- Delegasikan SEMUA task coding/web/deploy ke sys_coder via task(name='sys_coder', task='...')\n"
+                "- task description ke sys_coder harus RINGKAS (maks 3-4 kalimat): sebutkan apa yang dibuat, teknologi, port jika perlu\n"
+                "- JANGAN sertakan spec detail, pseudocode, atau desain panjang di task description — sys_coder sudah tau cara kerjanya\n"
+                "- sys_coder akan menulis file, deploy, dan kembalikan URL publik\n"
+                "- Main agent hanya orchestrate: terima request → delegate ke sys_coder → relay hasil ke user\n"
+                "- JANGAN instruksikan main agent untuk nulis kode sendiri\n"
+            )
+
+        user_msg = (
+            f"Tulis system prompt untuk agent berikut:\n\n"
+            f"NAMA AGENT: {agent_name}\n"
+            f"PRESET: {preset_id} ({preset.get('label', '')})\n"
+            f"CHANNEL: {channel}\n"
+            f"PERSONA: {persona}\n\n"
+            f"KONTEKS BISNIS:\n{business_context or 'Agent umum tanpa konteks bisnis spesifik'}\n\n"
+            f"INFO ESKALASI:\n{escalation_info or 'Tidak ada eskalasi khusus'}\n\n"
+            f"ATURAN TAMBAHAN:\n{extra_rules or 'Tidak ada'}\n\n"
+            f"SKELETON REFERENSI (jadikan panduan struktur, jangan copy-paste):\n{skeleton[:600] if skeleton else 'Tidak ada'}"
+            f"{coder_note}\n\n"
+            "Tulis system prompt lengkap sekarang:"
+        )
+
+        try:
+            instructions = await _call_instruction_writer(user_msg, system_msg)
+
+            # Sanity check: flag remaining placeholders
+            placeholders = re.findall(r"\{[a-z_]+\}|\[[A-Za-z ]+\]", instructions)
+
+            return json.dumps({
+                "instructions": instructions,
+                "char_count": len(instructions),
+                "remaining_placeholders": placeholders,
+                "warning": (
+                    f"PERINGATAN: Masih ada {len(placeholders)} placeholder yang belum diisi: {placeholders}. "
+                    "Panggil compose_agent_instructions ulang dengan business_context yang lebih lengkap."
+                    if placeholders else None
+                ),
+                "next_step": (
+                    "Gunakan 'instructions' di atas sebagai parameter create_agent. "
+                    "Jika remaining_placeholders tidak kosong, panggil ulang dengan info lebih lengkap."
+                ),
+            }, ensure_ascii=False, indent=2)
+
+        except Exception as exc:
+            logger.error("builder_tools.compose_agent_instructions.error", error=str(exc))
+            fallback = skeleton.replace("{name}", agent_name) if skeleton else ""
+            return json.dumps({
+                "error": f"Gagal generate dengan model reasoning: {exc}",
+                "fallback_skeleton": fallback[:1200] if fallback else "",
+                "note": "Tulis instructions manual berdasarkan fallback_skeleton. Pastikan tidak ada placeholder.",
+            }, ensure_ascii=False)
+
+    # ------------------------------------------------------------------ #
+    # compose_agent_soul                                                  #
+    # ------------------------------------------------------------------ #
+
+    @tool
+    async def compose_agent_soul(
+        preset_id: str,
+        agent_name: str,
+        role: str,
+        business: str = "",
+        persona: str = "ramah dan profesional",
+        tasks: str = "",
+        business_info: str = "",
+        escalation: str = "",
+        extra_rules: str = "",
+    ) -> str:
+        """
+        Buat soul (identitas permanen) untuk agent yang baru dibuat.
+        Soul di-inject otomatis ke setiap sesi agent sebagai fondasi identitasnya.
+
+        WAJIB dipanggil setelah create_agent berhasil, sebelum verify_agent.
+        Gunakan hasilnya sebagai value saat kirim ke /v1/agents/{id}/memory dengan key="soul".
+
+        Args:
+            preset_id: Preset agent (cs_whatsapp_basic, coding_deploy_agent, dll)
+            agent_name: Nama agent
+            role: Peran agent (misal: "Customer Service", "Programmer", "Asisten FAQ")
+            business: Nama bisnis (misal: "Toko Bunga Melati")
+            persona: Karakter/gaya bicara
+            tasks: Tugas-tugas utama, satu per baris
+            business_info: Info bisnis singkat untuk di-inject ke soul
+            escalation: Kondisi eskalasi
+            extra_rules: Aturan tambahan
+        """
+        template = _SOUL_TEMPLATES.get(preset_id, _SOUL_TEMPLATES["cs_whatsapp_basic"])
+
+        # Use r1 to write a rich, filled soul
+        system_msg = (
+            "Kamu menulis 'soul' — identitas permanen sebuah AI agent. "
+            "Soul harus padat, kuat, dan bebas dari placeholder. "
+            "Format: teks terstruktur dengan HURUF KAPITAL untuk judul section. "
+            "Panjang: 100-180 kata. Jangan gunakan markdown. Mulai langsung dari IDENTITAS."
+        )
+        user_msg = (
+            f"Buat soul untuk agent ini:\n\n"
+            f"Nama: {agent_name}\n"
+            f"Peran: {role}\n"
+            f"Bisnis: {business or 'General'}\n"
+            f"Preset: {preset_id}\n"
+            f"Persona: {persona}\n"
+            f"Tugas utama: {tasks or 'Sesuai preset'}\n"
+            f"Info bisnis: {business_info or '-'}\n"
+            f"Eskalasi: {escalation or 'Tidak ada'}\n"
+            f"Aturan extra: {extra_rules or 'Tidak ada'}\n\n"
+            f"Template referensi:\n{template[:500]}\n\n"
+            "Tulis soul sekarang:"
+        )
+
+        try:
+            soul = await _call_instruction_writer(user_msg, system_msg, model=_SOUL_WRITER_MODEL)
+            # Strip any leftover placeholders
+            placeholders = re.findall(r"\{[a-z_]+\}|\[[A-Za-z ]+\]", soul)
+            return json.dumps({
+                "soul": soul,
+                "char_count": len(soul),
+                "remaining_placeholders": placeholders,
+                "next_step": "Kirim soul ini via: http_post('/v1/agents/{agent_id}/memory', {'key': 'soul', 'value': soul})",
+            }, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            logger.error("builder_tools.compose_agent_soul.error", error=str(exc))
+            # Fallback: fill template manually
+            soul_fallback = (
+                template
+                .replace("{name}", agent_name)
+                .replace("{role}", role)
+                .replace("{business}", business or "bisnis ini")
+                .replace("{persona}", persona)
+                .replace("{tasks}", tasks or "- Bantu user sesuai kebutuhan")
+                .replace("{business_info}", business_info or "Informasi bisnis belum tersedia")
+                .replace("{escalation}", escalation or "Eskalasi jika tidak bisa membantu")
+                .replace("{extra_rules}", extra_rules or "")
+            )
+            return json.dumps({
+                "soul": soul_fallback,
+                "char_count": len(soul_fallback),
+                "note": f"Fallback soul karena model error: {exc}",
+                "next_step": "Kirim soul ini via: http_post('/v1/agents/{agent_id}/memory', {'key': 'soul', 'value': soul})",
+            }, ensure_ascii=False, indent=2)
 
     # ------------------------------------------------------------------ #
     # 1. get_platform_capabilities                                        #
@@ -900,12 +1237,31 @@ def build_builder_tools(
 
         # Validasi instructions
         instruction_len = len(instructions)
-        if instruction_len < 50:
-            warnings.append("Instructions sangat pendek — agent mungkin tidak punya cukup konteks untuk bekerja dengan baik")
+        if instruction_len < 100:
+            errors.append("Instructions terlalu pendek — agent tidak akan punya cukup konteks. Gunakan compose_agent_instructions untuk generate yang baik.")
         if instruction_len > 32000:
             errors.append(f"Instructions terlalu panjang ({instruction_len} karakter) — bisa melebihi context window model")
         elif instruction_len > 16000:
             warnings.append(f"Instructions cukup panjang ({instruction_len} karakter) — pertimbangkan memindahkan detail ke RAG documents")
+
+        # Deteksi placeholder yang belum diisi
+        unfilled = re.findall(r"\{[a-z_]+\}|\[[A-Z][a-z A-Z]+\]", instructions)
+        if unfilled:
+            errors.append(
+                f"Instructions masih mengandung {len(unfilled)} placeholder yang belum diisi: {unfilled}. "
+                "Panggil compose_agent_instructions untuk generate instructions yang lengkap."
+            )
+
+        # Cek few-shot examples untuk WA agent
+        if channel_type == "whatsapp" or (not channel_type and "escalat" in instructions.lower()):
+            has_example = (
+                "user:" in instructions.lower()
+                or "contoh" in instructions.lower()
+                or "example" in instructions.lower()
+                or "percakapan" in instructions.lower()
+            )
+            if not has_example:
+                warnings.append("Instructions tidak punya contoh percakapan — tambahkan 1-2 few-shot examples untuk meningkatkan kualitas respons agent")
 
         # Validasi tools_config
         try:
@@ -1032,6 +1388,24 @@ def build_builder_tools(
         if not name or len(name.strip()) < 2:
             return "[error] Nama agent minimal 2 karakter"
 
+        # Duplicate check: cegah agent dengan nama sama milik user yang sama
+        if owner_phone:
+            async with db_factory() as db:
+                dup_result = await db.execute(
+                    select(Agent).where(
+                        Agent.name == name.strip(),
+                        Agent.is_deleted.is_(False),
+                        Agent.operator_ids.contains([owner_phone]),
+                    )
+                )
+                dup = dup_result.scalar_one_or_none()
+            if dup:
+                return json.dumps({
+                    "error": f"Agent dengan nama '{name.strip()}' sudah ada.",
+                    "existing_agent_id": str(dup.id),
+                    "hint": "Gunakan update_agent(agent_id, ...) untuk mengubah agent yang sudah ada, atau pilih nama yang berbeda.",
+                }, ensure_ascii=False)
+
         try:
             tc: dict[str, Any] = json.loads(tools_config) if tools_config else {"memory": True, "skills": True, "escalation": True}
         except json.JSONDecodeError:
@@ -1102,7 +1476,12 @@ def build_builder_tools(
                 "api_key": agent.api_key,
                 "token_quota": agent.token_quota,
                 "active_until": agent.active_until.isoformat() if agent.active_until else None,
-                "message": f"Agent '{agent.name}' berhasil dibuat dengan ID: {agent.id}",
+                "message": (
+                    f"Agent '{agent.name}' berhasil dibuat dengan ID: {agent.id}. "
+                    "PENTING: Langkah selanjutnya — panggil remember() dengan key='soul' dan value berisi "
+                    "identitas lengkap agent ini (nama, peran, cara bicara, aturan kerja). "
+                    "Gunakan agent_id di atas sebagai konteks. Soul wajib diisi agar agent punya identitas permanen."
+                ),
             }, ensure_ascii=False, indent=2)
 
         except Exception as exc:
@@ -1359,6 +1738,8 @@ def build_builder_tools(
         get_platform_capabilities,
         get_presets,
         plan_agent,
+        compose_agent_instructions,
+        compose_agent_soul,
         verify_agent,
         list_available_wa_devices,
         validate_agent_config,

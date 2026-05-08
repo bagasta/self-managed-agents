@@ -48,6 +48,7 @@ type DeviceManager struct {
 	devices       map[string]*DeviceInfo
 	pythonWebhook string
 	storeDir      string
+	typingCancels sync.Map // key: "deviceID:chatJID" → context.CancelFunc
 }
 
 func NewDeviceManager(pythonWebhook, storeDir string) (*DeviceManager, error) {
@@ -184,6 +185,28 @@ func (dm *DeviceManager) CreateDevice(deviceID string) (string, error) {
 	}
 }
 
+// RefreshQR forces a fresh QR scan for an existing device.
+// Disconnects, clears the stored session, removes the device from memory, then calls CreateDevice.
+// Use this when the user needs a new QR (e.g. previous QR expired and QR channel closed).
+func (dm *DeviceManager) RefreshQR(deviceID string) (string, error) {
+	dm.mu.Lock()
+	di, ok := dm.devices[deviceID]
+	if ok {
+		if di.Client.IsConnected() {
+			di.Client.Disconnect()
+		}
+		// Clear session so CreateDevice opens a fresh QR channel
+		if di.Client.Store.ID != nil {
+			if err := di.Client.Store.Delete(context.Background()); err != nil {
+				log.Printf("[%s] RefreshQR: store.Delete err: %v", deviceID, err)
+			}
+		}
+		delete(dm.devices, deviceID)
+	}
+	dm.mu.Unlock()
+	return dm.CreateDevice(deviceID)
+}
+
 // GetQR returns the latest cached QR PNG (base64). Empty string if connected.
 func (dm *DeviceManager) GetQR(deviceID string) (string, DeviceStatus, error) {
 	dm.mu.RLock()
@@ -257,7 +280,11 @@ func (dm *DeviceManager) SendMessage(deviceID, to, text string) error {
 		jid = types.NewJID(phone, types.DefaultUserServer)
 	}
 
-	// Stop typing indicator before sending the actual reply.
+	// Cancel typing keep-alive goroutine and stop composing indicator.
+	typingKey := deviceID + ":" + jid.String()
+	if cancel, loaded := dm.typingCancels.LoadAndDelete(typingKey); loaded {
+		cancel.(context.CancelFunc)()
+	}
 	_ = info.Client.SendChatPresence(context.Background(), jid, types.ChatPresencePaused, types.ChatPresenceMediaText)
 
 	msg := &waE2E.Message{
@@ -729,12 +756,33 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 		}
 	}
 
-	// Send typing indicator immediately so the user sees "typing..." while AI processes.
+	// Send typing indicator and keep it alive until the reply is sent.
+	// WhatsApp auto-expires composing after ~15s, so we refresh every 10s.
 	dm.mu.RLock()
 	typingInfo, typingOk := dm.devices[deviceID]
 	dm.mu.RUnlock()
 	if typingOk {
-		_ = typingInfo.Client.SendChatPresence(context.Background(), chatJID, types.ChatPresenceComposing, types.ChatPresenceMediaText)
+		typingKey := deviceID + ":" + chatJID.String()
+		// Cancel any previous typing keep-alive for this chat
+		if prev, loaded := dm.typingCancels.LoadAndDelete(typingKey); loaded {
+			prev.(context.CancelFunc)()
+		}
+		typingCtx, typingCancel := context.WithCancel(context.Background())
+		dm.typingCancels.Store(typingKey, typingCancel)
+		typingClient := typingInfo.Client
+		_ = typingClient.SendChatPresence(typingCtx, chatJID, types.ChatPresenceComposing, types.ChatPresenceMediaText)
+		go func() {
+			ticker := time.NewTicker(10 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-typingCtx.Done():
+					return
+				case <-ticker.C:
+					_ = typingClient.SendChatPresence(context.Background(), chatJID, types.ChatPresenceComposing, types.ChatPresenceMediaText)
+				}
+			}
+		}()
 	}
 
 	payload := map[string]interface{}{

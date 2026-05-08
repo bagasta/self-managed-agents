@@ -82,11 +82,10 @@ def sanitize_input_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
 
 
 _SELF_INSTRUCTION_MARKERS = (
-    # Deep agents TodoListMiddleware leaks these into the final AIMessage
-    "Tuliskan respons",
-    "Tulis respons",
-    "jelaskan apa yang sudah dilakukan",
-    "Jangan sebut nama tool",
+    # Deep agents TodoListMiddleware leaks these internal directives into the final AIMessage.
+    # Use specific multi-word phrases to avoid stripping valid agent text.
+    "Tuliskan respons singkat",
+    "Tulis respons singkat",
 )
 
 

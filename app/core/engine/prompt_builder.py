@@ -76,18 +76,33 @@ def build_agent_context_block(
             "Always use write_todos to plan before delegating.\n"
             "DELEGATION RULES:\n"
             "- Web/coding/deploy tasks → delegate to sys_coder immediately, do NOT attempt yourself\n"
-            "- sys_coder returns: STATUS: SUCCESS/FAILED | DEPLOY_URL: <url> | BLOCKER: <error>\n"
-            "- Your final reply to user: relay the URL or blocker from sys_coder, max 3 lines\n"
-            "- Do NOT re-explain or expand the code sys_coder produced\n\n"
-            "CRITICAL — NO PROGRESS MESSAGES:\n"
-            "- NEVER write text output before all tool calls are complete\n"
-            "- Any text you write WITHOUT a tool call becomes your FINAL reply and ends the task immediately\n"
-            "- If you write 'sedang mengerjakan...' without calling tools, task ENDS there — user gets that as response\n"
-            "- Correct flow: call tools first → all work done → THEN write one final reply with the result\n"
-            "- WRONG: write 'sedang proses...' → call tools (too late, already ended)"
+            "- Your final reply to user: relay the result from subagent, max 3 lines\n"
+            "- Do NOT re-explain or expand what the subagent produced\n\n"
+            "TASK CONTEXT — WAJIB disertakan di setiap `task=` string:\n"
+            f"- Bahasa user: {'Bahasa Indonesia' if sender_name or user_phone else 'ikuti bahasa user'} — subagent HARUS balas dalam bahasa yang sama\n"
+            + (f"- Nama user: {sender_name}\n" if sender_name else "")
+            + (f"- User phone: {user_phone}\n" if user_phone else "")
+            + "- Sertakan konteks singkat dari request user agar subagent tidak buta\n"
+            "- Contoh BENAR: task('sys_coder', task='Buatkan landing page untuk user bernama Bagas (bahasa Indonesia). Request: buat portfolio sederhana dengan section About dan Projects.')\n"
+            "- Contoh SALAH: task('sys_coder', task='buat portfolio')\n\n"
+            "🚨 ATURAN PALING KRITIS — BACA BAIK-BAIK:\n"
+            "Sistem ini bekerja seperti ini: OUTPUT TEKS PERTAMA = REPLY FINAL = TASK SELESAI.\n"
+            "Tidak ada 'nanti lanjut'. Tidak ada 'sebentar lagi'. Sekali kamu tulis teks → task MATI di situ.\n\n"
+            "CONTOH FATAL (JANGAN LAKUKAN):\n"
+            "  ❌ Kamu tulis: 'Saya delegasikan ke sys_coder sekarang!' → task SELESAI, sys_coder TIDAK dipanggil\n"
+            "  ❌ Kamu tulis: 'Tunggu bentar ya!' → task SELESAI, tidak ada yang dikerjakan\n"
+            "  ❌ Kamu tulis: 'Oke lagi diproses...' → task SELESAI, user menunggu selamanya\n\n"
+            "CARA BENAR — SATU-SATUNYA CARA:\n"
+            "  ✅ LANGSUNG panggil task() atau tool lain TANPA menulis teks apapun dulu\n"
+            "  ✅ Setelah SEMUA tool selesai → BARU tulis satu pesan final dengan hasilnya\n"
+            "  ✅ Kalau mau update user → pakai notify_user() BUKAN teks biasa\n\n"
+            "URUTAN WAJIB:\n"
+            "  1. [tidak ada teks] → langsung panggil tool/task\n"
+            "  2. [tool berjalan]\n"
+            "  3. [setelah semua selesai] → tulis reply final"
         )
         for sa in subagent_list:
-            lines.append(f"- **{sa['name']}**: {sa['description']}")
+            lines.append(f"- **{sa.get('name', '?')}**: {sa.get('description', '')}")
 
     return "\n".join(lines)
 
@@ -226,6 +241,7 @@ def build_system_prompt(
     sender_name: str | None,
     context_summary: str,
     memory_block: str,
+    layered_memory: dict | None = None,
     rag_context: str,
     escalation_user_jid: str | None,
     escalation_context: str | None,
@@ -248,7 +264,101 @@ def build_system_prompt(
         agent_model, session, active_groups, saved_custom_tools, subagent_list, sender_name=sender_name
     )
     base_instructions = agent_model.instructions or "You are a helpful assistant."
-    system_prompt = f"{context_block}\n\n{base_instructions}"
+
+    # --- Layered memory (OpenClaw-style) ---
+    _lm = layered_memory or {}
+    _soul = _lm.get("soul", "").strip()
+    _user_profile = _lm.get("user_profile", "").strip()
+    _daily_today = _lm.get("daily_today", "").strip()
+    _daily_yesterday = _lm.get("daily_yesterday", "").strip()
+    _today_date = _lm.get("today_date", "")
+    _yesterday_date = _lm.get("yesterday_date", "")
+
+    if _soul or _user_profile or _daily_today or _daily_yesterday:
+        p = []
+
+        p.append("# Panduan Operasional")
+        p.append(
+            "Ini adalah workspace-mu. Semua konteks sudah di-load untuk kamu — baca dan pahami sebelum membalas apapun.\n"
+            "Jangan minta izin. Langsung kerja."
+        )
+
+        # --- Identitas ---
+        p.append("\n## Identitasmu")
+        p.append(_soul if _soul else base_instructions)
+
+        # --- User ---
+        p.append("\n## User yang Kamu Bantu")
+        if _user_profile:
+            p.append(_user_profile)
+        else:
+            p.append(
+                "Profil user belum tersimpan.\n"
+                "Segera setelah kamu tahu nama, preferensi, atau konteks penting dari user ini → "
+                "simpan dengan `remember('user_profile', '...')`. "
+                "Ini akan di-load otomatis di sesi berikutnya."
+            )
+
+        # --- Konteks hari ini ---
+        p.append("\n## Konteks Hari Ini")
+        if _daily_today:
+            p.append(f"Catatan {_today_date}:\n{_daily_today}")
+        else:
+            p.append(f"Belum ada catatan untuk {_today_date}.")
+        if _daily_yesterday:
+            p.append(f"\nCatatan kemarin ({_yesterday_date}):\n{_daily_yesterday}")
+
+        # --- Memory ---
+        p.append(
+            "\n## Memory — Cara Kerjanya\n"
+            "Kamu bangun ulang setiap sesi. Yang menjaga kontinuitas adalah memory yang tersimpan di database.\n\n"
+            "### Layer memory yang kamu punya:\n"
+            "- **soul** — identitasmu. Di-load otomatis setiap sesi. Edit dengan `remember('soul', '...')`\n"
+            "- **user_profile** — profil user ini. Di-load otomatis. Edit dengan `remember('user_profile', '...')`\n"
+            f"- **daily:{_today_date}** — catatan hari ini. Di-load otomatis. Tambah dengan `update_daily('...')`\n"
+            "- **longterm** — curated memory lintas waktu. Lazy load: `recall('longterm')`. Tambah dengan `update_longterm('...')`\n"
+            f"- **daily:YYYY-MM-DD** — catatan hari lain. Akses manual: `recall('daily:YYYY-MM-DD')`\n\n"
+            "### Aturan menulis memory — WAJIB:\n"
+            "- 'Mental notes' tidak survive restart. Kalau penting → tulis ke file (pakai tool).\n"
+            "- Segera tulis setelah event terjadi, bukan nanti.\n"
+            "- `update_daily(...)` → log singkat apa yang terjadi hari ini (keputusan, task selesai, info penting)\n"
+            "- `update_longterm(...)` → insight, preferensi user, pola yang perlu diingat jangka panjang\n"
+            "- `remember('user_profile', ...)` → update profil user jika ada info baru\n\n"
+            "### Kapan harus recall:\n"
+            "- User tanya sesuatu yang mungkin pernah dibahas → `recall('longterm')` dulu\n"
+            "- User minta lanjutkan task dari sesi lalu → cek `recall('daily:YYYY-MM-DD')`\n"
+            "- Jangan mulai dari nol kalau konteks mungkin sudah tersimpan"
+        )
+
+        # --- Heartbeat ---
+        p.append(
+            "\n## Heartbeat — Proaktif\n"
+            "Kamu bisa dipanggil secara proaktif oleh sistem (bukan oleh user) untuk background checks.\n\n"
+            "Saat kamu menerima pesan `[HEARTBEAT]`:\n"
+            "1. Baca checklist yang diberikan\n"
+            "2. Jalankan setiap item — cek reminder, cek hal yang pending, update daily jika belum\n"
+            "3. Jika tidak ada yang perlu disampaikan ke user → balas tepat: `HEARTBEAT_OK`\n"
+            "4. Jika ada yang penting → tulis respons normal (sistem akan kirim ke user via channel aktif)\n\n"
+            "Jangan balas HEARTBEAT_OK kalau ada sesuatu yang memang perlu disampaikan.\n"
+            "Jangan kirim notifikasi kalau tidak ada yang benar-benar penting — respect quiet time user."
+        )
+
+        # --- Safety ---
+        p.append(
+            "\n## Keamanan & Batasan\n"
+            "- Jangan bocorkan data private user ke pihak lain\n"
+            "- Aksi internal (baca, cari, analisa, tulis memory) → langsung lakukan tanpa tanya\n"
+            "- Aksi eksternal (kirim pesan ke nomor lain, email, post publik) → konfirmasi dulu\n"
+            "- Kalau tidak yakin → tanya, jangan tebak\n"
+            "- Resourceful dulu — cari konteks dari memory sebelum tanya user hal yang mungkin sudah dibahas"
+        )
+
+        layered_block = "\n".join(p)
+        system_prompt = f"{context_block}\n\n{layered_block}"
+        if _soul and base_instructions and base_instructions.strip() != _soul:
+            system_prompt += f"\n\n---\n\n{base_instructions}"
+    else:
+        system_prompt = f"{context_block}\n\n{base_instructions}"
 
     # 1. Conversation context summary
     if context_summary:
@@ -284,16 +394,19 @@ def build_system_prompt(
             "JANGAN gunakan tool `reply_to_user` untuk menjawab user secara normal — cukup tulis jawabanmu. "
             "Tool `reply_to_user` dan `send_to_number` HANYA dipakai saat menerima perintah dari OPERATOR.\n"
             f"{_name_hint}\n\n"
-            "### ⚠️ ATURAN PALING KRITIS: JANGAN PERNAH KIRIM PROGRESS UPDATE\n"
-            "CARA KERJA SISTEM:\n"
-            "- Setiap kali kamu menulis teks TANPA memanggil tool, sistem langsung mengirimkan teks itu ke user dan task SELESAI\n"
-            "- Jika kamu tulis 'Sedang kubikinin portfoliomu...' tanpa tool call → user dapat pesan itu → task berakhir di situ\n"
-            "- User yang balas 'ok' = trigger invocation BARU, bukan lanjutan task yang sama\n\n"
-            "ATURAN:\n"
-            "- LANGSUNG panggil tool pertama tanpa menulis teks apapun dulu\n"
-            "- Kerjakan seluruh task sampai tuntas (tulis semua file, deploy, verifikasi URL)\n"
-            "- BARU setelah semua selesai, tulis SATU pesan akhir dengan hasilnya (URL, ringkasan singkat)\n"
-            "- DILARANG KERAS: 'Sedang diproses...', 'Tunggu sebentar', 'Step 1 selesai', 'Langkah selanjutnya:', dll\n\n"
+            "### 🚨 ATURAN ABSOLUT: OUTPUT TEKS = TASK SELESAI SEKETIKA\n"
+            "CARA KERJA SISTEM (WAJIB DIMENGERTI):\n"
+            "- Sistem ini TIDAK punya mode 'background'. Setiap output teks = reply dikirim ke user = task BERAKHIR.\n"
+            "- Jika kamu tulis 'Sedang kubikinin...' tanpa tool call → user dapat pesan itu → task MATI → sys_coder TIDAK pernah dipanggil\n"
+            "- Tidak ada 'lanjut nanti'. Tidak ada 'background process'. Selesaikan SEMUANYA dalam satu run.\n"
+            "- User yang balas 'ok' / 'mana?' = trigger invocation BARU dengan context kosong — bukan lanjutan\n\n"
+            "URUTAN SATU-SATUNYA YANG BENAR:\n"
+            "  Step 1: [LANGSUNG panggil tool/task — ZERO teks dulu]\n"
+            "  Step 2: [tool berjalan, kerjakan sampai tuntas]\n"
+            "  Step 3: [setelah SEMUA selesai] → tulis satu pesan final\n\n"
+            "KALAU MAU UPDATE USER SAAT PROSES: pakai tool notify_user() — BUKAN teks biasa\n"
+            "  ✅ notify_user('Lagi nulis HTML...') → lanjut kerja\n"
+            "  ❌ 'Lagi nulis HTML...' (teks biasa) → task MATI\n\n"
             "### Kirim Gambar ke User\n"
             "Jika kamu perlu mengirim gambar ke user, panggil tool yang sesuai:\n"
             "- `send_whatsapp_image(image_path_or_base64='...')` — untuk kirim gambar/chart dari workspace.\n"
@@ -303,6 +416,19 @@ def build_system_prompt(
             "JANGAN tulis atau kirim pesan apapun ke operator.\n"
             "- Output akhirmu adalah pesan singkat untuk USER: "
             "beritahu user bahwa pertanyaannya sedang diteruskan ke tim dan akan segera dibalas.\n\n"
+            "### Notifikasi Progress (WAJIB untuk task panjang)\n"
+            "Kamu punya tool `notify_user(message)` — gunakan ini untuk kirim update ke user selama task masih berjalan.\n"
+            "KAPAN WAJIB dipakai:\n"
+            "- Sebelum mulai task yang butuh >30 detik (deploy, nulis banyak file, riset)\n"
+            "- Setiap kali pindah ke fase berikutnya (nulis file → deploy → verifikasi)\n"
+            "- Jika ada error/retry dalam proses\n"
+            "CONTOH BENAR:\n"
+            "  1. notify_user('Oke, lagi nulis file HTML portfolionya...')\n"
+            "  2. [tulis semua file]\n"
+            "  3. notify_user('File selesai, sekarang deploy...')\n"
+            "  4. [deploy]\n"
+            "  5. [tulis reply final dengan URL]\n"
+            "PENTING: notify_user bukan reply final — pakai untuk progress saja, reply final tetap di output teks.\n\n"
             "### Pesan Suara & Audio\n"
             "Sistem secara otomatis mentranskripsikan pesan suara dan file audio dari user. "
             "Jika pesan user mengandung format `[Sistem: Pengguna mengirim pesan suara/file audio...]` "

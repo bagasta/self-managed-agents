@@ -31,6 +31,7 @@ OFF by default : sandbox, tool_creator, scheduler, http, mcp,
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, TypedDict
@@ -44,7 +45,7 @@ from app.database import AsyncSessionLocal
 from app.config import get_settings
 from app.core.engine.context_service import count_user_messages, db_messages_to_lc, load_history
 from app.core.utils.log_sanitizer import redact_pii
-from app.core.domain.memory_service import build_memory_context, extract_long_term_memory
+from app.core.domain.memory_service import build_memory_context, extract_long_term_memory, load_layered_memory
 from app.core.engine.prompt_builder import build_rag_context, build_system_prompt, maybe_summarize_context
 from app.core.infra.sandbox import DockerSandbox
 from app.core.engine.subagent_builder import build_subagents
@@ -55,10 +56,12 @@ from app.core.engine.tool_builder import (
     build_http_tools,
     build_loaded_custom_tools,
     build_memory_tools,
+    build_heartbeat_tools,
     build_sandbox_binary_tool,
     build_skill_tools,
     build_tool_creator_tools,
     build_wa_agent_manager_tools,
+    build_wa_notify_tool,
     build_whatsapp_media_tools,
 )
 from app.models.agent import Agent as AgentModel
@@ -72,6 +75,12 @@ from app.core.engine.result_parser import (
     sanitize_input_messages as _sanitize_input_messages,
     parse_agent_result,
 )
+from app.core.engine.wa_progress import (
+    build_progress_message as _build_progress_message,
+    build_task_done_message as _build_task_done_message,
+    parse_tool_input_payload as _parse_tool_input_payload,
+)
+from app.core.engine.reply_guard import ensure_non_empty_reply
 
 logger = structlog.get_logger(__name__)
 settings = get_settings()
@@ -97,6 +106,7 @@ async def run_agent(
     media_image_b64: str | None = None,
     media_image_mime: str | None = None,
     sender_name: str | None = None,
+    prior_run_was_interrupted: bool = False,
 ) -> AgentRunResult:
     """
     Jalankan agent end-to-end:
@@ -132,6 +142,158 @@ async def run_agent(
     )
     db.add(run_record)
     await db.flush()
+
+    # ------------------------------------------------------------------ #
+    # 0b. HITL resume — check if session has a pending interrupt          #
+    # ------------------------------------------------------------------ #
+    from app.core.engine import interrupt_store as _istore
+    _pending = await _istore.get_interrupt(session.id)
+    if _pending:
+        # Use LLM to classify user intent naturally — no keyword matching.
+        # The LLM sees the pending action and the user's reply, then decides:
+        #   approve  → run the tool
+        #   reject   → cancel it
+        #   respond  → user asked a question / needs clarification before deciding
+        _pending_action_requests = _pending.get("action_requests", [])
+        _pending_tool = _pending_action_requests[0].get("name", "unknown") if _pending_action_requests else "unknown"
+        _pending_args = _pending_action_requests[0].get("args", {}) if _pending_action_requests else {}
+
+        _classify_prompt = (
+            "You are a decision classifier. An AI agent was paused and asked the user for approval "
+            f"before calling tool `{_pending_tool}` with args {_pending_args}.\n\n"
+            f"The user replied: \"{user_message}\"\n\n"
+            "Classify the user's intent as exactly one of:\n"
+            "- APPROVE  (user wants to proceed)\n"
+            "- REJECT   (user wants to cancel)\n"
+            "- RESPOND  (user asked a question or wants clarification before deciding)\n\n"
+            "Reply with only the single word: APPROVE, REJECT, or RESPOND."
+        )
+        try:
+            _cls_llm = ChatOpenAI(
+                model="openai/gpt-4o-mini",
+                api_key=get_settings().openrouter_api_key,
+                base_url="https://openrouter.ai/api/v1",
+                temperature=0,
+                max_tokens=10,
+            )
+            _cls_resp = await _cls_llm.ainvoke([HumanMessage(content=_classify_prompt)])
+            _cls_text = (_cls_resp.content or "").strip().upper()
+            if "APPROVE" in _cls_text:
+                _decision_type: str | None = "approve"
+            elif "REJECT" in _cls_text:
+                _decision_type = "reject"
+            elif "RESPOND" in _cls_text:
+                _decision_type = "respond"
+            else:
+                _decision_type = None
+        except Exception as _cls_err:
+            log.warning("agent_run.hitl_classify_failed", error=str(_cls_err))
+            _decision_type = None
+
+        if _decision_type is not None:
+            from langgraph.types import Command
+            _resume_graph = _pending["graph"]
+            _resume_ckpt = _pending["checkpointer"]
+            _resume_thread = _pending["thread_id"]
+            _resume_cfg = {
+                "recursion_limit": (get_settings().agent_max_steps * 8),
+                "configurable": {"thread_id": _resume_thread},
+            }
+            if _decision_type == "respond":
+                _resume_cmd = Command(
+                    resume={"decisions": [{"type": "respond", "message": user_message}]}
+                )
+            else:
+                _resume_cmd = Command(
+                    resume={"decisions": [{"type": _decision_type}]}
+                )
+            try:
+                async with asyncio.timeout(get_settings().agent_timeout_seconds):
+                    _resume_output = await _resume_graph.ainvoke(
+                        _resume_cmd,
+                        config=_resume_cfg,
+                        version="v2",
+                    )
+                    _resume_state = await _resume_graph.aget_state(_resume_cfg)
+                    _resume_result: dict = dict(_resume_state.values) if _resume_state else {}
+                await _istore.clear_interrupt(session.id)
+                # Parse result normally
+                _r_interrupts = getattr(_resume_output, "interrupts", None)
+                if _r_interrupts:
+                    # Another interrupt — save again
+                    _r_action_requests: list[dict] = []
+                    for _ri in _r_interrupts:
+                        _rv = getattr(_ri, "value", {}) or {}
+                        _r_action_requests.extend(_rv.get("action_requests", []))
+                    await _istore.save_interrupt(
+                        session.id,
+                        graph=_resume_graph,
+                        checkpointer=_resume_ckpt,
+                        thread_id=_resume_thread,
+                        action_requests=_r_action_requests,
+                    )
+                    _tool_name2 = _r_action_requests[0].get("name", "") if _r_action_requests else ""
+                    _tool_args2 = _r_action_requests[0].get("args", {}) if _r_action_requests else {}
+                    _humanize2 = (
+                        "You are a helpful assistant. Explain to the user (in the same language "
+                        "they used) what you are about to do, in plain conversational language — "
+                        "no tool names, no code, no technical jargon. Then ask if it's okay to proceed.\n\n"
+                        f"Tool: {_tool_name2}\nArguments: {_tool_args2}\n\nKeep it to 1–2 sentences max."
+                    )
+                    try:
+                        _h2_llm = ChatOpenAI(
+                            model="openai/gpt-4o-mini",
+                            api_key=get_settings().openrouter_api_key,
+                            base_url="https://openrouter.ai/api/v1",
+                            temperature=0.3,
+                            max_tokens=100,
+                        )
+                        _h2_resp = await _h2_llm.ainvoke([HumanMessage(content=_humanize2)])
+                        _ir_reply = (_h2_resp.content or "").strip() or "Saya memerlukan konfirmasi sebelum melanjutkan. Boleh?"
+                    except Exception:
+                        _ir_reply = "Saya memerlukan konfirmasi sebelum melanjutkan. Boleh?"
+                    run_record.status = "interrupted"
+                    run_record.completed_at = datetime.now(timezone.utc)
+                    await db.flush()
+                    return AgentRunResult(reply=_ir_reply, steps=[], run_id=run_id, tokens_used=0)
+
+                from app.core.engine.result_parser import parse_agent_result as _par
+                _rp = _par(
+                    result=_resume_result,
+                    input_messages=[HumanMessage(content=user_message)],
+                    session_id=session.id,
+                    run_id=run_id,
+                    step_start=1,
+                    log=log,
+                )
+                for _m in _rp["db_messages"]:
+                    db.add(_m)
+                run_record.status = "completed"
+                run_record.completed_at = datetime.now(timezone.utc)
+                await db.flush()
+                return AgentRunResult(
+                    reply=_rp["final_reply"] or ("Selesai." if _decision_type == "approve" else "Dibatalkan."),
+                    steps=_rp["steps"],
+                    run_id=run_id,
+                    tokens_used=_rp["total_tokens_used"],
+                )
+            except Exception as _re_err:
+                log.error("agent_run.resume_failed", error=str(_re_err))
+                await _istore.clear_interrupt(session.id)
+                run_record.status = "failed"
+                run_record.completed_at = datetime.now(timezone.utc)
+                run_record.error_message = str(_re_err)[:2000]
+                await db.flush()
+                return AgentRunResult(
+                    reply="Maaf, gagal melanjutkan. Silakan coba lagi dari awal.",
+                    steps=[],
+                    run_id=run_id,
+                    tokens_used=0,
+                )
+        else:
+            # LLM couldn't classify — treat as new message, clear interrupt
+            await _istore.clear_interrupt(session.id)
+            log.info("agent_run.interrupt_cleared_unclassified", session_id=str(session.id))
 
     # ------------------------------------------------------------------ #
     # 1. LLM                                                              #
@@ -186,6 +348,7 @@ async def run_agent(
     _memory_scope = getattr(session, "external_user_id", None)
     if _is_enabled(tools_config, "memory", default=True):
         tools.extend(build_memory_tools(agent_id, AsyncSessionLocal, scope=_memory_scope))
+        tools.extend(build_heartbeat_tools(agent_id, session.id, AsyncSessionLocal, scope=_memory_scope))
         active_groups.append("memory")
 
     if _is_enabled(tools_config, "skills", default=True):
@@ -230,6 +393,8 @@ async def run_agent(
         active_groups.append("http")
 
     if getattr(session, "channel_type", None) == "whatsapp":
+        tools.extend(build_wa_notify_tool(session))
+        active_groups.append("wa_notify")
         if _is_enabled(tools_config, "whatsapp_media", default=True):
             tools.extend(build_whatsapp_media_tools(session, sandbox))
             active_groups.append("whatsapp_media")
@@ -255,10 +420,15 @@ async def run_agent(
     sub_sandboxes: list[DockerSandbox] = []
     if _is_enabled(tools_config, "subagents", default=False):
         _sub_ids: list[str] = tools_config.get("subagents", {}).get("agent_ids", [])
-        subagent_list, sub_sandboxes = await build_subagents(_sub_ids, session.id, db, log)
+        _sub_ch: dict = session.channel_config if isinstance(session.channel_config, dict) else {}
+        subagent_list, sub_sandboxes = await build_subagents(
+            _sub_ids, session.id, db, log,
+            wa_device_id=_sub_ch.get("device_id", ""),
+            wa_target=_sub_ch.get("user_phone", ""),
+        )
         if subagent_list:
             active_groups.append(f"subagents({len(subagent_list)})")
-            log.info("agent_run.subagents_ready", names=[s["name"] for s in subagent_list])
+            log.info("agent_run.subagents_ready", names=[s.get("name", "?") for s in subagent_list])
 
     log.debug("agent_run.tools_ready (pre-mcp)", groups=active_groups, count=len(tools))
 
@@ -272,8 +442,18 @@ async def run_agent(
     context_summary = await maybe_summarize_context(session, db, llm, log)
 
     memory_block = await build_memory_context(agent_id, db, scope=_memory_scope)
+    layered_memory = await load_layered_memory(agent_id, db, scope=_memory_scope)
 
-    history_rows = await load_history(session.id, db, max_turns=settings.short_term_memory_turns)
+    # When a context summary is already injected into the system prompt (triggered
+    # after context_summary_trigger messages), loading the full short_term_memory_turns
+    # is redundant — the summary covers older turns.  Reduce to half the configured
+    # limit so the LLM context stays manageable on long sessions.
+    _history_turns = (
+        max(settings.short_term_memory_turns // 2, 5)
+        if context_summary
+        else settings.short_term_memory_turns
+    )
+    history_rows = await load_history(session.id, db, max_turns=_history_turns)
     prior_messages = db_messages_to_lc(history_rows)
     log.debug("agent_run.history_loaded", turns=len(prior_messages) // 2)
 
@@ -291,6 +471,7 @@ async def run_agent(
         sender_name=sender_name,
         context_summary=context_summary,
         memory_block=memory_block,
+        layered_memory=layered_memory,
         rag_context=rag_context,
         escalation_user_jid=escalation_user_jid,
         escalation_context=escalation_context,
@@ -316,8 +497,36 @@ async def run_agent(
     from app.core.tools.mcp_tool import mcp_client_context
     from langchain_core.callbacks import AsyncCallbackHandler
 
+    # WA progress notify — only for WhatsApp sessions
+    _ch_cfg: dict = session.channel_config if isinstance(session.channel_config, dict) else {}
+    _wa_device_id: str = _ch_cfg.get("device_id", "")
+    _wa_target: str = _ch_cfg.get("user_phone", "")
+    _is_wa_session: bool = getattr(session, "channel_type", None) == "whatsapp" and bool(_wa_device_id and _wa_target)
+
     class _AgentLogger(AsyncCallbackHandler):
-        """Enhanced callback logger with tool_call_id tracing."""
+        """Callback logger — log tiap step + kirim progress update ke WA."""
+
+        def __init__(self) -> None:
+            self._notified: set[str] = set()   # tool types yang sudah dinotif run ini
+            self._tool_inputs: dict[str, Any] = {}
+            self._tool_names: dict[str, str] = {}
+            self._task_done_notified: set[str] = set()
+            self._last_ts: float = 0.0
+
+        async def _wa_progress(self, msg: str, *, force: bool = False) -> None:
+            """Kirim progress message ke WA dengan throttle 6 detik."""
+            if not _is_wa_session:
+                return
+            import time as _time
+            now = _time.monotonic()
+            if not force and now - self._last_ts < 6:
+                return
+            self._last_ts = now
+            try:
+                from app.core.infra.wa_client import send_wa_message as _send
+                await _send(_wa_device_id, _wa_target, msg)
+            except Exception:
+                pass
 
         async def on_llm_start(self, serialized, prompts, **kwargs):
             log.debug("agent_step.llm_thinking")
@@ -326,7 +535,6 @@ async def run_agent(
             try:
                 gen = response.generations[0][0]
                 text = gen.text[:200] if gen.text else ""
-                # Log tool_call_ids from the AIMessage for tracing
                 ai_msg = gen.message if hasattr(gen, "message") else None
                 tc_ids = []
                 if ai_msg and hasattr(ai_msg, "tool_calls") and ai_msg.tool_calls:
@@ -344,18 +552,36 @@ async def run_agent(
 
         async def on_tool_start(self, serialized, input_str, **kwargs):
             tool_name = serialized.get("name", "?")
-            # Extract tool_call_id from kwargs (LangGraph passes it)
             tool_call_id = kwargs.get("tool_call_id") or kwargs.get("run_id") or "?"
+            self._tool_inputs[str(tool_call_id)] = input_str
+            self._tool_names[str(tool_call_id)] = str(tool_name)
             safe_input = redact_pii(str(input_str)[:300])
             log.info("agent_step.tool_start",
                      tool=tool_name, tool_call_id=str(tool_call_id)[:36],
                      input=safe_input)
+            # Kirim progress ke WA
+            progress_msg = _build_progress_message(tool_name, input_str)
+            if progress_msg:
+                if tool_name == "task":
+                    # One-shot notification only — no heartbeat loop to avoid spam
+                    await self._wa_progress(progress_msg, force=True)
+                elif tool_name not in self._notified:
+                    self._notified.add(tool_name)
+                    await self._wa_progress(progress_msg)
 
         async def on_tool_end(self, output, **kwargs):
             tool_call_id = kwargs.get("tool_call_id") or kwargs.get("run_id") or "?"
             log.info("agent_step.tool_end",
                      tool_call_id=str(tool_call_id)[:36],
                      output=str(output)[:300])
+            input_payload = self._tool_inputs.get(str(tool_call_id))
+            tool_name = self._tool_names.get(str(tool_call_id), "")
+            task_done_msg = _build_task_done_message(input_payload, output)
+            if tool_name == "task" and input_payload and task_done_msg and str(tool_call_id) not in self._task_done_notified:
+                parsed = _parse_tool_input_payload(input_payload)
+                if parsed.get("name") or parsed.get("task"):
+                    self._task_done_notified.add(str(tool_call_id))
+                    await self._wa_progress(task_done_msg, force=True)
 
         async def on_tool_error(self, error, **kwargs):
             tool_call_id = kwargs.get("tool_call_id") or kwargs.get("run_id") or "?"
@@ -380,20 +606,37 @@ async def run_agent(
 
         try:
             from deepagents import create_deep_agent
+            from langgraph.checkpoint.memory import MemorySaver
             from app.core.engine.deep_agent_backend import DockerBackend
+            from app.core.engine import interrupt_store as _istore
 
             backend = DockerBackend(sandbox) if sandbox is not None else None
+            _checkpointer = MemorySaver()
+            # interrupt_on: tools_config["interrupt_on"] may be:
+            #   - dict: {"tool_name": true}  → pass directly
+            #   - list: ["tool_name"]         → convert to {name: True}
+            _raw_interrupt_on = tools_config.get("interrupt_on") if isinstance(tools_config, dict) else None
+            if isinstance(_raw_interrupt_on, dict) and _raw_interrupt_on:
+                _interrupt_on: dict[str, bool] = _raw_interrupt_on
+            elif isinstance(_raw_interrupt_on, list) and _raw_interrupt_on:
+                _interrupt_on = {name: True for name in _raw_interrupt_on}
+            else:
+                _interrupt_on = {}
             # PENTING: gunakan llm_raw (bukan llm yang sudah .bind()) —
             # DeepAgents SDK memanggil .count() pada model untuk parse nama provider,
             # yang gagal pada RunnableBinding dan menyebabkan AttributeError ditangkap
             # sebagai TypeError → fallback ke create_react_agent tanpa backend.
-            graph = create_deep_agent(
+            _dag_kwargs: dict[str, Any] = dict(
                 model=llm_raw,
                 tools=tools,
                 system_prompt=system_prompt,
                 backend=backend,
                 subagents=subagent_list or None,
+                checkpointer=_checkpointer,
             )
+            if _interrupt_on:
+                _dag_kwargs["interrupt_on"] = _interrupt_on
+            graph = create_deep_agent(**_dag_kwargs)
         except (ImportError, TypeError, AttributeError) as _dag_err:
             log.warning(
                 "agent_run.deepagent_fallback",
@@ -426,12 +669,55 @@ async def run_agent(
                 sanitized=len(sanitized_prior),
             )
 
-        input_messages: list[BaseMessage] = sanitized_prior + [HumanMessage(content=human_content)]
+        # Hard cap on context window size to prevent token explosion on long sessions.
+        # Each "turn" in prior_messages can include AIMessage+ToolMessages pairs that
+        # each add significant tokens.  We cap at 30 messages (≈15 conversation turns)
+        # regardless of short_term_memory_turns setting.  When a context summary is
+        # active (injected into system prompt), history older than this is redundant.
+        _MAX_PRIOR_MESSAGES = 30
+        if len(sanitized_prior) > _MAX_PRIOR_MESSAGES:
+            log.debug(
+                "agent_run.history_trimmed",
+                original=len(sanitized_prior),
+                trimmed=_MAX_PRIOR_MESSAGES,
+            )
+            sanitized_prior = sanitized_prior[-_MAX_PRIOR_MESSAGES:]
+
+        # If the previous run was interrupted by this message, strip the partial
+        # messages from the interrupted run before building history.  The interrupted
+        # run may have written AIMessage+ToolMessage pairs mid-task that make the LLM
+        # think work is still ongoing — even if the user just says "hello".
+        # We remove all messages that belong to the last run_id in history (they are
+        # incomplete) and replace them with a single SystemMessage that informs the
+        # LLM the previous task was cancelled.
+        _interrupt_note: list[BaseMessage] = []
+        if prior_run_was_interrupted:
+            from langchain_core.messages import SystemMessage as _SM
+            # Drop any messages from the last run in sanitized_prior (incomplete tool chains)
+            if history_rows:
+                _last_run_id = history_rows[-1].run_id
+                _rows_before_last_run = [m for m in history_rows if m.run_id != _last_run_id]
+                if len(_rows_before_last_run) < len(history_rows):
+                    # Re-convert trimmed history; keep what was before the interrupted run
+                    sanitized_prior = _sanitize_input_messages(db_messages_to_lc(_rows_before_last_run))
+                    log.info(
+                        "agent_run.stripped_interrupted_run_messages",
+                        stripped=len(history_rows) - len(_rows_before_last_run),
+                    )
+            _interrupt_note = [_SM(content=(
+                "[SYSTEM] The previous task was interrupted because the user sent a new message. "
+                "Do NOT continue or retry the previous task. Focus solely on the user's current message."
+            ))]
+
+        input_messages: list[BaseMessage] = sanitized_prior + _interrupt_note + [HumanMessage(content=human_content)]
         step_counter = step_base + 1
 
+        _agent_logger = _AgentLogger()
+        _thread_id = str(session.id)
         _graph_config = {
             "recursion_limit": settings.agent_max_steps * 8,
-            "callbacks": [_AgentLogger()],
+            "callbacks": [_agent_logger],
+            "configurable": {"thread_id": _thread_id},
         }
 
         async def _cleanup_sandboxes() -> None:
@@ -440,24 +726,79 @@ async def run_agent(
             for _ssb in sub_sandboxes:
                 await _ssb.aclose()
 
+        _agent_caps = getattr(agent_model, "capabilities", []) or []
+        _has_subagents = bool(
+            isinstance(tools_config, dict)
+            and tools_config.get("subagents", {})
+            and tools_config["subagents"].get("enabled")
+        )
+        _timeout = (
+            settings.agent_timeout_seconds * 3
+            if "builder" in _agent_caps or "system" in _agent_caps or _has_subagents
+            else settings.agent_timeout_seconds
+        )
         try:
-            async with asyncio.timeout(settings.agent_timeout_seconds):
-                result = await graph.ainvoke({"messages": input_messages}, config=_graph_config)
+            async with asyncio.timeout(_timeout):
+                _graph_output = await graph.ainvoke(
+                    {"messages": input_messages},
+                    config=_graph_config,
+                    version="v2",
+                )
+                # GraphOutput (version="v2") only carries .interrupts; get the
+                # actual state dict (with "messages") from the checkpointer.
+                _state = await graph.aget_state(_graph_config)
+                result: dict = dict(_state.values) if _state else {}
+        except asyncio.CancelledError:
+            # Human interrupt — user sent a new message while this run was active.
+            log.info("agent_run.cancelled_by_interrupt", session_id=str(session.id))
+            await _cleanup_sandboxes()
+            raise  # propagate so the task is properly marked cancelled
         except asyncio.TimeoutError:
             log.error(
                 "agent_run.timeout",
-                timeout_seconds=settings.agent_timeout_seconds,
+                timeout_seconds=_timeout,
                 session_id=str(session.id),
             )
-            # Update Run → timed_out
             run_record.status = "timed_out"
             run_record.completed_at = datetime.now(timezone.utc)
-            run_record.error_message = f"Timeout after {settings.agent_timeout_seconds}s"
+            run_record.error_message = f"Timeout after {_timeout}s"
             await db.flush()
             await _cleanup_sandboxes()
             raise
         except Exception as exc:
             err_str = str(exc)
+
+            # JSONDecodeError inside a subagent = OpenRouter returned a truncated
+            # HTTP response (network hiccup). Retry the same graph once with a brief
+            # delay — no need to rebuild or sanitize messages.
+            import json as _json_mod
+            if isinstance(exc.__cause__, _json_mod.JSONDecodeError) or isinstance(exc, _json_mod.JSONDecodeError) or "JSONDecodeError" in type(exc).__name__ or (exc.__context__ and isinstance(exc.__context__, _json_mod.JSONDecodeError)):
+                log.warning("agent_run.subagent_json_error_retry", error=err_str[:200])
+                try:
+                    await asyncio.sleep(1)
+                    async with asyncio.timeout(_timeout):
+                        _graph_output = await graph.ainvoke(
+                            {"messages": input_messages},
+                            config=_graph_config,
+                            version="v2",
+                        )
+                        _state = await graph.aget_state(_graph_config)
+                        result = dict(_state.values) if _state else {}
+                    log.info("agent_run.subagent_json_error_retry_ok")
+                except Exception as _retry_json_exc:
+                    log.error("agent_run.subagent_json_error_retry_failed", error=str(_retry_json_exc)[:300])
+                    run_record.status = "failed"
+                    run_record.completed_at = datetime.now(timezone.utc)
+                    run_record.error_message = str(_retry_json_exc)[:2000]
+                    await db.flush()
+                    await _cleanup_sandboxes()
+                    return AgentRunResult(
+                        reply="Maaf, terjadi gangguan koneksi ke model. Silakan coba lagi.",
+                        steps=[],
+                        run_id=run_id,
+                        tokens_used=0,
+                    )
+
             # "No tool output found for function call" means the provider received
             # an AIMessage with tool_calls but no matching ToolMessage. This can
             # happen when the Deep Agents SDK drops a tool result mid-graph (e.g.
@@ -466,7 +807,7 @@ async def run_agent(
             # Retry strategy: rebuild graph using LangGraph's built-in
             # create_react_agent (more reliable tool execution than Deep Agents SDK)
             # with sanitized input so history is clean.
-            if "No tool output found for function call" in err_str:
+            elif "No tool output found for function call" in err_str:
                 log.warning(
                     "agent_run.dangling_tool_call_retry",
                     error=err_str[:300],
@@ -529,6 +870,69 @@ async def run_agent(
                 await _cleanup_sandboxes()
                 raise
 
+
+        # ------------------------------------------------------------------ #
+        # 9a. Handle HITL interrupt (version="v2" result object)              #
+        # ------------------------------------------------------------------ #
+        _interrupts = getattr(_graph_output, "interrupts", None)
+        if _interrupts:
+            # Graph paused — awaiting human approval before sensitive tool call.
+            # Save state so the next user message can resume.
+            try:
+                _action_requests: list[dict] = []
+                for _intr in _interrupts:
+                    _val = getattr(_intr, "value", {}) or {}
+                    _ar = _val.get("action_requests", [])
+                    _action_requests.extend(_ar)
+                await _istore.save_interrupt(
+                    session.id,
+                    graph=graph,
+                    checkpointer=_checkpointer,
+                    thread_id=_thread_id,
+                    action_requests=_action_requests,
+                )
+                # Build approval-request message — natural language, no tech jargon
+                if _action_requests:
+                    _tool_name = _action_requests[0].get("name", "")
+                    _tool_args = _action_requests[0].get("args", {})
+                    _humanize_prompt = (
+                        "You are a helpful assistant. Explain to the user (in the same language "
+                        "they used) what you are about to do, in plain conversational language — "
+                        "no tool names, no code, no technical jargon. Then ask if it's okay to proceed.\n\n"
+                        f"Tool: {_tool_name}\n"
+                        f"Arguments: {_tool_args}\n\n"
+                        "Keep it to 1–2 sentences max."
+                    )
+                    try:
+                        _h_llm = ChatOpenAI(
+                            model="openai/gpt-4o-mini",
+                            api_key=get_settings().openrouter_api_key,
+                            base_url="https://openrouter.ai/api/v1",
+                            temperature=0.3,
+                            max_tokens=100,
+                        )
+                        _h_msgs = list(prior_messages[-4:]) + [HumanMessage(content=user_message), HumanMessage(content=_humanize_prompt)]
+                        _h_resp = await _h_llm.ainvoke(_h_msgs)
+                        _interrupt_reply = (_h_resp.content or "").strip() or "Saya memerlukan konfirmasi sebelum melanjutkan. Boleh?"
+                    except Exception:
+                        _interrupt_reply = "Saya memerlukan konfirmasi sebelum melanjutkan. Boleh?"
+                else:
+                    _interrupt_reply = "Saya memerlukan konfirmasi sebelum melanjutkan. Boleh?"
+            except Exception as _ie:
+                log.warning("agent_run.interrupt_save_failed", error=str(_ie))
+                _interrupt_reply = "Saya memerlukan konfirmasi sebelum melanjutkan. Boleh?"
+
+            run_record.status = "interrupted"
+            run_record.completed_at = datetime.now(timezone.utc)
+            await db.flush()
+            await _cleanup_sandboxes()
+            return AgentRunResult(
+                reply=_interrupt_reply,
+                steps=[],
+                run_id=run_id,
+                tokens_used=0,
+            )
+
         # ------------------------------------------------------------------ #
         # 9. Parse & persist result messages                                  #
         # ------------------------------------------------------------------ #
@@ -572,11 +976,7 @@ async def run_agent(
         await _ssb.aclose()
 
     if not final_reply:
-        import asyncio as _asyncio
-        import re as _re
-        from app.core.infra import deployment_service as _svc
-
-        _empty_llm = not parsed["has_output"]  # LLM tidak menghasilkan output sama sekali
+        _empty_llm = not parsed["has_output"]
         if _empty_llm:
             log.error(
                 "agent_run.no_llm_output",
@@ -584,110 +984,14 @@ async def run_agent(
                 run_id=str(run_id),
                 user_message=user_message[:100],
             )
-
-        # --- Cek URL deployment aktif ---
-        try:
-            status_info = await _asyncio.to_thread(_svc.get_deployment_status, str(session.id))
-        except Exception as _ds_err:
-            log.warning("agent_run.deployment_status_check_failed", error=str(_ds_err))
-            status_info = {}
-
-        _deploy_url: str | None = None
-        _deploy_status = status_info.get("status", "")
-        if _deploy_status in ("running", "degraded") and status_info.get("url"):
-            _deploy_url = status_info["url"]
-
-        # Fallback ke URL dari tool result run ini
-        if not _deploy_url:
-            _url_pat = _re.compile(r"https://[a-z0-9\-]+\.trycloudflare\.com")
-            for step in steps:
-                m = _url_pat.search(step.get("result", ""))
-                if m:
-                    _deploy_url = m.group(0)
-                    break
-
-        if _deploy_url:
-            # Deployment sudah aktif — langsung share URL tanpa "Selesai."
-            final_reply = f"App sudah live! Buka di sini: {_deploy_url}"
-        elif not _empty_llm:
-            # Agent sudah menjalankan tool calls tapi tidak menghasilkan text reply.
-            # Invoke LLM langsung (tanpa graph) untuk meminta summary response.
+        else:
             log.warning(
                 "agent_run.missing_final_reply",
                 steps=len(steps),
                 run_id=str(run_id),
             )
-            try:
-                from langchain_core.messages import SystemMessage as _SM, ToolMessage as _TM
-                _tool_summary = "\n".join(
-                    f"- {s['tool']}: {s['result'][:200]}" for s in steps
-                ) if steps else "(tidak ada tool yang dijalankan)"
 
-                # Cek apakah ada deploy URL di tool results
-                import re as _re2
-                _cf_url_in_steps = None
-                for _st in steps:
-                    _mu = _re2.search(r"https://[a-z0-9\-]+\.trycloudflare\.com", _st.get("result", ""))
-                    if _mu:
-                        _cf_url_in_steps = _mu.group(0)
-                        break
-
-                _deploy_hint = (
-                    f"\n\nPENTING: App sudah berhasil di-deploy. URL publiknya adalah: {_cf_url_in_steps}\n"
-                    f"Wajib sertakan URL ini di responmu."
-                ) if _cf_url_in_steps else ""
-
-                _summary_prompt = (
-                    "Kamu baru saja menjalankan beberapa langkah. "
-                    "Tulis respons singkat kepada user dalam Bahasa Indonesia — "
-                    "jelaskan apa yang sudah dilakukan dan apa langkah selanjutnya. "
-                    f"Jangan sebut nama tool secara teknis.{_deploy_hint}"
-                )
-
-                # Gunakan prior_messages (history bersih) + pesan user + prompt
-                # JANGAN pakai result["messages"] — masih berisi AIMessage dengan
-                # dangling tool_calls yang tidak punya pasangan ToolMessage,
-                # sehingga LLM reject dengan error "No tool output found".
-                _clean_msgs = list(prior_messages) + [
-                    HumanMessage(content=user_message),
-                    _SM(content=f"{_summary_prompt}\n\nHasil:\n{_tool_summary}"),
-                ]
-                _force_resp = await llm.ainvoke(_clean_msgs)
-                _force_text = (
-                    _force_resp.content
-                    if isinstance(_force_resp.content, str)
-                    else " ".join(
-                        b.get("text", "") for b in _force_resp.content
-                        if isinstance(b, dict) and b.get("type") == "text"
-                    )
-                ).strip()
-                if _force_text:
-                    final_reply = _force_text
-                    db.add(Message(
-                        session_id=session.id,
-                        role="agent",
-                        content=final_reply,
-                        step_index=step_counter,
-                        run_id=run_id,
-                    ))
-                    await db.flush()
-            except Exception as _fe:
-                log.warning("agent_run.force_reply_failed", error=str(_fe))
-
-        if not final_reply:
-            final_reply = "Maaf, sepertinya ada gangguan sementara. Coba kirim pesan lagi."
-
-    # Always inject Cloudflare URL if deploy happened this run but LLM forgot to include it.
-    # The `if not final_reply` block above only runs as a fallback — if LLM generated any text
-    # without the URL, we still need to surface it.
-    import re as _re_url
-    _cf_pat = _re_url.compile(r"https://[a-z0-9\-]+\.trycloudflare\.com")
-    if final_reply and not _cf_pat.search(final_reply):
-        for _step in steps:
-            _m = _cf_pat.search(_step.get("result", ""))
-            if _m:
-                final_reply = f"{final_reply}\n\n{_m.group(0)}"
-                break
+    final_reply = ensure_non_empty_reply(final_reply, steps)
 
     log.info(
         "agent_run.complete",

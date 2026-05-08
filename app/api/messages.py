@@ -1,16 +1,23 @@
+import asyncio
 import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.engine.agent_runner import run_agent
-from app.core.engine.session_lock import session_run_lock
+from app.core.engine.session_lock import (
+    cancel_active_run,
+    register_active_task,
+    session_run_lock,
+    unregister_active_task,
+)
 from app.database import get_db
 from app.models.agent import Agent
+from app.models.message import Message
 from app.models.session import Session
 from app.schemas.message import MessageCreate, MessageResponse, StepSummary
 
@@ -83,13 +90,44 @@ async def send_message(
             detail=f"Session {session_id} not found for agent {agent_id}",
         )
 
-    async with session_run_lock(session_id):
-        result = await run_agent(
-            agent_model=agent,
-            session=session,
-            user_message=payload.message,
-            db=db,
+    # /reset — intercept sebelum agent run
+    if payload.message.strip().lower() == "/reset":
+        await db.execute(delete(Message).where(Message.session_id == session_id))
+        session.metadata_ = {}
+        db.add(session)
+        await db.commit()
+        from app.core.engine import interrupt_store as _istore
+        await _istore.clear_interrupt(session_id)
+        return MessageResponse(
+            reply="Percakapan direset. Memori sesi ini telah dibersihkan.",
+            steps=[],
+            run_id=None,
         )
+
+    # Cancel any in-progress run for this session (human interrupt).
+    # This handles the case where user sends a new message while the agent
+    # is still working (e.g. subagent taking too long).
+    _prior_interrupted = await cancel_active_run(session_id)
+
+    current_task = asyncio.current_task()
+    if current_task:
+        await register_active_task(session_id, current_task)
+
+    try:
+        async with session_run_lock(session_id):
+            result = await run_agent(
+                agent_model=agent,
+                session=session,
+                user_message=payload.message,
+                db=db,
+                prior_run_was_interrupted=_prior_interrupted,
+            )
+    except asyncio.CancelledError:
+        # This run was interrupted by a subsequent message from the same user.
+        # The new request will handle the reply — nothing to return here.
+        raise
+    finally:
+        await unregister_active_task(session_id)
 
     # update consumed tokens
     tokens_this_run: int = result.get("tokens_used", 0)

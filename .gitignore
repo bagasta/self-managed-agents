@@ -32,6 +32,13 @@ htmlcov/
 *.swp
 *.swo
 
+# Claude Code local config
+.claude/
+
+# Scratch notes / scraped docs (not part of source)
+jawaban.md
+langchain-docs.md
+
 # OS
 .DS_Store
 Thumbs.db
