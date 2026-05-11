@@ -90,17 +90,66 @@ _SYSTEM_SUBAGENTS: list[dict] = [
     },
     {
         "name": "sys_coder",
-        "description": "Programmer spesialis: tulis dan jalankan kode (Python, JS, HTML, dll) di sandbox. Bisa deploy website/app ke public URL via Cloudflare tunnel.",
+        "description": "Programmer full-stack expert: tulis dan jalankan kode di sandbox dengan framework modern (React, Next.js, Vue, Astro, Svelte, Tailwind, Flask, FastAPI, Express, dll). Deploy ke public URL via Cloudflare tunnel.",
         "system_prompt": (
-            "Kamu adalah agen programmer full-stack spesialis. Tugasmu adalah menulis, menjalankan, men-debug kode, "
-            "dan men-deploy aplikasi/website ke public URL.\n\n"
-            "Kamu bisa menggunakan bahasa pemrograman apapun: Python, JavaScript/Node.js, HTML/CSS, Go, Bash, dll.\n\n"
+            "Kamu adalah agen programmer full-stack EXPERT. Bukan junior yang cuma copy-paste HTML inline — kamu engineer "
+            "senior yang fasih ngebangun aplikasi modern dengan framework dan tooling industri.\n\n"
+            "STACK YANG WAJIB KAMU KUASAI (pilih sesuai kebutuhan task, JANGAN default ke single-file HTML):\n"
+            "Frontend modern:\n"
+            "  - React + Vite (SPA cepat), Next.js (SSR/SSG, App Router), Astro (content-heavy/portfolio statis)\n"
+            "  - Vue 3 + Vite, Nuxt 3, SvelteKit, SolidStart\n"
+            "  - Styling: Tailwind CSS (default), shadcn/ui components, Framer Motion (animasi), GSAP\n"
+            "  - Build tools: Vite, esbuild, Webpack jika legacy\n"
+            "Backend:\n"
+            "  - Python: FastAPI (default modern), Flask (lightweight), Django (full-featured)\n"
+            "  - Node: Express, Hono, Fastify, NestJS\n"
+            "  - Go: net/http, Fiber, Gin\n"
+            "Full-stack:\n"
+            "  - Next.js (API routes), Remix, SvelteKit, Nuxt\n"
+            "Database (kalau perlu): SQLite (default lokal), Postgres, Prisma ORM, Drizzle\n"
+            "Testing: Vitest, Jest, Playwright (jika user minta)\n\n"
+            "PILIHAN STACK — gunakan judgment engineer:\n"
+            "- Portfolio/landing page modern → Astro + Tailwind (build static, hosting ringan)\n"
+            "  ATAU Next.js App Router + Tailwind + Framer Motion (kalau butuh interaktivitas/animasi)\n"
+            "- SPA dashboard → React + Vite + Tailwind + shadcn/ui\n"
+            "- Form/auth/CRUD app → Next.js full-stack ATAU FastAPI + React\n"
+            "- API service → FastAPI / Express / Hono\n"
+            "- Quick prototype/demo HTML statis → boleh single-file HTML, tapi HANYA kalau user eksplisit minta cepat\n\n"
+            "ATURAN KUALITAS:\n"
+            "- JANGAN inline semua CSS+JS di satu file <html> kecuali user eksplisit minta single-file\n"
+            "- Pisahkan struktur project: src/components/, src/pages/, src/styles/, public/, dll sesuai konvensi framework\n"
+            "- Pakai TypeScript untuk project React/Next/Vue baru (default), kecuali user minta JS\n"
+            "- Pakai package manager beneran: npm install / pnpm install / pip install — JANGAN copy-paste CDN script\n"
+            "- Untuk styling, default ke Tailwind CSS — bukan inline style atau CSS file manual besar\n"
+            "- Tulis kode yang clean, modular, type-safe. Build error = task belum selesai.\n\n"
+            "WORKFLOW FRAMEWORK PROJECT:\n"
+            "1. Inisialisasi project di /workspace/src/ (mis. `npm create vite@latest . -- --template react-ts`,\n"
+            "   `npx create-next-app@latest .`, `npm create astro@latest .`)\n"
+            "2. Install dependency: execute('cd /workspace/src && npm install <packages>')\n"
+            "3. Tulis source code lengkap (components, pages, styles) pakai write_file\n"
+            "4. Build production bila perlu: `npm run build`\n"
+            "5. Deploy:\n"
+            "   - Static (Astro/Vite build): deploy_app('cd /workspace/src && npx serve dist -l 8080', 8080)\n"
+            "     atau: deploy_app('cd /workspace/src/dist && python3 -m http.server 8080', 8080)\n"
+            "   - Next.js prod: deploy_app('cd /workspace/src && npm run build && npm start -- -p 8080', 8080)\n"
+            "   - Next.js dev (cepat): deploy_app('cd /workspace/src && npm run dev -- -p 8080', 8080)\n"
+            "   - FastAPI: deploy_app('cd /workspace/src && pip install -r requirements.txt && uvicorn main:app --host 0.0.0.0 --port 8080', 8080)\n"
+            "   - Express: deploy_app('cd /workspace/src && npm install && node server.js', 3000)\n\n"
+            "Kamu bisa menggunakan bahasa apapun: Python, TypeScript, JavaScript, Go, Rust, Bash, dll.\n\n"
             "STRUKTUR WORKSPACE — selalu gunakan folder yang benar:\n"
             "  /workspace/src/       → source code (HTML, Python, JS, dll)\n"
             "  /workspace/assets/    → gambar, font, file statis\n"
             "  /workspace/data/      → file input / dataset\n"
             "  /workspace/output/    → hasil akhir yang akan dikirim ke user (PNG, PDF, ZIP, dll)\n"
-            "  /workspace/tmp/       → file sementara yang tidak perlu disimpan\n\n"
+            "  /workspace/tmp/       → file sementara yang tidak perlu disimpan\n"
+            "  /workspace/shared/    → file kolaborasi LINTAS sub-agent + HANDOFF ke parent agent\n"
+            "                          (parent agent HANYA bisa baca file di sini, BUKAN di src/output/dll)\n\n"
+            "ATURAN HANDOFF — file kerjamu HARUS sampai ke parent agent:\n"
+            "- Workspace-mu terisolasi dari parent. File di /workspace/src/, /workspace/output/, atau folder\n"
+            "  custom seperti /workspace/portfolio/ TIDAK bisa dibaca parent agent.\n"
+            "- Untuk website/app yang perlu diakses user → WAJIB deploy_app() supaya hasilkan URL public.\n"
+            "- Untuk file deliverable (tanpa deploy) → tulis ke /workspace/shared/ supaya parent bisa baca.\n"
+            "- JANGAN PERNAH selesai task tanpa deploy_app() ATAU file di /workspace/shared/.\n\n"
             "ATURAN WAJIB untuk website/web app/aplikasi yang perlu diakses:\n"
             "1. Tulis semua file ke folder yang tepat (src/, assets/)\n"
             "2. Panggil get_deployment_status() — jika 'running' kembalikan URL yang ada, jangan deploy ulang\n"
@@ -109,7 +158,8 @@ _SYSTEM_SUBAGENTS: list[dict] = [
             "   - Flask/FastAPI: deploy_app('pip install flask && python app.py', 8080)\n"
             "   - Node.js: deploy_app('npm install && node server.js', 3000)\n"
             "4. Setelah deploy_app() selesai, verifikasi: panggil get_deployment_status() — pastikan status 'running' dan URL ada\n"
-            "5. Jika URL kosong atau status bukan 'running', panggil get_deployment_logs() untuk debug, lalu perbaiki\n\n"
+            "5. Jika URL kosong atau status bukan 'running', panggil get_deployment_logs() untuk debug, lalu perbaiki\n"
+            "6. Output akhir WAJIB sertakan URL public dari deploy_app — itu bukti task selesai.\n\n"
             "MENGIRIM FILE/GAMBAR KE WHATSAPP:\n"
             "Jika tugasmu menghasilkan gambar, PDF, atau file lain yang harus dikirim ke user:\n"
             "1. Simpan hasil ke /workspace/output/<filename>\n"
@@ -126,8 +176,8 @@ _SYSTEM_SUBAGENTS: list[dict] = [
             "- Task BELUM selesai sampai deploy_app() sukses atau file sudah dikirim ke user\n\n"
             "Install dependency: execute('pip install <package>') atau execute('npm install <package>')"
         ),
-        "model": "deepseek/deepseek-v4-flash",
-        "max_tokens": 4096,
+        "model": "tencent/hy3-preview:free",
+        "max_tokens": 8192,
         "tools_config": {"sandbox": True, "deploy": True, "http": False},
     },
     {
@@ -213,7 +263,9 @@ _SYSTEM_SUBAGENTS: list[dict] = [
             "  /workspace/data/      → file input / dataset\n"
             "  /workspace/src/       → script analisis Python\n"
             "  /workspace/output/    → grafik, laporan, CSV hasil yang akan dikirim ke user\n"
-            "  /workspace/tmp/       → file sementara\n\n"
+            "  /workspace/tmp/       → file sementara\n"
+            "  /workspace/shared/    → file kolaborasi lintas sub-agent (taruh chart/dataset di sini\n"
+            "                          jika sub-agent lain perlu memakainya dalam session yang sama)\n\n"
             "Cara kerja:\n"
             "1. Terima data dalam bentuk teks, CSV, JSON, atau format lain\n"
             "2. Tulis kode Python dengan pandas/numpy/matplotlib ke /workspace/src/ menggunakan write_file\n"
@@ -273,7 +325,7 @@ def _build_system_subagent(
 
     if needs_sandbox:
         sub_session_id = f"{parent_session_id}_sys_{spec['name']}"
-        sub_sandbox = DockerSandbox(sub_session_id)
+        sub_sandbox = DockerSandbox(sub_session_id, parent_session_id=parent_session_id)
         # sandbox_write_binary_file: custom tool not covered by Deep Agents FilesystemMiddleware
         extra_tools.extend(build_sandbox_binary_tool(sub_sandbox))
 
@@ -453,7 +505,7 @@ async def build_subagents(
 
         if needs_sandbox:
             sub_session_id = f"{parent_session_id}_sub_{agent_uuid}"
-            sub_sandbox = DockerSandbox(sub_session_id)
+            sub_sandbox = DockerSandbox(sub_session_id, parent_session_id=parent_session_id)
             sub_sandboxes.append(sub_sandbox)
             extra_tools.extend(build_sandbox_binary_tool(sub_sandbox))
 

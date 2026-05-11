@@ -67,7 +67,7 @@ def _connect_docker(preferred: str) -> docker.DockerClient:
     )
 
 
-_WORKSPACE_SUBDIRS = ("output", "src", "data", "assets", "tmp")
+_WORKSPACE_SUBDIRS = ("output", "src", "data", "assets", "tmp", "shared")
 
 
 def get_workspace_dir(session_id: str | uuid.UUID) -> Path:
@@ -79,6 +79,15 @@ def get_workspace_dir(session_id: str | uuid.UUID) -> Path:
     return workspace
 
 
+def get_shared_dir(parent_session_id: str | uuid.UUID) -> Path:
+    """Return the per-session shared directory used for cross-subagent collaboration.
+
+    Scoped to parent_session_id, which is unique per user session, so cross-user
+    leakage is impossible — different users always have different session ids.
+    """
+    return get_workspace_dir(parent_session_id) / "shared"
+
+
 class DockerSandbox:
     """
     Manages sandbox operations for one agent session.
@@ -87,11 +96,44 @@ class DockerSandbox:
     host workspace directory — no container needed. Only bash() spins up a container.
     """
 
-    def __init__(self, session_id: str | uuid.UUID) -> None:
+    def __init__(
+        self,
+        session_id: str | uuid.UUID,
+        parent_session_id: str | uuid.UUID | None = None,
+    ) -> None:
         self.session_id = str(session_id)
         self.workspace_dir = get_workspace_dir(session_id)
         self._settings = get_settings()
         self._client: docker.DockerClient | None = None
+
+        # Per-parent-session shared dir. Subagents pass parent_session_id so they
+        # all see the same /workspace/shared mount (collaboration). Main agent's
+        # parent_session_id is None — its shared dir lives inside its own workspace.
+        self.parent_session_id: str | None = (
+            str(parent_session_id) if parent_session_id else None
+        )
+        if self.parent_session_id:
+            self.shared_dir = get_shared_dir(self.parent_session_id)
+            # Replace empty `shared/` subdir with a symlink to parent's shared dir
+            # so host-side filesystem ops (DockerBackend.read/write) and the container
+            # mount agree on a single location.
+            local_shared = self.workspace_dir / "shared"
+            try:
+                if local_shared.is_symlink():
+                    if local_shared.resolve() != self.shared_dir.resolve():
+                        local_shared.unlink()
+                        local_shared.symlink_to(self.shared_dir, target_is_directory=True)
+                elif local_shared.is_dir() and not any(local_shared.iterdir()):
+                    local_shared.rmdir()
+                    local_shared.symlink_to(self.shared_dir, target_is_directory=True)
+            except OSError as exc:
+                logger.warning(
+                    "sandbox.shared_symlink_failed",
+                    session_id=self.session_id,
+                    error=str(exc),
+                )
+        else:
+            self.shared_dir = self.workspace_dir / "shared"
 
     def _get_client(self) -> docker.DockerClient:
         if self._client is None:
@@ -120,12 +162,18 @@ class DockerSandbox:
         # survive across ephemeral container runs (only /workspace is mounted
         # on the host). Agents can install anything — full internet is available.
         pyvenv_dir = "/workspace/.pyvenv"
+        volumes: dict = {
+            str(self.workspace_dir): {"bind": "/workspace", "mode": "rw"}
+        }
+        # Subagent: mount parent's shared dir explicitly so /workspace/shared works
+        # inside the container (the on-host symlink doesn't resolve across the bind boundary).
+        if self.parent_session_id:
+            volumes[str(self.shared_dir)] = {"bind": "/workspace/shared", "mode": "rw"}
+
         run_kwargs: dict = dict(
             image=self._settings.docker_sandbox_image,
             command=["bash", "-c", cmd],
-            volumes={
-                str(self.workspace_dir): {"bind": "/workspace", "mode": "rw"}
-            },
+            volumes=volumes,
             working_dir="/workspace",
             environment={
                 # Pip installs land here and persist between messages

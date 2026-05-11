@@ -1,3 +1,69 @@
+# Recap: Sub-Agent Shared Workspace — Cross-Subagent Collaboration Tanpa Bocor Antar User
+
+**Tanggal**: 2026-05-08
+**Status**: ✅ Selesai — verified, 39/39 tests pass
+
+## Konteks
+
+Sebelumnya tiap sub-agent punya workspace terisolasi total:
+- Main agent: `{SANDBOX_BASE_DIR}/{session_id}/`
+- Sys subagent: `{SANDBOX_BASE_DIR}/{session_id}_sys_{name}/`
+- Custom subagent: `{SANDBOX_BASE_DIR}/{session_id}_sub_{agent_id}/`
+
+Akibatnya `sys_analyst` bikin chart, `sys_coder` gak bisa baca file-nya — kolaborasi mustahil tanpa
+routing manual via main agent.
+
+## Solusi
+
+Tambah folder `shared/` per **session** (bukan per agent) yang di-mount ke semua sub-sandbox dalam
+session yang sama. Karena `parent_session_id` adalah UUID dari tabel `sessions` yang unik per
+(agent_id × external_user_id), shared dir otomatis terisolasi per user — mustahil bocor antar user.
+
+## File yang Diubah
+
+| File | Perubahan |
+|------|-----------|
+| `app/core/infra/sandbox.py` | `_WORKSPACE_SUBDIRS` += `"shared"`; tambah `get_shared_dir()`; `DockerSandbox(session_id, parent_session_id=None)` — sub bikin symlink `workspace/shared → {parent}/shared`; `bash()` tambah bind mount `/workspace/shared` ke parent shared dir |
+| `app/core/engine/deep_agent_backend.py` | `__init__` track `_shared_root`; `_resolve()` izinkan path yang resolve ke shared root (bukan cuma `_root`); `_rel()` handle path under shared dir → return `shared/...` |
+| `app/core/engine/subagent_builder.py` | Sys + custom sub sandboxes pass `parent_session_id=parent_session_id`; prompt `sys_coder` & `sys_analyst` dapat dokumentasi `/workspace/shared/` |
+
+## Isolasi Multi-tenant
+
+```
+session_X (User A) ──┬── main agent workspace
+                     ├── sys_coder workspace ──► /workspace/shared → {session_X}/shared
+                     └── sys_analyst workspace ──► /workspace/shared → {session_X}/shared
+
+session_Y (User B) ──┬── main agent workspace
+                     ├── sys_coder workspace ──► /workspace/shared → {session_Y}/shared
+                     └── sys_analyst workspace ──► /workspace/shared → {session_Y}/shared
+```
+
+Session_X ≠ session_Y, jadi shared dir-nya direktori berbeda di host. Tidak ada code path yang
+bisa cross-mount antar session.
+
+## Verifikasi
+
+```python
+s = DockerSandbox('test_main')
+s2 = DockerSandbox('test_main_sys_coder', parent_session_id='test_main')
+# s.shared_dir == s2.shared_dir  → True
+# s2.workspace_dir/'shared' is_symlink → True
+# DockerBackend(s2)._resolve('/workspace/shared/foo.txt') → {test_main}/shared/foo.txt ✅
+```
+
+Tests: `pytest tests/test_session_lock_and_history.py` → 39 passed.
+
+## Dual-Path Coherence
+
+- **Container path** (bash/execute): `/workspace/shared/*` → bind mount ke `{parent}/shared/`
+- **Host path** (DockerBackend write_file/read_file): `sub_workspace/shared/*` → symlink ke `{parent}/shared/*`
+
+Kedua path resolve ke direktori host yang sama. Sub-agent A `write_file('shared/x.png')` →
+sub-agent B bisa langsung `read_file('shared/x.png')` atau `execute('cat /workspace/shared/x.png')`.
+
+---
+
 # Recap: Arthur End-to-End Test + Sandbox Image Fix + Test Skill
 
 **Tanggal**: 2026-05-06

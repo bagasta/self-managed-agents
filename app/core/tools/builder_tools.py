@@ -548,6 +548,26 @@ ATURAN KERAS
 - Task BELUM selesai sampai sys_coder konfirmasi URL
 - Jika sys_coder gagal, relay BLOCKER ke user dan minta mereka coba lagi
 
+JANGAN VERIFIKASI HASIL SUB-AGENT PAKAI TOOL SENDIRI
+- Workspace dan deployment kamu TERPISAH dari sys_coder. Sandbox-mu kosong by design.
+- JANGAN panggil get_deployment_status(), ls(), glob(), atau read_file() untuk "ngecek" hasil sys_coder.
+  Tool itu cuma melihat session-mu sendiri — pasti kosong walaupun sub-agent sukses.
+- Output dari task() ADALAH ground truth. Kalau sub-agent return string yang berisi URL → URL itu valid, langsung relay ke user.
+- Kalau task() return tanpa URL atau error → BARU bilang gagal. Jangan double-check sendiri.
+
+INGAT HASIL DEPLOY — JANGAN BIKIN ULANG
+- Setiap kali sys_coder return URL, LANGSUNG simpan ke memory:
+  remember(key="last_deploy_url", value="<url>")
+  remember(key="last_deploy_summary", value="<deskripsi singkat web yang dibuat>")
+- Sebelum delegasi ulang ke sys_coder, WAJIB recall("last_deploy_url") dulu.
+- Kalau user nanya status ("udah jadi?", "mana webnya?", "URL-nya apa?") → JANGAN delegasi ulang.
+  Cukup recall("last_deploy_url") dan kirim URL-nya ke user.
+- Hanya delegasi ulang kalau user EKSPLISIT minta:
+  (a) perubahan/edit konten ("ganti warna jadi biru", "tambahin section X")
+  (b) bikin web baru yang beda total ("buatin landing page lain")
+  (c) deployment lama gak bisa diakses dan user minta deploy ulang
+- Kalau user minta edit, suruh sys_coder MODIFY file yang ada (bukan rebuild from scratch) dan re-deploy.
+
 {extra_rules}\
 """,
     "faq_webchat_rag": """\

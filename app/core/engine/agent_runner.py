@@ -430,6 +430,26 @@ async def run_agent(
             active_groups.append(f"subagents({len(subagent_list)})")
             log.info("agent_run.subagents_ready", names=[s.get("name", "?") for s in subagent_list])
 
+            # Hard-block: parent can no longer call deployment tools when subagents
+            # are active. These tools are session-scoped and always return empty for
+            # parent (subagent runs in isolated session), causing parent to falsely
+            # conclude "subagent failed" → re-delegate / fallback loop.
+            # Sub-agents (sys_coder etc.) keep their own deployment tools.
+            _deploy_tool_names = {
+                "deploy_app", "stop_deployment",
+                "get_deployment_status", "get_deployment_logs",
+            }
+            _before = len(tools)
+            tools = [t for t in tools if getattr(t, "name", None) not in _deploy_tool_names]
+            if len(tools) != _before:
+                log.info(
+                    "agent_run.parent_deploy_tools_stripped",
+                    removed=_before - len(tools),
+                    reason="subagents_active",
+                )
+                if "deploy" in active_groups:
+                    active_groups.remove("deploy")
+
     log.debug("agent_run.tools_ready (pre-mcp)", groups=active_groups, count=len(tools))
 
     # ------------------------------------------------------------------ #
@@ -683,30 +703,71 @@ async def run_agent(
             )
             sanitized_prior = sanitized_prior[-_MAX_PRIOR_MESSAGES:]
 
-        # If the previous run was interrupted by this message, strip the partial
-        # messages from the interrupted run before building history.  The interrupted
-        # run may have written AIMessage+ToolMessage pairs mid-task that make the LLM
-        # think work is still ongoing — even if the user just says "hello".
-        # We remove all messages that belong to the last run_id in history (they are
-        # incomplete) and replace them with a single SystemMessage that informs the
-        # LLM the previous task was cancelled.
+        # Detect & strip dangling-tail from a prior run that was interrupted, crashed,
+        # or didn't produce a final assistant reply. We don't trust prior_run_was_interrupted
+        # alone — it's only set when cancel_active_run() found a live task. If the prior
+        # run already finished (timeout / error / partial commit) before this message
+        # arrived, the flag is False even though the tail is dirty.
+        #
+        # Strategy: scan history_rows from the end and find the last "clean boundary" —
+        # a row whose role is "user". Any AI/tool rows after the most-recent user row
+        # without a final AI text reply (no tool_calls) are partial. Drop them. The
+        # interrupt note tells the LLM to ignore them entirely.
         _interrupt_note: list[BaseMessage] = []
-        if prior_run_was_interrupted:
-            from langchain_core.messages import SystemMessage as _SM
-            # Drop any messages from the last run in sanitized_prior (incomplete tool chains)
-            if history_rows:
-                _last_run_id = history_rows[-1].run_id
-                _rows_before_last_run = [m for m in history_rows if m.run_id != _last_run_id]
-                if len(_rows_before_last_run) < len(history_rows):
-                    # Re-convert trimmed history; keep what was before the interrupted run
-                    sanitized_prior = _sanitize_input_messages(db_messages_to_lc(_rows_before_last_run))
+        _force_interrupt = bool(prior_run_was_interrupted)
+        if history_rows:
+            # Find last "clean" position. Walk backwards: if we see a final AI text
+            # reply (role=agent, no tool_calls in content metadata) → clean. If we
+            # see partial tool_calls or trailing tool messages → tail is dirty.
+            _idx_last_user = -1
+            for _i in range(len(history_rows) - 1, -1, -1):
+                if history_rows[_i].role == "user":
+                    _idx_last_user = _i
+                    break
+
+            _has_final_ai_reply_after_user = False
+            if _idx_last_user >= 0:
+                for _row in history_rows[_idx_last_user + 1:]:
+                    # A "final AI reply" is an agent message that's pure text (not a
+                    # tool call). We approximate: role=agent and content is non-empty
+                    # and the row is the LAST agent row in the run. If any agent row
+                    # after the last user has no following tool-call partner, treat as
+                    # final. Heuristic: presence of any agent text reply after last
+                    # user means the run completed at least one turn.
+                    if _row.role == "agent" and _row.content and not str(_row.content).startswith("[tool_call]"):
+                        _has_final_ai_reply_after_user = True
+                        break
+
+            _tail_dirty = _idx_last_user >= 0 and not _has_final_ai_reply_after_user
+            if _tail_dirty or _force_interrupt:
+                # Trim history to everything up to (and including) the last user row,
+                # plus the agent's final reply (if any). Drop everything after that —
+                # those are partial tool chains the LLM shouldn't try to continue.
+                _kept_rows = history_rows[: _idx_last_user + 1] if _idx_last_user >= 0 else []
+                # Include the first complete agent text reply right after, if present.
+                for _row in history_rows[_idx_last_user + 1:]:
+                    _kept_rows.append(_row)
+                    if _row.role == "agent" and _row.content and not str(_row.content).startswith("[tool_call]"):
+                        break
+                if len(_kept_rows) < len(history_rows):
+                    sanitized_prior = _sanitize_input_messages(db_messages_to_lc(_kept_rows))
                     log.info(
-                        "agent_run.stripped_interrupted_run_messages",
-                        stripped=len(history_rows) - len(_rows_before_last_run),
+                        "agent_run.stripped_dirty_tail",
+                        stripped=len(history_rows) - len(_kept_rows),
+                        forced_interrupt=_force_interrupt,
+                        tail_dirty=_tail_dirty,
                     )
+                    _force_interrupt = True  # ensure the system note is injected
+
+        if _force_interrupt:
+            from langchain_core.messages import SystemMessage as _SM
             _interrupt_note = [_SM(content=(
-                "[SYSTEM] The previous task was interrupted because the user sent a new message. "
-                "Do NOT continue or retry the previous task. Focus solely on the user's current message."
+                "[SYSTEM — HARD OVERRIDE] Pesan baru dari user di bawah ini adalah PRIORITAS TUNGGAL. "
+                "Task sebelumnya (jika ada) sudah dibatalkan. JANGAN melanjutkan, mengulang, atau "
+                "menyebut pekerjaan lama kecuali user eksplisit bertanya tentangnya. "
+                "Respon HANYA terhadap pesan user terbaru. "
+                "Kalau user cuma sapa ('Halo', 'hai', 'bro'), balas sapaan singkat — JANGAN otomatis "
+                "lanjut delegasi atau tool call apapun yang berkaitan dengan task lama."
             ))]
 
         input_messages: list[BaseMessage] = sanitized_prior + _interrupt_note + [HumanMessage(content=human_content)]
@@ -732,8 +793,11 @@ async def run_agent(
             and tools_config.get("subagents", {})
             and tools_config["subagents"].get("enabled")
         )
+        # Agents that delegate to sys_coder may build framework projects (npm install,
+        # next build, pip install) — these can take 5-10 min on cold sandboxes.
+        # Multiplier 8x → ~40 min ceiling for builder/system/subagent-enabled flows.
         _timeout = (
-            settings.agent_timeout_seconds * 3
+            settings.agent_timeout_seconds * 8
             if "builder" in _agent_caps or "system" in _agent_caps or _has_subagents
             else settings.agent_timeout_seconds
         )

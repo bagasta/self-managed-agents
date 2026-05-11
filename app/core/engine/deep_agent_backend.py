@@ -46,6 +46,12 @@ class DockerBackend(SandboxBackendProtocol):
     def __init__(self, sandbox: DockerSandbox) -> None:
         self._sandbox = sandbox
         self._root: Path = sandbox.workspace_dir
+        # Allowed extra root: per-session shared dir (cross-subagent collaboration).
+        # When sandbox is a subagent, shared/ inside workspace is a symlink that resolves
+        # outside _root, so traversal check must accept this specific target too.
+        self._shared_root: Path | None = (
+            sandbox.shared_dir if getattr(sandbox, "parent_session_id", None) else None
+        )
 
     # ------------------------------------------------------------------
     # Identity
@@ -73,12 +79,26 @@ class DockerBackend(SandboxBackendProtocol):
         if clean == "workspace" or clean.startswith("workspace/"):
             clean = clean[len("workspace"):].lstrip("/")
         resolved = (self._root / clean).resolve()
-        if not str(resolved).startswith(str(self._root.resolve())):
-            raise ValueError(f"Path traversal blocked: {path!r}")
-        return resolved
+        root_resolved = str(self._root.resolve())
+        if str(resolved).startswith(root_resolved):
+            return resolved
+        if self._shared_root is not None:
+            shared_resolved = str(self._shared_root.resolve())
+            if str(resolved).startswith(shared_resolved):
+                return resolved
+        raise ValueError(f"Path traversal blocked: {path!r}")
 
     def _rel(self, p: Path) -> str:
-        return str(p.relative_to(self._root))
+        try:
+            return str(p.relative_to(self._root))
+        except ValueError:
+            if self._shared_root is not None:
+                try:
+                    rel = p.relative_to(self._shared_root.resolve())
+                    return str(Path("shared") / rel)
+                except ValueError:
+                    pass
+            return str(p)
 
     # ------------------------------------------------------------------
     # execute — runs in Docker container
