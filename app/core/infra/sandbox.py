@@ -187,7 +187,7 @@ class DockerSandbox:
             # Full internet — bridge network with no firewall restrictions
             network_mode="bridge",
             # No capability restrictions: agents have full container privileges
-            labels={"managed-agent-sandbox": "true"},
+            labels={"managed-agent-sandbox": "true", "managed-agent-session": self.session_id},
             remove=True,
             stdout=True,
             stderr=True,
@@ -256,9 +256,30 @@ class DockerSandbox:
         return "\n".join(lines) if lines else "(empty)"
 
     async def abash(self, cmd: str) -> str:
-        """Non-blocking wrapper around bash() for use in async contexts."""
+        """Non-blocking wrapper around bash() — cancellable via asyncio.CancelledError.
+
+        When the task is cancelled while a Docker container is running, we kill the
+        container by its label so the blocking thread unblocks quickly.
+        """
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, functools.partial(self.bash, cmd))
+        future = loop.run_in_executor(None, functools.partial(self.bash, cmd))
+        try:
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            # Kill any running sandbox containers belonging to this session
+            try:
+                client = self._get_client()
+                containers = client.containers.list(
+                    filters={"label": f"managed-agent-session={self.session_id}"}
+                )
+                for c in containers:
+                    try:
+                        c.kill()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            raise
 
     def close(self) -> None:
         if self._client:

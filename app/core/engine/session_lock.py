@@ -97,12 +97,12 @@ async def session_run_lock(session_id: UUID) -> AsyncIterator[None]:
     from app.config import get_settings
     settings = get_settings()
     # Maximum time we wait to acquire the lock.
-    # Must be >= actual max agent run time (3× for subagent agents) + cancel buffer.
-    _lock_timeout = settings.agent_timeout_seconds * 3 + 120  # e.g. 1020s
+    # Builder/system agents use 8x multiplier — lock must cover that ceiling.
+    _lock_timeout = settings.agent_timeout_seconds * 8 + 120  # e.g. 2520s
 
     # Maximum time a single run is allowed to hold the lock before we
     # force-evict it (prevents permanently stuck sessions).
-    _max_lock_age = settings.agent_timeout_seconds * 3 + 60   # e.g. 960s
+    _max_lock_age = settings.agent_timeout_seconds * 8 + 60   # e.g. 2460s
 
     lock = await _get_lock(session_id)
 

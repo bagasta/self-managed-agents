@@ -37,7 +37,9 @@ def build_agent_context_block(
     agent_id = session.agent_id
     _raw_cfg = session.channel_config
     _ch_cfg = _raw_cfg if isinstance(_raw_cfg, dict) else {}
-    user_phone = _ch_cfg.get("user_phone") or getattr(session, "external_user_id", None) or ""
+    _raw_user_phone = _ch_cfg.get("user_phone") or getattr(session, "external_user_id", None) or ""
+    # Strip @lid / @s.whatsapp.net — always expose clean phone number to LLM
+    user_phone = normalize_phone(_raw_user_phone) if _raw_user_phone else ""
     channel_type = getattr(session, "channel_type", None) or "api"
 
     operator_ids: list = getattr(agent_model, "operator_ids", None) or []
@@ -61,11 +63,29 @@ def build_agent_context_block(
         lines.append("- Custom Tools:\n" + "\n".join(ct_lines))
 
     lines.append(f"- Channel: {channel_type}")
+
+    escalation_cfg: dict = getattr(agent_model, "escalation_config", None) or {}
+    operator_name: str = escalation_cfg.get("operator_name", "")
+    operator_phone_cfg: str = escalation_cfg.get("operator_phone", "")
+
     if user_phone:
         lines.append(f"- Current User Phone: {user_phone}")
-    if sender_name:
-        lines.append(f"- Current User Name: {sender_name}")
-    lines.append(f"- Current User Role: {user_role}")
+    if is_operator:
+        # Operator session — show operator identity, NOT customer sender_name
+        _op_label = operator_name or "Operator/Admin"
+        lines.append(f"- Current User Name: {_op_label} (ini adalah OPERATOR, bukan customer)")
+        lines.append(f"- Current User Role: OPERATOR")
+        if operator_phone_cfg:
+            lines.append(f"- Operator Phone: {operator_phone_cfg}")
+        lines.append("- PENTING: Kamu sedang di-chat oleh OPERATOR. Jangan gunakan nama atau sapaan yang ditujukan ke customer.")
+    else:
+        if sender_name:
+            lines.append(f"- Current User Name: {sender_name}")
+        lines.append(f"- Current User Role: {user_role}")
+        if operator_phone_cfg:
+            lines.append(f"- Operator Phone (pemilik agent): {operator_phone_cfg}")
+        if operator_name:
+            lines.append(f"- Operator Name: {operator_name}")
     lines.append(f"- Session ID: {session.id}")
 
 
@@ -405,6 +425,15 @@ def build_system_prompt(
     # 5. Channel-specific
     is_whatsapp = getattr(session, "channel_type", None) == "whatsapp"
 
+    if is_whatsapp:
+        system_prompt += (
+            "\n\n## ⛔ ATURAN FORMAT NOMOR TELEPON\n"
+            "DILARANG KERAS mencantumkan format teknis WhatsApp dalam pesan apapun: "
+            "`@lid`, `@s.whatsapp.net`, `@c.us`. "
+            "Jika kamu perlu menyebut nomor WA customer, gunakan format internasional biasa: `628xxx` atau `+628xxx`. "
+            "Contoh BENAR: `6281234567890`. Contoh SALAH: `6281234567890@lid` atau `6281234567890@s.whatsapp.net`."
+        )
+
     if is_whatsapp and not is_operator_message and not escalation_user_jid:
         _name_hint = (
             f" Nama user saat ini adalah **{sender_name}** — gunakan namanya saat menyapa atau membalas."
@@ -463,10 +492,12 @@ def build_system_prompt(
         ctx_block = ""
         if escalation_context:
             ctx_block = f"\n\n### Pesan terakhir dari user yang dieskalasi:\n{escalation_context}"
+        # Strip @lid / @s.whatsapp.net — tampilkan nomor telepon saja, bukan JID teknis
+        _user_display_phone = normalize_phone(escalation_user_jid)
         system_prompt += (
             f"\n\n## SESI OPERATOR\n"
             f"Kamu sedang berbicara dengan OPERATOR/ADMIN.\n"
-            f"Target user WhatsApp (Chat ID): `{escalation_user_jid}`"
+            f"Nomor WhatsApp user yang dieskalasi: `{_user_display_phone}` (gunakan nomor ini saat menyebut customer, BUKAN format @lid)"
             f"{ctx_block}\n\n"
             "### 🚨 ATURAN PALING KRITIS: DRAFT DULU, JANGAN LANGSUNG KIRIM 🚨\n"
             "- Apabila operator memberikan instruksi/jawaban untuk diteruskan ke customer, KAMU DILARANG KERAS langsung memanggil tool `reply_to_user`.\n"
@@ -479,10 +510,11 @@ def build_system_prompt(
     elif is_operator_message:
         _raw_cfg = session.channel_config
         _ch_cfg = _raw_cfg if isinstance(_raw_cfg, dict) else {}
-        user_wa_jid = _ch_cfg.get("user_phone") or getattr(session, "external_user_id", None) or "unknown"
+        _raw_user_jid = _ch_cfg.get("user_phone") or getattr(session, "external_user_id", None) or "unknown"
+        user_wa_phone = normalize_phone(_raw_user_jid) if _raw_user_jid != "unknown" else "unknown"
         system_prompt += (
             f"\n\n## MODE: OPERATOR COMMAND — ALUR KONFIRMASI\n"
-            f"WhatsApp JID user dalam eskalasi: `{user_wa_jid}`\n"
+            f"Nomor WhatsApp user: `{user_wa_phone}`\n"
             "Pesan berikut adalah PERINTAH dari human operator.\n\n"
             "### INSTRUKSI WAJIB\n"
             "- Alur DRAFT -> KONFIRMASI -> KIRIM:\n"

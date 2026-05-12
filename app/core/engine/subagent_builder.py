@@ -176,7 +176,7 @@ _SYSTEM_SUBAGENTS: list[dict] = [
             "- Task BELUM selesai sampai deploy_app() sukses atau file sudah dikirim ke user\n\n"
             "Install dependency: execute('pip install <package>') atau execute('npm install <package>')"
         ),
-        "model": "tencent/hy3-preview:free",
+        "model": "moonshotai/kimi-k2.6",
         "max_tokens": 8192,
         "tools_config": {"sandbox": True, "deploy": True, "http": False},
     },

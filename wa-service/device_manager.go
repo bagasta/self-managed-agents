@@ -259,25 +259,10 @@ func (dm *DeviceManager) SendMessage(deviceID, to, text string) error {
 		}
 	}
 
-	// Parse JID tujuan.
-	// Jika `to` mengandung "@" (misal "phone@s.whatsapp.net", "phone@lid", "group@g.us"),
-	// parse langsung — ini mempertahankan server yang benar (penting untuk LID accounts).
-	// Fallback ke DefaultUserServer jika hanya nomor telepon yang diberikan.
-	var jid types.JID
-	if strings.Contains(to, "@") {
-		parsed, err := types.ParseJID(to)
-		if err != nil {
-			return fmt.Errorf("invalid JID %q: %w", to, err)
-		}
-		// Tolak AD JID (device-specific JID seperti "phone:5@s.whatsapp.net") —
-		// whatsmeow mengembalikan ErrRecipientADJID untuk ini.
-		if parsed.Device > 0 {
-			return fmt.Errorf("cannot send to AD JID %q — use non-device JID", to)
-		}
-		jid = parsed
-	} else {
-		phone := strings.TrimPrefix(to, "+")
-		jid = types.NewJID(phone, types.DefaultUserServer)
+	// Resolve JID — handles full JID strings, phone numbers, and LID accounts.
+	jid, err := resolveJID(info.Client, to)
+	if err != nil {
+		return err
 	}
 
 	// Cancel typing keep-alive goroutine and stop composing indicator.
@@ -291,11 +276,11 @@ func (dm *DeviceManager) SendMessage(deviceID, to, text string) error {
 		Conversation: proto.String(text),
 	}
 
-	_, err := info.Client.SendMessage(context.Background(), jid, msg)
-	if err != nil {
-		log.Printf("[%s] send to %s failed: %v", deviceID, to, err)
+	_, sendErr := info.Client.SendMessage(context.Background(), jid, msg)
+	if sendErr != nil {
+		log.Printf("[%s] send to %s failed: %v", deviceID, to, sendErr)
 	}
-	return err
+	return sendErr
 }
 
 // Disconnect logs out and removes the device.
@@ -590,12 +575,23 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 	mediaData := ""
 	mediaFilename := ""
 
+	quotedText := "" // text of the message being replied to (for escalation routing)
+
 	if conv := evt.Message.GetConversation(); conv != "" {
 		text = conv
 	} else if ext := evt.Message.GetExtendedTextMessage(); ext != nil {
 		text = ext.GetText()
 		if ctx := ext.GetContextInfo(); ctx != nil {
 			mentionedJIDs = ctx.GetMentionedJID()
+			// Extract quoted message text so Python can route operator replies
+			// to the correct escalation case using the case_id embedded in the quote.
+			if qm := ctx.GetQuotedMessage(); qm != nil {
+				if q := qm.GetConversation(); q != "" {
+					quotedText = q
+				} else if qe := qm.GetExtendedTextMessage(); qe != nil {
+					quotedText = qe.GetText()
+				}
+			}
 		}
 	} else if img := evt.Message.GetImageMessage(); img != nil {
 		// Image message
@@ -749,10 +745,15 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 	dm.mu.RLock()
 	resolveInfo, resolveOk := dm.devices[deviceID]
 	dm.mu.RUnlock()
-	if resolveOk && resolveInfo.Client.Store != nil {
-		if pnJID, err := resolveInfo.Client.Store.LIDs.GetPNForLID(context.Background(), evt.Info.Sender); err == nil && pnJID.User != "" {
+	if resolveOk && resolveInfo.Client.Store != nil && evt.Info.Sender.Server == types.HiddenUserServer {
+		// Use ToNonAD() to strip device suffix — LID store lookup requires non-AD JID.
+		if pnJID, err := resolveInfo.Client.Store.LIDs.GetPNForLID(context.Background(), evt.Info.Sender.ToNonAD()); err == nil && pnJID.User != "" {
 			phoneFrom = "+" + pnJID.User
 			log.Printf("[%s] resolved LID %s -> phone %s", deviceID, from, phoneFrom)
+		} else {
+			// LID unresolved — leave phoneFrom empty so Python knows phone is unknown.
+			phoneFrom = ""
+			log.Printf("[%s] LID %s unresolved (no PN mapping yet): %v", deviceID, from, err)
 		}
 	}
 
@@ -796,6 +797,7 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 		"media_type":     mediaType,
 		"media_data":     mediaData,
 		"media_filename": mediaFilename,
+		"quoted_text":    quotedText,
 	}
 	data, _ := json.Marshal(payload)
 

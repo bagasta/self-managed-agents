@@ -62,6 +62,9 @@ class Agent(Base):
     # ["628111", "628222"] = hanya nomor ini yang dibalas (non-operator)
     allowed_senders: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
+    # --- subscription ownership ---
+    owner_external_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     # --- output token limit (per-agent override) ---
     # null = pakai settings.llm_max_tokens (global default)
     # Isi untuk override per-agent: WA CS agent ~512, builder ~2048

@@ -7,6 +7,7 @@ kecil yang bisa di-test dan di-maintain secara independen.
 from __future__ import annotations
 
 import base64
+import re
 import uuid
 from typing import TYPE_CHECKING
 
@@ -99,6 +100,7 @@ async def find_or_create_wa_session(
     device_id: str,
     db: AsyncSession,
     is_operator: bool,
+    phone_number: str | None = None,
 ) -> tuple:
     """
     Cari session WhatsApp yang sudah ada; buat baru jika belum ada.
@@ -126,25 +128,30 @@ async def find_or_create_wa_session(
         # Pastikan device_id dan user_phone selalu up-to-date
         raw_cfg = session.channel_config
         new_config = dict(raw_cfg) if isinstance(raw_cfg, dict) else {}
-        if (
+        changed = (
             new_config.get("device_id") != device_id
             or new_config.get("user_phone") != effective_reply_target
-        ):
+        )
+        if phone_number and new_config.get("phone_number") != phone_number:
+            changed = True
+        if changed:
             new_config["device_id"] = device_id
             new_config["user_phone"] = effective_reply_target
+            if phone_number:
+                new_config["phone_number"] = phone_number
             session.channel_config = new_config
             await db.flush()
         return session, False
 
     # Buat session baru — simpan dalam format normalized
+    cfg: dict = {"user_phone": effective_reply_target, "device_id": device_id}
+    if phone_number:
+        cfg["phone_number"] = phone_number
     session = Session(
         agent_id=agent.id,
         external_user_id=normalized_lookup,
         channel_type="whatsapp",
-        channel_config={
-            "user_phone": effective_reply_target,
-            "device_id": device_id,
-        },
+        channel_config=cfg,
     )
     db.add(session)
     await db.flush()
@@ -152,9 +159,17 @@ async def find_or_create_wa_session(
     return session, True
 
 
-async def find_escalation_context(agent, db: AsyncSession) -> tuple[str | None, str | None]:
+async def find_escalation_context(
+    agent,
+    db: AsyncSession,
+    quoted_text: str | None = None,
+) -> tuple[str | None, str | None]:
     """
     Cari session user yang sedang dalam eskalasi aktif untuk agent ini.
+
+    Jika operator me-reply (quote) pesan eskalasi, `quoted_text` berisi teks pesan
+    yang di-quote. Kita parse `case_id` dari teks itu untuk routing yang tepat —
+    krusial saat ada banyak eskalasi paralel.
 
     Returns (escalation_user_jid, escalation_context_text)
     - escalation_user_jid: JID user yang dieskalasi (untuk dikirim reply)
@@ -163,17 +178,40 @@ async def find_escalation_context(agent, db: AsyncSession) -> tuple[str | None, 
     from app.models.message import Message
     from app.models.session import Session
 
-    esc_result = await db.execute(
-        select(Session)
-        .join(Message, Message.session_id == Session.id)
-        .where(
-            Session.agent_id == agent.id,
-            Message.role == "escalation",
+    esc_session = None
+
+    # Strategy 1: operator reply (quote) pesan eskalasi → parse case_id dari quoted_text
+    if quoted_text:
+        m = re.search(r'ID Kasus:\s*(esc_\d+_[a-f0-9]+)', quoted_text)
+        if m:
+            case_id = m.group(1)
+            # Cari session yang punya case_id ini di metadata_
+            case_result = await db.execute(
+                select(Session).where(
+                    Session.agent_id == agent.id,
+                    Session.metadata_["escalation_case_id"].astext == case_id,
+                )
+            )
+            esc_session = case_result.scalars().first()
+            if esc_session:
+                log.info("find_escalation_context.by_case_id", case_id=case_id, session_id=str(esc_session.id))
+
+    # Strategy 2: fallback — ambil session eskalasi terbaru
+    if not esc_session:
+        esc_result = await db.execute(
+            select(Session)
+            .join(Message, Message.session_id == Session.id)
+            .where(
+                Session.agent_id == agent.id,
+                Message.role == "escalation",
+            )
+            .order_by(desc(Message.timestamp))
+            .limit(1)
         )
-        .order_by(desc(Message.timestamp))
-        .limit(1)
-    )
-    esc_session = esc_result.scalars().first()
+        esc_session = esc_result.scalars().first()
+        if esc_session:
+            log.info("find_escalation_context.by_latest", session_id=str(esc_session.id))
+
     if not esc_session:
         return None, None
 

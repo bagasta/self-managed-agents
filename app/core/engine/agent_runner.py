@@ -378,7 +378,7 @@ async def run_agent(
             or _channel_cfg.get("user_phone")
             or getattr(session, "external_user_id", None)
         )
-        tools.extend(build_escalation_tools(session.id, agent_id, AsyncSessionLocal, user_jid=_user_jid))
+        tools.extend(build_escalation_tools(session.id, agent_id, AsyncSessionLocal, user_jid=_user_jid, sender_name=sender_name))
         active_groups.append("escalation")
 
     # Operator tools: hanya aktif di session operator (is_op_msg = True)
@@ -523,8 +523,35 @@ async def run_agent(
     _wa_target: str = _ch_cfg.get("user_phone", "")
     _is_wa_session: bool = getattr(session, "channel_type", None) == "whatsapp" and bool(_wa_device_id and _wa_target)
 
+    async def _send_agent_recovery_message(reason: str) -> None:
+        """Jalankan quick 1-turn LLM call agar agent bisa kirim pesan recovery natural ke WA."""
+        if not _is_wa_session:
+            return
+        try:
+            from langchain_core.messages import HumanMessage as _HM, SystemMessage as _SM
+            _recovery_llm = llm_raw.bind(max_tokens=200)
+            _resp = await _recovery_llm.ainvoke([
+                _SM(content=system_prompt if isinstance(system_prompt, str) else ""),
+                _HM(content=(
+                    f"[INTERNAL] Task kamu barusan {reason}. "
+                    "Kirim pesan singkat dan natural ke user untuk memberi tahu bahwa prosesnya terganggu. "
+                    "Tanyakan apakah mereka ingin melanjutkan atau mencoba lagi. "
+                    "Jangan gunakan format robotik. Tulis langsung pesan untuk user, tidak lebih dari 2 kalimat."
+                )),
+            ])
+            _msg = getattr(_resp, "content", "") or ""
+            if _msg.strip():
+                from app.core.infra.wa_client import send_wa_message as _send_wa
+                await _send_wa(_wa_device_id, _wa_target, _msg.strip())
+        except Exception as _re:
+            log.warning("agent_run.recovery_message_failed", error=str(_re))
+
     class _AgentLogger(AsyncCallbackHandler):
-        """Callback logger — log tiap step + kirim progress update ke WA."""
+        """Callback logger — log tiap step + kirim progress update ke WA.
+
+        Also accumulates token usage from ALL LLM calls in the run, including
+        sub-agent calls, so the quota deduction covers the full cost.
+        """
 
         def __init__(self) -> None:
             self._notified: set[str] = set()   # tool types yang sudah dinotif run ini
@@ -532,6 +559,8 @@ async def run_agent(
             self._tool_names: dict[str, str] = {}
             self._task_done_notified: set[str] = set()
             self._last_ts: float = 0.0
+            # Cumulative token counter — covers parent + all sub-agents
+            self.total_tokens_from_callbacks: int = 0
 
         async def _wa_progress(self, msg: str, *, force: bool = False) -> None:
             """Kirim progress message ke WA dengan throttle 6 detik."""
@@ -553,6 +582,24 @@ async def run_agent(
 
         async def on_llm_end(self, response, **kwargs):
             try:
+                # Accumulate token usage — covers parent + sub-agent LLM calls
+                usage = getattr(response, "llm_output", None) or {}
+                token_usage = usage.get("token_usage") or usage.get("usage") or {}
+                total = (
+                    token_usage.get("total_tokens")
+                    or token_usage.get("total_token_count")
+                    or 0
+                )
+                if not total:
+                    # Fallback: sum from individual generations
+                    for gen_list in response.generations:
+                        for g in gen_list:
+                            ai_msg = getattr(g, "message", None)
+                            if ai_msg:
+                                u = getattr(ai_msg, "usage_metadata", None) or {}
+                                total += u.get("total_tokens", 0)
+                self.total_tokens_from_callbacks += total
+
                 gen = response.generations[0][0]
                 text = gen.text[:200] if gen.text else ""
                 ai_msg = gen.message if hasattr(gen, "message") else None
@@ -714,7 +761,7 @@ async def run_agent(
         # without a final AI text reply (no tool_calls) are partial. Drop them. The
         # interrupt note tells the LLM to ignore them entirely.
         _interrupt_note: list[BaseMessage] = []
-        _force_interrupt = bool(prior_run_was_interrupted)
+        _tail_dirty = False
         if history_rows:
             # Find last "clean" position. Walk backwards: if we see a final AI text
             # reply (role=agent, no tool_calls in content metadata) → clean. If we
@@ -739,7 +786,7 @@ async def run_agent(
                         break
 
             _tail_dirty = _idx_last_user >= 0 and not _has_final_ai_reply_after_user
-            if _tail_dirty or _force_interrupt:
+            if _tail_dirty:
                 # Trim history to everything up to (and including) the last user row,
                 # plus the agent's final reply (if any). Drop everything after that —
                 # those are partial tool chains the LLM shouldn't try to continue.
@@ -754,12 +801,13 @@ async def run_agent(
                     log.info(
                         "agent_run.stripped_dirty_tail",
                         stripped=len(history_rows) - len(_kept_rows),
-                        forced_interrupt=_force_interrupt,
-                        tail_dirty=_tail_dirty,
+                        tail_dirty=True,
                     )
-                    _force_interrupt = True  # ensure the system note is injected
 
-        if _force_interrupt:
+        # Inject interrupt note ONLY when tail is actually dirty (incomplete prior run).
+        # If prior run completed cleanly (has final AI reply), skip the note — injecting
+        # it when the tail is clean causes the agent to re-run the previous task.
+        if _tail_dirty:
             from langchain_core.messages import SystemMessage as _SM
             _interrupt_note = [_SM(content=(
                 "[SYSTEM — HARD OVERRIDE] Pesan baru dari user di bawah ini adalah PRIORITAS TUNGGAL. "
@@ -828,6 +876,7 @@ async def run_agent(
             run_record.error_message = f"Timeout after {_timeout}s"
             await db.flush()
             await _cleanup_sandboxes()
+            await _send_agent_recovery_message("memakan waktu terlalu lama dan terpaksa dihentikan")
             raise
         except Exception as exc:
             err_str = str(exc)
@@ -856,6 +905,7 @@ async def run_agent(
                     run_record.error_message = str(_retry_json_exc)[:2000]
                     await db.flush()
                     await _cleanup_sandboxes()
+                    await _send_agent_recovery_message("mengalami gangguan koneksi ke model")
                     return AgentRunResult(
                         reply="Maaf, terjadi gangguan koneksi ke model. Silakan coba lagi.",
                         steps=[],
@@ -1010,7 +1060,10 @@ async def run_agent(
         )
         final_reply = parsed["final_reply"]
         steps = parsed["steps"]
-        total_tokens_used = parsed["total_tokens_used"]
+        # Prefer callback-based counter — it captures sub-agent LLM calls too.
+        # Fall back to result_parser count if callback produced nothing (e.g. mocked LLM).
+        _cb_tokens = _agent_logger.total_tokens_from_callbacks
+        total_tokens_used = _cb_tokens if _cb_tokens > 0 else parsed["total_tokens_used"]
         for _msg_record in parsed["db_messages"]:
             db.add(_msg_record)
 

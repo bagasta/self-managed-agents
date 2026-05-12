@@ -1384,6 +1384,7 @@ def build_builder_tools(
         channel_type: str = "",
         escalation_config: str = "{}",
         operator_phone: str = "",
+        operator_name: str = "",
         token_quota: int = 4_000_000,
         max_tokens: int = 0,
     ) -> str:
@@ -1402,6 +1403,7 @@ def build_builder_tools(
             channel_type: Channel yang dipakai: 'whatsapp', 'webchat', atau kosong
             escalation_config: JSON string konfigurasi eskalasi, contoh: '{"channel_type": "whatsapp", "operator_phone": "+62xxx"}'
             operator_phone: Nomor WA operator/admin yang akan dapat notifikasi eskalasi
+            operator_name: Nama operator/admin (misal: "Budi", "Tim CS"). Wajib diisi agar agent tahu siapa operatornya.
             token_quota: Batas token per periode (default: 4,000,000)
             max_tokens: Batas token per reply LLM. WA CS: 512-800, default platform: 1024. Isi 0 untuk pakai default.
         """
@@ -1454,27 +1456,57 @@ def build_builder_tools(
 
         if ec and operator_phone and "operator_phone" not in ec:
             ec["operator_phone"] = operator_phone
+        if operator_name and "operator_name" not in ec:
+            ec["operator_name"] = operator_name
 
         try:
-            agent = Agent(
-                name=name.strip(),
-                description=description or None,
-                instructions=instructions,
-                model=model,
-                temperature=temperature,
-                tools_config=tc,
-                sandbox_config={},
-                safety_policy={},
-                escalation_config=ec,
-                operator_ids=op_ids,
-                allowed_senders=senders,
-                capabilities=[],
-                max_tokens=max_tokens if max_tokens > 0 else None,
-                token_quota=token_quota,
-                quota_period_days=30,
-                channel_type=channel_type or None,
+            from app.core.domain.subscription_service import (
+                check_can_create_agent,
+                get_or_create_wa_user,
             )
+
+            logger.info("builder_tools.create_agent.start", owner_phone=owner_phone, name=name)
+
             async with db_factory() as db:
+                # Auto-provision user + Tier 1 subscription untuk WA user
+                if owner_phone:
+                    _user, _sub = await get_or_create_wa_user(owner_phone, db)
+                    logger.info("builder_tools.create_agent.user_provisioned", user_id=str(_user.id), sub_status=_sub.status)
+
+                    # Cek apakah boleh buat agent (slot & status subscription)
+                    _check = await check_can_create_agent(owner_phone, db)
+                    logger.info("builder_tools.create_agent.slot_check", check=_check)
+                    if not _check["allowed"]:
+                        return json.dumps({"error": _check["reason"]}, ensure_ascii=False)
+
+                    # Override token_quota & active_until dari subscription
+                    token_quota = _sub.token_quota
+                    _active_until = _sub.expires_at or _sub.grace_until
+                else:
+                    _active_until = None
+
+                agent = Agent(
+                    name=name.strip(),
+                    description=description or None,
+                    instructions=instructions,
+                    model=model,
+                    temperature=temperature,
+                    tools_config=tc,
+                    sandbox_config={},
+                    safety_policy={},
+                    escalation_config=ec,
+                    operator_ids=op_ids,
+                    allowed_senders=senders,
+                    capabilities=[],
+                    max_tokens=max_tokens if max_tokens > 0 else None,
+                    token_quota=token_quota,
+                    quota_period_days=30,
+                    channel_type=channel_type or None,
+                    owner_external_id=owner_phone or None,
+                )
+                if _active_until:
+                    agent.active_until = _active_until
+
                 db.add(agent)
                 await db.flush()
                 await db.refresh(agent)

@@ -15,7 +15,7 @@ from slowapi.util import get_remote_address
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api import agents, channels, custom_tools, documents, history, memory, messages, models, runs, sessions, skills, stream
+from app.api import agents, auth, channels, custom_tools, documents, history, memory, messages, models, runs, sessions, skills, stream, subscriptions
 from app.config import get_settings
 from app.database import get_db
 from app.middleware.request_id import RequestIDMiddleware
@@ -95,6 +95,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth.router)
+app.include_router(subscriptions.router)
 app.include_router(agents.router)
 app.include_router(channels.router)
 app.include_router(sessions.router)

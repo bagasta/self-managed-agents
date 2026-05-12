@@ -26,11 +26,26 @@ from app.models.session import Session
 logger = structlog.get_logger(__name__)
 
 
+def _normalize_jid(jid: str | None) -> str:
+    """Strip @lid / @s.whatsapp.net suffix and return clean number."""
+    if not jid:
+        return ""
+    return jid.split("@")[0]
+
+
+import re as _re
+
+def _clean_jid_from_text(text: str) -> str:
+    """Remove @lid and @s.whatsapp.net suffixes from any phone numbers in text."""
+    return _re.sub(r'(\d+)@(?:lid|s\.whatsapp\.net|c\.us)', r'\1', text)
+
+
 def build_escalation_tools(
     session_id: uuid.UUID,
     agent_id: uuid.UUID,
     db_factory: async_sessionmaker,
     user_jid: str | None = None,
+    sender_name: str | None = None,
 ) -> list:
 
     @tool
@@ -75,19 +90,40 @@ def build_escalation_tools(
 
             _raw_cfg = session.channel_config
             channel_cfg = _raw_cfg if isinstance(_raw_cfg, dict) else {}
-            user_wa_jid = channel_cfg.get("user_phone") or session.external_user_id or str(session.id)
-            user_phone_display = session.external_user_id or user_wa_jid
+            # phone_number = real phone from Go (max 15 digits). Reject if it looks like a LID number.
+            _raw_phone = channel_cfg.get("phone_number") or ""
+            _clean_raw_phone = _raw_phone.lstrip("+")
+            resolved_phone = _raw_phone if (_clean_raw_phone and len(_clean_raw_phone) <= 15) else ""
+            raw_jid = channel_cfg.get("user_phone") or session.external_user_id or str(session.id)
+            clean_jid = _normalize_jid(raw_jid)
+            is_lid = raw_jid and "@lid" in raw_jid
+            customer_name = sender_name or channel_cfg.get("sender_name") or ""
+            if resolved_phone:
+                # Nomor asli tersedia — tampilkan langsung
+                clean_phone = _normalize_jid(resolved_phone)
+                user_phone_display = f"+{clean_phone}" if not clean_phone.startswith("+") else clean_phone
+            elif is_lid:
+                # LID tanpa phone_number — tampilkan LID apa adanya (tidak strip @lid)
+                user_phone_display = raw_jid
+            else:
+                user_phone_display = f"+{clean_jid}" if clean_jid and not clean_jid.startswith("+") else (clean_jid or "(tidak diketahui)")
+
+            clean_reason = _clean_jid_from_text(reason)
+            clean_summary = _clean_jid_from_text(summary)
 
             notif_text = (
-                f"🚨 *[CS AI Clevio] Eskalasi pertanyaan customer*\n"
+                f"🚨 *[CS AI] ESKALASI*\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"ID Kasus: {case_id}\n"
-                f"Chat ID/no wa: {user_phone_display}\n"
-                f"Alasan: {reason}\n"
-                + (f"Pertanyaan customer:\n{summary}\n" if summary else "")
+                + (f"WA Customer: {user_phone_display}\n" if user_phone_display and user_phone_display != "(tidak diketahui)" else "")
+                + (f"Nama: {customer_name}\n" if customer_name else "")
+                + f"Alasan: {clean_reason}\n"
+                + (f"Pesan:\n{clean_summary}\n" if clean_summary else "")
                 + f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"Balas pesan ini dengan jawaban untuk customer.\n"
-                f"Agent akan langsung meneruskan jawabanmu ke customer."
+                f"💬 *REPLY pesan ini* untuk menjawab customer ini.\n"
+                f"Format balasan:\n"
+                f"<OPERATOR>\n"
+                f"Pesan: [instruksi/jawaban untuk diteruskan ke customer]"
             )
 
             db.add(Message(
@@ -96,6 +132,12 @@ def build_escalation_tools(
                 content=notif_text,
                 step_index=9000,
             ))
+
+            # Simpan case_id di metadata_ session agar bisa di-lookup saat operator reply
+            sess_meta = dict(session.metadata_ or {})
+            sess_meta["escalation_case_id"] = case_id
+            session.metadata_ = sess_meta
+
             await db.commit()
 
         try:
@@ -130,6 +172,7 @@ def build_escalation_tools(
         channel_type_val: str = "whatsapp"
         ch_cfg: dict = {}
 
+        message = _clean_jid_from_text(message)
         async with db_factory() as db:
             db.add(Msg(
                 session_id=session_id,
@@ -175,6 +218,7 @@ def build_escalation_tools(
         """
         from app.models.message import Message as Msg
 
+        message = _clean_jid_from_text(message)
         channel_type_val: str | None = None
         channel_config_val: dict = {}
 

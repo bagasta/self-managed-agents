@@ -26,6 +26,7 @@ Single-worker constraint:
 """
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 import structlog
@@ -113,6 +114,7 @@ class WAIncomingMessage(BaseModel):
     media_type: str | None = None      # "image" | "document" | "sticker" | "audio" | "ptt" | None
     media_data: str | None = Field(None, max_length=10_000_000)  # base64-encoded raw bytes
     media_filename: str | None = None  # original filename (dokumen) atau generated (gambar/audio)
+    quoted_text: str | None = None     # text of the quoted/replied-to message (for escalation routing)
 
     model_config = {"populate_by_name": True}
 
@@ -154,7 +156,11 @@ async def incoming_message(
     is_operator = bool(_norm_op_ids and from_phone and normalize_phone(from_phone) in _norm_op_ids)
 
     if is_operator:
-        user_message = f"[OPERATOR] {raw_message}"
+        user_message = (
+            f"<OPERATOR>\n"
+            f"No Telepon/WA/Id: {from_phone or '(tidak diketahui)'}\n"
+            f"Pesan: {raw_message}"
+        )
         log.info("channels.incoming.operator_command")
     else:
         user_message = raw_message
@@ -179,6 +185,11 @@ async def incoming_message(
                 user_message=user_message,
                 db=db,
             )
+    except asyncio.CancelledError:
+        return {"status": "cancelled", "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
+    except (TimeoutError, asyncio.TimeoutError):
+        log.warning("channels.incoming.session_lock_timeout", session_id=str(session.id))
+        return {"status": "timeout", "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
     except Exception as exc:
         log.error("channels.incoming.agent_error", error=str(exc))
         raise HTTPException(status_code=500, detail=f"Agent error: {exc}")
@@ -244,6 +255,7 @@ async def wa_incoming(
     # phone_from: phone number yang sudah di-resolve dari LID oleh Go wa-service.
     # Untuk akun LID: body.from_ berisi LID number, body.phone_from berisi phone number asli.
     # Gunakan phone_from sebagai identifier utama untuk allowlist & operator check.
+    # phone_from is empty string when Go couldn't resolve LID→PN — treat as unknown.
     from_phone = body.phone_from or body.from_
     reply_target = body.chat_id or body.from_
 
@@ -290,7 +302,9 @@ async def wa_incoming(
     escalation_user_jid: str | None = None
     escalation_context: str | None = None
     if _is_operator:
-        escalation_user_jid, escalation_context = await find_escalation_context(agent, db)
+        escalation_user_jid, escalation_context = await find_escalation_context(
+            agent, db, quoted_text=body.quoted_text
+        )
         log.info("wa_incoming.operator_session", escalation_user_jid=escalation_user_jid)
 
     # Tentukan lookup_user_id untuk session
@@ -306,6 +320,8 @@ async def wa_incoming(
     effective_reply_target = reply_target
 
     # 4. Find or create session
+    # from_phone = nomor asli (phone_from dari Go, sudah di-resolve dari LID)
+    # effective_reply_target = JID untuk reply (bisa LID/chat_id)
     session, was_created = await find_or_create_wa_session(
         agent=agent,
         lookup_user_id=lookup_user_id,
@@ -313,6 +329,10 @@ async def wa_incoming(
         device_id=body.device_id,
         db=db,
         is_operator=_is_operator,
+        # Only store phone_number if it's a real phone (not a LID number).
+        # LID accounts send empty phone_from when unresolved; non-empty phone_from is the real phone.
+        # Guard: real WA phone numbers are max 15 digits (ITU-T E.164).
+        phone_number=from_phone if (not _is_operator and from_phone and len(from_phone.lstrip("+")) <= 15) else None,
     )
     if was_created:
         log.info("wa_incoming.session_created", session_id=str(session.id), is_operator=_is_operator)
@@ -344,7 +364,16 @@ async def wa_incoming(
         user_message = media_context.strip()
     else:
         user_message = sanitize_user_input(body.message) + media_context
-    if not _is_operator:
+    if _is_operator:
+        op_display_name = body.push_name or ""
+        user_message = (
+            f"<OPERATOR>\n"
+            + (f"Name WA: {op_display_name}\n" if op_display_name else "")
+            + f"No Telepon/WA/Id: {from_phone}\n"
+            f"Pesan: {user_message}"
+        )
+        log.info("wa_incoming.operator_command")
+    else:
         log.info("wa_incoming.normal")
 
     sender_name: str | None = body.push_name or None
@@ -384,12 +413,13 @@ async def wa_incoming(
     if not _is_operator:
         _prior_interrupted = await cancel_active_run(session.id)
 
-    _current_task = _asyncio.current_task()
-    if _current_task and not _is_operator:
-        await register_active_task(session.id, _current_task)
-
     try:
         async with session_run_lock(session.id):
+            # Register task INSIDE the lock — ensures cancel_active_run always
+            # targets the task that actually holds the lock and is running.
+            _current_task = _asyncio.current_task()
+            if _current_task and not _is_operator:
+                await register_active_task(session.id, _current_task)
             result = await run_agent(
                 agent_model=agent,
                 session=session,
@@ -406,6 +436,15 @@ async def wa_incoming(
         log.info("wa_incoming.cancelled_by_interrupt", session_id=str(session.id))
         await unregister_active_task(session.id)
         return {"status": "cancelled", "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
+    except (TimeoutError, _asyncio.TimeoutError):
+        await unregister_active_task(session.id)
+        log.warning("wa_incoming.session_lock_timeout", session_id=str(session.id))
+        try:
+            await send_wa_message(body.device_id, effective_reply_target,
+                "⏳ Sedang memproses pesan sebelumnya, mohon tunggu sebentar lalu kirim ulang.")
+        except Exception:
+            pass
+        return {"status": "timeout", "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
     except Exception as exc:
         await unregister_active_task(session.id)
         log.error("wa_incoming.agent_error", error=str(exc), exc_info=True)
@@ -430,6 +469,29 @@ async def wa_incoming(
 
     reply = result.get("reply", "")
     steps = result.get("steps", [])
+
+    # 7a. Update token usage on agent + user subscription
+    _tokens_this_run: int = result.get("tokens_used", 0)
+    if _tokens_this_run > 0:
+        agent.tokens_used = (agent.tokens_used or 0) + _tokens_this_run
+        # Update shared user_subscription.tokens_used if owner exists
+        if agent.owner_external_id:
+            try:
+                from sqlalchemy import select as _sel
+                from app.models.subscription import User as _User, UserSubscription as _UserSub
+                _u = (await db.execute(
+                    _sel(_User).where(_User.external_id == agent.owner_external_id)
+                )).scalar_one_or_none()
+                if _u:
+                    _sub = (await db.execute(
+                        _sel(_UserSub).where(_UserSub.user_id == _u.id)
+                    )).scalar_one_or_none()
+                    if _sub:
+                        _sub.tokens_used = (_sub.tokens_used or 0) + _tokens_this_run
+            except Exception as _te:
+                log.warning("wa_incoming.token_update_failed", error=str(_te))
+        await db.flush()
+        await db.commit()
 
     # 7. Kirim reply ke channel
     if reply:

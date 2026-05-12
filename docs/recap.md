@@ -1,3 +1,84 @@
+# Recap: Escalation Routing Fix — Reply-Based Operator Routing + LID Display Fix
+
+**Tanggal**: 2026-05-12
+**Status**: ✅ Selesai
+
+## Masalah
+
+1. **Routing eskalasi ambiguous**: `find_escalation_context` hanya ambil eskalasi *terbaru* — jika ada 10 eskalasi paralel, operator reply ke eskalasi ke-3 tapi agent respond ke eskalasi ke-10.
+2. **LID number tampil sebagai nomor telepon**: Nomor seperti `62813334989922328` (17 digit LID) tampil di notifikasi eskalasi sebagai "WA Customer" karena `GetPNForLID` dipanggil dengan AD JID (dengan device suffix) bukan NonAD JID.
+3. **`phone_number` di session diisi LID number**: Ketika LID resolution gagal, `phone_from` = LID number, disimpan ke `channel_config.phone_number` dan ditampilkan sebagai nomor telepon customer.
+
+## Solusi
+
+### Reply-based Routing (Fix utama untuk multi-eskalasi)
+
+Operator **wajib REPLY** (quote) pesan notifikasi eskalasi. Go extract `quoted_text` dari `ContextInfo.QuotedMessage`, Python parse `case_id` dari teks itu, lookup session berdasarkan `metadata_["escalation_case_id"]`.
+
+```
+Eskalasi terjadi
+  → case_id = "esc_1234567_abc123"
+  → session.metadata_["escalation_case_id"] = case_id
+  → notifikasi ke operator WAJIB di-REPLY
+         ↓
+Operator reply (quote) pesan eskalasi
+  → Go: quotedText = ContextInfo.QuotedMessage.GetConversation()
+  → Python: parse "ID Kasus: esc_1234567_abc123" dari quoted_text
+  → Lookup session WHERE metadata_["escalation_case_id"] == case_id
+  → Route ke session TEPAT ✓
+  → Fallback: ambil eskalasi terbaru jika operator tidak quote
+```
+
+### LID Resolution Fix (Go)
+
+```go
+// Sebelum: pass AD JID → GetPNForLID selalu gagal
+client.Store.LIDs.GetPNForLID(ctx, evt.Info.Sender)
+
+// Sesudah: strip device suffix dulu
+client.Store.LIDs.GetPNForLID(ctx, evt.Info.Sender.ToNonAD())
+
+// Jika tetap gagal → phoneFrom = "" (bukan fallback ke LID number)
+```
+
+### Guard LID di Python
+
+- `channels.py`: Jangan simpan `phone_number` ke session jika panjangnya > 15 digit (LID, bukan telepon)
+- `escalation_tool.py`: Validasi `phone_number` — tolak jika > 15 digit
+- `escalation_tool.py`: Hapus baris `WA JID` dari notifikasi (tidak perlu, membingungkan operator)
+
+## File yang Diubah
+
+| File | Perubahan |
+|------|-----------|
+| `wa-service/device_manager.go` | `GetPNForLID` pakai `ToNonAD()`; jika gagal set `phoneFrom=""`; extract `quoted_text` dari `ContextInfo.QuotedMessage`; kirim di webhook payload; `SendMessage` pakai `resolveJID()` |
+| `app/api/channels.py` | Tambah `quoted_text` ke `WAIncomingMessage`; pass ke `find_escalation_context`; guard LID di `phone_number` (max 15 digit) |
+| `app/api/wa_helpers.py` | `find_escalation_context` terima `quoted_text`, parse `case_id` via regex, query `session.metadata_["escalation_case_id"]`; fallback ke latest jika tidak ditemukan |
+| `app/core/tools/escalation_tool.py` | Simpan `case_id` di `session.metadata_`; hapus `WA JID` line dari notifikasi; validasi `phone_number` ≤15 digit; instruksi operator ganti jadi "💬 REPLY pesan ini" |
+
+## Format Notifikasi Baru
+
+```
+🚨 [CS AI] ESKALASI
+━━━━━━━━━━━━━━━━━━━━━━━━
+ID Kasus: esc_1234567_abc123
+WA Customer: +628123456789
+Nama: Wira Adi
+Alasan: permintaan refund
+Pesan: ...
+━━━━━━━━━━━━━━━━━━━━━━━━
+💬 REPLY pesan ini untuk menjawab customer ini.
+Format balasan:
+<OPERATOR>
+Pesan: [instruksi]
+```
+
+## Teknik dari wago-project
+
+Inspeksi `/home/bagas/wago-project` — wago sudah implement `GetPNForLID(ctx, v.Info.Sender.ToNonAD())` dengan benar + `SenderLID` field terpisah di webhook payload. Pola ini diadopsi ke wa-service.
+
+---
+
 # Recap: Sub-Agent Shared Workspace — Cross-Subagent Collaboration Tanpa Bocor Antar User
 
 **Tanggal**: 2026-05-08

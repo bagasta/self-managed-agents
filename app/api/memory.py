@@ -52,6 +52,7 @@ async def upsert_agent_memory(
     await _get_agent_or_404(agent_id, db)
     mem = await upsert_memory(agent_id, payload.key, payload.value, db)
     await db.commit()
+    await db.refresh(mem)
     return MemoryResponse.model_validate(mem)
 
 
