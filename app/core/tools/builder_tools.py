@@ -1155,6 +1155,46 @@ def build_builder_tools(
             "Dua agent dengan preset sama tapi bisnis berbeda HARUS punya instructions yang berbeda."
         )
 
+        # Build tool hints so the instruction writer knows which tools are available
+        tc_preset = preset.get("tools_config", {})
+        tool_hints: list[str] = []
+        if tc_preset.get("memory"):
+            tool_hints.append(
+                "- remember(key, value) / recall(key) / forget(key) — simpan dan ambil info user lintas sesi. "
+                "Gunakan untuk menyimpan preferensi, nama, konteks penting yang perlu diingat antar percakapan."
+            )
+        if tc_preset.get("http"):
+            tool_hints.append(
+                "- http_get(url) / http_post(url, body) / http_patch(url, body) / http_delete(url) — "
+                "akses API eksternal, ambil data dari web, atau kirim data ke sistem lain."
+            )
+        if tc_preset.get("wa_agent_manager"):
+            tool_hints.append(
+                "- send_agent_wa_qr(agent_id, caption, phone) — kirim QR WhatsApp ke nomor tertentu agar user bisa scan dan connect."
+            )
+        if tc_preset.get("scheduler"):
+            tool_hints.append(
+                "- set_reminder(message, run_at) / list_reminders() / cancel_reminder(id) — jadwalkan pengingat otomatis untuk user."
+            )
+        if tc_preset.get("rag"):
+            tool_hints.append(
+                "- search_documents(query) — cari jawaban dari dokumen/knowledge base yang sudah diupload."
+            )
+        subagents_cfg = tc_preset.get("subagents", {})
+        if isinstance(subagents_cfg, dict) and subagents_cfg.get("enabled"):
+            tool_hints.append(
+                "- task(name, task) — delegasikan pekerjaan ke sub-agent spesialis. "
+                "Contoh: task('sys_coder', 'Buat file PDF ...'), task('sys_researcher', 'Cari info ...')."
+            )
+        tool_hints.append(
+            "- get_self_config() — baca konfigurasi diri sendiri (nama, model, tools aktif). "
+            "Berguna untuk menjawab pertanyaan user tentang kemampuan agent."
+        )
+        tools_section = (
+            "\n\nTOOLS YANG TERSEDIA UNTUK AGENT INI (wajib disebutkan di instructions cara pakainya):\n"
+            + "\n".join(tool_hints)
+        ) if tool_hints else ""
+
         # For coding agents, add sys_coder delegation context
         coder_note = ""
         if preset_id == "coding_deploy_agent":
@@ -1180,8 +1220,10 @@ def build_builder_tools(
             f"INFO ESKALASI:\n{escalation_info or 'Tidak ada eskalasi khusus'}\n\n"
             f"ATURAN TAMBAHAN:\n{extra_rules or 'Tidak ada'}\n\n"
             f"SKELETON REFERENSI (jadikan panduan struktur, jangan copy-paste):\n{skeleton[:600] if skeleton else 'Tidak ada'}"
+            f"{tools_section}"
             f"{coder_note}\n\n"
-            "Tulis system prompt lengkap sekarang:"
+            "Tulis system prompt lengkap sekarang. "
+            "Pastikan instructions menyebutkan tools yang tersedia dan kapan/cara menggunakannya secara konkret."
         )
 
         try:
