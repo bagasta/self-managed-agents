@@ -177,7 +177,7 @@ def parse_agent_result(
                         if isinstance(b, dict) and b.get("type") == "text"
                     ).strip()
                 else:
-                    text = str(msg.content)
+                    text = str(msg.content).replace("\x00", "")
                 if text:
                     final_reply = _clean_final_reply(text)
                 db_messages.append(Message(
@@ -204,6 +204,7 @@ def parse_agent_result(
                 step_counter += 1
         elif isinstance(msg, ToolMessage):
             output = msg.content if isinstance(msg.content, str) else str(msg.content)
+            output = output.replace("\x00", "")
             for entry in reversed(steps):
                 if entry["result"] == "":
                     entry["result"] = output[:500]
