@@ -80,4 +80,4 @@ update_schema.py
 test_out.txt
 
 # System message drafts (large markdown, managed via scripts/seed_*.py)
-system-message-*.md
+
