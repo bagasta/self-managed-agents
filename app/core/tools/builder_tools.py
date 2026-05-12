@@ -291,6 +291,357 @@ AGENT_PRESETS: dict[str, dict] = {
             ],
         },
     },
+    "social_media_agent": {
+        "label": "Social Media Specialist Agent",
+        "description": "Agent spesialis konten media sosial — riset tren, buat content planner, generate file PDF/Excel, dan kirim langsung ke WhatsApp.",
+        "default_model": "openai/gpt-5.1",
+        "default_temperature": 0.7,
+        "default_max_tokens": 2048,
+        "default_channel": "whatsapp",
+        "tools_config": {
+            "memory": True,
+            "skills": True,
+            "escalation": False,
+            "sandbox": True,
+            "deploy": False,
+            "tool_creator": False,
+            "scheduler": True,
+            "rag": False,
+            "http": True,
+            "whatsapp_media": True,
+            "subagents": {"enabled": True},
+        },
+        "required_tools": ["sandbox", "subagents", "whatsapp_media", "http"],
+        "forbidden_tools": ["deploy"],
+        "channel_requirements": [],
+        "runtime_limitations": [
+            "no_direct_social_media_posting",
+        ],
+        "instruction_skeleton": (
+            "Kamu adalah {name}, {role} yang membantu {business} dengan strategi dan konten media sosial.\n\n"
+            "KEMAMPUAN UTAMA:\n"
+            "- Riset tren media sosial dan topik relevan industri via HTTP\n"
+            "- Buat content planner mingguan/bulanan\n"
+            "- Generate file PDF atau Excel dengan sys_coder dan kirim langsung ke user\n"
+            "- Buat draft caption, hashtag, dan ide visual konten\n\n"
+            "CARA GENERATE DAN KIRIM FILE (WAJIB IKUTI):\n"
+            "Saat user minta file (PDF, Excel, gambar):\n"
+            "1. Riset dulu jika perlu (http_get)\n"
+            "2. Delegate ke sys_coder: task('sys_coder', task='Buat file [format] berisi [konten]. "
+            "Simpan ke /workspace/output/[filename]. "
+            "Kirim ke user via send_whatsapp_document(\"/workspace/output/[filename]\", filename=\"[filename]\", caption=\"[caption]\"). "
+            "Konfirmasi setelah terkirim.')\n"
+            "3. Relay hasil ke user — jangan bilang 'file perlu didownload manual'\n\n"
+            "CARA BICARA:\n"
+            "Bahasa: Indonesia, energik dan kreatif\n"
+            "JANGAN pakai markdown saat di WhatsApp\n\n"
+            "INFORMASI BISNIS:\n"
+            "{business_info}"
+        ),
+        "smoke_test": {
+            "strategy": "manual_wa",
+            "steps": [
+                "Kirim: 'Buat content planner 1 minggu dalam bentuk PDF'",
+                "Pastikan agent riset dulu lalu delegate ke sys_coder",
+                "Pastikan file PDF dikirim langsung via WhatsApp (bukan 'didownload manual')",
+            ],
+            "expected_status": "File PDF dikirim ke WhatsApp user",
+            "known_failure_modes": [
+                "whatsapp_media: false → send_whatsapp_document tidak tersedia",
+                "subagents: false → sys_coder tidak bisa dipanggil",
+            ],
+        },
+    },
+    "data_analyst_agent": {
+        "label": "Data Analyst Agent",
+        "description": "Agent analisis data — upload file Excel/CSV, dapatkan insight, grafik, dan laporan langsung di WhatsApp atau webchat.",
+        "default_model": "openai/gpt-5.1",
+        "default_temperature": 0.3,
+        "default_max_tokens": 2048,
+        "default_channel": "whatsapp",
+        "tools_config": {
+            "memory": True,
+            "skills": True,
+            "escalation": False,
+            "sandbox": True,
+            "deploy": False,
+            "tool_creator": False,
+            "scheduler": False,
+            "rag": False,
+            "http": False,
+            "whatsapp_media": True,
+            "subagents": {"enabled": True},
+        },
+        "required_tools": ["sandbox", "subagents", "whatsapp_media"],
+        "forbidden_tools": ["deploy"],
+        "channel_requirements": [],
+        "runtime_limitations": [
+            "no_persistent_storage_across_sessions",
+        ],
+        "instruction_skeleton": (
+            "Kamu adalah {name}, analis data untuk {business}.\n\n"
+            "TUGASMU:\n"
+            "- Terima file data (Excel, CSV) dari user\n"
+            "- Analisis data: statistik, tren, anomali\n"
+            "- Generate grafik dan laporan, kirim hasilnya ke user\n\n"
+            "CARA ANALISIS DAN KIRIM HASIL (WAJIB):\n"
+            "Saat user kirim data atau minta analisis:\n"
+            "1. Terima file dan simpan di workspace\n"
+            "2. Delegate ke sys_coder: task('sys_coder', task='Analisis file [nama] di /workspace/. "
+            "Buat grafik dan laporan ringkas. Simpan ke /workspace/output/. "
+            "Kirim via send_whatsapp_document atau send_whatsapp_image ke user.')\n"
+            "3. Relay insight ke user dalam bahasa sederhana\n\n"
+            "CARA BICARA:\n"
+            "Bahasa: Indonesia, jelas dan berbasis data\n"
+            "Selalu sertakan angka dan fakta dalam jawaban\n\n"
+            "KONTEKS BISNIS:\n"
+            "{business_info}"
+        ),
+        "smoke_test": {
+            "strategy": "manual",
+            "steps": [
+                "Kirim file CSV sederhana",
+                "Minta: 'Analisis data ini dan buat grafiknya'",
+                "Pastikan agent delegate ke sys_coder dan kirim hasil grafik",
+            ],
+            "expected_status": "Grafik atau laporan terkirim",
+            "known_failure_modes": [
+                "File biner rusak → pandas gagal baca",
+            ],
+        },
+    },
+    "research_agent": {
+        "label": "Research & Intelligence Agent",
+        "description": "Agent riset mendalam — browsing internet, kumpulkan data, susun laporan terstruktur.",
+        "default_model": "openai/gpt-5.1",
+        "default_temperature": 0.4,
+        "default_max_tokens": 2048,
+        "default_channel": "webchat",
+        "tools_config": {
+            "memory": True,
+            "skills": True,
+            "escalation": False,
+            "sandbox": False,
+            "deploy": False,
+            "tool_creator": False,
+            "scheduler": False,
+            "rag": True,
+            "http": True,
+            "whatsapp_media": False,
+            "subagents": {"enabled": True},
+        },
+        "required_tools": ["http", "subagents"],
+        "forbidden_tools": ["deploy"],
+        "channel_requirements": [],
+        "runtime_limitations": [
+            "http_depends_on_target_api_availability",
+        ],
+        "instruction_skeleton": (
+            "Kamu adalah {name}, agen riset dan intelijen untuk {business}.\n\n"
+            "TUGASMU:\n"
+            "- Lakukan riset mendalam dari berbagai sumber online\n"
+            "- Kumpulkan, verifikasi, dan sintesis informasi\n"
+            "- Sajikan laporan yang terstruktur dan actionable\n\n"
+            "CARA RISET:\n"
+            "- Gunakan http_get untuk akses URL, API, dan sumber data\n"
+            "- Untuk riset paralel yang kompleks, delegate ke sys_researcher via task()\n"
+            "- Selalu cite sumber informasi\n\n"
+            "CARA BICARA:\n"
+            "Bahasa: Indonesia (atau sesuai bahasa user)\n"
+            "Format output: terstruktur dengan poin-poin jelas\n"
+            "Jujur jika informasi tidak tersedia atau tidak bisa diverifikasi\n\n"
+            "KONTEKS:\n"
+            "{business_info}"
+        ),
+        "smoke_test": {
+            "strategy": "manual",
+            "steps": [
+                "Minta: 'Riset 3 kompetitor terbesar di industri [X]'",
+                "Pastikan agent menggunakan http_get atau delegate ke sys_researcher",
+                "Pastikan output terstruktur dengan sumber",
+            ],
+            "expected_status": "Laporan riset terstruktur dengan sumber",
+            "known_failure_modes": [
+                "Target URL blokir scraping → hasil kosong",
+            ],
+        },
+    },
+    "ecommerce_cs": {
+        "label": "E-Commerce Customer Service",
+        "description": "CS agent khusus e-commerce — handle pertanyaan produk, status pesanan, komplain, dan retur via WhatsApp.",
+        "default_model": "openai/gpt-5.1",
+        "default_temperature": 0.7,
+        "default_max_tokens": 800,
+        "default_channel": "whatsapp",
+        "tools_config": {
+            "memory": True,
+            "skills": True,
+            "escalation": True,
+            "sandbox": False,
+            "deploy": False,
+            "tool_creator": False,
+            "scheduler": False,
+            "rag": True,
+            "http": True,
+            "whatsapp_media": True,
+            "subagents": {"enabled": False},
+        },
+        "required_tools": ["escalation", "whatsapp_media"],
+        "forbidden_tools": ["sandbox", "deploy"],
+        "channel_requirements": ["whatsapp_device_required"],
+        "runtime_limitations": [
+            "markdown_not_rendered_on_whatsapp",
+            "one_wa_number_per_agent",
+            "wa_device_scan_required_before_use",
+        ],
+        "instruction_skeleton": (
+            "Kamu adalah {name}, CS online shop {business}.\n\n"
+            "TUGASMU:\n"
+            "- Jawab pertanyaan produk: stok, harga, spesifikasi\n"
+            "- Bantu cek status pesanan (jika ada API order)\n"
+            "- Handle komplain dengan empati\n"
+            "- Proses permintaan retur/refund sesuai policy\n"
+            "- Eskalasi ke operator untuk kasus kompleks\n\n"
+            "POLICY TOKO:\n"
+            "{business_info}\n\n"
+            "CARA BICARA:\n"
+            "Bahasa: Indonesia, ramah, sabar\n"
+            "Singkat — maks 3 kalimat per pesan\n"
+            "JANGAN pakai *, #, atau markdown\n"
+            "Panggil customer dengan nama jika sudah tahu\n\n"
+            "ESKALASI:\n"
+            "Wajib eskalasi untuk: komplain keras, refund > Rp 500rb, ancaman hukum\n"
+            "Cara: panggil escalate_to_human(reason, summary) dulu BARU balas user"
+        ),
+        "smoke_test": {
+            "strategy": "manual_wa",
+            "steps": [
+                "Kirim: 'Halo, produk X masih ada?'",
+                "Pastikan agent jawab sesuai info bisnis",
+                "Kirim: 'Pesanan saya belum sampai sudah 2 minggu, mau komplain!'",
+                "Pastikan agent eskalasi ke operator",
+            ],
+            "expected_status": "Jawaban sesuai policy, eskalasi berjalan",
+            "known_failure_modes": [
+                "escalation_config kosong → operator tidak notif",
+            ],
+        },
+    },
+    "personal_assistant": {
+        "label": "Personal Assistant Agent",
+        "description": "Asisten pribadi all-in-one — jadwal, reminder, riset cepat, dan pengingat via WhatsApp.",
+        "default_model": "openai/gpt-5.1",
+        "default_temperature": 0.7,
+        "default_max_tokens": 1024,
+        "default_channel": "whatsapp",
+        "tools_config": {
+            "memory": True,
+            "skills": True,
+            "escalation": False,
+            "sandbox": False,
+            "deploy": False,
+            "tool_creator": False,
+            "scheduler": True,
+            "rag": False,
+            "http": True,
+            "whatsapp_media": False,
+            "subagents": {"enabled": False},
+        },
+        "required_tools": ["scheduler", "memory"],
+        "forbidden_tools": ["sandbox", "deploy"],
+        "channel_requirements": [],
+        "runtime_limitations": [
+            "scheduler_requires_apscheduler_running",
+            "markdown_not_rendered_on_whatsapp",
+        ],
+        "instruction_skeleton": (
+            "Kamu adalah {name}, asisten pribadi {business}.\n\n"
+            "TUGASMU:\n"
+            "- Kelola jadwal dan pengingat\n"
+            "- Catat hal penting ke memory\n"
+            "- Bantu riset cepat via internet jika diminta\n"
+            "- Ingatkan deadline, meeting, tugas penting\n\n"
+            "CARA BICARA:\n"
+            "Bahasa: Indonesia, santai seperti asisten pribadi\n"
+            "Proaktif — jika user bilang ada meeting besok, tawarkan set reminder\n"
+            "JANGAN pakai markdown\n\n"
+            "CONTOH:\n"
+            "User: Ada rapat investor Jumat jam 10\n"
+            "{name}: Oke, saya catat rapat investor Jumat jam 10. Mau saya ingatkan H-1 atau pagi harinya?"
+        ),
+        "smoke_test": {
+            "strategy": "manual",
+            "steps": [
+                "Kirim: 'Ingatkan saya beli kado ulang tahun istri 3 hari lagi'",
+                "Pastikan agent set reminder dan konfirmasi",
+                "Kirim: 'Apa jadwal saya minggu ini?'",
+                "Pastikan agent recall dari memory",
+            ],
+            "expected_status": "Reminder terset, memory terisi",
+            "known_failure_modes": [
+                "APScheduler tidak running → reminder tidak terkirim",
+            ],
+        },
+    },
+    "hr_assistant": {
+        "label": "HR & Internal Knowledge Assistant",
+        "description": "Asisten HR internal — jawab pertanyaan kebijakan perusahaan, cuti, benefit, dan onboarding dari dokumen.",
+        "default_model": "openai/gpt-5.1",
+        "default_temperature": 0.3,
+        "default_max_tokens": 1024,
+        "default_channel": "webchat",
+        "tools_config": {
+            "memory": True,
+            "skills": True,
+            "escalation": True,
+            "sandbox": False,
+            "deploy": False,
+            "tool_creator": False,
+            "scheduler": False,
+            "rag": True,
+            "http": False,
+            "whatsapp_media": False,
+            "subagents": {"enabled": False},
+        },
+        "required_tools": ["rag", "escalation"],
+        "forbidden_tools": ["sandbox", "deploy"],
+        "channel_requirements": ["documents_must_be_uploaded_via_api"],
+        "runtime_limitations": [
+            "rag_requires_documents_uploaded_first",
+            "rag_uses_vector_similarity_not_full_text",
+        ],
+        "instruction_skeleton": (
+            "Kamu adalah {name}, asisten HR digital untuk {business}.\n\n"
+            "TUGASMU:\n"
+            "- Jawab pertanyaan karyawan tentang kebijakan perusahaan\n"
+            "- Informasi cuti, benefit, prosedur HR dari dokumen\n"
+            "- Bantu onboarding karyawan baru\n"
+            "- Eskalasi ke HR manusia untuk kasus sensitif\n\n"
+            "CARA MENJAWAB:\n"
+            "- Selalu cari dulu di dokumen via search_documents\n"
+            "- Jika tidak ada di dokumen, jujur dan tawarkan eskalasi\n"
+            "- JANGAN mengarang kebijakan yang tidak ada di dokumen\n\n"
+            "CARA BICARA:\n"
+            "Bahasa: Indonesia, profesional tapi ramah\n"
+            "Sertakan referensi dokumen saat menjawab\n\n"
+            "ESKALASI:\n"
+            "Untuk: terminasi, konflik antar karyawan, masalah payroll → eskalasi ke HR"
+        ),
+        "smoke_test": {
+            "strategy": "manual_with_docs",
+            "steps": [
+                "Upload policy dokumen (PDF/DOCX)",
+                "Tanya: 'Berapa hari jatah cuti tahunan?'",
+                "Pastikan agent menjawab berdasarkan dokumen",
+                "Tanya sesuatu yang tidak ada di dokumen",
+                "Pastikan agent jujur dan tawarkan eskalasi",
+            ],
+            "expected_status": "Jawaban akurat dari dokumen, jujur saat tidak tahu",
+            "known_failure_modes": [
+                "Dokumen belum diupload → jawaban tidak akurat",
+            ],
+        },
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -439,19 +790,62 @@ def _detect_preset(goal_lower: str, features: list[str], channel: str) -> str:
                     "manual", "kebijakan", "katalog", "produk info"}
     scheduler_keywords = {"reminder", "jadwal", "pengingat", "schedule", "alarm",
                           "kalkulator", "timer", "tanggal", "waktu"}
+    social_media_keywords = {"sosmed", "social media", "konten", "content", "instagram", "tiktok",
+                              "facebook", "linkedin", "posting", "caption", "content planner",
+                              "jadwal konten", "copywriting", "copywriter", "content creator",
+                              "social media specialist", "content calendar", "engagement"}
+    data_analyst_keywords = {"data", "analisis", "analyst", "analitik", "laporan", "report",
+                              "dashboard", "grafik", "chart", "excel", "csv", "statistik",
+                              "visualisasi", "insight", "metrics", "kpi", "pandas", "numpy"}
+    research_keywords = {"riset", "research", "penelitian", "cari informasi", "kompetitor",
+                          "market research", "trend", "analisis pasar", "survei", "literatur",
+                          "referensi", "ringkasan artikel", "summarize", "web search"}
+    ecommerce_keywords = {"ecommerce", "e-commerce", "marketplace", "toko online", "jualan",
+                           "pesanan", "order", "checkout", "produk", "katalog online",
+                           "shopee", "tokopedia", "lazada", "stok", "inventory", "harga"}
+    personal_assistant_keywords = {"asisten pribadi", "personal assistant", "pa", "sekretaris",
+                                    "to-do", "todo", "task", "agenda", "manajemen waktu",
+                                    "time management", "kalender", "email", "meeting"}
+    hr_keywords = {"hr", "hrd", "rekrutmen", "recruitment", "karyawan", "onboarding",
+                   "sdm", "human resource", "interview", "cv", "resume", "absensi",
+                   "cuti", "gaji", "payroll", "training", "performa"}
 
     goal_words = set(goal_lower.split())
+    # Also check substrings for multi-word keywords
+    def has_keyword(kw_set: set) -> bool:
+        for kw in kw_set:
+            if kw in goal_lower or kw in features:
+                return True
+        return bool(goal_words & kw_set)
 
-    if goal_words & coding_keywords or any(f in coding_keywords for f in features):
+    if has_keyword(coding_keywords):
         return "coding_deploy_agent"
 
-    if channel == "whatsapp" and (goal_words & cs_keywords or any(f in cs_keywords for f in features)):
+    if has_keyword(social_media_keywords):
+        return "social_media_agent"
+
+    if has_keyword(data_analyst_keywords):
+        return "data_analyst_agent"
+
+    if has_keyword(research_keywords):
+        return "research_agent"
+
+    if has_keyword(hr_keywords):
+        return "hr_assistant"
+
+    if has_keyword(ecommerce_keywords):
+        return "ecommerce_cs"
+
+    if has_keyword(personal_assistant_keywords):
+        return "personal_assistant"
+
+    if channel == "whatsapp" and has_keyword(cs_keywords):
         return "cs_whatsapp_basic"
 
-    if goal_words & faq_keywords or any(f in faq_keywords for f in features):
+    if has_keyword(faq_keywords):
         return "faq_webchat_rag"
 
-    if goal_words & scheduler_keywords or any(f in scheduler_keywords for f in features):
+    if has_keyword(scheduler_keywords):
         return "scheduler_assistant"
 
     # Default: if channel is whatsapp, use cs; otherwise general (faq_webchat_rag as fallback)
@@ -464,7 +858,14 @@ def _detect_preset(goal_lower: str, features: list[str], channel: str) -> str:
 def _detect_preset_from_config(tc: dict, channel_type: str) -> str:
     """Reverse-detect preset from an existing tools_config."""
     if tc.get("sandbox") or tc.get("deploy"):
+        # Could be coding or social_media/data — can't distinguish without goal, use coding
         return "coding_deploy_agent"
+    if tc.get("subagents") and tc.get("whatsapp_media"):
+        return "social_media_agent"
+    if tc.get("subagents") and not tc.get("whatsapp_media"):
+        return "data_analyst_agent"
+    if tc.get("rag") and tc.get("escalation"):
+        return "hr_assistant"
     if tc.get("rag"):
         return "faq_webchat_rag"
     if tc.get("scheduler"):
@@ -989,7 +1390,9 @@ def build_builder_tools(
 
         Args:
             preset_id: ID preset spesifik (opsional). Kosong = tampilkan semua preset.
-                       Pilihan: coding_deploy_agent, cs_whatsapp_basic, faq_webchat_rag, scheduler_assistant
+                       Pilihan: coding_deploy_agent, cs_whatsapp_basic, faq_webchat_rag, scheduler_assistant,
+                                social_media_agent, data_analyst_agent, research_agent,
+                                ecommerce_cs, personal_assistant, hr_assistant
         """
         if preset_id and preset_id in AGENT_PRESETS:
             preset = AGENT_PRESETS[preset_id]
