@@ -5,6 +5,7 @@ Hanya dimuat jika agent memiliki capability 'builder' atau 'system'.
 
 Tools yang di-expose:
   get_platform_capabilities()           — ringkasan kapabilitas platform
+  get_user_subscription(phone)          — cek plan, slot agent, dan status subscription user
   get_presets()                         — katalog preset agent siap pakai
   plan_agent(...)                       — structured plan sebelum create
   verify_agent(agent_id)               — post-create readback + smoke test guidance
@@ -1393,6 +1394,74 @@ def build_builder_tools(
     # ------------------------------------------------------------------ #
     # 2. list_available_wa_devices                                        #
     # ------------------------------------------------------------------ #
+    # get_user_subscription                                              #
+    # ------------------------------------------------------------------ #
+
+    @tool
+    async def get_user_subscription(phone: str = "") -> str:
+        """
+        Cek status subscription dan kuota agent user berdasarkan nomor telepon.
+        Gunakan ini sebelum atau sesudah create_agent untuk memberikan info
+        akurat tentang plan, sisa slot agent, dan status subscription.
+
+        Args:
+            phone: Nomor telepon user (format: 628xxx). Kosong = gunakan owner agent saat ini.
+        """
+        try:
+            from app.core.domain.subscription_service import (
+                get_subscription_by_external_id,
+                check_can_create_agent,
+            )
+            from app.models.agent import Agent
+            from sqlalchemy import or_
+
+            target_phone = phone or owner_phone
+            if not target_phone:
+                return json.dumps({"error": "phone tidak tersedia"}, ensure_ascii=False)
+
+            async with db_factory() as db:
+                result = await get_subscription_by_external_id(target_phone, db)
+                if result is None:
+                    return json.dumps({
+                        "status": "not_found",
+                        "message": "User belum terdaftar. Akan di-provision otomatis saat buat agent pertama.",
+                    }, ensure_ascii=False)
+
+                user, sub, plan = result
+
+                # Hitung agent aktif
+                active_count_result = await db.execute(
+                    select(Agent).where(
+                        Agent.is_deleted.is_(False),
+                        or_(
+                            Agent.owner_external_id == target_phone,
+                            Agent.operator_ids.contains([target_phone]),
+                        ),
+                    )
+                )
+                active_agents = active_count_result.scalars().all()
+                used = len(active_agents)
+                limit = plan.max_agents
+                remaining = max(0, limit - used)
+
+                return json.dumps({
+                    "phone": target_phone,
+                    "plan_code": plan.code,
+                    "plan_label": plan.label,
+                    "status": sub.status,
+                    "is_active": sub.is_usable,
+                    "agents_used": used,
+                    "agents_limit": limit,
+                    "agents_remaining": remaining,
+                    "active_agent_names": [a.name for a in active_agents],
+                    "token_quota": sub.token_quota,
+                    "active_until": sub.active_until.isoformat() if sub.active_until else None,
+                }, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            logger.error("builder_tools.get_user_subscription.error", error=str(exc))
+            return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+    # ------------------------------------------------------------------ #
 
     @tool
     async def list_available_wa_devices() -> str:
@@ -2236,6 +2305,7 @@ def build_builder_tools(
     return [
         get_self_config,
         get_platform_capabilities,
+        get_user_subscription,
         get_presets,
         plan_agent,
         compose_agent_instructions,
