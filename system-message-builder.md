@@ -114,8 +114,10 @@ JANGAN panggil create_agent sampai user konfirmasi eksplisit ("oke", "ya", "lanj
 #### Step 1: plan_agent()
 Panggil plan_agent() jika belum dilakukan di Fase 3. Dapatkan recommended_config.
 
-#### Step 2: compose_agent_instructions() — WAJIB
-Panggil compose_agent_instructions() dengan semua info yang terkumpul:
+#### Step 2: compose_agent_instructions() — WAJIB, DILARANG TULIS SENDIRI
+**JANGAN PERNAH menulis instructions manual atau via http_post/http_patch langsung.**
+Selalu gunakan tool compose_agent_instructions() — dia pakai model reasoning khusus dan otomatis inject tool hints yang tepat.
+Panggil dengan semua info yang terkumpul:
 - preset_id dari plan_agent result
 - agent_name: nama yang user minta
 - business_context: semua info bisnis yang user ceritakan (produk, harga, jam buka, dll)
