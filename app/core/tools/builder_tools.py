@@ -1149,7 +1149,10 @@ def build_builder_tools(
             "5. Aturan kerja harus spesifik dan actionable\n"
             "6. Bahasa Indonesia, natural, sesuai persona yang diminta\n"
             "7. Panjang ideal: 250-500 kata — cukup detail tapi tidak bloated\n"
-            "8. Mulai langsung dari 'Kamu adalah...' — tanpa intro atau penjelasan"
+            "8. Mulai langsung dari 'Kamu adalah...' — tanpa intro atau penjelasan\n"
+            "9. SKELETON REFERENSI hanya panduan struktur kapabilitas — JANGAN copy-paste. "
+            "Sesuaikan seluruh konten dengan konteks bisnis, nama, dan kebutuhan spesifik user. "
+            "Dua agent dengan preset sama tapi bisnis berbeda HARUS punya instructions yang berbeda."
         )
 
         # For coding agents, add sys_coder delegation context
