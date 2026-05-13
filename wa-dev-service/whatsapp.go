@@ -50,6 +50,7 @@ type WhatsAppClient struct {
 	status      WAStatus
 	phoneNumber string
 	latestQR    string
+	latestQRRaw string // raw QR code text for terminal rendering
 	onMessage   func(msg IncomingMessage)
 }
 
@@ -131,6 +132,7 @@ func (wa *WhatsAppClient) Connect() (string, error) {
 				b64 := base64.StdEncoding.EncodeToString(png)
 				wa.mu.Lock()
 				wa.latestQR = b64
+				wa.latestQRRaw = evt.Code
 				wa.mu.Unlock()
 				select {
 				case firstQR <- b64:
@@ -140,6 +142,7 @@ func (wa *WhatsAppClient) Connect() (string, error) {
 				wa.mu.Lock()
 				wa.status = WAStatusConnected
 				wa.latestQR = ""
+				wa.latestQRRaw = ""
 				if wa.client.Store.ID != nil {
 					wa.phoneNumber = wa.client.Store.ID.User
 				}
@@ -156,10 +159,10 @@ func (wa *WhatsAppClient) Connect() (string, error) {
 	}
 }
 
-func (wa *WhatsAppClient) GetStatus() (WAStatus, string, string) {
+func (wa *WhatsAppClient) GetStatus() (WAStatus, string, string, string) {
 	wa.mu.RLock()
 	defer wa.mu.RUnlock()
-	return wa.status, wa.phoneNumber, wa.latestQR
+	return wa.status, wa.phoneNumber, wa.latestQR, wa.latestQRRaw
 }
 
 func (wa *WhatsAppClient) SendText(chatID, text string) error {

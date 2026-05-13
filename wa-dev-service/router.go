@@ -12,19 +12,24 @@ import (
 )
 
 type Router struct {
-	mainAPIURL string
-	mainAPIKey string
-	webhookURL string
-	store      *ConnectionStore
-	wa         *WhatsAppClient
+	mainAPIURL  string
+	mainAPIKey  string
+	webhookURL  string
+	autoAgentID string // if set, all messages auto-route to this agent (test mode)
+	store       *ConnectionStore
+	wa          *WhatsAppClient
 }
 
-func NewRouter(mainAPIURL, mainAPIKey string, store *ConnectionStore, webhookURL string) *Router {
+func NewRouter(mainAPIURL, mainAPIKey string, store *ConnectionStore, webhookURL, autoAgentID string) *Router {
+	if autoAgentID != "" {
+		log.Printf("[dev-router] TEST MODE: all messages auto-routed to agent %s", autoAgentID)
+	}
 	return &Router{
-		mainAPIURL: mainAPIURL,
-		mainAPIKey: mainAPIKey,
-		webhookURL: webhookURL,
-		store:      store,
+		mainAPIURL:  mainAPIURL,
+		mainAPIKey:  mainAPIKey,
+		webhookURL:  webhookURL,
+		autoAgentID: autoAgentID,
+		store:       store,
 	}
 }
 
@@ -50,6 +55,12 @@ func (r *Router) HandleMessage(msg IncomingMessage) {
 		go r.forwardWebhook(msg)
 	}
 
+	// TEST MODE: auto-route semua pesan ke agent tertentu
+	if r.autoAgentID != "" {
+		r.forwardToAgent(r.autoAgentID, msg)
+		return
+	}
+
 	conn, connected := r.store.Get(msg.From)
 
 	if connected && isDisconnect(msg.Text) {
@@ -72,7 +83,7 @@ func (r *Router) HandleMessage(msg IncomingMessage) {
 			r.forwardToAgent(agentID, msg)
 			return
 		}
-		_ = r.wa.SendText(msg.ChatID, "👋 Halo! Ini adalah *WhatsApp Development Agent*.\n\nKirim perintah berikut untuk mulai:\n*connect AGENT_ID*\n\nContoh: connect abc123-def456\n\nDapatkan Agent ID dari dashboard.")
+		// _ = r.wa.SendText(msg.ChatID, "👋 Halo! Ini adalah *WhatsApp Development Agent*.\n\nKirim perintah berikut untuk mulai:\n*connect AGENT_ID*\n\nContoh: connect abc123-def456\n\nDapatkan Agent ID dari dashboard.")
 		return
 	}
 

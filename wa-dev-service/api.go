@@ -19,10 +19,11 @@ func NewAPI(wa *WhatsAppClient, store *ConnectionStore) *API {
 
 // GET /status
 func (a *API) GetStatus(w http.ResponseWriter, r *http.Request) {
-	status, phone, qr := a.wa.GetStatus()
+	status, phone, qr, qrRaw := a.wa.GetStatus()
 	writeJSON(w, map[string]interface{}{
 		"status":       status,
 		"phone_number": phone,
+		"qr_raw":       qrRaw,
 		"qr":           qr,
 	})
 }

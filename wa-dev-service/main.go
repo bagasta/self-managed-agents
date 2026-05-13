@@ -35,7 +35,7 @@ func main() {
 		log.Fatalf("store init: %v", err)
 	}
 
-	router := NewRouter(cfg.MainAPIURL, cfg.MainAPIKey, store, cfg.WebhookURL)
+	router := NewRouter(cfg.MainAPIURL, cfg.MainAPIKey, store, cfg.WebhookURL, getEnv("AUTO_AGENT_ID", ""))
 
 	wa, err := NewWhatsAppClient(cfg.StoreDir, router.HandleMessage)
 	if err != nil {
