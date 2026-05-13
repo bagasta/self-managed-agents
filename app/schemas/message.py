@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class MessageCreate(BaseModel):
     message: str = Field(..., max_length=10_000)
     metadata: dict[str, Any] = {}
+    external_user_id: str | None = Field(None, description="Nomor WA / ID user pengirim. Dipakai untuk auto-provision user di DB.")
 
 
 class StepSummary(BaseModel):

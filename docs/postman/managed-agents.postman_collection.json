@@ -36,6 +36,21 @@
     {
       "key": "wa_device_id",
       "value": ""
+    },
+    {
+      "key": "user_id",
+      "value": "",
+      "description": "User UUID — dipakai di endpoint /v1/subscriptions/:user_id"
+    },
+    {
+      "key": "user_key",
+      "value": "",
+      "description": "User API key — auto-saved saat POST /v1/auth/keys, dipakai di X-User-Key header"
+    },
+    {
+      "key": "user_key_id",
+      "value": "",
+      "description": "ID user API key — untuk revoke"
     }
   ],
   "item": [
@@ -1919,6 +1934,474 @@
               }
             }
           ]
+        }
+      ]
+    },
+    {
+      "name": "Auth (User API Keys)",
+      "item": [
+        {
+          "name": "POST /v1/auth/keys — Buat user API key baru (admin)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}",
+                "description": "Platform admin key"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/v1/auth/keys",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"label\": \"user-bagas-web\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Generate user API key baru. Hanya admin (X-API-Key) yang bisa memanggil ini. Response berisi `key` (raw key, hanya tampil sekali) dan `id` untuk revoke nanti."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  const json = pm.response.json();",
+                  "  pm.collectionVariables.set('user_key', json.key);",
+                  "  pm.collectionVariables.set('user_key_id', json.id);",
+                  "  pm.test('key tersimpan', () => pm.expect(json.key).to.be.a('string'));",
+                  "  pm.test('id tersimpan', () => pm.expect(json.id).to.be.a('string'));",
+                  "  pm.test('expires_at ada', () => pm.expect(json.expires_at).to.be.a('string'));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "GET /v1/auth/keys/me — Cek status user key",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Key",
+                "value": "{{user_key}}",
+                "description": "User API key (bukan admin key)"
+              }
+            ],
+            "url": "{{base_url}}/v1/auth/keys/me",
+            "description": "Cek status key milik caller. Gunakan X-User-Key (bukan X-API-Key). Response: id, label, expires_at, revoked."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) {",
+                  "  const json = pm.response.json();",
+                  "  pm.test('revoked=false', () => pm.expect(json.revoked).to.eql(false));",
+                  "  pm.test('expires_at ada', () => pm.expect(json.expires_at).to.be.a('string'));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "POST /v1/auth/keys/renew — Perpanjang user key 30 hari",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-User-Key",
+                "value": "{{user_key}}",
+                "description": "User API key yang ingin diperpanjang"
+              }
+            ],
+            "url": "{{base_url}}/v1/auth/keys/renew",
+            "description": "Perpanjang user key +30 hari dari sekarang. Tidak butuh admin key — user bisa renew keynya sendiri. Jika key sudah expired atau revoked, akan ditolak."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) {",
+                  "  const json = pm.response.json();",
+                  "  pm.test('message ada', () => pm.expect(json.message).to.be.a('string'));",
+                  "  pm.test('expires_at diperbarui', () => pm.expect(json.expires_at).to.be.a('string'));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "POST /v1/auth/keys/:key_id/revoke — Cabut user key (admin)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}",
+                "description": "Platform admin key"
+              }
+            ],
+            "url": "{{base_url}}/v1/auth/keys/{{user_key_id}}/revoke",
+            "description": "Cabut (revoke) user key berdasarkan ID. Hanya admin. Key yang dicabut tidak bisa dipakai lagi. Response: 204 No Content."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 204', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Subscriptions",
+      "item": [
+        {
+          "name": "GET /v1/subscriptions/plans — List semua plan",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/subscriptions/plans",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "subscriptions", "plans"]
+            },
+            "description": "Return semua subscription plan yang aktif: trial, tier_1 (Starter), tier_2 (Pro), tier_3 (Business).\n\nField penting per plan:\n- `code`: identifier untuk activate/upgrade\n- `max_agents`: NULL = unlimited\n- `token_quota`: total token per periode\n- `period_days`: NULL = tidak ada expiry (trial)\n- `subagents_allowed`: apakah boleh pakai subagent feature\n- `wa_connect`: apakah boleh connect WhatsApp"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Response adalah array', () => pm.expect(pm.response.json()).to.be.an('array'));",
+                  "pm.test('Ada minimal 1 plan', () => pm.expect(pm.response.json().length).to.be.above(0));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "POST /v1/subscriptions/:user_id/activate — Aktivasi subscription baru",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/subscriptions/{{user_id}}/activate",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "subscriptions", "{{user_id}}", "activate"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"plan_code\": \"trial\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Buat subscription baru untuk user.\n\nGunakan `plan_code: 'trial'` untuk trial gratis 14 hari (hanya bisa sekali per user).\n\nJika user sudah punya subscription aktif → 409 Conflict. Gunakan `/upgrade` untuk ganti plan.\n\n**Plan codes:** `trial`, `tier_1`, `tier_2`, `tier_3`"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  const json = pm.response.json();",
+                  "  pm.test('subscription_status ada', () => pm.expect(json.subscription_status).to.be.a('string'));",
+                  "  pm.test('token_quota > 0', () => pm.expect(json.token_quota).to.be.above(0));",
+                  "  pm.test('tokens_remaining = token_quota', () => pm.expect(json.tokens_remaining).to.eql(json.token_quota));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "POST /v1/subscriptions/:user_id/upgrade — Upgrade / downgrade plan",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/subscriptions/{{user_id}}/upgrade",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "subscriptions", "{{user_id}}", "upgrade"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"plan_code\": \"tier_1\",\n  \"reference_id\": \"INV-2026-001\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Upgrade atau downgrade plan subscription user ke plan lain.\n\n- `plan_code`: plan tujuan (`tier_1`, `tier_2`, `tier_3`) — tidak bisa ke `trial`\n- `reference_id`: ID transaksi dari payment gateway, harus unik (idempotency)\n\nPada upgrade: token_quota di-reset ke quota plan baru, tokens_used di-reset ke 0, expires_at diperbarui dari sekarang.\n\nAdmin-only (X-API-Key)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) {",
+                  "  const json = pm.response.json();",
+                  "  pm.test('new_plan ada', () => pm.expect(json.new_plan).to.be.a('string'));",
+                  "  pm.test('previous_plan ada', () => pm.expect(json.previous_plan).to.be.a('string'));",
+                  "  pm.test('subscription_status = active', () => pm.expect(json.subscription_status).to.eql('active'));",
+                  "  pm.test('tokens_remaining = token_quota', () => pm.expect(json.tokens_remaining).to.eql(json.token_quota));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "POST /v1/subscriptions/:user_id/topup — Top-up token user (admin)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/subscriptions/{{user_id}}/topup",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "subscriptions", "{{user_id}}", "topup"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tokens\": 1000000,\n  \"reference_id\": \"TOPUP-2026-001\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Tambah token quota ke subscription aktif user. Dipanggil oleh backend website setelah payment gateway konfirmasi sukses.\n\n`reference_id` harus unik per transaksi untuk mencegah double top-up (idempotency guard).\n\nJika subscription statusnya `grace_period`, otomatis reaktivasi ke `active`.\n\nAdmin-only (X-API-Key)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) {",
+                  "  const json = pm.response.json();",
+                  "  pm.test('tokens_added ada', () => pm.expect(json.tokens_added).to.be.above(0));",
+                  "  pm.test('token_quota_after > token_quota_before', () => pm.expect(json.token_quota_after).to.be.above(json.token_quota_before));",
+                  "  pm.test('reference_id cocok', () => pm.expect(json.reference_id).to.be.a('string'));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "GET /v1/subscriptions/:user_id — Cek status subscription",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/subscriptions/{{user_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "subscriptions", "{{user_id}}"]
+            },
+            "description": "Lihat detail subscription user: plan, status, token_quota, tokens_used, tokens_remaining, expires_at, grace_until.\n\n**Subscription status values:**\n- `trial` — masa trial aktif\n- `active` — subscription berbayar aktif\n- `grace_period` — expired tapi masih dalam grace period\n- `expired` — tidak aktif\n\nAdmin-only (X-API-Key)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) {",
+                  "  const json = pm.response.json();",
+                  "  pm.test('plan_code ada', () => pm.expect(json.plan_code).to.be.a('string'));",
+                  "  pm.test('tokens_remaining >= 0', () => pm.expect(json.tokens_remaining).to.be.at.least(0));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Stream (SSE)",
+      "item": [
+        {
+          "name": "GET /v1/sessions/:session_id/stream — SSE real-time stream",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/sessions/{{session_id}}/stream?timeout=300",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "sessions", "{{session_id}}", "stream"],
+              "query": [
+                {
+                  "key": "timeout",
+                  "value": "300",
+                  "description": "Max koneksi dalam detik (30–3600, default 300)"
+                },
+                {
+                  "key": "api_key",
+                  "value": "{{api_key}}",
+                  "description": "Alternatif auth via query param (karena EventSource tidak support header)",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Server-Sent Events stream untuk menerima push event real-time dari session.\n\nGunakan ini untuk tampilkan scheduled reminder / proactive message di UI tanpa polling.\n\n**Event types:**\n- `message` — agent reply baru dari scheduler atau heartbeat\n- `ping` — keep-alive setiap 20 detik\n\n**Format event:**\n```\nevent: message\ndata: {\"type\": \"scheduled_message\", \"reply\": \"...\", \"label\": \"...\", \"run_id\": \"...\"}\n\nevent: ping\ndata: {}\n```\n\n**Auth:** Bisa via `X-API-Key` header ATAU `?api_key=` query param (untuk browser EventSource yang tidak support custom header)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "WhatsApp (Extra)",
+      "item": [
+        {
+          "name": "POST /v1/agents/:agent_id/whatsapp/connect — Connect ulang WhatsApp",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/agents/{{agent_id}}/whatsapp/connect",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "agents", "{{agent_id}}", "whatsapp", "connect"]
+            },
+            "description": "Initialize atau re-initialize WhatsApp untuk agent yang sudah ada.\n\nGunakan ini saat:\n- Agent dibuat tanpa `channel_type: whatsapp` dan ingin ditambahkan WA setelah itu\n- WA service sempat mati saat create agent\n- Perlu generate QR baru untuk re-scan\n\nBerbeda dengan QR endpoint (`GET .../whatsapp/qr`) — endpoint ini juga membuat `device_id` baru jika belum ada."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const json = pm.response.json();",
+                  "  pm.collectionVariables.set('wa_device_id', json.device_id || '');",
+                  "  pm.test('device_id ada', () => pm.expect(json.device_id).to.be.a('string'));",
+                  "  pm.test('status ada', () => pm.expect(json.status).to.be.a('string'));",
+                  "  if (json.qr_image) {",
+                  "    console.log('QR Image (copy & paste ke browser):');",
+                  "    console.log('data:image/png;base64,' + json.qr_image);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "GET /v1/channels/wa-dev/operator-route — Lookup agent by operator phone",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/channels/wa-dev/operator-route?phone=%2B62811000000",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "channels", "wa-dev", "operator-route"],
+              "query": [
+                {
+                  "key": "phone",
+                  "value": "+62811000000",
+                  "description": "Nomor operator (dengan + prefix)"
+                }
+              ]
+            },
+            "description": "Dipakai oleh wa-dev-service untuk auto-routing pesan operator.\n\nGiven a phone number, find which agent this phone is an operator for.\nReturn `{agent_id, agent_name}` atau 404 jika nomor bukan operator di agent mana pun.\n\nIni memungkinkan operator reply ke session tanpa harus manual kirim `connect {agentID}` dulu — wa-dev-service otomatis tahu harus route ke agent mana."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const json = pm.response.json();",
+                  "  pm.test('agent_id ada', () => pm.expect(json.agent_id).to.be.a('string'));",
+                  "  pm.test('agent_name ada', () => pm.expect(json.agent_name).to.be.a('string'));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "response": []
         }
       ]
     }

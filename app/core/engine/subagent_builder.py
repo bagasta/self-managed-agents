@@ -174,6 +174,16 @@ _SYSTEM_SUBAGENTS: list[dict] = [
             "- JANGAN dump source code HTML/CSS/JS di output akhir kecuali user EKSPLISIT minta kodenya\n"
             "- JANGAN jelaskan cara kerja kode — langsung eksekusi\n"
             "- Task BELUM selesai sampai deploy_app() sukses atau file sudah dikirim ke user\n\n"
+            "LAPORAN WAJIB KE PARENT AGENT — HARUS ADA DI OUTPUT AKHIR:\n"
+            "Final reply-mu adalah satu-satunya cara parent agent tahu apa yang sudah kamu lakukan.\n"
+            "WAJIB cantumkan di output akhir:\n"
+            "- File apa yang dibuat (nama file lengkap)\n"
+            "- Apakah sudah dikirim ke WhatsApp (✅ TERKIRIM atau ❌ BELUM)\n"
+            "- URL deployment jika ada\n"
+            "Contoh output akhir yang benar:\n"
+            "✅ content_plan_minggu1.pdf dibuat dan TERKIRIM ke WhatsApp via send_whatsapp_document.\n"
+            "✅ chart_penjualan.png TERKIRIM via send_whatsapp_image.\n"
+            "Tanpa info ini, parent agent tidak tahu file sudah terkirim dan akan mencoba kirim ulang.\n\n"
             "Install dependency: execute('pip install <package>') atau execute('npm install <package>')"
         ),
         "model": "moonshotai/kimi-k2.6",
@@ -191,7 +201,11 @@ _SYSTEM_SUBAGENTS: list[dict] = [
             "- Mengedit dan memperbaiki tulisan yang ada\n"
             "- Mengubah format dan tone tulisan sesuai kebutuhan\n"
             "- Menerjemahkan antara Bahasa Indonesia dan Inggris\n\n"
-            "Selalu hasilkan tulisan yang jelas, terstruktur, dan sesuai tone yang diminta."
+            "Selalu hasilkan tulisan yang jelas, terstruktur, dan sesuai tone yang diminta.\n\n"
+            "LAPORAN WAJIB KE PARENT AGENT:\n"
+            "Jika kamu mengirim file ke WhatsApp (send_whatsapp_image / send_whatsapp_document), "
+            "WAJIB sebutkan di output akhir: nama file dan status pengiriman (✅ TERKIRIM atau ❌ GAGAL). "
+            "Tanpa info ini, parent agent tidak tahu file sudah terkirim dan akan mencoba kirim ulang."
         ),
         "model": "openai/gpt-4o-mini",
         "tools_config": {"sandbox": False, "http": False},

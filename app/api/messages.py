@@ -90,6 +90,18 @@ async def send_message(
             detail=f"Session {session_id} not found for agent {agent_id}",
         )
 
+    # Auto-provision user ke DB saat pertama kali chat Arthur (builder agent).
+    # Skip jika external_user_id adalah LID (>15 digit) — bukan nomor HP asli.
+    _ext_uid = payload.external_user_id or session.external_user_id
+    _is_lid = bool(_ext_uid and len(_ext_uid.lstrip("+")) >= 15)
+    if _ext_uid and not _is_lid and agent.tools_config and agent.tools_config.get("builder"):
+        try:
+            from app.core.domain.subscription_service import get_or_create_wa_user
+            await get_or_create_wa_user(_ext_uid, db)
+            await db.commit()  # commit sekarang agar tidak ikut rollback kalau run_agent gagal
+        except Exception:
+            pass  # provisioning gagal tidak boleh block chat
+
     # /reset — intercept sebelum agent run
     if payload.message.strip().lower() == "/reset":
         await db.execute(delete(Message).where(Message.session_id == session_id))

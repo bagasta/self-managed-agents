@@ -957,13 +957,24 @@ JANGAN VERIFIKASI HASIL SUB-AGENT PAKAI TOOL SENDIRI
 - Output dari task() ADALAH ground truth. Kalau sub-agent return string yang berisi URL → URL itu valid, langsung relay ke user.
 - Kalau task() return tanpa URL atau error → BARU bilang gagal. Jangan double-check sendiri.
 
-INGAT HASIL DEPLOY — JANGAN BIKIN ULANG
+PERCAYA LAPORAN PENGIRIMAN FILE DARI SUB-AGENT
+- Sub-agent kirim file (PDF, gambar, dll) LANGSUNG ke WhatsApp tanpa melalui kamu.
+- Kalau output task() menyebut "✅ TERKIRIM" atau "send_whatsapp_document/image berhasil" → FILE SUDAH SAMPAI KE USER.
+- JANGAN coba kirim ulang file yang sudah dilaporkan terkirim oleh sub-agent.
+- JANGAN tanya "mau saya kirim lagi?" kalau sub-agent sudah bilang terkirim.
+- Kalau output task() TIDAK menyebut pengiriman → BARU kamu tanya atau kirim sendiri.
+- Simpan info ini ke memory: remember(key="last_file_sent", value="<nama_file> — TERKIRIM via sub-agent")
+
+INGAT HASIL DEPLOY DAN FILE — JANGAN BIKIN ULANG
 - Setiap kali sys_coder return URL, LANGSUNG simpan ke memory:
   remember(key="last_deploy_url", value="<url>")
   remember(key="last_deploy_summary", value="<deskripsi singkat web yang dibuat>")
+- Setiap kali sub-agent kirim file, LANGSUNG simpan ke memory:
+  remember(key="last_file_sent", value="<nama_file> dikirim <tanggal/waktu>")
 - Sebelum delegasi ulang ke sys_coder, WAJIB recall("last_deploy_url") dulu.
 - Kalau user nanya status ("udah jadi?", "mana webnya?", "URL-nya apa?") → JANGAN delegasi ulang.
   Cukup recall("last_deploy_url") dan kirim URL-nya ke user.
+- Kalau user nanya "udah dikirim?", "mana filenya?" → recall("last_file_sent") dulu sebelum buat ulang.
 - Hanya delegasi ulang kalau user EKSPLISIT minta:
   (a) perubahan/edit konten ("ganti warna jadi biru", "tambahin section X")
   (b) bikin web baru yang beda total ("buatin landing page lain")
@@ -1409,25 +1420,34 @@ def build_builder_tools(
         """
         try:
             from app.core.domain.subscription_service import (
+                get_or_create_wa_user,
                 get_subscription_by_external_id,
                 check_can_create_agent,
             )
             from app.models.agent import Agent
+            from app.models.subscription import SubscriptionPlan
             from sqlalchemy import or_
 
             target_phone = phone or owner_phone
             if not target_phone:
                 return json.dumps({"error": "phone tidak tersedia"}, ensure_ascii=False)
 
-            async with db_factory() as db:
-                result = await get_subscription_by_external_id(target_phone, db)
-                if result is None:
-                    return json.dumps({
-                        "status": "not_found",
-                        "message": "User belum terdaftar. Akan di-provision otomatis saat buat agent pertama.",
-                    }, ensure_ascii=False)
+            # Tolak LID (>15 digit) — bukan nomor HP asli, tidak bisa di-provision
+            if len(target_phone.lstrip("+")) >= 15:
+                return json.dumps({
+                    "error": "Nomor tidak dapat diidentifikasi (LID). Pastikan nomor WA kamu sudah terdaftar dengan benar.",
+                }, ensure_ascii=False)
 
-                user, sub, plan = result
+            async with db_factory() as db:
+                # Auto-provision: buat user + Tier 1 jika belum ada
+                user, sub = await get_or_create_wa_user(target_phone, db)
+                await db.commit()
+
+                plan = (
+                    await db.execute(
+                        select(SubscriptionPlan).where(SubscriptionPlan.id == sub.plan_id)
+                    )
+                ).scalar_one()
 
                 # Hitung agent aktif
                 active_count_result = await db.execute(
@@ -1455,7 +1475,7 @@ def build_builder_tools(
                     "agents_remaining": remaining,
                     "active_agent_names": [a.name for a in active_agents],
                     "token_quota": sub.token_quota,
-                    "active_until": sub.active_until.isoformat() if sub.active_until else None,
+                    "active_until": sub.expires_at.isoformat() if sub.expires_at else None,
                 }, ensure_ascii=False, indent=2)
         except Exception as exc:
             logger.error("builder_tools.get_user_subscription.error", error=str(exc))
