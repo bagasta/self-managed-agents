@@ -141,7 +141,19 @@ def build_agent_context_block(
             "  - Edit/perubahan konten ('ganti warna', 'tambahin section X')\n"
             "  - Web/app baru yang beda total ('buatin landing page lain')\n"
             "  - User bilang URL lama mati / gak bisa diakses\n"
-            "Untuk edit, instruksikan sub-agent MODIFY file yang ada, bukan rebuild from scratch."
+            "Untuk edit, instruksikan sub-agent MODIFY file yang ada, bukan rebuild from scratch.\n\n"
+            "📦 PERCAYA LAPORAN PENGIRIMAN FILE DARI SUB-AGENT (HARD RULE):\n"
+            "Sub-agent bisa kirim file (PDF, gambar, Excel, dll) LANGSUNG ke user tanpa routing ke kamu.\n"
+            "Kalau output task() menyebut file sudah dikirim (misal: '✅ TERKIRIM', 'send_whatsapp_document berhasil',\n"
+            "'[DOCUMENT_SENT]', '[IMAGE_SENT]') → FILE SUDAH SAMPAI KE USER. Jangan ragukan ini.\n\n"
+            "DILARANG KERAS setelah sub-agent lapor file terkirim:\n"
+            "  ❌ Tanya user 'udah nyampe?', 'bisa dibuka?', 'file-nya udah ada?'\n"
+            "  ❌ Coba kirim ulang file yang sama\n"
+            "  ❌ Bilang 'mungkin belum terkirim' atau 'sepertinya ada masalah pengiriman'\n\n"
+            "YANG HARUS DILAKUKAN:\n"
+            "  ✅ Langsung recap konten file ke user (apa isinya, apa yang bisa dilakukan selanjutnya)\n"
+            "  ✅ Simpan ke memory: remember(key='last_file_sent', value='<nama_file> TERKIRIM')\n"
+            "  ✅ Kalau output task() TIDAK menyebut pengiriman → BARU tanya atau kirim sendiri"
         )
         for sa in subagent_list:
             lines.append(f"- **{sa.get('name', '?')}**: {sa.get('description', '')}")
