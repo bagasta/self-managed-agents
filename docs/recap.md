@@ -1,3 +1,89 @@
+# Recap: WhatsApp Escalation Media Forwarding + Operator Reply Routing
+
+**Tanggal**: 2026-05-19
+**Status**: ✅ Selesai
+
+## Masalah
+
+- Customer mengirim bukti order/pembayaran dalam bentuk gambar, tetapi saat agent eskalasi ke operator, file gambarnya tidak ikut diteruskan.
+- Pesan eskalasi ke operator belum selalu mencantumkan nomor customer dengan jelas, sehingga operator/agent bisa bingung balasan harus dikirim ke siapa.
+- Saat operator memakai fitur reply WhatsApp pada pesan eskalasi, agent belum cukup eksplisit diarahkan untuk mengirim balasan operator ke customer terkait.
+
+## Akar Bug
+
+- `process_wa_media()` memang menyimpan media ke workspace, tetapi metadata media belum tersimpan/ter-commit ke `session.metadata_` sebelum `run_agent()` berjalan.
+- `escalate_to_human()` membaca session dari DB session lain, sehingga metadata lampiran yang baru di-`flush` belum terlihat.
+- Format notifikasi eskalasi terlalu teknis dan kurang “routing-friendly” untuk operator.
+- Runtime prompt operator belum punya sinyal khusus bahwa pesan operator berasal dari reply/quote pesan eskalasi tertentu.
+
+## Solusi
+
+- `process_wa_media()` sekarang return `media_meta` berisi `media_type`, `filename`, `workspace_path`, `mimetype`, dan ukuran file.
+- `/wa/incoming` menyimpan `last_incoming_media` ke `session.metadata_` dan langsung `commit` sebelum agent run.
+- `escalate_to_human()` meneruskan lampiran terakhir customer ke operator:
+  - image/sticker via `send_wa_image`
+  - document via `send_wa_document`
+- Format notifikasi eskalasi dibuat eksplisit:
+
+```text
+ESKALASI PESAN DARI CUSTOMER
+ID Kasus: esc_xxx
+Nomor customer/user: 628xxxx
+Pesan: <isi/ringkasan pesan user>
+
+Cara balas customer:
+Reply pesan ini di WhatsApp, lalu tulis jawaban untuk customer.
+Agent akan mengirim balasan ke nomor customer di atas.
+```
+
+- `find_escalation_context()` sekarang menandai routing quote dengan:
+  `ROUTING: operator_reply_quoted_escalation`
+- Runtime prompt operator memakai sinyal itu untuk langsung memanggil `reply_to_user(message)` saat operator membalas pesan eskalasi via fitur reply WhatsApp.
+- Arthur rulebook ikut diupdate supaya agent baru memahami pola eskalasi media dan reply operator ini sejak awal.
+
+## File yang Diubah
+
+| File | Perubahan |
+|------|-----------|
+| `app/api/wa_helpers.py` | `process_wa_media()` return metadata media; `find_escalation_context()` tambah routing note untuk quoted escalation |
+| `app/api/channels.py` | Simpan dan commit `last_incoming_media` sebelum `run_agent()` |
+| `app/core/tools/escalation_tool.py` | Format notifikasi baru; forward lampiran customer ke operator; simpan `escalation_customer_phone` |
+| `app/core/engine/prompt_builder.py` | Runtime prompt operator paham quoted escalation dan boleh langsung `reply_to_user` |
+| `app/core/tools/builder_tools.py` | Tool hints escalation diperjelas untuk agent baru |
+| `system-message-builder.md` | Arthur diarahkan membuat agent WhatsApp yang paham escalation media + operator reply routing |
+| `scripts/seed_arthur.py` | Soul note Arthur diselaraskan dengan create-agent flow baru |
+
+## Command Verifikasi
+
+```bash
+.venv/bin/python -m py_compile \
+  app/api/wa_helpers.py \
+  app/api/channels.py \
+  app/core/tools/escalation_tool.py \
+  app/core/engine/prompt_builder.py \
+  app/core/tools/builder_tools.py \
+  scripts/seed_arthur.py
+```
+
+Hasil: compile lolos.
+
+```bash
+.venv/bin/python scripts/seed_arthur.py
+```
+
+Hasil: Arthur berhasil diupdate ke versi `15`.
+
+## Hasil Test Manual
+
+- Customer kirim bukti order/bukti pembayaran berupa gambar.
+- Agent eskalasi ke operator.
+- Operator menerima pesan eskalasi dengan format nomor customer + pesan customer yang jelas.
+- Lampiran bukti dari customer ikut diteruskan ke operator.
+- Operator memakai fitur reply WhatsApp pada pesan eskalasi.
+- Agent mengirim balasan operator ke customer yang benar.
+
+---
+
 # Recap: Google Forms Workflow Mode — Auto Isi Konten + Link Final
 
 **Tanggal**: 2026-05-18

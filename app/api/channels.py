@@ -351,15 +351,27 @@ async def wa_incoming(
     media_context = ""
     media_image_b64: str | None = None
     media_image_mime: str | None = None
+    media_meta: dict | None = None
 
     if body.media_type and body.media_data:
-        media_context, media_image_b64, media_image_mime = await process_wa_media(
+        media_context, media_image_b64, media_image_mime, media_meta = await process_wa_media(
             media_type=body.media_type,
             media_data=body.media_data,
             media_filename=body.media_filename,
             session_id=session.id,
             logger=log,
         )
+        if media_meta:
+            import time as _time
+            sess_meta = dict(session.metadata_ or {})
+            sess_meta["last_incoming_media"] = {
+                **media_meta,
+                "saved_at": int(_time.time()),
+                "from_operator": _is_operator,
+            }
+            session.metadata_ = sess_meta
+            db.add(session)
+            await db.commit()
 
     # For audio/ptt, media_context already contains the full transcript label —
     # drop the raw "[Voice note]"/"[Audio]" placeholder from Go to avoid confusion.

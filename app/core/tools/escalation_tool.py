@@ -14,6 +14,7 @@ Saat escalation_active=True:
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 
 import structlog
 from langchain_core.tools import tool
@@ -101,29 +102,27 @@ def build_escalation_tools(
             if resolved_phone:
                 # Nomor asli tersedia — tampilkan langsung
                 clean_phone = _normalize_jid(resolved_phone)
-                user_phone_display = f"+{clean_phone}" if not clean_phone.startswith("+") else clean_phone
+                user_phone_display = clean_phone.lstrip("+")
             elif is_lid:
                 # LID tanpa phone_number — tampilkan LID apa adanya (tidak strip @lid)
                 user_phone_display = raw_jid
             else:
-                user_phone_display = f"+{clean_jid}" if clean_jid and not clean_jid.startswith("+") else (clean_jid or "(tidak diketahui)")
+                user_phone_display = clean_jid.lstrip("+") if clean_jid else "(tidak diketahui)"
 
             clean_reason = _clean_jid_from_text(reason)
             clean_summary = _clean_jid_from_text(summary)
+            pesan_customer = clean_summary or clean_reason or "(tidak ada ringkasan pesan)"
 
             notif_text = (
-                f"🚨 *[CS AI] ESKALASI*\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"ESKALASI PESAN DARI CUSTOMER\n"
                 f"ID Kasus: {case_id}\n"
-                + (f"WA Customer: {user_phone_display}\n" if user_phone_display and user_phone_display != "(tidak diketahui)" else "")
-                + (f"Nama: {customer_name}\n" if customer_name else "")
-                + f"Alasan: {clean_reason}\n"
-                + (f"Pesan:\n{clean_summary}\n" if clean_summary else "")
-                + f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"💬 *REPLY pesan ini* untuk menjawab customer ini.\n"
-                f"Format balasan:\n"
-                f"<OPERATOR>\n"
-                f"Pesan: [instruksi/jawaban untuk diteruskan ke customer]"
+                f"Nomor customer/user: {user_phone_display}\n"
+                + (f"Nama customer: {customer_name}\n" if customer_name else "")
+                + f"Alasan eskalasi: {clean_reason}\n"
+                + f"Pesan: {pesan_customer}\n\n"
+                f"Cara balas customer:\n"
+                f"Reply pesan ini di WhatsApp, lalu tulis jawaban untuk customer.\n"
+                f"Agent akan mengirim balasan ke nomor customer di atas."
             )
 
             db.add(Message(
@@ -136,6 +135,7 @@ def build_escalation_tools(
             # Simpan case_id di metadata_ session agar bisa di-lookup saat operator reply
             sess_meta = dict(session.metadata_ or {})
             sess_meta["escalation_case_id"] = case_id
+            sess_meta["escalation_customer_phone"] = user_phone_display
             session.metadata_ = sess_meta
 
             await db.commit()
@@ -148,6 +148,38 @@ def build_escalation_tools(
                 text=notif_text,
             )
             logger.info("escalation_tool.notified_operator", reason=reason, operator=operator_phone)
+
+            sess_meta = dict(session.metadata_ or {})
+            media_meta = sess_meta.get("last_incoming_media") if isinstance(sess_meta, dict) else None
+            if (
+                operator_channel == "whatsapp"
+                and operator_phone
+                and isinstance(media_meta, dict)
+                and not media_meta.get("from_operator")
+            ):
+                media_type = media_meta.get("media_type")
+                workspace_path = media_meta.get("workspace_path")
+                filename = media_meta.get("filename") or "lampiran"
+                mimetype = media_meta.get("mimetype") or "application/octet-stream"
+                if workspace_path and Path(workspace_path).exists():
+                    import base64
+                    from app.core.infra.wa_client import send_wa_document, send_wa_image
+
+                    encoded = base64.b64encode(Path(workspace_path).read_bytes()).decode()
+                    caption = f"Lampiran dari customer untuk kasus {case_id}"
+                    device_id = operator_config.get("device_id", "")
+                    if media_type in ("image", "sticker"):
+                        await send_wa_image(device_id, operator_phone, encoded, caption, mimetype)
+                    elif media_type == "document":
+                        await send_wa_document(device_id, operator_phone, encoded, filename, caption, mimetype)
+                    else:
+                        logger.info("escalation_tool.media_not_forwarded_type", media_type=media_type)
+                    logger.info(
+                        "escalation_tool.forwarded_media_to_operator",
+                        media_type=media_type,
+                        filename=filename,
+                        operator=operator_phone,
+                    )
         except Exception as exc:
             logger.warning("escalation_tool.channel_send_skipped", error=str(exc))
 
@@ -163,8 +195,10 @@ def build_escalation_tools(
     async def reply_to_user(message: str) -> str:
         """
         Kirim pesan final ke user.
-        🚨 LARANGAN KERAS: JANGAN PERNAH memanggil tool ini jika operator belum secara eksplisit mengetik 'kirim', 'ok', atau menyetujui draft!
-        Jika operator baru saja menginstruksikan jawaban, tugasmu HANYA menulis pesan biasa berisi draft. JANGAN panggil tool ini sampai operator merespons draft tersebut.
+        Panggil tool ini hanya jika operator sudah menyetujui pengiriman.
+        Persetujuan eksplisit termasuk: "kirim", "ok kirim", "langsung kirim",
+        "rapihin aja pesannya terus kirim", atau instruksi sejenis yang jelas meminta pesan dikirim.
+        Jika operator belum meminta kirim, tampilkan draft dulu dan tunggu konfirmasi.
         Args: message (pesan final yang akan dikirim ke user).
         """
         from app.models.message import Message as Msg

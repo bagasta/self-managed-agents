@@ -8,6 +8,7 @@ Tools yang di-expose:
   get_user_subscription(phone)          — cek plan, slot agent, dan status subscription user
   get_presets()                         — katalog preset agent siap pakai
   plan_agent(...)                       — structured plan sebelum create
+  compose_agent_blueprint(...)          — rancang workflow & knowledge plan custom per bisnis
   verify_agent(agent_id)               — post-create readback + smoke test guidance
   list_available_wa_devices()           — WA devices yang belum di-assign ke agent
   validate_agent_config(...)            — validasi config sebelum create/update
@@ -47,7 +48,7 @@ AGENT_PRESETS: dict[str, dict] = {
     "coding_deploy_agent": {
         "label": "Coding & Deploy Agent",
         "description": "Agent yang bisa menulis kode, menjalankannya di sandbox Docker, dan men-deploy ke public URL via Cloudflare tunnel.",
-        "default_model": "openai/gpt-5.1",
+        "default_model": "openai/gpt-4.1-mini",
         "default_temperature": 0.5,
         "default_max_tokens": 2048,
         "default_channel": "webchat",
@@ -113,7 +114,7 @@ AGENT_PRESETS: dict[str, dict] = {
     "cs_whatsapp_basic": {
         "label": "CS WhatsApp Basic",
         "description": "Agent customer service untuk WhatsApp — jawab pertanyaan pelanggan, eskalasi ke operator jika perlu.",
-        "default_model": "openai/gpt-5.1",
+        "default_model": "openai/gpt-4.1-mini",
         "default_temperature": 0.7,
         "default_max_tokens": 800,
         "default_channel": "whatsapp",
@@ -178,7 +179,7 @@ AGENT_PRESETS: dict[str, dict] = {
     "faq_webchat_rag": {
         "label": "FAQ & RAG Webchat Agent",
         "description": "Agent yang menjawab pertanyaan berdasarkan dokumen yang diupload (PDF, DOCX). Cocok untuk FAQ produk, kebijakan, manual.",
-        "default_model": "openai/gpt-5.1",
+        "default_model": "openai/gpt-4.1-mini",
         "default_temperature": 0.3,
         "default_max_tokens": 1024,
         "default_channel": "webchat",
@@ -239,7 +240,7 @@ AGENT_PRESETS: dict[str, dict] = {
     "scheduler_assistant": {
         "label": "Scheduler & Reminder Assistant",
         "description": "Asisten pribadi yang bisa set reminder, jadwal, dan pengingat otomatis.",
-        "default_model": "openai/gpt-5.1",
+        "default_model": "openai/gpt-4.1-mini",
         "default_temperature": 0.7,
         "default_max_tokens": 512,
         "default_channel": "whatsapp",
@@ -295,7 +296,7 @@ AGENT_PRESETS: dict[str, dict] = {
     "social_media_agent": {
         "label": "Social Media Specialist Agent",
         "description": "Agent spesialis konten media sosial — riset tren, buat content planner, generate file PDF/Excel, dan kirim langsung ke WhatsApp.",
-        "default_model": "openai/gpt-5.1",
+        "default_model": "openai/gpt-4.1-mini",
         "default_temperature": 0.7,
         "default_max_tokens": 2048,
         "default_channel": "whatsapp",
@@ -356,7 +357,7 @@ AGENT_PRESETS: dict[str, dict] = {
     "data_analyst_agent": {
         "label": "Data Analyst Agent",
         "description": "Agent analisis data — upload file Excel/CSV, dapatkan insight, grafik, dan laporan langsung di WhatsApp atau webchat.",
-        "default_model": "openai/gpt-5.1",
+        "default_model": "openai/gpt-4.1-mini",
         "default_temperature": 0.3,
         "default_max_tokens": 2048,
         "default_channel": "whatsapp",
@@ -414,7 +415,7 @@ AGENT_PRESETS: dict[str, dict] = {
     "research_agent": {
         "label": "Research & Intelligence Agent",
         "description": "Agent riset mendalam — browsing internet, kumpulkan data, susun laporan terstruktur.",
-        "default_model": "openai/gpt-5.1",
+        "default_model": "openai/gpt-4.1-mini",
         "default_temperature": 0.4,
         "default_max_tokens": 2048,
         "default_channel": "webchat",
@@ -470,7 +471,7 @@ AGENT_PRESETS: dict[str, dict] = {
     "ecommerce_cs": {
         "label": "E-Commerce Customer Service",
         "description": "CS agent khusus e-commerce — handle pertanyaan produk, status pesanan, komplain, dan retur via WhatsApp.",
-        "default_model": "openai/gpt-5.1",
+        "default_model": "openai/gpt-4.1-mini",
         "default_temperature": 0.7,
         "default_max_tokens": 800,
         "default_channel": "whatsapp",
@@ -531,7 +532,7 @@ AGENT_PRESETS: dict[str, dict] = {
     "personal_assistant": {
         "label": "Personal Assistant Agent",
         "description": "Asisten pribadi all-in-one — jadwal, reminder, riset cepat, dan pengingat via WhatsApp.",
-        "default_model": "openai/gpt-5.1",
+        "default_model": "openai/gpt-4.1-mini",
         "default_temperature": 0.7,
         "default_max_tokens": 1024,
         "default_channel": "whatsapp",
@@ -587,7 +588,7 @@ AGENT_PRESETS: dict[str, dict] = {
     "hr_assistant": {
         "label": "HR & Internal Knowledge Assistant",
         "description": "Asisten HR internal — jawab pertanyaan kebijakan perusahaan, cuti, benefit, dan onboarding dari dokumen.",
-        "default_model": "openai/gpt-5.1",
+        "default_model": "openai/gpt-4.1-mini",
         "default_temperature": 0.3,
         "default_max_tokens": 1024,
         "default_channel": "webchat",
@@ -765,15 +766,14 @@ _PLATFORM_CHANNELS = [
 ]
 
 _RECOMMENDED_MODELS = [
-    {"model": "openai/gpt-5.1", "use_case": "Default terbaik — reasoning kuat, tool use akurat"},
+    {"model": "openai/gpt-4.1-mini", "use_case": "Budget default — cukup kuat untuk mayoritas agent, lebih hemat"},
     {"model": "openai/gpt-4.1", "use_case": "Balance cost & quality (generasi sebelumnya)"},
-    {"model": "openai/gpt-4.1-mini", "use_case": "Budget / volume tinggi"},
     {"model": "openai/gpt-4.1-nano", "use_case": "Ultra-fast response"},
     {"model": "anthropic/claude-sonnet-4-6", "use_case": "Reasoning kompleks, nuanced"},
     {"model": "openai/gpt-4o", "use_case": "Analisis gambar/dokumen (vision)"},
 ]
 
-_DEFAULT_MODEL = "openai/gpt-5.1"
+_DEFAULT_MODEL = "openai/gpt-4.1-mini"
 
 
 # ---------------------------------------------------------------------------
@@ -898,6 +898,7 @@ def _get_post_create_steps(preset_id: str, channel: str, tc: dict) -> list[str]:
 _INSTRUCTION_WRITER_MODEL = "deepseek/deepseek-r1"
 # Soul writing is structured text — doesn't need heavy reasoning, use fast model
 _SOUL_WRITER_MODEL = "openai/gpt-4o-mini"
+_BLUEPRINT_WRITER_MODEL = "openai/gpt-4.1-mini"
 
 _SOUL_TEMPLATES: dict[str, str] = {
     "cs_whatsapp_basic": """\
@@ -1120,6 +1121,120 @@ def build_builder_tools(
         }, ensure_ascii=False, indent=2)
 
     # ------------------------------------------------------------------ #
+    # compose_agent_blueprint                                             #
+    # ------------------------------------------------------------------ #
+
+    @tool
+    async def compose_agent_blueprint(
+        preset_id: str,
+        user_goal: str,
+        agent_name: str = "",
+        business_context: str = "",
+        target_users: str = "",
+        channel: str = "webchat",
+        requested_features: str = "",
+        known_constraints: str = "",
+    ) -> str:
+        """
+        Rancang blueprint agent yang spesifik untuk kebutuhan user sebelum menulis instructions.
+
+        Blueprint berisi workflow, data yang wajib dikumpulkan, knowledge yang dibutuhkan,
+        aturan eskalasi, tool plan, dan checklist validasi. Gunakan ini untuk agent bisnis
+        yang butuh SOP/custom workflow, terutama CS, ecommerce, HR, data, dan personal assistant.
+
+        Args:
+            preset_id: Preset yang dipilih dari plan_agent
+            user_goal: Tujuan utama user
+            agent_name: Nama agent jika sudah ada
+            business_context: Detail bisnis/produk/SOP yang user sudah jelaskan
+            target_users: Siapa yang akan ngobrol dengan agent ini
+            channel: whatsapp, webchat, atau channel lain
+            requested_features: Fitur yang diminta user, dipisah koma
+            known_constraints: Batasan penting, compliance, gaya komunikasi, atau larangan
+        """
+        preset = AGENT_PRESETS.get(preset_id, {})
+        tc = preset.get("tools_config", {})
+
+        system_msg = (
+            "Kamu adalah solution architect untuk AI agent bisnis. "
+            "Tugasmu membuat blueprint yang operasional, spesifik, dan tidak generik. "
+            "Return HANYA JSON valid, tanpa markdown dan tanpa penjelasan di luar JSON."
+        )
+        user_msg = (
+            "Buat Agent Blueprint dari data berikut.\n\n"
+            f"preset_id: {preset_id}\n"
+            f"preset_label: {preset.get('label', 'Custom')}\n"
+            f"agent_name: {agent_name or 'belum ditentukan'}\n"
+            f"user_goal: {user_goal}\n"
+            f"business_context: {business_context or 'belum ada detail bisnis'}\n"
+            f"target_users: {target_users or 'belum jelas'}\n"
+            f"channel: {channel}\n"
+            f"requested_features: {requested_features or '-'}\n"
+            f"known_constraints: {known_constraints or '-'}\n"
+            f"available_tools_config: {json.dumps(tc, ensure_ascii=False)}\n\n"
+            "Schema JSON wajib:\n"
+            "{\n"
+            '  "agent_summary": "...",\n'
+            '  "assumptions": ["..."],\n'
+            '  "workflow_steps": [{"step": 1, "name": "...", "agent_action": "...", "required_user_data": ["..."], "success_criteria": "..."}],\n'
+            '  "knowledge_plan": {"must_have": ["..."], "nice_to_have": ["..."], "needs_upload": true},\n'
+            '  "tool_plan": [{"tool": "...", "why": "...", "when_to_use": "..."}],\n'
+            '  "memory_plan": [{"key": "...", "value_to_store": "..."}],\n'
+            '  "escalation_rules": [{"condition": "...", "action": "..."}],\n'
+            '  "conversation_examples_needed": ["..."],\n'
+            '  "validation_checklist": ["..."],\n'
+            '  "missing_info_questions": ["maks 3 pertanyaan paling penting jika data belum cukup"]\n'
+            "}\n\n"
+            "Pastikan workflow berbeda untuk tiap konteks bisnis. Jangan isi generik seperti 'jawab pertanyaan user' saja."
+        )
+
+        try:
+            raw = await _call_instruction_writer(user_msg, system_msg, model=_BLUEPRINT_WRITER_MODEL)
+            match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+            blueprint = json.loads(match.group(0) if match else raw)
+            return json.dumps({
+                "blueprint": blueprint,
+                "next_step": (
+                    "Gunakan blueprint ini sebagai agent_blueprint saat compose_agent_instructions. "
+                    "Kalau missing_info_questions berisi pertanyaan kritis, tanya user dulu sebelum create."
+                ),
+            }, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            logger.error("builder_tools.compose_agent_blueprint.error", error=str(exc))
+            fallback = {
+                "agent_summary": f"{agent_name or 'Agent'} untuk {user_goal}",
+                "assumptions": ["Blueprint fallback karena generator gagal; konfirmasi detail penting ke user."],
+                "workflow_steps": [
+                    {
+                        "step": 1,
+                        "name": "Discovery kebutuhan",
+                        "agent_action": "Tanyakan kebutuhan utama dan konteks yang belum jelas.",
+                        "required_user_data": ["nama/kebutuhan user"],
+                        "success_criteria": "Agent memahami intent sebelum menjawab.",
+                    }
+                ],
+                "knowledge_plan": {
+                    "must_have": ["Detail produk/layanan, harga, jam operasional, kebijakan penting"],
+                    "nice_to_have": ["FAQ dan contoh kasus nyata"],
+                    "needs_upload": bool(tc.get("rag")),
+                },
+                "tool_plan": [
+                    {"tool": k, "why": "Aktif dari preset", "when_to_use": "Sesuai kebutuhan workflow"}
+                    for k, v in tc.items() if v
+                ],
+                "memory_plan": [{"key": "user_profile", "value_to_store": "Nama, kebutuhan, dan preferensi user"}],
+                "escalation_rules": [{"condition": "Agent tidak yakin atau kasus sensitif", "action": "Eskalasi ke operator"}],
+                "conversation_examples_needed": ["Contoh tanya jawab untuk kasus paling umum"],
+                "validation_checklist": ["Instructions mencerminkan workflow dan tidak generik"],
+                "missing_info_questions": ["Detail bisnis apa yang paling wajib agent pahami?"],
+            }
+            return json.dumps({
+                "blueprint": fallback,
+                "warning": f"Generator blueprint gagal: {exc}",
+                "next_step": "Gunakan blueprint fallback ini atau panggil ulang dengan konteks lebih lengkap.",
+            }, ensure_ascii=False, indent=2)
+
+    # ------------------------------------------------------------------ #
     # compose_agent_instructions                                          #
     # ------------------------------------------------------------------ #
 
@@ -1132,6 +1247,7 @@ def build_builder_tools(
         channel: str = "webchat",
         escalation_info: str = "",
         extra_rules: str = "",
+        agent_blueprint: str = "",
     ) -> str:
         """
         Tulis system prompt (instructions) berkualitas tinggi untuk agent baru
@@ -1152,6 +1268,7 @@ def build_builder_tools(
             channel: Channel: 'whatsapp' atau 'webchat'
             escalation_info: Kondisi eskalasi dan info operator (misal: "Eskalasi jika komplain besar. Operator: +62812xxx")
             extra_rules: Aturan tambahan yang diminta user
+            agent_blueprint: JSON/string hasil compose_agent_blueprint agar instructions mengikuti workflow custom user.
         """
         preset = AGENT_PRESETS.get(preset_id, {})
         skeleton = preset.get("instruction_skeleton", "")
@@ -1171,7 +1288,9 @@ def build_builder_tools(
             "8. Mulai langsung dari 'Kamu adalah...' — tanpa intro atau penjelasan\n"
             "9. SKELETON REFERENSI hanya panduan struktur kapabilitas — JANGAN copy-paste. "
             "Sesuaikan seluruh konten dengan konteks bisnis, nama, dan kebutuhan spesifik user. "
-            "Dua agent dengan preset sama tapi bisnis berbeda HARUS punya instructions yang berbeda."
+            "Dua agent dengan preset sama tapi bisnis berbeda HARUS punya instructions yang berbeda.\n"
+            "10. Jika ada AGENT BLUEPRINT, jadikan itu sumber utama workflow. "
+            "Instructions harus memuat workflow steps, data wajib dikumpulkan, knowledge plan, memory plan, dan escalation rules."
         )
 
         # Build tool hints so the instruction writer knows which tools are available
@@ -1181,6 +1300,15 @@ def build_builder_tools(
             tool_hints.append(
                 "- remember(key, value) / recall(key) / forget(key) — simpan dan ambil info user lintas sesi. "
                 "Gunakan untuk menyimpan preferensi, nama, konteks penting yang perlu diingat antar percakapan."
+            )
+        if tc_preset.get("escalation"):
+            tool_hints.append(
+                "- escalate_to_human(reason, summary) — eskalasi ke operator. "
+                "Jika user mengirim bukti transfer/gambar/dokumen lalu butuh approval manusia, "
+                "ringkas konteksnya dan panggil tool ini; sistem akan meneruskan notifikasi dan lampiran terakhir ke operator. "
+                "- reply_to_user(message) — hanya untuk sesi operator. "
+                "Jika operator meminta draft, tampilkan draft dulu; jika operator sudah bilang 'kirim', "
+                "'langsung kirim', atau 'rapihin terus kirim', rapikan pesan lalu panggil reply_to_user(message)."
             )
         if tc_preset.get("http"):
             tool_hints.append(
@@ -1238,6 +1366,7 @@ def build_builder_tools(
             f"KONTEKS BISNIS:\n{business_context or 'Agent umum tanpa konteks bisnis spesifik'}\n\n"
             f"INFO ESKALASI:\n{escalation_info or 'Tidak ada eskalasi khusus'}\n\n"
             f"ATURAN TAMBAHAN:\n{extra_rules or 'Tidak ada'}\n\n"
+            f"AGENT BLUEPRINT CUSTOM:\n{agent_blueprint or 'Tidak ada blueprint khusus'}\n\n"
             f"SKELETON REFERENSI (jadikan panduan struktur, jangan copy-paste):\n{skeleton[:600] if skeleton else 'Tidak ada'}"
             f"{tools_section}"
             f"{coder_note}\n\n"
@@ -1665,6 +1794,21 @@ def build_builder_tools(
             "channel": effective_channel,
             "persona": persona or "ramah dan profesional",
             "business_context": business_context,
+            "blueprint_seed": {
+                "agent_summary": f"{agent_name or 'Agent ini'} dibuat untuk {user_goal}",
+                "customization_goal": (
+                    "Gunakan compose_agent_blueprint jika agent perlu SOP/workflow spesifik per bisnis, "
+                    "produk, tim, atau industri. Jangan hanya mengandalkan persona generik."
+                ),
+                "known_business_context": business_context,
+                "requested_features": features,
+                "recommended_questions": [
+                    "Apa langkah kerja ideal agent dari awal sampai selesai?",
+                    "Data apa yang wajib dikumpulkan dari user/pelanggan?",
+                    "Pengetahuan produk/SOP apa yang wajib agent tahu?",
+                    "Kapan agent harus eskalasi ke manusia?",
+                ],
+            },
             "recommended_config": {
                 "model": preset.get("default_model", _DEFAULT_MODEL),
                 "temperature": preset.get("default_temperature", 0.7),
@@ -1682,7 +1826,8 @@ def build_builder_tools(
             "critical_limitations": critical_limitations,
             "smoke_test_guidance": preset.get("smoke_test", {}).get("steps", []),
             "next_action": (
-                "Panggil create_agent dengan config di atas. Setelah create, panggil verify_agent(agent_id)."
+                "Untuk agent bisnis/custom, panggil compose_agent_blueprint lalu compose_agent_instructions. "
+                "Setelah itu validate_agent_config dan create_agent."
                 if not validation_errors
                 else "Perbaiki validation_errors sebelum create."
             ),
@@ -1783,7 +1928,7 @@ def build_builder_tools(
             name: Nama agent yang akan dibuat
             instructions: System prompt yang akan divalidasi
             tools_config: JSON string dari tools_config yang direncanakan
-            model: Model LLM yang akan digunakan (kosong = pakai default gpt-5.1)
+            model: Model LLM yang akan digunakan (kosong = pakai default gpt-4.1-mini)
             channel_type: Channel agent: 'whatsapp', 'webchat', atau kosong
             preset_id: ID preset yang digunakan (opsional — untuk validasi preset-specific rules)
         """
@@ -1921,7 +2066,7 @@ def build_builder_tools(
         name: str,
         instructions: str,
         description: str = "",
-        model: str = "openai/gpt-5.1",
+        model: str = "openai/gpt-4.1-mini",
         temperature: float = 0.7,
         tools_config: str = '{"memory": true, "skills": true, "escalation": true}',
         allowed_senders: str = "",
@@ -1931,6 +2076,8 @@ def build_builder_tools(
         operator_name: str = "",
         token_quota: int = 4_000_000,
         max_tokens: int = 0,
+        soul: str = "",
+        blueprint: str = "",
     ) -> str:
         """
         Buat agent baru di platform dan simpan ke database.
@@ -1940,7 +2087,7 @@ def build_builder_tools(
             name: Nama agent (wajib, maks 255 karakter)
             instructions: System prompt / instructions lengkap agent
             description: Deskripsi singkat fungsi agent
-            model: Model LLM (default: openai/gpt-4.1)
+            model: Model LLM (default: openai/gpt-4.1-mini)
             temperature: Kreativitas respons, 0.0-2.0 (default: 0.7)
             tools_config: JSON string konfigurasi tools, contoh: '{"memory": true, "scheduler": true}'
             allowed_senders: JSON array nomor WA yang diizinkan, contoh: '["+62811xxx"]'. Kosong = semua.
@@ -1950,6 +2097,8 @@ def build_builder_tools(
             operator_name: Nama operator/admin (misal: "Budi", "Tim CS"). Wajib diisi agar agent tahu siapa operatornya.
             token_quota: Batas token per periode (default: 4,000,000)
             max_tokens: Batas token per reply LLM. WA CS: 512-800, default platform: 1024. Isi 0 untuk pakai default.
+            soul: Identitas permanen agent hasil compose_agent_soul. Jika diisi, disimpan otomatis ke memory key='soul'.
+            blueprint: Agent Blueprint hasil compose_agent_blueprint. Jika diisi, disimpan otomatis ke memory key='agent_blueprint'.
         """
         if not name or len(name.strip()) < 2:
             return "[error] Nama agent minimal 2 karakter"
@@ -2054,6 +2203,18 @@ def build_builder_tools(
                 db.add(agent)
                 await db.flush()
                 await db.refresh(agent)
+
+                memory_keys_seeded: list[str] = []
+                if soul.strip() or blueprint.strip():
+                    from app.core.domain.memory_service import upsert_memory
+
+                    if soul.strip():
+                        await upsert_memory(agent.id, "soul", soul.strip(), db, scope=None)
+                        memory_keys_seeded.append("soul")
+                    if blueprint.strip():
+                        await upsert_memory(agent.id, "agent_blueprint", blueprint.strip(), db, scope=None)
+                        memory_keys_seeded.append("agent_blueprint")
+
                 await db.commit()
 
             logger.info(
@@ -2072,11 +2233,12 @@ def build_builder_tools(
                 "api_key": agent.api_key,
                 "token_quota": agent.token_quota,
                 "active_until": agent.active_until.isoformat() if agent.active_until else None,
+                "memory_keys_seeded": memory_keys_seeded,
                 "message": (
                     f"Agent '{agent.name}' berhasil dibuat dengan ID: {agent.id}. "
-                    "PENTING: Langkah selanjutnya — panggil remember() dengan key='soul' dan value berisi "
-                    "identitas lengkap agent ini (nama, peran, cara bicara, aturan kerja). "
-                    "Gunakan agent_id di atas sebagai konteks. Soul wajib diisi agar agent punya identitas permanen."
+                    "Jika memory_keys_seeded belum berisi 'soul', langkah selanjutnya adalah panggil compose_agent_soul "
+                    "lalu simpan ke memory agent baru via endpoint /v1/agents/{agent_id}/memory. "
+                    "Lebih efisien: untuk create berikutnya, isi parameter soul dan blueprint langsung saat create_agent."
                 ),
             }, ensure_ascii=False, indent=2)
 
@@ -2252,6 +2414,23 @@ def build_builder_tools(
         if not is_self and owner_phone and owner_phone not in (agent.operator_ids or []):
             return f"[error] Kamu tidak punya akses ke agent ini"
 
+        memory_summary: dict[str, str] = {}
+        try:
+            from app.core.domain.memory_service import get_memory
+            async with db_factory() as db:
+                soul_mem = await get_memory(agent.id, "soul", db, scope=None)
+                blueprint_mem = await get_memory(agent.id, "agent_blueprint", db, scope=None)
+            if soul_mem:
+                memory_summary["soul_preview"] = soul_mem.value_data[:500] + (
+                    "..." if len(soul_mem.value_data) > 500 else ""
+                )
+            if blueprint_mem:
+                memory_summary["agent_blueprint_preview"] = blueprint_mem.value_data[:800] + (
+                    "..." if len(blueprint_mem.value_data) > 800 else ""
+                )
+        except Exception as exc:
+            memory_summary["memory_warning"] = f"Gagal membaca memory agent: {exc}"
+
         return json.dumps({
             "id": str(agent.id),
             "name": agent.name,
@@ -2269,6 +2448,7 @@ def build_builder_tools(
             "active_until": agent.active_until.isoformat() if agent.active_until else None,
             "version": agent.version,
             "instructions_preview": (agent.instructions or "")[:300] + ("..." if len(agent.instructions or "") > 300 else ""),
+            "memory": memory_summary,
         }, ensure_ascii=False, indent=2)
 
     # ------------------------------------------------------------------ #
@@ -2374,6 +2554,7 @@ def build_builder_tools(
         get_user_subscription,
         get_presets,
         plan_agent,
+        compose_agent_blueprint,
         compose_agent_instructions,
         compose_agent_soul,
         verify_agent,

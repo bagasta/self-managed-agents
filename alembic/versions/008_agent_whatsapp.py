@@ -21,13 +21,33 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _has_column(table_name: str, column_name: str) -> bool:
+    inspector = sa.inspect(op.get_bind())
+    if table_name not in inspector.get_table_names():
+        return False
+    return any(col["name"] == column_name for col in inspector.get_columns(table_name))
+
+
+def _has_index(table_name: str, index_name: str) -> bool:
+    inspector = sa.inspect(op.get_bind())
+    if table_name not in inspector.get_table_names():
+        return False
+    return any(idx["name"] == index_name for idx in inspector.get_indexes(table_name))
+
+
 def upgrade() -> None:
-    op.add_column("agents", sa.Column("wa_device_id", sa.String(64), nullable=True))
-    op.add_column("agents", sa.Column("channel_type", sa.String(32), nullable=True))
-    op.create_index("ix_agents_wa_device_id", "agents", ["wa_device_id"], unique=True)
+    if not _has_column("agents", "wa_device_id"):
+        op.add_column("agents", sa.Column("wa_device_id", sa.String(64), nullable=True))
+    if not _has_column("agents", "channel_type"):
+        op.add_column("agents", sa.Column("channel_type", sa.String(32), nullable=True))
+    if not _has_index("agents", "ix_agents_wa_device_id"):
+        op.create_index("ix_agents_wa_device_id", "agents", ["wa_device_id"], unique=True)
 
 
 def downgrade() -> None:
-    op.drop_index("ix_agents_wa_device_id", table_name="agents")
-    op.drop_column("agents", "wa_device_id")
-    op.drop_column("agents", "channel_type")
+    if _has_index("agents", "ix_agents_wa_device_id"):
+        op.drop_index("ix_agents_wa_device_id", table_name="agents")
+    if _has_column("agents", "wa_device_id"):
+        op.drop_column("agents", "wa_device_id")
+    if _has_column("agents", "channel_type"):
+        op.drop_column("agents", "channel_type")

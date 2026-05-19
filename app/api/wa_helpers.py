@@ -9,7 +9,7 @@ from __future__ import annotations
 import base64
 import re
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from sqlalchemy import desc, select
@@ -180,6 +180,8 @@ async def find_escalation_context(
 
     esc_session = None
 
+    routed_by_quoted_case = False
+
     # Strategy 1: operator reply (quote) pesan eskalasi → parse case_id dari quoted_text
     if quoted_text:
         m = re.search(r'ID Kasus:\s*(esc_\d+_[a-f0-9]+)', quoted_text)
@@ -194,6 +196,7 @@ async def find_escalation_context(
             )
             esc_session = case_result.scalars().first()
             if esc_session:
+                routed_by_quoted_case = True
                 log.info("find_escalation_context.by_case_id", case_id=case_id, session_id=str(esc_session.id))
 
     # Strategy 2: fallback — ambil session eskalasi terbaru
@@ -242,6 +245,13 @@ async def find_escalation_context(
         if lines:
             escalation_context = "\n".join(lines)
 
+    if routed_by_quoted_case:
+        route_note = (
+            "ROUTING: operator_reply_quoted_escalation. "
+            "Operator membalas pesan eskalasi dengan fitur reply WhatsApp; balasan operator saat ini ditujukan untuk customer ini."
+        )
+        escalation_context = f"{route_note}\n{escalation_context or ''}".strip()
+
     return escalation_user_jid, escalation_context
 
 
@@ -252,7 +262,7 @@ async def process_wa_media(
     media_filename: str | None,
     session_id: uuid.UUID,
     logger: structlog.BoundLogger,
-) -> tuple[str, str | None, str | None]:
+) -> tuple[str, str | None, str | None, dict[str, Any] | None]:
     """
     Proses media (gambar/dokumen/stiker/audio) dari pesan WhatsApp.
 
@@ -263,10 +273,11 @@ async def process_wa_media(
     - "audio"    : file audio biasa
     - "ptt"      : push-to-talk / voice note
 
-    Returns (media_context, media_image_b64, media_image_mime)
+    Returns (media_context, media_image_b64, media_image_mime, media_meta)
     - media_context: teks tambahan untuk disertakan ke LLM
     - media_image_b64: base64 gambar untuk multimodal input (hanya untuk image)
     - media_image_mime: MIME type gambar (hanya untuk image)
+    - media_meta: metadata file tersimpan untuk escalation forwarding
     """
     from app.config import get_settings
     from app.core.infra.sandbox import get_workspace_dir
@@ -274,6 +285,7 @@ async def process_wa_media(
     media_context = ""
     media_image_b64: str | None = None
     media_image_mime: str | None = None
+    media_meta: dict[str, Any] | None = None
 
     try:
         raw_bytes = base64.b64decode(media_data)
@@ -285,6 +297,12 @@ async def process_wa_media(
         target_path = workspace / filename
         target_path.write_bytes(raw_bytes)
         logger.info("wa_incoming.media_saved", media_type=media_type, filename=filename)
+        media_meta = {
+            "media_type": media_type,
+            "filename": filename,
+            "workspace_path": str(target_path),
+            "size_bytes": len(raw_bytes),
+        }
 
         if media_type == "image":
             ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "jpg"
@@ -295,6 +313,7 @@ async def process_wa_media(
                 "webp": "image/webp",
             }
             media_image_mime = mime_map.get(ext, "image/jpeg")
+            media_meta["mimetype"] = media_image_mime
             media_image_b64 = media_data
             media_context = (
                 f"\n[Gambar diterima dan ditampilkan di atas. "
@@ -303,6 +322,7 @@ async def process_wa_media(
 
         elif media_type == "document":
             ext = ("." + filename.rsplit(".", 1)[-1].lower()) if "." in filename else ""
+            media_meta["mimetype"] = "application/octet-stream"
             doc_extractable = {".pdf", ".docx", ".pptx", ".txt", ".md", ".csv"}
             if ext in doc_extractable:
                 try:
@@ -327,9 +347,11 @@ async def process_wa_media(
                 media_context = f"\n[Dokumen diterima: {filename}, tersimpan di /workspace/{filename}]"
 
         elif media_type == "sticker":
+            media_meta["mimetype"] = "image/webp"
             media_context = f"\n[Stiker diterima, tersimpan di /workspace/{filename}]"
 
         elif media_type in ("audio", "ptt"):
+            media_meta["mimetype"] = "audio/ogg"
             # Transkripsi audio/voice note menggunakan openai/gpt-audio-mini via OpenRouter
             from app.core.infra.transcription_service import transcribe_audio
 
@@ -363,7 +385,7 @@ async def process_wa_media(
     except Exception as exc:
         logger.warning("wa_incoming.media_save_failed", error=str(exc))
 
-    return media_context, media_image_b64, media_image_mime
+    return media_context, media_image_b64, media_image_mime, media_meta
 
 
 def is_operator_message(

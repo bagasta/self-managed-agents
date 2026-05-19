@@ -21,17 +21,26 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _has_column(table_name: str, column_name: str) -> bool:
+    inspector = sa.inspect(op.get_bind())
+    if table_name not in inspector.get_table_names():
+        return False
+    return any(col["name"] == column_name for col in inspector.get_columns(table_name))
+
+
 def upgrade() -> None:
-    op.add_column(
-        "agents",
-        sa.Column(
-            "operator_ids",
-            JSONB,
-            nullable=False,
-            server_default=sa.text("'[]'::jsonb"),
-        ),
-    )
+    if not _has_column("agents", "operator_ids"):
+        op.add_column(
+            "agents",
+            sa.Column(
+                "operator_ids",
+                JSONB,
+                nullable=False,
+                server_default=sa.text("'[]'::jsonb"),
+            ),
+        )
 
 
 def downgrade() -> None:
-    op.drop_column("agents", "operator_ids")
+    if _has_column("agents", "operator_ids"):
+        op.drop_column("agents", "operator_ids")

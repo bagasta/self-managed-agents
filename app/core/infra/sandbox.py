@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import os
+import shlex
 import uuid
 from pathlib import Path
 
@@ -140,7 +141,7 @@ class DockerSandbox:
             self._client = _connect_docker(self._settings.docker_host)
         return self._client
 
-    def bash(self, cmd: str) -> str:
+    def bash_result(self, cmd: str, timeout: int | None = None) -> tuple[str, int | None]:
         """
         Run a bash command in an ephemeral Docker container.
         The sandbox workspace is mounted at /workspace inside the container.
@@ -170,9 +171,13 @@ class DockerSandbox:
         if self.parent_session_id:
             volumes[str(self.shared_dir)] = {"bind": "/workspace/shared", "mode": "rw"}
 
+        actual_cmd = cmd
+        if timeout is not None and timeout > 0:
+            actual_cmd = f"timeout {int(timeout)}s bash -lc {shlex.quote(cmd)}"
+
         run_kwargs: dict = dict(
             image=self._settings.docker_sandbox_image,
-            command=["bash", "-c", cmd],
+            command=["bash", "-c", actual_cmd],
             volumes=volumes,
             working_dir="/workspace",
             environment={
@@ -202,21 +207,28 @@ class DockerSandbox:
             raw = client.containers.run(**run_kwargs)
             output = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
             log.debug("sandbox.bash.done", output_len=len(output))
-            return output or "(no output)"
+            return output or "(no output)", 0
         except docker.errors.ContainerError as exc:
+            stdout = getattr(exc, "stdout", None)
+            stdout_text = stdout.decode("utf-8", errors="replace") if isinstance(stdout, bytes) else (str(stdout) if stdout else "")
             stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
             log.warning(
                 "sandbox.bash.container_error",
                 exit_status=exc.exit_status,
                 stderr=stderr[:2000],
             )
-            return f"[exit {exc.exit_status}]\n{stderr}"
+            output = "\n".join(part for part in (stdout_text, stderr) if part)
+            return f"[exit {exc.exit_status}]\n{output}", int(exc.exit_status)
         except docker.errors.ImageNotFound:
             log.error("sandbox.bash.image_not_found", image=self._settings.docker_sandbox_image)
-            return f"[error] Docker image not found: {self._settings.docker_sandbox_image}"
+            return f"[error] Docker image not found: {self._settings.docker_sandbox_image}", None
         except Exception as exc:
             log.error("sandbox.bash.error", error=str(exc))
-            return f"[sandbox error] {exc}"
+            return f"[sandbox error] {exc}", None
+
+    def bash(self, cmd: str) -> str:
+        output, _exit_code = self.bash_result(cmd)
+        return output
 
     def write_file(self, path: str, content: str) -> str:
         """Write content to a file in the workspace. Creates parent dirs as needed."""
@@ -267,6 +279,26 @@ class DockerSandbox:
             return await asyncio.shield(future)
         except asyncio.CancelledError:
             # Kill any running sandbox containers belonging to this session
+            try:
+                client = self._get_client()
+                containers = client.containers.list(
+                    filters={"label": f"managed-agent-session={self.session_id}"}
+                )
+                for c in containers:
+                    try:
+                        c.kill()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            raise
+
+    async def abash_result(self, cmd: str, timeout: int | None = None) -> tuple[str, int | None]:
+        loop = asyncio.get_event_loop()
+        future = loop.run_in_executor(None, functools.partial(self.bash_result, cmd, timeout))
+        try:
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
             try:
                 client = self._get_client()
                 containers = client.containers.list(

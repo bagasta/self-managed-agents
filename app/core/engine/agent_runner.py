@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, TypedDict
 
 import structlog
@@ -79,6 +80,7 @@ class AgentRunResult(TypedDict):
     steps: list[dict]
     run_id: uuid.UUID
     tokens_used: int
+    usage: dict[str, Any]
 
 
 async def run_agent(
@@ -272,6 +274,7 @@ async def run_agent(
                 log=log,
             )
 
+        backend = None
         try:
             from deepagents import create_deep_agent
             from langgraph.checkpoint.memory import MemorySaver
@@ -305,6 +308,15 @@ async def run_agent(
                 _dag_kwargs["interrupt_on"] = _interrupt_on
             graph = create_deep_agent(**_dag_kwargs)
         except (ImportError, TypeError, AttributeError) as _dag_err:
+            if sandbox is not None or backend is not None or subagent_list:
+                log.error(
+                    "agent_run.deepagent_required_failed",
+                    error=str(_dag_err)[:300],
+                    has_backend=backend is not None,
+                    has_sandbox=sandbox is not None,
+                    subagents=len(subagent_list or []),
+                )
+                raise
             log.warning(
                 "agent_run.deepagent_fallback",
                 error=str(_dag_err)[:300],
@@ -330,6 +342,28 @@ async def run_agent(
         step_counter = step_base + 1
 
         _agent_logger = AgentStepLogger(log)
+
+        def _usage_summary() -> dict[str, Any]:
+            return {
+                "prompt_tokens": _agent_logger.prompt_tokens_from_callbacks,
+                "completion_tokens": _agent_logger.completion_tokens_from_callbacks,
+                "reasoning_tokens": _agent_logger.reasoning_tokens_from_callbacks,
+                "cached_tokens": _agent_logger.cached_tokens_from_callbacks,
+                "total_tokens": _agent_logger.total_tokens_from_callbacks,
+                "openrouter_cost_usd": round(_agent_logger.openrouter_cost_usd_from_callbacks, 8),
+                "details": _agent_logger.usage_details,
+            }
+
+        def _apply_run_usage(total_tokens: int) -> None:
+            summary = _usage_summary()
+            run_record.tokens_used = int(total_tokens or summary["total_tokens"] or 0)
+            run_record.prompt_tokens = int(summary["prompt_tokens"] or 0)
+            run_record.completion_tokens = int(summary["completion_tokens"] or 0)
+            run_record.reasoning_tokens = int(summary["reasoning_tokens"] or 0)
+            run_record.cached_tokens = int(summary["cached_tokens"] or 0)
+            run_record.openrouter_cost_usd = Decimal(str(summary["openrouter_cost_usd"] or 0))
+            run_record.usage_details = summary["details"] or None
+
         _thread_id = str(session.id)
         _graph_config = {
             "recursion_limit": settings.agent_max_steps * 8,
@@ -429,6 +463,7 @@ async def run_agent(
                     run_record.status = "failed"
                     run_record.completed_at = datetime.now(timezone.utc)
                     run_record.error_message = str(_retry_json_exc)[:2000]
+                    _apply_run_usage(_agent_logger.total_tokens_from_callbacks)
                     await db.flush()
                     await _cleanup_sandboxes()
                     await send_agent_recovery_message(
@@ -444,7 +479,8 @@ async def run_agent(
                         reply="Maaf, terjadi gangguan koneksi ke model. Silakan coba lagi.",
                         steps=[],
                         run_id=run_id,
-                        tokens_used=0,
+                        tokens_used=_agent_logger.total_tokens_from_callbacks,
+                        usage=_usage_summary(),
                     )
 
             # "No tool output found for function call" means the provider received
@@ -493,18 +529,21 @@ async def run_agent(
                         run_record.status = "failed"
                         run_record.completed_at = datetime.now(timezone.utc)
                         run_record.error_message = "Dangling tool call after retry"
+                        _apply_run_usage(_agent_logger.total_tokens_from_callbacks)
                         await db.commit()
                         return AgentRunResult(
                             reply="Maaf, terjadi kesalahan internal. Silakan coba lagi.",
                             steps=[],
                             run_id=run_id,
-                            tokens_used=0,
+                            tokens_used=_agent_logger.total_tokens_from_callbacks,
+                            usage=_usage_summary(),
                         )
                     log.error("agent_run.retry_error", error=retry_err)
                     # Update Run → failed
                     run_record.status = "failed"
                     run_record.completed_at = datetime.now(timezone.utc)
                     run_record.error_message = retry_err[:2000]
+                    _apply_run_usage(_agent_logger.total_tokens_from_callbacks)
                     await db.flush()
                     await _cleanup_sandboxes()
                     raise retry_exc
@@ -557,14 +596,15 @@ async def run_agent(
                         _reply = _build_google_mcp_validation_reply(err_str)
                         run_record.status = "completed"
                         run_record.completed_at = datetime.now(timezone.utc)
-                        run_record.tokens_used = 0
+                        _apply_run_usage(_agent_logger.total_tokens_from_callbacks)
                         await db.flush()
                         await _cleanup_sandboxes()
                         return AgentRunResult(
                             reply=_reply,
                             steps=[],
                             run_id=run_id,
-                            tokens_used=0,
+                            tokens_used=_agent_logger.total_tokens_from_callbacks,
+                            usage=_usage_summary(),
                         )
 
                 if _slides_invalid_page_target:
@@ -597,14 +637,15 @@ async def run_agent(
                         _reply = _build_google_mcp_validation_reply(err_str)
                         run_record.status = "completed"
                         run_record.completed_at = datetime.now(timezone.utc)
-                        run_record.tokens_used = 0
+                        _apply_run_usage(_agent_logger.total_tokens_from_callbacks)
                         await db.flush()
                         await _cleanup_sandboxes()
                         return AgentRunResult(
                             reply=_reply,
                             steps=[],
                             run_id=run_id,
-                            tokens_used=0,
+                            tokens_used=_agent_logger.total_tokens_from_callbacks,
+                            usage=_usage_summary(),
                         )
 
                 _forms_create_title_only_error = (
@@ -646,14 +687,15 @@ async def run_agent(
                         _reply = _build_google_mcp_validation_reply(err_str)
                         run_record.status = "completed"
                         run_record.completed_at = datetime.now(timezone.utc)
-                        run_record.tokens_used = 0
+                        _apply_run_usage(_agent_logger.total_tokens_from_callbacks)
                         await db.flush()
                         await _cleanup_sandboxes()
                         return AgentRunResult(
                             reply=_reply,
                             steps=[],
                             run_id=run_id,
-                            tokens_used=0,
+                            tokens_used=_agent_logger.total_tokens_from_callbacks,
+                            usage=_usage_summary(),
                         )
 
                 if _forms_request_kind_error:
@@ -686,14 +728,15 @@ async def run_agent(
                         _reply = _build_google_mcp_validation_reply(err_str)
                         run_record.status = "completed"
                         run_record.completed_at = datetime.now(timezone.utc)
-                        run_record.tokens_used = 0
+                        _apply_run_usage(_agent_logger.total_tokens_from_callbacks)
                         await db.flush()
                         await _cleanup_sandboxes()
                         return AgentRunResult(
                             reply=_reply,
                             steps=[],
                             run_id=run_id,
-                            tokens_used=0,
+                            tokens_used=_agent_logger.total_tokens_from_callbacks,
+                            usage=_usage_summary(),
                         )
 
                 if _recovered_via_retry:
@@ -717,14 +760,15 @@ async def run_agent(
                     _reply = _build_google_mcp_validation_reply(err_str)
                     run_record.status = "completed"
                     run_record.completed_at = datetime.now(timezone.utc)
-                    run_record.tokens_used = 0
+                    _apply_run_usage(_agent_logger.total_tokens_from_callbacks)
                     await db.flush()
                     await _cleanup_sandboxes()
                     return AgentRunResult(
                         reply=_reply,
                         steps=[],
                         run_id=run_id,
-                        tokens_used=0,
+                        tokens_used=_agent_logger.total_tokens_from_callbacks,
+                        usage=_usage_summary(),
                     )
 
                 if (not _recovered_via_retry) and _is_google_auth_or_scope_error(err_str):
@@ -743,14 +787,15 @@ async def run_agent(
                     )
                     run_record.status = "completed"
                     run_record.completed_at = datetime.now(timezone.utc)
-                    run_record.tokens_used = 0
+                    _apply_run_usage(_agent_logger.total_tokens_from_callbacks)
                     await db.flush()
                     await _cleanup_sandboxes()
                     return AgentRunResult(
                         reply=_reply,
                         steps=[],
                         run_id=run_id,
-                        tokens_used=0,
+                        tokens_used=_agent_logger.total_tokens_from_callbacks,
+                        usage=_usage_summary(),
                     )
 
                 if not _recovered_via_retry:
@@ -759,6 +804,7 @@ async def run_agent(
                     run_record.status = "failed"
                     run_record.completed_at = datetime.now(timezone.utc)
                     run_record.error_message = err_str[:2000]
+                    _apply_run_usage(_agent_logger.total_tokens_from_callbacks)
                     await db.flush()
                     await _cleanup_sandboxes()
                     raise
@@ -1017,12 +1063,21 @@ async def run_agent(
         steps=len(steps),
         reply_len=len(final_reply),
         tokens_used=total_tokens_used,
+        prompt_tokens=_agent_logger.prompt_tokens_from_callbacks,
+        completion_tokens=_agent_logger.completion_tokens_from_callbacks,
+        openrouter_cost_usd=round(_agent_logger.openrouter_cost_usd_from_callbacks, 8),
     )
 
     # Update Run → completed
     run_record.status = "completed"
     run_record.completed_at = datetime.now(timezone.utc)
-    run_record.tokens_used = total_tokens_used
+    _apply_run_usage(total_tokens_used)
     await db.flush()
 
-    return {"reply": final_reply, "steps": steps, "run_id": run_id, "tokens_used": total_tokens_used}
+    return {
+        "reply": final_reply,
+        "steps": steps,
+        "run_id": run_id,
+        "tokens_used": total_tokens_used,
+        "usage": _usage_summary(),
+    }

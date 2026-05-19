@@ -79,13 +79,19 @@ class DockerBackend(SandboxBackendProtocol):
         if clean == "workspace" or clean.startswith("workspace/"):
             clean = clean[len("workspace"):].lstrip("/")
         resolved = (self._root / clean).resolve()
-        root_resolved = str(self._root.resolve())
-        if str(resolved).startswith(root_resolved):
+        root_resolved = self._root.resolve()
+        try:
+            resolved.relative_to(root_resolved)
             return resolved
+        except ValueError:
+            pass
         if self._shared_root is not None:
-            shared_resolved = str(self._shared_root.resolve())
-            if str(resolved).startswith(shared_resolved):
+            shared_resolved = self._shared_root.resolve()
+            try:
+                resolved.relative_to(shared_resolved)
                 return resolved
+            except ValueError:
+                pass
         raise ValueError(f"Path traversal blocked: {path!r}")
 
     def _rel(self, p: Path) -> str:
@@ -105,14 +111,14 @@ class DockerBackend(SandboxBackendProtocol):
     # ------------------------------------------------------------------
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
-        output = self._sandbox.bash(command)
+        output, exit_code = self._sandbox.bash_result(command, timeout=timeout)
         truncated = len(output) > 50_000
-        return ExecuteResponse(output=output[:50_000], exit_code=None, truncated=truncated)
+        return ExecuteResponse(output=output[:50_000], exit_code=exit_code, truncated=truncated)
 
     async def aexecute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
-        output = await self._sandbox.abash(command)
+        output, exit_code = await self._sandbox.abash_result(command, timeout=timeout)
         truncated = len(output) > 50_000
-        return ExecuteResponse(output=output[:50_000], exit_code=None, truncated=truncated)
+        return ExecuteResponse(output=output[:50_000], exit_code=exit_code, truncated=truncated)
 
     # ------------------------------------------------------------------
     # read
@@ -265,9 +271,10 @@ class DockerBackend(SandboxBackendProtocol):
         except ValueError as e:
             return GrepResult(error=str(e))
         try:
-            cmd = ["grep", "-r", "-n", "--text", pattern, str(base)]
+            cmd = ["grep", "-F", "-r", "-n", "--text"]
             if glob:
                 cmd += ["--include", glob]
+            cmd += ["--", pattern, str(base)]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             matches = []
             for line in result.stdout.strip().splitlines():

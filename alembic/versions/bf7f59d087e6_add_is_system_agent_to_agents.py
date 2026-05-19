@@ -20,19 +20,28 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _has_column(table_name: str, column_name: str) -> bool:
+    inspector = sa.inspect(op.get_bind())
+    if table_name not in inspector.get_table_names():
+        return False
+    return any(col["name"] == column_name for col in inspector.get_columns(table_name))
+
+
 def upgrade() -> None:
     # Tambah flag is_system_agent ke tabel agents
     # server_default='false' agar semua agent lama otomatis False (aman)
-    op.add_column(
-        'agents',
-        sa.Column(
-            'is_system_agent',
-            sa.Boolean(),
-            nullable=False,
-            server_default='false',
-        ),
-    )
+    if not _has_column('agents', 'is_system_agent') and not _has_column('agents', 'capabilities'):
+        op.add_column(
+            'agents',
+            sa.Column(
+                'is_system_agent',
+                sa.Boolean(),
+                nullable=False,
+                server_default='false',
+            ),
+        )
 
 
 def downgrade() -> None:
-    op.drop_column('agents', 'is_system_agent')
+    if _has_column('agents', 'is_system_agent'):
+        op.drop_column('agents', 'is_system_agent')
