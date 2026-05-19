@@ -1,0 +1,188 @@
+"""Tool and sub-agent setup for agent runs."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import get_settings
+from app.database import AsyncSessionLocal
+from app.core.domain.custom_tool_service import list_custom_tools
+from app.core.engine.subagent_builder import build_subagents
+from app.core.engine.tool_builder import (
+    _is_enabled,
+    build_builder_tools,
+    build_deployment_tools,
+    build_http_tools,
+    build_loaded_custom_tools,
+    build_memory_tools,
+    build_heartbeat_tools,
+    build_sandbox_binary_tool,
+    build_skill_tools,
+    build_tool_creator_tools,
+    build_wa_agent_manager_tools,
+    build_wa_notify_tool,
+    build_whatsapp_media_tools,
+)
+from app.core.infra.sandbox import DockerSandbox
+from app.models.agent import Agent as AgentModel
+from app.models.session import Session
+
+
+@dataclass
+class AgentToolSetup:
+    tools: list
+    active_groups: list[str]
+    saved_custom_tools: list
+    sandbox: DockerSandbox | None
+    subagent_list: list
+    sub_sandboxes: list[DockerSandbox]
+    memory_scope: str | None
+
+
+async def build_agent_tool_setup(
+    *,
+    agent_model: AgentModel,
+    session: Session,
+    tools_config: dict[str, Any],
+    raw_tools_config: Any,
+    db: AsyncSession,
+    log: Any,
+    escalation_user_jid: str | None,
+    sender_name: str | None,
+    user_message: str,
+) -> AgentToolSetup:
+    settings = get_settings()
+    agent_id = session.agent_id
+    tools: list = []
+    active_groups: list[str] = []
+    saved_custom_tools: list = []
+
+    deploy_enabled = _is_enabled(tools_config, "deploy", default=False)
+    sandbox: DockerSandbox | None = None
+    if _is_enabled(tools_config, "sandbox", default=False) or deploy_enabled:
+        sandbox = DockerSandbox(session.id)
+
+    if sandbox is not None:
+        tools.extend(build_sandbox_binary_tool(sandbox))
+        active_groups.append("sandbox")
+        tools.extend(build_deployment_tools(sandbox))
+        active_groups.append("deploy")
+
+    memory_scope = getattr(session, "external_user_id", None)
+    if _is_enabled(tools_config, "memory", default=True):
+        tools.extend(build_memory_tools(agent_id, AsyncSessionLocal, scope=memory_scope))
+        tools.extend(build_heartbeat_tools(agent_id, session.id, AsyncSessionLocal, scope=memory_scope))
+        active_groups.append("memory")
+
+    if _is_enabled(tools_config, "skills", default=True):
+        tools.extend(build_skill_tools(agent_id, AsyncSessionLocal))
+        active_groups.append("skills")
+
+    if _is_enabled(tools_config, "tool_creator", default=False):
+        if sandbox is None:
+            log.warning("agent_run.tool_creator_requires_sandbox")
+        else:
+            tools.extend(build_tool_creator_tools(agent_id, AsyncSessionLocal, sandbox))
+            saved_custom_tools = await list_custom_tools(agent_id, db)
+            tools.extend(build_loaded_custom_tools(saved_custom_tools, sandbox))
+            active_groups.append("tool_creator")
+
+    if _is_enabled(tools_config, "scheduler", default=False):
+        from app.core.tools.scheduler_tool import build_scheduler_tools
+
+        tools.extend(build_scheduler_tools(session.id, agent_id, AsyncSessionLocal))
+        active_groups.append("scheduler")
+
+    if _is_enabled(tools_config, "escalation", default=True):
+        from app.core.tools.escalation_tool import build_escalation_tools
+
+        raw_cfg = session.channel_config
+        channel_cfg = raw_cfg if isinstance(raw_cfg, dict) else {}
+        user_jid = (
+            escalation_user_jid
+            or channel_cfg.get("user_phone")
+            or getattr(session, "external_user_id", None)
+        )
+        tools.extend(
+            build_escalation_tools(
+                session.id,
+                agent_id,
+                AsyncSessionLocal,
+                user_jid=user_jid,
+                sender_name=sender_name,
+            )
+        )
+        active_groups.append("escalation")
+
+    if user_message.startswith("[OPERATOR] "):
+        from app.core.tools.operator_tools import build_operator_tools
+
+        tools.extend(build_operator_tools(agent_id=agent_id, db_factory=AsyncSessionLocal))
+        active_groups.append("operator")
+
+    if _is_enabled(tools_config, "http", default=False):
+        tools.extend(build_http_tools(tools_config))
+        active_groups.append("http")
+
+    if getattr(session, "channel_type", None) == "whatsapp":
+        tools.extend(build_wa_notify_tool(session))
+        active_groups.append("wa_notify")
+        if _is_enabled(tools_config, "whatsapp_media", default=True):
+            tools.extend(build_whatsapp_media_tools(session, sandbox))
+            active_groups.append("whatsapp_media")
+        if _is_enabled(tools_config, "wa_agent_manager", default=False):
+            tools.extend(build_wa_agent_manager_tools(session, db_factory=AsyncSessionLocal))
+            active_groups.append("wa_agent_manager")
+
+    capabilities = getattr(agent_model, "capabilities", []) or []
+    if "builder" in capabilities:
+        tools.extend(build_builder_tools(
+            db_factory=AsyncSessionLocal,
+            owner_phone=memory_scope,
+            self_agent_id=str(agent_id),
+            api_key=settings.api_key,
+        ))
+        active_groups.append("builder")
+
+    subagent_list: list = []
+    sub_sandboxes: list[DockerSandbox] = []
+    if _is_enabled(tools_config, "subagents", default=False):
+        sub_ids: list[str] = tools_config.get("subagents", {}).get("agent_ids", [])
+        sub_channel: dict = session.channel_config if isinstance(session.channel_config, dict) else {}
+        subagent_list, sub_sandboxes = await build_subagents(
+            sub_ids,
+            session.id,
+            db,
+            log,
+            wa_device_id=sub_channel.get("device_id", ""),
+            wa_target=sub_channel.get("user_phone", ""),
+        )
+        if subagent_list:
+            active_groups.append(f"subagents({len(subagent_list)})")
+            log.info("agent_run.subagents_ready", names=[s.get("name", "?") for s in subagent_list])
+            deploy_tool_names = {
+                "deploy_app", "stop_deployment",
+                "get_deployment_status", "get_deployment_logs",
+            }
+            before = len(tools)
+            tools = [tool for tool in tools if getattr(tool, "name", None) not in deploy_tool_names]
+            if len(tools) != before:
+                log.info(
+                    "agent_run.parent_deploy_tools_stripped",
+                    removed=before - len(tools),
+                    reason="subagents_active",
+                )
+                if "deploy" in active_groups:
+                    active_groups.remove("deploy")
+
+    return AgentToolSetup(
+        tools=tools,
+        active_groups=active_groups,
+        saved_custom_tools=saved_custom_tools,
+        sandbox=sandbox,
+        subagent_list=subagent_list,
+        sub_sandboxes=sub_sandboxes,
+        memory_scope=memory_scope,
+    )

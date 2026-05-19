@@ -55,7 +55,7 @@ ARTHUR_CONFIG = {
         "skills": True,
         "escalation": True,
         "scheduler": False,
-        "sandbox": False,
+        "sandbox": True,
         "tool_creator": False,
         "rag": False,
         "http": True,           # Arthur butuh http untuk call platform API

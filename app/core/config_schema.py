@@ -53,8 +53,10 @@ class ToolsConfig(BaseModel):
     # Sub-agents
     subagents: SubagentsConfig | bool = Field(default_factory=SubagentsConfig)
 
-    # MCP servers: dict of server_name → McpServerConfig
-    mcp: dict[str, McpServerConfig | dict[str, Any]] = Field(default_factory=dict)
+    # MCP config (supports both shapes):
+    # - Legacy: {"google_workspace": {"url": "..."}}
+    # - Current: {"enabled": true, "servers": {"google_workspace": {"url": "..."}}}
+    mcp: dict[str, Any] = Field(default_factory=dict)
 
     # Deployment tooling (system agents only)
     deploy: bool = False

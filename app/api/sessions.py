@@ -61,6 +61,25 @@ async def create_session(
     return SessionResponse.model_validate(session)
 
 
+@router.get("/{agent_id}/sessions", tags=["sessions"])
+async def list_sessions(
+    agent_id: uuid.UUID,
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(verify_api_key),
+) -> dict:
+    from sqlalchemy import desc
+    rows = (
+        await db.execute(
+            select(Session)
+            .where(Session.agent_id == agent_id)
+            .order_by(desc(Session.created_at))
+            .limit(limit)
+        )
+    ).scalars().all()
+    return {"items": [SessionResponse.model_validate(s) for s in rows]}
+
+
 @router.get("/{agent_id}/sessions/{session_id}", response_model=SessionResponse, tags=["sessions"])
 async def get_session(
     agent_id: uuid.UUID,

@@ -113,6 +113,20 @@ make wa-dev-build   # compile binary
 make wa-dev         # jalankan di port 8081 (baca .env otomatis)
 ```
 
+
+
+## Google MCP Runbook
+
+Untuk operasional QA/onboarding Google Workspace MCP (re-auth + live smoke test), lihat:
+- `docs/google-mcp-runbook.md`
+
+Command cepat:
+```bash
+make mcp-smoke-live-onboard
+make mcp-smoke-live-reauth
+make mcp-smoke-live
+```
+
 ---
 
 ## Menjalankan via Docker Compose

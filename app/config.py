@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     wa_service_url: str = "http://localhost:8080"
     wa_dev_service_url: str = "http://localhost:8081"
 
+    # Google Workspace MCP runtime routing
+    workspace_mcp_url: str = ""
+    workspace_mcp_runtime_url: str = ""
+    workspace_mcp_url_local: str = ""
+    workspace_mcp_prefer_local: str = "false"
+    workspace_mcp_token: str = ""
+
     # Logging
     log_level: str = "INFO"
 

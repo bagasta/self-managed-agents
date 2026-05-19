@@ -110,6 +110,8 @@ app.include_router(documents.router)
 app.include_router(models.router)
 app.include_router(runs.router)
 app.include_router(stream.router)
+from app.api import integrations
+app.include_router(integrations.router)
 
 app.mount("/ui", StaticFiles(directory="UI-DEV", html=True), name="ui")
 

@@ -811,13 +811,18 @@ def _detect_preset(goal_lower: str, features: list[str], channel: str) -> str:
                    "sdm", "human resource", "interview", "cv", "resume", "absensi",
                    "cuti", "gaji", "payroll", "training", "performa"}
 
+    import re
+
     goal_words = set(goal_lower.split())
-    # Also check substrings for multi-word keywords
+
     def has_keyword(kw_set: set) -> bool:
         for kw in kw_set:
-            if kw in goal_lower or kw in features:
+            # Word-boundary match to avoid "app" matching "whatsapp", "web" matching "webhook"
+            if re.search(r'\b' + re.escape(kw) + r'\b', goal_lower):
                 return True
-        return bool(goal_words & kw_set)
+            if kw in features:
+                return True
+        return False
 
     if has_keyword(coding_keywords):
         return "coding_deploy_agent"
@@ -2324,6 +2329,45 @@ def build_builder_tools(
             logger.error("builder_tools.list_my_agents.error", error=str(exc))
             return f"[error] Gagal mengambil daftar agent: {exc}"
 
+    async def generate_google_auth_link(
+        agent_id: str,
+        external_user_id: str,
+    ) -> str:
+        """
+        Generate link untuk user connect akun Google mereka ke agent tertentu.
+        Gunakan tool ini setiap kali user minta link auth Google, atau setelah
+        create/update agent yang punya MCP google_workspace.
+
+        Setelah dapat auth_url, kirimkan HANYA link-nya ke user — jangan tampilkan
+        endpoint atau parameter teknis apapun.
+
+        Args:
+            agent_id: ID agent yang akan dihubungkan ke Google
+            external_user_id: ID user saat ini (dari session yang sedang berjalan)
+        """
+        import os
+        import httpx
+
+        integration_url = os.environ.get(
+            "GOOGLE_INTEGRATION_SERVICE_URL", "http://localhost:8003"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    f"{integration_url}/v1/integrations/google/connect",
+                    json={"external_user_id": external_user_id, "agent_id": agent_id},
+                )
+            if resp.status_code == 200:
+                data = resp.json()
+                auth_url = data.get("auth_url") or data.get("authorization_url", "")
+                if auth_url:
+                    return json.dumps({"auth_url": auth_url}, ensure_ascii=False)
+                return f"[error] Response tidak mengandung auth_url: {resp.text[:200]}"
+            return f"[error] Gagal generate link ({resp.status_code}): {resp.text[:200]}"
+        except Exception as exc:
+            logger.error("builder_tools.generate_google_auth_link.error", error=str(exc))
+            return f"[error] {exc}"
+
     return [
         get_self_config,
         get_platform_capabilities,
@@ -2339,4 +2383,5 @@ def build_builder_tools(
         update_agent,
         get_agent_detail,
         list_my_agents,
+        generate_google_auth_link,
     ]

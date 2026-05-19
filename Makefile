@@ -1,22 +1,26 @@
-.PHONY: help install dev db-up migrate upgrade downgrade lint format wa wa-build dev-all wa-dev-build wa-dev seed-agents
+.PHONY: help install dev db-up migrate upgrade downgrade lint format wa wa-build dev-all wa-dev-build wa-dev seed-agents mcp-smoke-live mcp-smoke-live-strict mcp-smoke-live-reauth mcp-smoke-live-onboard
 
 help:
 	@echo "Managed Agent Platform"
 	@echo ""
-	@echo "  make install       Install Python dependencies"
-	@echo "  make dev           Run API in dev mode (uvicorn --reload)"
-	@echo "  make wa            Run WhatsApp Go microservice (port 8080)"
-	@echo "  make wa-build      Build wa-service binary"
-	@echo "  make wa-dev-build  Build wa-dev-service binary"
-	@echo "  make wa-dev        Run WA dev number service (port 8081) + dashboard"
-	@echo "  make dev-all       Run API + wa-service (2 terminals needed)"
-	@echo "  make db-up         Start PostgreSQL via docker-compose"
-	@echo "  make migrate       Generate migration  (MSG='description')"
-	@echo "  make upgrade       Apply all pending migrations"
-	@echo "  make downgrade     Rollback one migration"
-	@echo "  make lint          Run ruff linter"
-	@echo "  make format        Run ruff formatter"
-	@echo "  make seed-agents   Seed system sub-agents to DB"
+	@echo "  make install                Install Python dependencies"
+	@echo "  make dev                    Run API in dev mode (uvicorn --reload)"
+	@echo "  make wa                     Run WhatsApp Go microservice (port 8080)"
+	@echo "  make wa-build               Build wa-service binary"
+	@echo "  make wa-dev-build           Build wa-dev-service binary"
+	@echo "  make wa-dev                 Run WA dev number service (port 8081) + dashboard"
+	@echo "  make dev-all                Run API + wa-service (2 terminals needed)"
+	@echo "  make db-up                  Start PostgreSQL via docker-compose"
+	@echo "  make migrate                Generate migration  (MSG='description')"
+	@echo "  make upgrade                Apply all pending migrations"
+	@echo "  make downgrade              Rollback one migration"
+	@echo "  make lint                   Run ruff linter"
+	@echo "  make format                 Run ruff formatter"
+	@echo "  make seed-agents            Seed system sub-agents to DB"
+	@echo "  make mcp-smoke-live         Run safe live Google MCP smoke suite"
+	@echo "  make mcp-smoke-live-strict  Run live Google MCP smoke suite in strict mode"
+	@echo "  make mcp-smoke-live-reauth  Generate fresh Google re-auth link for smoke testing"
+	@echo "  make mcp-smoke-live-onboard Show tester steps for re-auth + smoke test"
 
 install:
 	pip install -r requirements.txt
@@ -65,3 +69,41 @@ format:
 
 seed-agents:
 	python -m scripts.seed_system_agents
+
+mcp-smoke-live:
+	RUN_GOOGLE_MCP_LIVE_SMOKE=true \
+	GOOGLE_MCP_INTEGRATION_URL=$${GOOGLE_MCP_INTEGRATION_URL:-http://localhost:8003} \
+	GOOGLE_MCP_URL=$${GOOGLE_MCP_URL:-http://localhost:8002/mcp} \
+	GOOGLE_MCP_EXTERNAL_USER_ID=$${GOOGLE_MCP_EXTERNAL_USER_ID:-62895619356936} \
+	GOOGLE_MCP_AGENT_ID=$${GOOGLE_MCP_AGENT_ID:-46ed1c39-c343-4d42-a5ff-2559f43efa0e} \
+	/home/bagas/managed-agents-project/.venv/bin/python -m pytest -q tests/test_google_mcp_live_smoke.py
+
+mcp-smoke-live-strict:
+	RUN_GOOGLE_MCP_LIVE_SMOKE=true \
+	GOOGLE_MCP_LIVE_SMOKE_STRICT=true \
+	GOOGLE_MCP_INTEGRATION_URL=$${GOOGLE_MCP_INTEGRATION_URL:-http://localhost:8003} \
+	GOOGLE_MCP_URL=$${GOOGLE_MCP_URL:-http://localhost:8002/mcp} \
+	GOOGLE_MCP_EXTERNAL_USER_ID=$${GOOGLE_MCP_EXTERNAL_USER_ID:-62895619356936} \
+	GOOGLE_MCP_AGENT_ID=$${GOOGLE_MCP_AGENT_ID:-46ed1c39-c343-4d42-a5ff-2559f43efa0e} \
+	/home/bagas/managed-agents-project/.venv/bin/python -m pytest -q tests/test_google_mcp_live_smoke.py
+
+
+mcp-smoke-live-reauth:
+	GOOGLE_MCP_INTEGRATION_URL=$${GOOGLE_MCP_INTEGRATION_URL:-http://localhost:8003} \
+	GOOGLE_MCP_EXTERNAL_USER_ID=$${GOOGLE_MCP_EXTERNAL_USER_ID:-62895619356936} \
+	GOOGLE_MCP_AGENT_ID=$${GOOGLE_MCP_AGENT_ID:-46ed1c39-c343-4d42-a5ff-2559f43efa0e} \
+	/home/bagas/managed-agents-project/.venv/bin/python scripts/generate_google_mcp_reauth_link.py
+
+
+mcp-smoke-live-onboard:
+	@echo "Google MCP smoke onboarding:"
+	@echo "1) Generate fresh link: make mcp-smoke-live-reauth"
+	@echo "2) Open auth_url and finish Google consent"
+	@echo "3) Run smoke suite: make mcp-smoke-live"
+	@echo "4) For stricter gating: make mcp-smoke-live-strict"
+	@echo ""
+	@echo "Optional env overrides:"
+	@echo "  GOOGLE_MCP_EXTERNAL_USER_ID=<user>"
+	@echo "  GOOGLE_MCP_AGENT_ID=<agent-id>"
+	@echo "  GOOGLE_MCP_INTEGRATION_URL=http://localhost:8003"
+	@echo "  GOOGLE_MCP_URL=http://localhost:8002/mcp"

@@ -259,7 +259,7 @@ async def wa_incoming(
     # Guard: jika from_ > 15 digit (LID) dan phone_from kosong, jangan pakai LID sebagai identifier.
     _raw_from = body.phone_from or body.from_
     _is_lid = len(_raw_from.lstrip("+")) >= 15
-    from_phone = body.phone_from if _is_lid and not body.phone_from else _raw_from
+    from_phone = body.phone_from if (_is_lid and body.phone_from) else _raw_from
     reply_target = body.chat_id or body.from_
 
     # 1.5. Cek deduplikasi WA (handling multiple webhook calls for the same message)

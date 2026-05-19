@@ -1,3 +1,82 @@
+# Recap: Google Forms Workflow Mode — Auto Isi Konten + Link Final
+
+**Tanggal**: 2026-05-18
+**Status**: ✅ Selesai
+
+## Masalah
+
+Agent sempat berhasil membuat Google Form, tapi berhenti di `title` saja tanpa melanjutkan isi deskripsi + pertanyaan, sehingga user tetap harus follow-up manual.
+
+## Akar Bug
+
+- Secara API, `create_form` memang hanya boleh `title` saat create.
+- Saat retry sudah ada, tapi sebelumnya ada alur yang membuat agent masih bisa berhenti terlalu cepat tanpa workflow lanjutan.
+
+## Solusi
+
+- Tambah deteksi intent pembuatan/pengisian Forms di `agent_runner`.
+- Aktifkan **FORMS WORKFLOW MODE** untuk request terkait Forms.
+- Workflow wajib:
+  1. `create_form` (title-only)
+  2. `batch_update_form` (isi `updateFormInfo` + `createItem` pertanyaan)
+  3. `get_form` (verifikasi + ambil link)
+  4. kirim URL final ke user
+- Jika user tidak memberi daftar pertanyaan, agent diminta membuat draft minimal 5 pertanyaan relevan.
+
+## File yang Diubah
+
+| File | Perubahan |
+|------|-----------|
+| `app/core/engine/agent_runner.py` | Tambah helper intent Forms + injeksi prompt `FORMS WORKFLOW MODE` |
+| `tests/test_google_slides_template_intent.py` | Tambah test deteksi intent Forms |
+
+## Command Verifikasi
+
+```bash
+PYTHONPATH=. .venv/bin/pytest -q tests/test_google_slides_template_intent.py tests/test_google_mcp_slides_errors.py tests/test_google_mcp_reply_overrides.py
+```
+
+Hasil: `11 passed`
+
+---
+
+# Recap: Google Slides Template Mode — Auto Rapi untuk Prompt Non-Teknis
+
+**Tanggal**: 2026-05-18
+**Status**: ✅ Selesai
+
+## Masalah
+
+Prompt seperti `rapihkan kontennya jadikan 3 slide` masih sering menghasilkan layout jelek karena agent fokus menulis teks, bukan menyusun slide dengan shape yang rapi.
+
+## Solusi
+
+- Tambah deteksi intent relayout Slides di `agent_runner`
+- Jika user minta rapihkan/restruktur slide, aktifkan **template mode** otomatis
+- Template mode memaksa agent:
+  - target jumlah slide dari prompt user (default `3`)
+  - buat slide dengan pola `createSlide -> createShape -> insertText`
+  - **tidak** menulis ke page/slide object ID
+  - pakai maksimal 2–3 shape utama per slide
+  - merangkum konten panjang menjadi poin inti agar tidak numpuk
+
+## File yang Diubah
+
+| File | Perubahan |
+|------|-----------|
+| `app/core/engine/agent_runner.py` | Tambah injeksi prompt `SLIDES TEMPLATE MODE` saat intent relayout terdeteksi |
+| `tests/test_google_slides_template_intent.py` | Tambah test untuk deteksi intent dan ekstraksi jumlah slide |
+
+## Command Verifikasi
+
+```bash
+PYTHONPATH=. .venv/bin/pytest -q tests/test_google_slides_template_intent.py tests/test_google_mcp_slides_errors.py tests/test_google_mcp_reply_overrides.py
+```
+
+Hasil: `7 passed`
+
+---
+
 # Recap: Escalation Routing Fix — Reply-Based Operator Routing + LID Display Fix
 
 **Tanggal**: 2026-05-12
@@ -1134,3 +1213,174 @@ Go wa-service → body.from_ = "+" + evt.Info.Sender.User  (LID number untuk aku
 Go wa-service → body.phone_from = hasil GetPNForLID (fallback ke from_ jika gagal)
 Python → from_phone = body.phone_from or body.from_
 ```
+## 2026-05-18 — Google MCP Re-auth Link Stabilization (WhatsApp-safe)
+
+### Problem
+- User menerima link reconnect Google yang sangat panjang dari endpoint `connect`.
+- Saat dibuka lewat WhatsApp, URL kadang rusak/terpotong sehingga flow berakhir ke `.../callback` tanpa query `code`.
+- Error yang muncul: `{"detail":[{"type":"missing","loc":["query","code"],"msg":"Field required"...}]}`.
+
+### Root Cause
+- URL OAuth `/authorize` berisi query sangat panjang (scope banyak) dan raw URL langsung dikirim ke user.
+- Beberapa client (terutama WhatsApp/open-in-browser) tidak stabil untuk URL sepanjang itu.
+
+### Changes Implemented
+- File diubah: `/home/bagas/google-workspace-mcp/app/api/integrations.py`.
+- Menambahkan mekanisme short-link server-side untuk auth URL:
+  - Menyimpan raw authorize URL ke memory store dengan TTL 15 menit.
+  - Menghasilkan token pendek (`t=<token>`).
+  - Mengembalikan `auth_url` pendek yang aman dikirim via chat.
+- Menambahkan endpoint redirect:
+  - `GET /v1/integrations/google/start?t=<token>`
+  - Validasi token + expiry, lalu `302 Redirect` ke raw authorize URL.
+- Endpoint `POST /v1/integrations/google/connect` sekarang return:
+  - `auth_url`: short URL (`/start?t=...`) untuk user klik.
+  - `raw_auth_url`: URL panjang asli (opsional untuk debug/log internal).
+
+### Expected Behavior After Patch
+- Agent tetap mengirim link reconnect, tapi link jadi pendek dan stabil.
+- User klik short-link, server yang mengarahkan ke URL authorize penuh.
+- Risiko URL rusak/mangled di WhatsApp berkurang drastis.
+
+### Operational Notes
+- Karena short-link disimpan in-memory, token hilang saat service restart dan akan expired otomatis setelah 15 menit.
+- Jika link expired, user tinggal request reconnect lagi (agent akan generate link baru).
+
+### Follow-up: OAuth invalid_scope fix
+- Dari log MCP `8002` dan integration `8003`, auth flow sempat gagal dengan callback:
+  - `error=invalid_scope`
+  - `error_description=Client was not registered with scope profile`
+- Root cause: request scope mengandung scope pendek `profile`/`email` yang tidak diterima oleh authorization server MCP untuk client yang didaftarkan.
+- Perbaikan:
+  - Menghapus scope pendek `profile` dan `email` dari request OAuth.
+  - Tetap memakai `openid` + scope URL Google yang dibutuhkan (`userinfo.email`, `userinfo.profile`, dst).
+  - Memperbaiki endpoint callback agar bisa menangani `error` dan `error_description` secara graceful, tidak lagi menghasilkan `422` karena `code` kosong.
+
+### Follow-up 2: invalid_scope (chat.memberships) remediation
+- Gejala terbaru: callback kembali dengan `error=invalid_scope` dan pesan seperti:
+  - `Client was not registered with scope https://www.googleapis.com/auth/chat.memberships`
+- Akar masalah: dynamic client registration di authorization server belum menyimpan deklarasi scope selengkap scope yang diminta saat `/authorize`.
+- Perbaikan di `/home/bagas/google-workspace-mcp/app/api/integrations.py`:
+  - Menambahkan field `scope` saat `POST /register` pada:
+    - `_get_or_register_client()` (registrasi awal)
+    - `_register_new_client()` (forced re-register)
+  - Memperluas preflight authorize check agar jika terdeteksi `invalid_scope` (selain `unregistered`) maka otomatis trigger re-register client lalu regenerate `auth_url`.
+- Dampak:
+  - Link reconnect baru akan mengarah ke client OAuth yang sudah terdaftar dengan scope yang dibutuhkan tools.
+
+---
+
+## 2026-05-18 — Google MCP Hardening + Live Smoke Suite (Final)
+
+Runbook operasional tim: `docs/google-mcp-runbook.md`
+
+### Ringkasan Hasil
+- Integrasi Google MCP sudah distabilkan untuk flow OAuth/re-auth dan validasi tool live.
+- Akses edit layanan utama terverifikasi live (safe/non-destruktif):
+  - Sheets: create + write
+  - Slides: create + batch update
+  - Docs: create + modify text
+  - Drive: create + update metadata
+  - Calendar: create + update event
+  - Gmail: draft (tanpa kirim)
+  - Tasks: create list + create task
+  - Forms: create + batch update
+  - Contacts: create + update
+- Guard anti-halu sudah ditambahkan: saat MCP timeout/unavailable, agent tidak boleh claim "lagi proses".
+- Guard auth/scope ditingkatkan: jika error auth/scope muncul dari hasil tool, agent otomatis arahkan re-auth.
+
+### Perubahan Kode Penting
+1. `/home/bagas/google-workspace-mcp/app/api/integrations.py`
+   - Migrasi flow ke OAuth Google langsung (external provider mode) + refresh token Google.
+   - Perluasan scope Google (`mail.google.com`, calendar events/read, drive.file, docs/sheets readonly, dll).
+   - Short-link reconnect (`/v1/integrations/google/start?t=...`) agar aman dipakai via WhatsApp.
+
+2. `/home/bagas/managed-agents-project/app/core/tools/mcp_tool.py`
+   - Runtime URL MCP Google tidak dipaksa localhost secara default.
+   - Local override hanya aktif jika `WORKSPACE_MCP_PREFER_LOCAL=true`.
+
+3. `/home/bagas/managed-agents-project/app/core/engine/agent_runner.py`
+   - Override reply jika MCP unavailable agar tetap jujur (tidak claim progress palsu).
+   - Deteksi auth/scope error diperluas (termasuk dari hasil step tool Google, bukan hanya connection error).
+   - Tambah system notice schema usage untuk mengurangi argumen tool yang salah (`range_name`, dst).
+
+4. Test suite baru:
+   - `/home/bagas/managed-agents-project/tests/test_google_mcp_reply_overrides.py`
+   - `/home/bagas/managed-agents-project/tests/test_google_mcp_live_smoke.py`
+
+5. Helper script baru:
+   - `/home/bagas/managed-agents-project/scripts/generate_google_mcp_reauth_link.py`
+
+6. Makefile targets baru:
+   - `mcp-smoke-live`
+   - `mcp-smoke-live-strict`
+   - `mcp-smoke-live-reauth`
+   - `mcp-smoke-live-onboard`
+
+### Command Operasional (Untuk Tim)
+
+#### 1) Onboarding tester
+```bash
+make mcp-smoke-live-onboard
+```
+
+#### 2) Generate link re-auth fresh
+```bash
+make mcp-smoke-live-reauth
+```
+
+#### 3) Jalankan live smoke suite (safe)
+```bash
+make mcp-smoke-live
+```
+
+#### 4) Jalankan live smoke suite strict
+```bash
+make mcp-smoke-live-strict
+```
+
+#### 5) Jalankan pytest langsung (tanpa Make)
+```bash
+RUN_GOOGLE_MCP_LIVE_SMOKE=true \
+GOOGLE_MCP_INTEGRATION_URL=http://localhost:8003 \
+GOOGLE_MCP_URL=http://localhost:8002/mcp \
+GOOGLE_MCP_EXTERNAL_USER_ID=62895619356936 \
+GOOGLE_MCP_AGENT_ID=46ed1c39-c343-4d42-a5ff-2559f43efa0e \
+/home/bagas/managed-agents-project/.venv/bin/python -m pytest -q tests/test_google_mcp_live_smoke.py
+```
+
+#### 6) Mode strict via pytest langsung
+```bash
+RUN_GOOGLE_MCP_LIVE_SMOKE=true \
+GOOGLE_MCP_LIVE_SMOKE_STRICT=true \
+GOOGLE_MCP_INTEGRATION_URL=http://localhost:8003 \
+GOOGLE_MCP_URL=http://localhost:8002/mcp \
+GOOGLE_MCP_EXTERNAL_USER_ID=62895619356936 \
+GOOGLE_MCP_AGENT_ID=46ed1c39-c343-4d42-a5ff-2559f43efa0e \
+/home/bagas/managed-agents-project/.venv/bin/python -m pytest -q tests/test_google_mcp_live_smoke.py
+```
+
+#### 7) Override target user/agent saat test
+```bash
+GOOGLE_MCP_EXTERNAL_USER_ID=<external_user_id> \
+GOOGLE_MCP_AGENT_ID=<agent_id> \
+make mcp-smoke-live
+```
+
+#### 8) Rebuild service terkait (jika ada perubahan Go/Python service)
+```bash
+make wa-dev-build
+make wa-build
+```
+
+> Catatan: service Python (API 8000 / integration 8003) dan MCP (8002) tetap perlu restart sesuai cara deploy masing-masing environment (systemd/docker/supervisor/screen).
+
+### Known Behavior / Non-Issue
+- `create_form` gagal jika payload create mengandung field yang tidak diizinkan saat create (mis. description). Gunakan `title` saja saat create, lalu ubah via `batch_update_form`.
+- `batch_update_form` harus pakai **Form ID edit** (mis. `1Wu...`), bukan responder ID (`1FA...`).
+- `manage_event` update yang ubah waktu perlu menyertakan `start_time` dan `end_time`.
+- `modify_sheet_values` wajib pakai `range_name` (bukan `range`).
+
+### Bukti Validasi Terakhir
+- Live suite terakhir: `9 passed` pada `tests/test_google_mcp_live_smoke.py`.
+- Regression guard suite: lulus (`test_google_mcp_reply_overrides.py` + `test_mcp_fallbacks.py`).

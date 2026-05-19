@@ -72,6 +72,7 @@
     <div class="nav-group">
       <div class="nav-group-label">Platform</div>
       <div class="nav-item" onclick="nav('arthur')" style="color:var(--accent);font-weight:600"><span class="icon">🏗️</span> Arthur Builder</div>
+      <div class="nav-item" onclick="nav('integrations')"><span class="icon">🔌</span> Google MCP</div>
     </div>
   </nav>
 
@@ -122,7 +123,7 @@
             <div class="form-group full">
               <label>Tools Config (JSON)</label>
               <textarea id="a-tools" rows="6"></textarea>
-              <div class="tools-config-hint">Default ON: memory, skills, escalation | Default OFF: sandbox, deploy, tool_creator, scheduler, rag, http, wa_agent_manager, subagents | ⚠️ mcp harus berupa object {} bukan false — contoh: "mcp": {} atau "mcp": {"server1": {"url": "..."}} | 🚀 deploy: true (+ sandbox: true wajib) → deploy app ke public URL via Cloudflare tunnel — URL aktif 1 jam lalu mati otomatis | subagents: { "enabled": true } → auto-load system sub-agents | subagents: { "enabled": true, "agent_ids": ["uuid"] } → load dari DB</div>
+              <div class="tools-config-hint">Default ON: memory, skills, escalation | Default OFF: sandbox, deploy, tool_creator, scheduler, rag, http, wa_agent_manager, subagents | ⚠️ mcp harus berupa object {} bukan false — supported: legacy `"mcp": {"google_workspace": {"url": "..."}}` atau new `"mcp": {"enabled": true, "servers": {"google_workspace": {"url": "..."}}}` | 🚀 deploy: true (+ sandbox: true wajib) → deploy app ke public URL via Cloudflare tunnel — URL aktif 1 jam lalu mati otomatis | subagents: { "enabled": true } → auto-load system sub-agents | subagents: { "enabled": true, "agent_ids": ["uuid"] } → load dari DB</div>
             </div>
             <div class="form-group full">
               <label>Escalation Config (JSON)</label>
@@ -171,12 +172,12 @@
             <select id="sess-agent-sel" style="flex:1" onchange="loadSessions()">
               <option value="">— pilih agent —</option>
             </select>
-            <button class="btn btn-ghost btn-sm" onclick="populateAgentSelects()">↻</button>
+            <button class="btn btn-ghost btn-sm" onclick="loadSessions()">↻ Refresh</button>
           </div>
         </div>
 
         <div class="card">
-          <div class="card-title">📋 Sessions</div>
+          <div class="card-title">📋 Sessions <span class="text-muted" style="font-size:10px;font-weight:400">· klik 💬 untuk langsung buka di Chat</span></div>
           <div id="sessions-table"><div class="empty-state"><div class="icon">💬</div>Pilih agent untuk load sessions</div></div>
         </div>
 
@@ -718,6 +719,58 @@
           <div id="arthur-sim-result" class="mt-8"></div>
         </div>
 
+      </div>
+
+      <!-- ═══════════════════════════ GOOGLE INTEGRATIONS ═══════════════════════════ -->
+      <div class="section" id="sec-integrations">
+        <div class="section-title">🔌 Google MCP — Integrations</div>
+        <p class="text-muted" style="margin-bottom:16px">
+          Kelola koneksi akun Google per user. Token disimpan di integration service (port 8003) dan diinject otomatis saat agent run.
+        </p>
+
+        <div class="card">
+          <div class="card-title">⚙️ Integration Service URL</div>
+          <div class="flex">
+            <input id="int-service-url" type="text" value="http://localhost:8003" style="flex:1">
+            <button class="btn btn-ghost btn-sm" onclick="loadGoogleStatus()">↻ Refresh Status</button>
+          </div>
+        </div>
+
+        <div class="card-grid" style="margin-bottom:16px">
+          <div class="card" style="margin:0">
+            <div class="card-title">➕ Hubungkan Akun Google</div>
+            <div class="form-group">
+              <label>External User ID <span class="text-muted">(nomor WA / user ID)</span></label>
+              <input id="google-user-id" type="text" placeholder="151414827434073">
+            </div>
+            <div class="form-group mt-8">
+              <label>Agent (opsional)</label>
+              <select id="google-agent-sel">
+                <option value="">— semua agent —</option>
+              </select>
+            </div>
+            <div class="btn-group">
+              <button class="btn btn-primary" onclick="triggerGoogleConnect()">🔗 Generate Auth URL</button>
+            </div>
+            <div id="google-connect-result" class="mt-8"></div>
+          </div>
+
+          <div class="card" style="margin:0">
+            <div class="card-title">📊 Connected Accounts</div>
+            <div id="google-status-list"><div class="empty-state text-muted">Klik Refresh Status</div></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">ℹ️ Cara Kerja</div>
+          <div class="text-muted" style="line-height:1.8; font-size:12px">
+            1️⃣ Masukkan <strong>External User ID</strong> user yang mau connect Google<br>
+            2️⃣ Klik <em>Generate Auth URL</em> → buka link → pilih akun Google<br>
+            3️⃣ Setelah authorize, token tersimpan di integration service<br>
+            4️⃣ Saat agent run untuk user tersebut, token diinject otomatis ke MCP<br>
+            5️⃣ Agent bisa pakai <code>search_gmail_messages</code>, <code>get_calendar_events</code>, dll
+          </div>
+        </div>
       </div>
 
     </div><!-- /content -->
