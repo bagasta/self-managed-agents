@@ -13,7 +13,6 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from langchain_core.messages import HumanMessage
 from langchain_core.tools import StructuredTool, tool
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, ConfigDict, Field
@@ -176,6 +175,26 @@ def _is_google_mcp_tool_name(tool_name: str) -> bool:
     return any(marker in name for marker in _GOOGLE_MCP_TOOL_NAME_MARKERS)
 
 
+def _google_integration_runtime_url(public_or_configured_url: str) -> str:
+    """Prefer local integration API for backend calls in local-dev mode."""
+    configured = str(public_or_configured_url or "").rstrip("/")
+    try:
+        from app.config import get_settings
+
+        settings = get_settings()
+        prefer_local = str(getattr(settings, "workspace_mcp_prefer_local", "")).lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    except Exception:
+        prefer_local = False
+    if prefer_local and "devtunnels.ms" in configured:
+        return "http://localhost:8003"
+    return configured
+
+
 def _extract_google_mcp_step_error(steps: list[dict[str, Any]]) -> str | None:
     for step in steps:
         tool_name = str((step or {}).get("tool", "")).lower()
@@ -264,6 +283,89 @@ def _looks_like_google_auth_recovery_reply(reply_text: str) -> bool:
     )
 
 
+def _looks_like_google_auth_confirmation(message: str) -> bool:
+    """Return True when the user likely confirms completing Google OAuth."""
+    if not message:
+        return False
+    t = re.sub(r"\s+", " ", message.strip().lower())
+    if not t:
+        return False
+    exact_markers = {
+        "sudah",
+        "udah",
+        "done",
+        "selesai",
+        "ok",
+        "oke",
+        "ok sudah",
+        "oke sudah",
+        "sudah selesai",
+        "udah selesai",
+        "sudah login",
+        "udah login",
+        "sudah reconnect",
+        "udah reconnect",
+        "sudah connect",
+        "udah connect",
+        "sudah saya connect",
+        "sudah saya reconnect",
+        "sudah dihubungkan",
+        "sudah tersambung",
+        "connected",
+        "reconnected",
+    }
+    if t in exact_markers:
+        return True
+    confirmation_markers = (
+        "sudah saya klik",
+        "udah saya klik",
+        "sudah authorize",
+        "sudah otorisasi",
+        "sudah autentikasi",
+        "sudah otentikasi",
+        "sudah kasih izin",
+        "sudah beri izin",
+        "sudah login google",
+        "google sudah connect",
+        "google sudah tersambung",
+    )
+    return any(marker in t for marker in confirmation_markers)
+
+
+def is_google_auth_recovery_followup(message: str, history_rows: list[Any], *, max_messages: int = 8) -> bool:
+    """Detect a short OAuth completion follow-up after a Google auth blocker.
+
+    The current user message often only says "sudah", so keyword intent detection
+    cannot see the original Google Workspace request. We intentionally tie this
+    to recent assistant history to avoid treating unrelated "sudah" replies as
+    Google MCP intent.
+    """
+    if not _looks_like_google_auth_confirmation(message):
+        return False
+    recent_rows = list(history_rows or [])[-max_messages:]
+    for row in reversed(recent_rows):
+        role = getattr(row, "role", None)
+        content = getattr(row, "content", None)
+        if role in {"assistant", "agent"} and _looks_like_google_auth_recovery_reply(str(content or "")):
+            return True
+    return False
+
+
+def find_last_google_workspace_user_request(history_rows: list[Any]) -> str | None:
+    """Return the most recent user request that needs Google Workspace MCP."""
+    for row in reversed(list(history_rows or [])):
+        if getattr(row, "role", None) != "user":
+            continue
+        content = str(getattr(row, "content", None) or "").strip()
+        if not content:
+            continue
+        if _looks_like_google_auth_confirmation(content):
+            continue
+        if _is_google_mcp_intent(content):
+            return content
+    return None
+
+
 def _ensure_google_auth_link_in_reply(reply_text: str, auth_url: str | None) -> str:
     if not auth_url:
         return reply_text
@@ -314,7 +416,10 @@ def _contains_google_workspace_artifact(text: str) -> bool:
 def _extract_requested_slide_count(message: str) -> int | None:
     if not message:
         return None
-    m = re.search(r"\b(\d{1,2})\s*slide\b", message.lower())
+    m = re.search(
+        r"\b(\d{1,2})\s*(?:slide|slides|halaman|page|pages|lembar)\b",
+        message.lower(),
+    )
     if not m:
         return None
     try:
@@ -324,6 +429,20 @@ def _extract_requested_slide_count(message: str) -> int | None:
     if 1 <= n <= 12:
         return n
     return None
+
+
+def _extract_presentation_total_slides(text: str) -> int | None:
+    if not text:
+        return None
+    m = re.search(r"Total Slides:\s*(\d{1,3})", text, re.IGNORECASE)
+    if not m:
+        m = re.search(r"Slides:\s*(\d{1,3})\s*slide", text, re.IGNORECASE)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except Exception:
+        return None
 
 
 def _is_google_slides_relayout_intent(message: str) -> bool:
@@ -1042,9 +1161,14 @@ def _needs_google_slides_followup(user_message: str, steps: list[dict[str, Any]]
     saw_create_presentation = False
     saw_content_update = False
     presentation_id: str | None = None
+    requested_slides = _extract_requested_slide_count(user_message)
+    max_total_slides: int | None = None
     for step in steps or []:
         tool_name = str((step or {}).get("tool", "") or "").lower()
         result = str((step or {}).get("result", "") or "")
+        total_slides = _extract_presentation_total_slides(result)
+        if total_slides is not None:
+            max_total_slides = max(max_total_slides or 0, total_slides)
         if tool_name == "create_presentation":
             saw_create_presentation = True
             presentation_id = presentation_id or _extract_presentation_id_from_text(result)
@@ -1057,7 +1181,13 @@ def _needs_google_slides_followup(user_message: str, steps: list[dict[str, Any]]
             if _presentation_result_has_non_empty_text(result):
                 saw_content_update = True
 
-    return (saw_create_presentation and not saw_content_update), presentation_id
+    needs_more_slides = (
+        saw_create_presentation
+        and bool(requested_slides)
+        and max_total_slides is not None
+        and max_total_slides < int(requested_slides or 0)
+    )
+    return (saw_create_presentation and (not saw_content_update or needs_more_slides)), presentation_id
 
 
 def _build_google_mcp_validation_reply(error_text: str) -> str:
@@ -1448,6 +1578,14 @@ def _has_google_mcp_step(steps: list[dict[str, Any]]) -> bool:
             return True
         result = str((step or {}).get("result", "") or "")
         if tool_name == "task" and _contains_google_workspace_artifact(result):
+            return True
+    return False
+
+
+def _has_google_workspace_artifact_step(steps: list[dict[str, Any]]) -> bool:
+    for step in steps:
+        result = str((step or {}).get("result", "") or "")
+        if _contains_google_workspace_artifact(result):
             return True
     return False
 
@@ -2036,7 +2174,9 @@ async def prepare_google_mcp_runtime(
 
     from app.config import get_settings
 
-    integration_url = str(get_settings().google_integration_service_url).rstrip("/")
+    integration_url = _google_integration_runtime_url(
+        str(get_settings().google_integration_service_url).rstrip("/")
+    )
     channel_cfg = session.channel_config if isinstance(session.channel_config, dict) else {}
     candidate_ids = _candidate_external_user_ids(
         memory_scope or getattr(session, "external_user_id", None) or fallback_external_user_id,
@@ -2122,6 +2262,8 @@ async def prepare_google_mcp_runtime(
             if jwt:
                 workspace_server.setdefault("headers", {})["Authorization"] = f"Bearer {jwt}"
                 connected_user_id = jwt_external_user_id
+                auth_url = None
+                preflight_error = None
                 log.info("agent_run.google_mcp_token_injected", external_user_id=jwt_external_user_id)
             elif candidate_ids:
                 log.info("agent_run.google_mcp_not_connected", external_user_ids=candidate_ids)
@@ -2208,10 +2350,14 @@ async def apply_google_mcp_reply_overrides(
     google_mcp_err = mcp_errors.get("google_workspace") if isinstance(mcp_errors, dict) else None
     google_mcp_step_err = _extract_google_mcp_step_error(steps)
     google_mcp_auth_err = google_mcp_err or google_mcp_step_err
+    google_mcp_has_artifact = _contains_google_workspace_artifact(
+        final_reply
+    ) or _has_google_workspace_artifact_step(steps)
     must_override_google_auth = (
         bool(google_mcp_auth_err)
         and _is_google_mcp_intent(user_message)
         and _is_google_auth_or_scope_error(str(google_mcp_auth_err))
+        and not google_mcp_has_artifact
     )
 
     if must_override_google_auth:
@@ -2235,6 +2381,7 @@ async def apply_google_mcp_reply_overrides(
         bool(google_mcp_err)
         and not must_override_google_auth
         and _is_google_mcp_intent(user_message)
+        and not google_mcp_has_artifact
         and (not final_reply or _looks_like_progress_claim(final_reply))
     )
     if must_override_google_unavailable:
@@ -2294,39 +2441,20 @@ async def _build_google_mcp_auth_failure_reply(
     error_text: str,
     auth_url: str | None,
 ) -> str:
-    guidance = (
-        "You are assisting a user whose Google Workspace MCP access failed. "
-        "Reply in the same language style as the user's last message. "
-        "Be transparent that no Google action was executed yet. "
-        "Ask the user to reconnect Google, then retry the original request. "
-        "Do not include any URL in your reply. "
-    )
-    if not auth_url:
-        guidance += "If no link is available, ask user to reconnect from integration settings."
-
-    prompt = (
-        f"User message: {user_message}\n"
-        f"MCP error: {error_text}\n"
-        f"Auth URL: {auth_url or 'N/A'}\n"
-        "Write one concise user-facing reply."
-    )
-    try:
-        resp = await llm.ainvoke([HumanMessage(content=guidance + "\n\n" + prompt)])
-        text = getattr(resp, "content", "")
-        if isinstance(text, str) and text.strip():
-            base_reply = text.strip()
-            if auth_url:
-                return f"{base_reply}\n\nReconnect link:\n{auth_url}"
-            return base_reply
-    except Exception:
-        pass
     if auth_url:
         return (
-            "Google Workspace auth failed, so I could not execute your request yet. "
-            "Please reconnect first, then retry.\n\n"
-            f"Reconnect link:\n{auth_url}"
+            "Google Workspace belum terhubung atau tokennya sudah expired, "
+            "jadi saya belum menjalankan request ini.\n\n"
+            "Klik link ini untuk reconnect Google:\n"
+            f"{auth_url}\n\n"
+            "Setelah selesai, balas `sudah` supaya saya lanjutkan."
         )
-    return "Google Workspace auth failed. Please reconnect Google first, then retry."
+    return (
+        "Google Workspace belum terhubung atau tokennya sudah expired, "
+        "jadi saya belum menjalankan request ini. Saya belum berhasil membuat "
+        "link reconnect otomatis; silakan reconnect Google dari pengaturan integrasi, "
+        "lalu coba lagi."
+    )
 
 
 def _build_google_mcp_unavailable_reply(error_text: str) -> str:

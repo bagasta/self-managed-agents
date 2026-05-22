@@ -130,6 +130,18 @@ Keputusan yang perlu diimplementasikan:
 - Research/heavy multi-step flow:
   - subagent tetap dipakai untuk context quarantine jika memang berguna
 
+Catatan implementasi awal:
+- Sudah ada runtime tool-call guard untuk agent `operational` yang menolak `task`/sandbox/file tools ketika payload tool call jelas mencoba menjalankan aksi Google Workspace.
+- Guard ini tidak dipasang untuk policy `builder`, sehingga Arthur tetap builder-first.
+- Keyword pre-routing lama tidak lagi menjadi default. Branch parent-only lama hanya aktif jika config eksplisit `mcp.google_workspace_parent_only = true`.
+
+Audit hasil implementasi:
+- `app/core/engine/agent_policy.py`: source of truth policy class `builder` vs `operational`; `_is_google_mcp_intent(...)` hanya dipakai untuk legacy compatibility switch.
+- `app/core/engine/agent_tool_setup.py`: tidak lagi otomatis mematikan sandbox/subagent berdasarkan keyword Google Workspace kecuali legacy switch aktif.
+- `app/core/engine/agent_runner.py`: memasang `ExternalServiceFallbackGuardMiddleware` untuk agent `operational` saat Google Workspace MCP tersedia; guard memblokir fallback ke `task`, sandbox, dan file tools untuk aksi Google Workspace.
+- `app/core/engine/google_mcp_support.py`: heuristic masih dipakai untuk prompt notice, auth/error reply override, dan truthful not-executed guard.
+- `app/core/engine/prompt_builder.py`: MCP tool priority tetap semantic guidance, bukan hard routing.
+
 ## Phase 5 — Evaluasi Interpreter / Programmatic Tool Calling
 
 - Pelajari apakah workflow Google Workspace tertentu lebih cocok dipindahkan ke interpreter/PTC dibanding prompt biasa.
@@ -142,6 +154,11 @@ Keputusan yang perlu diimplementasikan:
 
 Deliverable fase ini:
 - keputusan tertulis: flow mana tetap prompt-based, flow mana pindah ke interpreter/PTC
+
+Keputusan awal:
+- Slides/Sheets tetap prompt-based dengan MCP tool priority dan runtime fallback guard.
+- Interpreter/PTC belum dipindahkan sekarang karena belum ada bukti live trace baru bahwa urutan deterministik/retry terstruktur masih gagal setelah semantic MCP-first guard.
+- Kandidat PTC tetap dicatat untuk fase berikutnya jika live logs menunjukkan error berulang pada `create_presentation -> batch_update_presentation`, `create_spreadsheet -> modify_sheet_values`, atau auth helper retry.
 
 ## Phase 6 — Lindungi Arthur
 
@@ -200,16 +217,22 @@ Minimal test coverage:
 
 ## Checklist Eksekusi
 
-- [ ] Petakan seluruh keyword/intent branch MCP yang aktif sekarang
-- [ ] Definisikan policy class `builder` vs `operational`
-- [ ] Tambahkan guard agar Arthur tidak ikut terpengaruh runtime global
-- [ ] Refactor Google Workspace ke semantic MCP-first
-- [ ] Pastikan sandbox tidak jadi fallback palsu untuk external services
-- [ ] Pastikan subagent tidak mengambil jalur MCP external service
-- [ ] Putuskan apakah Slides/Sheets workflow perlu interpreter/PTC
-- [ ] Tambah regression test untuk agent operasional
-- [ ] Tambah regression test khusus Arthur
+- [x] Petakan seluruh keyword/intent branch MCP yang aktif sekarang
+- [x] Definisikan policy class `builder` vs `operational`
+- [x] Tambahkan guard agar Arthur tidak ikut terpengaruh runtime global
+- [x] Refactor Google Workspace ke semantic MCP-first
+- [x] Pastikan sandbox tidak jadi fallback palsu untuk external services
+- [x] Pastikan subagent tidak mengambil jalur MCP external service
+- [x] Putuskan apakah Slides/Sheets workflow perlu interpreter/PTC
+- [x] Tambah regression test untuk agent operasional
+- [x] Tambah regression test khusus Arthur
 - [ ] Verifikasi live behavior setelah deploy
+
+Status verifikasi lokal:
+- `PYTHONPATH=. .venv/bin/pytest -q tests/test_google_mcp_subagent_routing.py tests/test_google_mcp_reply_overrides.py tests/test_mcp_tool_priority.py tests/test_builder_tools.py tests/test_agent_builder_phase4.py::TestAgentRunnerIntegration`
+- Hasil: 68 passed.
+- `PYTHONPATH=. .venv/bin/python -m py_compile app/core/engine/agent_policy.py app/core/engine/agent_runner.py app/core/engine/agent_tool_setup.py`
+- Hasil: passed.
 
 ## Success Criteria
 

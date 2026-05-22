@@ -9,9 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.database import AsyncSessionLocal
 from app.core.domain.custom_tool_service import list_custom_tools
-from app.core.engine.google_mcp_support import (
-    _is_google_mcp_intent,
-    is_google_workspace_mcp_configured,
+from app.core.engine.agent_policy import (
+    build_agent_runtime_policy,
+    should_use_google_workspace_parent_only,
 )
 from app.core.engine.subagent_builder import build_subagents
 from app.core.engine.tool_builder import (
@@ -63,10 +63,13 @@ async def build_agent_tool_setup(
     active_groups: list[str] = []
     saved_custom_tools: list = []
 
-    google_mcp_parent_only = (
-        _is_google_mcp_intent(user_message)
-        and is_google_workspace_mcp_configured(tools_config)
+    policy = build_agent_runtime_policy(agent_model, tools_config)
+    google_mcp_parent_only = should_use_google_workspace_parent_only(
+        policy=policy,
+        user_message=user_message,
+        tools_config=tools_config,
     )
+    log.info("agent_run.policy_selected", policy_class=policy.policy_class)
     deploy_enabled = _is_enabled(tools_config, "deploy", default=False)
     sandbox: DockerSandbox | None = None
     sandbox_requested = _is_enabled(tools_config, "sandbox", default=False) or deploy_enabled

@@ -18,6 +18,8 @@ def test_slides_relayout_intent_detected_indonesian():
 
 def test_extract_requested_slide_count_from_message():
     assert _extract_requested_slide_count("rapihkan kontennya jadikan 3 slide") == 3
+    assert _extract_requested_slide_count("buatkan Google Slides 2 halaman") == 2
+    assert _extract_requested_slide_count("make a 4 page presentation") == 4
 
 
 def test_slides_authoring_intent_detected_for_new_deck():
@@ -71,6 +73,45 @@ def test_slides_followup_not_needed_after_batch_update() -> None:
         "tolong buatkan slide google slides tentang laporan kas", steps
     )
     assert needed is False
+    assert presentation_id == "pres123abc"
+
+
+def test_slides_followup_needed_when_requested_slide_count_not_reached() -> None:
+    steps = [
+        {
+            "tool": "create_presentation",
+            "result": (
+                "Presentation Created Successfully for user@example.com:\n"
+                "- Presentation ID: pres123abc\n"
+                "- Slides: 1 slide(s) created"
+            ),
+        },
+        {
+            "tool": "batch_update_presentation",
+            "args": {
+                "requests": [
+                    {"createShape": {"objectId": "slide1_title"}},
+                    {"insertText": {"objectId": "slide1_title", "text": "Olahraga Pagi"}},
+                ]
+            },
+            "result": "- Presentation ID: pres123abc\n- Requests Applied: 2",
+        },
+        {
+            "tool": "get_presentation",
+            "result": (
+                "Presentation Details for user@example.com:\n"
+                "- Presentation ID: pres123abc\n"
+                "- Total Slides: 1\n"
+                "Slides Breakdown:\n"
+                "  Slide 1: ID p, 2 element(s), text:\n"
+                "    > Olahraga Pagi"
+            ),
+        },
+    ]
+    needed, presentation_id = _needs_google_slides_followup(
+        "buatkan Google Slides 2 halaman tentang olahraga pagi", steps
+    )
+    assert needed is True
     assert presentation_id == "pres123abc"
 
 

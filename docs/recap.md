@@ -1,5 +1,175 @@
 # Recap: Deep Agent SaaS Hardening — MCP, Subagent, Sandbox, Builder Entitlements
 
+**Tanggal**: 2026-05-22
+**Status**: ✅ Selesai lokal + live Google Slides verified
+
+## Scope Update
+
+Perbaikan lanjutan untuk bug AI Staff 21 Mei pada Google Workspace MCP:
+
+- Agent operasional harus memakai MCP secara semantic saat tool tersedia.
+- Sandbox/subagent tidak boleh menjadi fallback palsu untuk aksi external service.
+- Arthur tetap builder-first dan tidak ikut terdampak policy runtime operasional.
+- Saat Google auth belum tersambung atau token expired, agent harus langsung memberi reconnect link.
+- Tool call MCP Google Workspace harus memakai runtime lokal `http://localhost:8002/mcp`, bukan devtunnel/port auth 8003.
+
+## Masalah Terbaru
+
+- Setelah refactor semantic MCP-first, preflight Google auth error tidak selalu menghentikan graph lebih awal karena hard parent-only branch tidak lagi default.
+- Akibatnya model bisa menjawab sendiri dulu, misalnya meminta user reconnect dari pengaturan atau bertanya apakah link perlu dibuat, padahal backend sudah bisa membuat `auth_url`.
+- Reply auth failure sebelumnya masih dibentuk lewat LLM, sehingga tidak deterministic dan bisa tidak langsung actionable.
+- Follow-up `sudah/ok sudah` setelah auth link bisa kehilangan konteks Google karena pesan terbaru tidak mengandung keyword Google. Akibatnya graph sempat mencoba `task/sys_coder`; guard memang memblokir fallback, tetapi reply akhir menjadi tidak actionable.
+- Setelah OAuth berhasil, follow-up `sudah` sempat menjawab “Ada yang bisa saya bantu?” karena request Google lama tidak direplay eksplisit ke graph.
+- Candidate auth pertama (`session.external_user_id`) bisa belum connected, sementara candidate fallback (`operator_ids[0]`) sudah connected. Sebelum fix, `preflight_error` dari candidate pertama tidak dibersihkan setelah token fallback berhasil, sehingga reply HTTP bisa tertimpa auth blocker walaupun tool MCP sudah sukses membuat Slides.
+- Backend integration call ke devtunnel 8003 bisa timeout sebelum mengecek token fallback lokal; untuk local-dev dengan `WORKSPACE_MCP_PREFER_LOCAL=true`, backend harus memakai `http://localhost:8003` untuk `/status`, `/token`, dan `/connect`.
+- Prompt "2 halaman" sebelumnya tidak dikenali sebagai target 2 slide, sehingga workflow bisa berhenti setelah 1 slide atau membuat deck kedua terpisah.
+- Ada kebingungan antara dua endpoint:
+  - `8002` = MCP runtime untuk tool execution.
+  - `8003` = integration/auth management untuk status, token, connect, dan short auth link.
+
+## Akar Bug
+
+- Semantic MCP-first benar untuk tool choice, tetapi auth blocker tetap perlu deterministic guard sebelum graph saat Google Workspace belum connected.
+- Guard pre-graph sebelumnya terlalu terikat ke `google_mcp_parent_only`; ketika parent-only menjadi legacy explicit switch, auth failure bisa lolos ke graph.
+- `_build_google_mcp_auth_failure_reply()` masih memberi kesempatan LLM menulis wording sendiri sebelum link ditempel, sehingga reply bisa kurang tegas.
+
+## Solusi
+
+- Tambah policy runtime eksplisit:
+  - `builder` untuk Arthur / Agent Builder.
+  - `operational` untuk agent biasa.
+- Legacy Google Workspace parent-only branch sekarang hanya aktif jika `mcp.google_workspace_parent_only = true`.
+- Untuk default semantic MCP-first:
+  - sandbox dan subagent tetap boleh tersedia untuk coding/deploy flow.
+  - Google Workspace MCP tools tetap diprioritaskan saat tersedia.
+  - `ExternalServiceFallbackGuardMiddleware` memblokir tool fallback seperti `task`, `execute`, `write_file`, `edit_file`, `read_file`, dan `sandbox_write_binary_file` jika payload jelas mencoba menjalankan aksi Google Workspace.
+- Arthur/builder policy tidak dipasangi external-service fallback guard operational, sehingga Arthur tetap memakai builder tools internal.
+- Auth failure Google Workspace sekarang deterministic:
+  - jika Google belum connected/token expired dan request user adalah Google Workspace, runner stop sebelum graph saat tidak ada MCP tools usable.
+  - agent langsung mengirim reconnect link jika `auth_url` tersedia.
+  - agent tidak lagi bertanya “mau saya buatkan link?” untuk case auth blocker.
+- `_build_google_mcp_auth_failure_reply()` tidak lagi bergantung pada LLM untuk membuat pesan auth failure; fungsi ini mengembalikan pesan fixed dan actionable.
+- Follow-up auth recovery sekarang dideteksi dari history terbaru:
+  - pesan pendek seperti `sudah`, `ok sudah`, `sudah login`, atau `sudah reconnect` dianggap kelanjutan OAuth hanya jika history terbaru berisi auth blocker Google.
+  - role history `assistant` dan `agent` sama-sama dikenali karena final graph replies tersimpan sebagai `agent`.
+  - jika token masih belum aktif, runner kembali stop sebelum graph dan mengirim link reconnect baru tanpa `task`, sandbox, atau tool auth LLM-ish.
+- Saat follow-up auth recovery punya request Google lama, runner membangun `execution_user_message` eksplisit dari request tersebut, sehingga `sudah` melanjutkan pekerjaan lama, bukan dianggap chat kosong.
+- Jika token fallback berhasil, `auth_url` dan `preflight_error` stale dibersihkan sebelum MCP client dibuka.
+- Reply override akhir tidak boleh menimpa success yang sudah memiliki Google Workspace artifact/tool output valid, meskipun masih ada auth error stale.
+- Jika DeepAgents tetap memilih `task` untuk aksi Google Workspace dan guard memblokirnya, runner melakukan retry MCP-only dengan `create_react_agent` dan hanya Google Workspace MCP tools.
+- `_extract_requested_slide_count()` sekarang mengenali `halaman`, `page/pages`, dan `lembar`, bukan hanya `slide`.
+- Follow-up Slides sekarang dipicu juga ketika total slide hasil `get_presentation` masih kurang dari jumlah yang diminta user.
+- Runtime MCP Google Workspace tetap diarahkan ke `WORKSPACE_MCP_RUNTIME_URL` / `WORKSPACE_MCP_URL_LOCAL`, yaitu `http://localhost:8002/mcp` pada env lokal.
+- Port 8003 tetap dipakai hanya untuk integration/auth service (`/v1/integrations/google/connect`, `/status`, `/token`, `/start`), bukan untuk MCP tool execution.
+
+## File yang Diubah
+
+- `app/core/engine/agent_policy.py`
+  - Policy class `builder` vs `operational`.
+  - Legacy explicit switch `mcp.google_workspace_parent_only`.
+  - Guard helper untuk blok fallback external-service.
+- `app/core/engine/agent_tool_setup.py`
+  - Runtime setup memakai policy helper.
+  - Sandbox/subagent tidak lagi otomatis dimatikan oleh keyword Google Workspace kecuali legacy switch aktif.
+- `app/core/engine/agent_runner.py`
+  - Pasang `ExternalServiceFallbackGuardMiddleware` untuk agent operational.
+  - Auth/preflight error Google Workspace sekarang bisa block before graph untuk request Google Workspace walaupun parent-only legacy tidak aktif.
+  - Fetch auth link ulang jika belum ada sebelum mengirim reply auth failure.
+  - Treat auth-recovery follow-up sebagai kelanjutan Google Workspace request untuk pre-graph blocker.
+  - Tambah MCP-only retry setelah fallback guard memblokir `task` untuk aksi Google Workspace.
+- `app/core/engine/google_mcp_support.py`
+  - Auth failure reply fixed, jujur, dan langsung menyertakan reconnect link jika tersedia.
+  - Tambah detector `is_google_auth_recovery_followup()` untuk follow-up OAuth berbasis history.
+  - Tambah replay request Google terakhir, local integration runtime URL, cleanup stale preflight setelah token fallback berhasil, stale-auth success guard, dan parser jumlah slide `halaman/page`.
+- `tests/test_google_mcp_subagent_routing.py`
+  - Regression untuk semantic MCP-first, legacy parent-only explicit switch, operational fallback guard, dan Arthur builder policy.
+- `tests/test_google_mcp_reply_overrides.py`
+  - Regression bahwa auth failure langsung mengirim reconnect link.
+- `docs/semantic-mcp-refactor-todo.md`
+  - Checklist implementation lokal selesai, live verification tetap pending.
+
+## Expected Behavior Saat Ditest
+
+Jika user meminta:
+
+```text
+buatkan Google Slides 5 halaman tentang bahaya rokok, kasih link hasilnya
+```
+
+Dan Google belum connected/token expired, agent harus langsung menjawab:
+
+```text
+Google Workspace belum terhubung atau tokennya sudah expired, jadi saya belum menjalankan request ini.
+
+Klik link ini untuk reconnect Google:
+<auth_url>
+
+Setelah selesai, balas `sudah` supaya saya lanjutkan.
+```
+
+Setelah user selesai OAuth dan membalas `sudah`, agent seharusnya mencoba lagi memakai Google Workspace MCP tools. Tool execution harus memakai MCP runtime `http://localhost:8002/mcp`. Link OAuth/reconnect boleh berasal dari integration/auth service 8003 karena itu endpoint auth management, bukan endpoint tool MCP.
+
+Jika user membalas `sudah` tetapi token masih belum aktif, agent harus kembali mengirim blocker deterministic dengan reconnect link baru dan `steps=[]`; tidak boleh masuk `task/sys_coder`, sandbox, atau klaim progress.
+
+Jika token sudah aktif pada fallback owner/operator, agent harus lanjut membuat Google Slides dengan MCP tools. Auth status/token backend memakai local integration API `http://localhost:8003`, sedangkan MCP tool execution tetap `http://localhost:8002/mcp`.
+
+## Verifikasi Lokal
+
+- `PYTHONPATH=. .venv/bin/python -m py_compile app/core/engine/agent_policy.py app/core/engine/agent_runner.py app/core/engine/agent_tool_setup.py`
+  - Hasil: passed.
+- `PYTHONPATH=. .venv/bin/python -m py_compile app/core/engine/google_mcp_support.py app/core/engine/agent_runner.py app/core/tools/mcp_tool.py`
+  - Hasil: passed.
+- `PYTHONPATH=. .venv/bin/pytest -q tests/test_google_mcp_subagent_routing.py tests/test_google_mcp_reply_overrides.py tests/test_mcp_tool_priority.py tests/test_mcp_server_map.py tests/test_builder_tools.py tests/test_agent_builder_phase4.py::TestAgentRunnerIntegration`
+  - Hasil awal: `74 passed in 4.72s`.
+- Setelah fix follow-up `sudah`:
+  - `PYTHONPATH=. .venv/bin/pytest -q tests/test_google_mcp_reply_overrides.py tests/test_google_mcp_subagent_routing.py tests/test_mcp_server_map.py`
+    - Hasil: `41 passed in 2.27s`.
+  - `PYTHONPATH=. .venv/bin/pytest -q tests/test_google_mcp_subagent_routing.py tests/test_google_mcp_reply_overrides.py tests/test_mcp_tool_priority.py tests/test_mcp_server_map.py tests/test_builder_tools.py tests/test_agent_builder_phase4.py::TestAgentRunnerIntegration`
+    - Hasil: `77 passed in 4.14s`.
+- Setelah fix replay intent, stale auth, local integration runtime, MCP-only retry, dan slide count:
+  - `PYTHONPATH=. .venv/bin/pytest -q tests/test_google_slides_template_intent.py tests/test_google_mcp_reply_overrides.py tests/test_google_mcp_subagent_routing.py tests/test_mcp_server_map.py`
+    - Hasil: `61 passed in 2.16s`.
+
+## Live API Partial Test 2026-05-22
+
+Agent test dibuat via API dengan model `openai/gpt-4.1-mini`, `mcp.google_workspace`, `sandbox: true`, dan `subagents.enabled: true`.
+
+Hasil:
+
+- Request Google Slides saat Google belum connected:
+  - reply pertama langsung memberi reconnect link.
+  - `steps=[]`.
+  - tidak ada fallback sandbox/subagent.
+- Follow-up `sudah` sebelum token aktif:
+  - sebelum patch follow-up: sempat mencoba `task/sys_coder`, lalu guard memblokir.
+  - setelah patch follow-up: kembali deterministic auth blocker dengan reconnect link baru dan `steps=[]`.
+- Follow-up `sudah` setelah token aktif:
+  - sebelum replay patch: bisa menjawab “Ada yang bisa saya bantu?”.
+  - setelah replay patch: request Google lama dilanjutkan.
+- Runtime token check:
+  - candidate session `codex-live-smoke-user` belum connected.
+  - candidate fallback operator `codex-live-smoke` connected dan token valid.
+  - setelah local integration patch, `prepare_google_mcp_runtime()` inject token fallback dan `mcp_client_context()` load `122` Google Workspace MCP tools dari `http://localhost:8002/mcp`.
+- Fresh Google Slides live test setelah patch:
+  - Request: `buatkan Google Slides 2 halaman tentang manfaat olahraga pagi, kasih link hasilnya`.
+  - Response HTTP berisi link:
+    `https://docs.google.com/presentation/d/1dZ7uXDJB59aeBGy2_JQmCGiRA_idbzYPnZX5iIcJkg0/edit`
+  - `get_presentation` memverifikasi `Total Slides: 2`.
+  - Tool yang dipakai adalah Google Workspace MCP (`get_presentation`, `create_presentation`, `batch_update_presentation`); bukan sandbox/subagent untuk hasil final.
+- Sandbox coding task:
+  - `write_file` berhasil membuat `/workspace/output/smoke_result.txt`.
+- Forced subagent task:
+  - `task` ke `sys_coder` berhasil menjalankan script dan mengembalikan output `subagent-ok`.
+- MCP server mapping:
+  - `_build_server_map()` memilih `http://localhost:8002/mcp` walaupun input URL berupa devtunnel, karena `WORKSPACE_MCP_RUNTIME_URL` dan `WORKSPACE_MCP_PREFER_LOCAL=true`.
+
+## Pending
+
+- Jalankan smoke di session baru yang bersih agar history lama tidak ikut mempengaruhi urutan tool.
+- Jika ingin production-hardening berikutnya: simpan state pending Google request secara eksplisit di session metadata, bukan hanya deteksi dari history.
+
+---
+
 **Tanggal**: 2026-05-21
 **Status**: ✅ Selesai
 

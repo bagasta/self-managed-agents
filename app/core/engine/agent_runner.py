@@ -36,6 +36,12 @@ from app.core.engine.agent_input import build_input_messages
 from app.core.engine.agent_llm import build_agent_llms
 from app.core.engine.agent_recovery import send_agent_recovery_message
 from app.core.engine.agent_tool_setup import build_agent_tool_setup
+from app.core.engine.agent_policy import (
+    AgentRuntimePolicy,
+    build_agent_runtime_policy,
+    should_block_external_service_fallback_tool,
+    should_use_google_workspace_parent_only,
+)
 from app.models.agent import Agent as AgentModel
 from app.models.message import Message
 from app.models.run import Run
@@ -56,6 +62,7 @@ from app.core.engine.google_mcp_support import (
     _extract_google_mcp_step_error,
     _extract_requested_slide_count,
     _fetch_google_auth_link,
+    _has_google_mcp_step,
     _is_google_auth_or_scope_error,
     _is_google_forms_authoring_intent,
     _is_google_mcp_intent,
@@ -72,12 +79,13 @@ from app.core.engine.google_mcp_support import (
     google_forms_followup_retry_directive,
     google_forms_request_kind_retry_directive,
     google_sheets_followup_directive,
+    find_last_google_workspace_user_request,
+    is_google_auth_recovery_followup,
     prepare_google_mcp_runtime,
     sanitize_google_forms_tools,
     google_slides_dimension_retry_directive,
     google_slides_followup_directive,
     google_slides_shape_retry_directive,
-    is_google_workspace_mcp_configured,
 )
 
 logger = structlog.get_logger(__name__)
@@ -215,6 +223,9 @@ def _task_result_guard_reply(final_reply: str, steps: list[dict[str, Any]], user
     return final_reply
 
 
+def _has_external_service_fallback_blocked_step(steps: list[dict[str, Any]]) -> bool:
+    marker = "This is a Google Workspace external-service action"
+    return any(marker in str((step or {}).get("result", "") or "") for step in steps or [])
 
 
 class AgentRunResult(TypedDict):
@@ -242,6 +253,59 @@ class BlockTaskToolMiddleware(AgentMiddleware):
             ),
             tool_call_id=tool_call.get("id", ""),
             name="task",
+            status="error",
+        )
+
+    def wrap_tool_call(self, request: Any, handler: Any) -> Any:
+        blocked = self._blocked_message(request)
+        if blocked is not None:
+            return blocked
+        return handler(request)
+
+    async def awrap_tool_call(self, request: Any, handler: Any) -> Any:
+        blocked = self._blocked_message(request)
+        if blocked is not None:
+            return blocked
+        return await handler(request)
+
+
+class ExternalServiceFallbackGuardMiddleware(AgentMiddleware):
+    """Reject local/delegated fallback tools for external-service side effects."""
+
+    name = "ExternalServiceFallbackGuardMiddleware"
+
+    def __init__(
+        self,
+        *,
+        policy: AgentRuntimePolicy,
+        google_workspace_mcp_available: bool,
+        user_message: str,
+    ) -> None:
+        self._policy = policy
+        self._google_workspace_mcp_available = google_workspace_mcp_available
+        self._user_message = user_message
+
+    def _blocked_message(self, request: Any) -> ToolMessage | None:
+        tool_name = getattr(getattr(request, "tool", None), "name", None) or ""
+        tool_call = getattr(request, "tool_call", {}) or {}
+        tool_payload = tool_call.get("args", tool_call)
+        if not should_block_external_service_fallback_tool(
+            policy=self._policy,
+            tool_name=tool_name,
+            tool_payload=tool_payload,
+            user_message=self._user_message,
+            google_workspace_mcp_available=self._google_workspace_mcp_available,
+        ):
+            return None
+        return ToolMessage(
+            content=(
+                "This is a Google Workspace external-service action. Do not use "
+                "sandbox, filesystem, or task delegation as a fallback. Call the "
+                "relevant Google Workspace MCP tool directly, or return the MCP "
+                "auth/unavailable blocker if MCP cannot run."
+            ),
+            tool_call_id=tool_call.get("id", ""),
+            name=tool_name,
             status="error",
         )
 
@@ -354,9 +418,11 @@ async def run_agent(
     sub_sandboxes = tool_setup.sub_sandboxes
     _memory_scope = tool_setup.memory_scope
 
-    google_mcp_parent_only = (
-        _is_google_mcp_intent(user_message)
-        and is_google_workspace_mcp_configured(tools_config)
+    runtime_policy = build_agent_runtime_policy(agent_model, tools_config)
+    google_mcp_parent_only = should_use_google_workspace_parent_only(
+        policy=runtime_policy,
+        user_message=user_message,
+        tools_config=tools_config,
     )
     if google_mcp_parent_only and subagent_list:
         log.info(
@@ -394,7 +460,22 @@ async def run_agent(
     )
     history_rows = await load_history(session.id, db, max_turns=_history_turns)
     prior_messages = db_messages_to_lc(history_rows)
+    google_auth_recovery_followup = is_google_auth_recovery_followup(
+        user_message,
+        history_rows,
+    )
+    google_auth_recovery_request = (
+        find_last_google_workspace_user_request(history_rows)
+        if google_auth_recovery_followup
+        else None
+    )
+    execution_user_message = google_auth_recovery_request or user_message
     log.debug("agent_run.history_loaded", turns=len(prior_messages) // 2)
+    if google_auth_recovery_followup:
+        log.info(
+            "agent_run.google_mcp_auth_recovery_followup_detected",
+            has_prior_request=bool(google_auth_recovery_request),
+        )
 
     is_op_msg = user_message.startswith("[OPERATOR] ")
 
@@ -423,6 +504,19 @@ async def run_agent(
             "Run sebelumnya terhenti karena service restart sebelum selesai. "
             "JANGAN lanjutkan atau ulangi task lama secara otomatis. "
             "Fokus pada pesan user terbaru. Jika user bertanya status task lama, jelaskan singkat bahwa proses sebelumnya terhenti saat restart dan minta konfirmasi sebelum menjalankan ulang."
+        )
+    if google_auth_recovery_followup:
+        _prior_google_request = (
+            f"\nRequest Google Workspace yang harus dilanjutkan: {google_auth_recovery_request[:800]}"
+            if google_auth_recovery_request
+            else ""
+        )
+        system_prompt += (
+            "\n\n## Google Workspace Auth Recovery\n"
+            "Pesan user terbaru adalah konfirmasi bahwa OAuth Google sudah dicoba/diselesaikan. "
+            "Lanjutkan request Google Workspace terakhir dari percakapan sebelumnya memakai MCP Google Workspace langsung. "
+            "Jika MCP Google masih belum authorized, jangan gunakan task, sandbox, atau filesystem sebagai fallback; kirim blocker auth yang berisi link reconnect baru."
+            f"{_prior_google_request}"
         )
 
     # ------------------------------------------------------------------ #
@@ -462,7 +556,7 @@ async def run_agent(
         agent_id=agent_id,
         memory_scope=_memory_scope,
         api_key=settings.api_key,
-        user_message=user_message,
+        user_message=execution_user_message,
         system_prompt=system_prompt,
         log=log,
         fallback_external_user_id=_google_fallback_external_user_id,
@@ -489,7 +583,7 @@ async def run_agent(
         if mcp_tools:
             mcp_tools = sanitize_google_forms_tools(mcp_tools, log)
             mcp_tool_names = [getattr(tool, "name", "") for tool in mcp_tools]
-            if _is_google_mcp_intent(user_message) and subagent_list:
+            if google_mcp_parent_only and subagent_list:
                 log.info(
                     "agent_run.google_mcp_subagents_disabled",
                     subagents=len(subagent_list),
@@ -529,11 +623,27 @@ async def run_agent(
                 log=log,
             )
             google_mcp_err = str(mcp_errors.get("google_workspace") or "")
-            if google_mcp_parent_only and google_mcp_err and not mcp_tools:
+            should_block_google_before_graph = (
+                bool(google_mcp_err)
+                and not mcp_tools
+                and (
+                    google_mcp_parent_only
+                    or _is_google_mcp_intent(user_message)
+                    or google_auth_recovery_followup
+                )
+            )
+            if should_block_google_before_graph:
                 if _is_google_auth_or_scope_error(google_mcp_err):
+                    if not _google_mcp_auth_url:
+                        _google_mcp_auth_url = await _fetch_google_auth_link(
+                            integration_url=google_mcp.integration_url,
+                            api_key=settings.api_key,
+                            agent_id=agent_id,
+                            candidate_user_ids=google_mcp.candidate_user_ids,
+                        )
                     final_reply = await _build_google_mcp_auth_failure_reply(
                         llm=llm_raw,
-                        user_message=user_message,
+                        user_message=execution_user_message,
                         error_text=google_mcp_err,
                         auth_url=_google_mcp_auth_url,
                     )
@@ -614,12 +724,27 @@ async def run_agent(
                 subagents=subagent_list or None,
                 checkpointer=_checkpointer,
             )
+            _middleware: list[AgentMiddleware] = []
+            if (
+                runtime_policy.policy_class == "operational"
+                and google_mcp.enabled
+                and google_mcp.workspace_server
+            ):
+                _middleware.append(
+                    ExternalServiceFallbackGuardMiddleware(
+                        policy=runtime_policy,
+                        google_workspace_mcp_available=True,
+                        user_message=execution_user_message,
+                    )
+                )
             if google_mcp_parent_only:
-                _dag_kwargs["middleware"] = [BlockTaskToolMiddleware()]
+                _middleware.append(BlockTaskToolMiddleware())
                 log.info(
                     "agent_run.google_mcp_deepagent_parent_only_mode",
                     reason="block_task_tool_keep_deepagents_runtime",
                 )
+            if _middleware:
+                _dag_kwargs["middleware"] = _middleware
             if _interrupt_on:
                 _dag_kwargs["interrupt_on"] = _interrupt_on
             graph = create_deep_agent(**_dag_kwargs)
@@ -653,6 +778,12 @@ async def run_agent(
             ]
         else:
             human_content = user_message
+            if google_auth_recovery_followup and google_auth_recovery_request:
+                human_content = (
+                    "Saya sudah menyelesaikan OAuth/reconnect Google. "
+                    "Lanjutkan request Google Workspace sebelumnya sekarang dengan MCP Google Workspace langsung:\n"
+                    f"{google_auth_recovery_request}"
+                )
 
         input_messages: list[BaseMessage] = build_input_messages(
             prior_messages=prior_messages,
@@ -1155,7 +1286,7 @@ async def run_agent(
                         )
                     _reply = await _build_google_mcp_auth_failure_reply(
                         llm=llm_raw,
-                        user_message=user_message,
+                        user_message=execution_user_message,
                         error_text=err_str,
                         auth_url=_google_mcp_auth_url,
                     )
@@ -1194,7 +1325,7 @@ async def run_agent(
             run_record=run_record,
             run_id=run_id,
             prior_messages=prior_messages,
-            user_message=user_message,
+            user_message=execution_user_message,
             cleanup_sandboxes=_cleanup_sandboxes,
             log=log,
         )
@@ -1218,10 +1349,54 @@ async def run_agent(
         # Fall back to result_parser count if callback produced nothing (e.g. mocked LLM).
         _cb_tokens = _agent_logger.total_tokens_from_callbacks
         total_tokens_used = _cb_tokens if _cb_tokens > 0 else parsed["total_tokens_used"]
+        if (
+            _is_google_mcp_intent(execution_user_message)
+            and mcp_tools
+            and not _has_google_mcp_step(steps)
+            and _has_external_service_fallback_blocked_step(steps)
+        ):
+            log.warning(
+                "agent_run.google_mcp_retry_after_blocked_fallback",
+                mcp_tools=len(mcp_tools),
+            )
+            try:
+                from langgraph.prebuilt import create_react_agent as _cra
+
+                _mcp_only_prompt = (
+                    (system_prompt if isinstance(system_prompt, str) else "")
+                    + "\n\n## Google Workspace MCP Retry\n"
+                    "The previous attempt incorrectly used a delegated/sandbox fallback for a Google Workspace action. "
+                    "Retry now using only the Google Workspace MCP tools. "
+                    "Do not call task, filesystem, sandbox, or non-MCP tools. "
+                    "Return the Google Workspace URL only after the MCP tool output contains it."
+                )
+                _mcp_only_graph = _cra(llm, tools=mcp_tools, prompt=_mcp_only_prompt)
+                _mcp_retry_input = _sanitize_input_messages(input_messages)
+                async with asyncio.timeout(settings.agent_timeout_seconds):
+                    result = await _mcp_only_graph.ainvoke(
+                        {"messages": _mcp_retry_input}, config=_graph_config
+                    )
+                parsed = parse_agent_result(
+                    result=result,
+                    input_messages=input_messages,
+                    session_id=session.id,
+                    run_id=run_id,
+                    step_start=step_counter,
+                    log=log,
+                )
+                final_reply = parsed["final_reply"]
+                steps = parsed["steps"]
+                total_tokens_used = _agent_logger.total_tokens_from_callbacks or parsed["total_tokens_used"]
+                log.info("agent_run.google_mcp_retry_after_blocked_fallback_ok")
+            except Exception as _mcp_retry_exc:
+                log.warning(
+                    "agent_run.google_mcp_retry_after_blocked_fallback_failed",
+                    error=str(_mcp_retry_exc)[:300],
+                )
         for _msg_record in parsed["db_messages"]:
             db.add(_msg_record)
 
-        _needs_forms_followup, _followup_form_id = _needs_google_forms_followup(user_message, steps)
+        _needs_forms_followup, _followup_form_id = _needs_google_forms_followup(execution_user_message, steps)
         if _needs_forms_followup and _followup_form_id:
             log.info("agent_run.forms_followup_continue", form_id=_followup_form_id)
             _forms_followup_directive = google_forms_followup_directive(_followup_form_id)
@@ -1296,11 +1471,11 @@ async def run_agent(
                             form_id=_followup_form_id,
                         )
 
-        _needs_slides_followup, _followup_presentation_id = _needs_google_slides_followup(user_message, steps)
+        _needs_slides_followup, _followup_presentation_id = _needs_google_slides_followup(execution_user_message, steps)
         if _needs_slides_followup and _followup_presentation_id:
             log.info("agent_run.slides_followup_continue", presentation_id=_followup_presentation_id)
             _slides_followup_directive = google_slides_followup_directive(
-                _followup_presentation_id, user_message
+                _followup_presentation_id, execution_user_message
             )
             try:
                 from langgraph.prebuilt import create_react_agent as _cra
@@ -1336,11 +1511,11 @@ async def run_agent(
                     presentation_id=_followup_presentation_id,
                 )
 
-        _needs_sheets_followup, _followup_spreadsheet_id = _needs_google_sheets_followup(user_message, steps)
+        _needs_sheets_followup, _followup_spreadsheet_id = _needs_google_sheets_followup(execution_user_message, steps)
         if _needs_sheets_followup and _followup_spreadsheet_id:
             log.info("agent_run.sheets_followup_continue", spreadsheet_id=_followup_spreadsheet_id)
             _sheets_followup_directive = google_sheets_followup_directive(
-                _followup_spreadsheet_id, user_message
+                _followup_spreadsheet_id, execution_user_message
             )
             try:
                 from langgraph.prebuilt import create_react_agent as _cra
@@ -1408,7 +1583,7 @@ async def run_agent(
                 "agent_run.no_llm_output",
                 session_id=str(session.id),
                 run_id=str(run_id),
-                user_message=user_message[:100],
+                user_message=execution_user_message[:100],
             )
         else:
             log.warning(
@@ -1424,12 +1599,12 @@ async def run_agent(
         runtime=google_mcp,
         auth_url=_google_mcp_auth_url,
         llm_raw=llm_raw,
-        user_message=user_message,
+        user_message=execution_user_message,
         agent_id=agent_id,
         api_key=settings.api_key,
         log=log,
     )
-    guarded_reply = _task_result_guard_reply(final_reply, steps, user_message)
+    guarded_reply = _task_result_guard_reply(final_reply, steps, execution_user_message)
     if guarded_reply != final_reply:
         log.warning("agent_run.final_reply_overridden_by_task_guard")
         final_reply = guarded_reply
