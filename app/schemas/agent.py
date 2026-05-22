@@ -97,6 +97,7 @@ class AgentResponse(BaseModel):
     capabilities: list[str]
     version: int
     is_deleted: bool
+    owner_external_id: str | None = None
 
     # output token limit
     max_tokens: int | None

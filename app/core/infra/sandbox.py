@@ -136,6 +136,30 @@ class DockerSandbox:
         else:
             self.shared_dir = self.workspace_dir / "shared"
 
+    def _resolve_workspace_path(self, path: str) -> Path:
+        """Resolve a user-supplied workspace path without allowing traversal."""
+        if not isinstance(path, str) or not path.strip():
+            raise ValueError("Path is required")
+
+        clean = path.strip().lstrip("/")
+        if clean == "workspace" or clean.startswith("workspace/"):
+            clean = clean[len("workspace"):].lstrip("/")
+
+        target = (self.workspace_dir / clean).resolve()
+        root = self.workspace_dir.resolve()
+        try:
+            target.relative_to(root)
+            return target
+        except ValueError:
+            pass
+
+        shared_root = self.shared_dir.resolve()
+        try:
+            target.relative_to(shared_root)
+            return target
+        except ValueError:
+            raise ValueError(f"Path traversal blocked: {path!r}") from None
+
     def _get_client(self) -> docker.DockerClient:
         if self._client is None:
             self._client = _connect_docker(self._settings.docker_host)
@@ -152,7 +176,10 @@ class DockerSandbox:
         try:
             running = client.containers.list(filters={"label": "managed-agent-sandbox=true"})
             if len(running) >= self._settings.max_concurrent_sandboxes:
-                return f"[sandbox error] Too many concurrent sandbox executions ({len(running)}). Try again later."
+                return (
+                    f"[sandbox error] Too many concurrent sandbox executions ({len(running)}). Try again later.",
+                    None,
+                )
         except Exception as e:
             logger.warning("sandbox.bash.check_running_failed", error=str(e))
 
@@ -232,17 +259,20 @@ class DockerSandbox:
 
     def write_file(self, path: str, content: str) -> str:
         """Write content to a file in the workspace. Creates parent dirs as needed."""
-        target = self.workspace_dir / path.lstrip("/")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
-        return f"Written {len(content)} chars to {path}"
+        try:
+            target = self._resolve_workspace_path(path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+            return f"Written {len(content)} chars to {path}"
+        except Exception as exc:
+            return f"[error] Failed to write file: {exc}"
 
     def write_binary_file(self, path: str, base64_content: str) -> str:
         """Decode base64 string and write as binary file to the workspace."""
         import base64
-        target = self.workspace_dir / path.lstrip("/")
-        target.parent.mkdir(parents=True, exist_ok=True)
         try:
+            target = self._resolve_workspace_path(path)
+            target.parent.mkdir(parents=True, exist_ok=True)
             raw = base64.b64decode(base64_content)
             target.write_bytes(raw)
             return f"Written {len(raw)} bytes to {path}"
@@ -251,7 +281,10 @@ class DockerSandbox:
 
     def read_file(self, path: str) -> str:
         """Read a file from the workspace."""
-        target = self.workspace_dir / path.lstrip("/")
+        try:
+            target = self._resolve_workspace_path(path)
+        except Exception as exc:
+            return f"[error] {exc}"
         if not target.exists():
             return f"[error] File not found: {path}"
         if not target.is_file():
@@ -260,7 +293,10 @@ class DockerSandbox:
 
     def list_files(self, directory: str = ".") -> str:
         """List all files under a workspace directory."""
-        target = self.workspace_dir / directory.lstrip("/")
+        try:
+            target = self._resolve_workspace_path(directory)
+        except Exception as exc:
+            return f"[error] {exc}"
         if not target.exists():
             return f"[error] Directory not found: {directory}"
         entries = sorted(p for p in target.rglob("*") if p.is_file() and not p.name.startswith("."))

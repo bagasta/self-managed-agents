@@ -4,21 +4,25 @@ Arthur memanggil GET /v1/integrations/google/auth-link untuk generate auth URL.
 """
 from __future__ import annotations
 
-import os
-
 import httpx
 import structlog
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 
+from app.config import get_settings
 from app.deps import verify_api_key as require_api_key
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/v1/integrations", tags=["integrations"])
 
-_INTEGRATION_SERVICE_URL = os.environ.get(
-    "GOOGLE_INTEGRATION_SERVICE_URL", "http://localhost:8003"
-)
+settings = get_settings()
+
+
+def _integration_service_url() -> str:
+    url = str(settings.google_integration_service_url).rstrip("/")
+    if not url:
+        raise RuntimeError("GOOGLE_INTEGRATION_SERVICE_URL is not configured")
+    return url
 
 
 @router.get("/google/auth-link", dependencies=[Depends(require_api_key)])
@@ -33,8 +37,9 @@ async def get_google_auth_link(
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
-                f"{_INTEGRATION_SERVICE_URL}/v1/integrations/google/connect",
+                f"{_integration_service_url()}/v1/integrations/google/connect",
                 json={"external_user_id": external_user_id, "agent_id": agent_id},
+                headers={"X-API-Key": settings.api_key},
             )
         if resp.status_code == 200:
             data = resp.json()
@@ -59,8 +64,9 @@ async def get_google_status(
             params["agent_id"] = agent_id
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(
-                f"{_INTEGRATION_SERVICE_URL}/v1/integrations/google/status",
+                f"{_integration_service_url()}/v1/integrations/google/status",
                 params=params,
+                headers={"X-API-Key": settings.api_key},
             )
         return JSONResponse(resp.json(), status_code=resp.status_code)
     except Exception as exc:

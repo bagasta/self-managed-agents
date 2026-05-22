@@ -580,7 +580,9 @@ def build_whatsapp_media_tools(
             if sandbox is None:
                 return "[error] Tool send_whatsapp_image membutuhkan sandbox aktif untuk membaca file. Gunakan base64 langsung atau aktifkan sandbox."
             path = image_path_or_base64 if image_path_or_base64.startswith("/workspace/") else f"/workspace/{image_path_or_base64}"
-            b64_output = sandbox.bash(f"base64 -w 0 {path} 2>&1")
+            import shlex as _shlex
+
+            b64_output = sandbox.bash(f"base64 -w 0 {_shlex.quote(path)} 2>&1")
             if b64_output.startswith("[") or "No such file" in b64_output:
                 return f"[error] Gagal membaca file: {b64_output}"
             image_b64 = b64_output.strip()
@@ -632,7 +634,9 @@ def build_whatsapp_media_tools(
             if sandbox is None:
                 return "[error] Tool send_whatsapp_document membutuhkan sandbox aktif untuk membaca file."
             path = file_path_or_base64 if file_path_or_base64.startswith("/workspace/") else f"/workspace/{file_path_or_base64}"
-            b64_output = sandbox.bash(f"base64 -w 0 {path} 2>&1")
+            import shlex as _shlex
+
+            b64_output = sandbox.bash(f"base64 -w 0 {_shlex.quote(path)} 2>&1")
             if b64_output.startswith("[") or "No such file" in b64_output:
                 return f"[error] Gagal membaca file: {b64_output}"
             doc_b64 = b64_output.strip()
@@ -706,7 +710,17 @@ def build_wa_agent_manager_tools(session: Any, db_factory: async_sessionmaker) -
         if not agent_row:
             return f"[error] Agent '{agent_id}' tidak ditemukan"
         if not agent_row.wa_device_id:
-            return f"[error] Agent '{agent_id}' tidak memiliki WhatsApp device"
+            agent_row.wa_device_id = str(_uuid.uuid4())
+            agent_row.channel_type = "whatsapp"
+            async with db_factory() as _db:
+                result = await _db.execute(
+                    _select(_Agent).where(_Agent.id == agent_uuid, _Agent.is_deleted.is_(False))
+                )
+                writable_agent = result.scalar_one_or_none()
+                if writable_agent:
+                    writable_agent.wa_device_id = agent_row.wa_device_id
+                    writable_agent.channel_type = "whatsapp"
+                    await _db.commit()
 
         wa_dev_id: str = agent_row.wa_device_id
 
@@ -714,7 +728,7 @@ def build_wa_agent_manager_tools(session: Any, db_factory: async_sessionmaker) -
             try:
                 resp = await get_wa_qr(wa_dev_id)
             except Exception:
-                resp = {"status": "not_found", "qr_image": ""}
+                resp = await create_wa_device(wa_dev_id)
 
             qr_status: str = resp.get("status", "")
             qr_b64: str = resp.get("qr_image", "")
@@ -724,7 +738,10 @@ def build_wa_agent_manager_tools(session: Any, db_factory: async_sessionmaker) -
 
             if not qr_b64:
                 # QR kosong: channel mungkin belum ada atau expired. Paksa fresh QR.
-                resp = await refresh_wa_qr(wa_dev_id)
+                try:
+                    resp = await refresh_wa_qr(wa_dev_id)
+                except Exception:
+                    resp = await create_wa_device(wa_dev_id)
                 qr_status = resp.get("status", "")
                 qr_b64 = resp.get("qr_image", "")
 
@@ -768,7 +785,6 @@ def build_builder_tools(
     db_factory: async_sessionmaker,
     owner_phone: str | None = None,
     self_agent_id: str | None = None,
-    api_key: str | None = None,
 ) -> list:
     """
     Build tools eksklusif untuk system agent (Agent Builder / Arthur).
@@ -778,10 +794,9 @@ def build_builder_tools(
         db_factory: async_sessionmaker factory — each tool call opens its own session
         owner_phone: external_user_id caller (nomor WA/JID) untuk scoping keamanan
         self_agent_id: UUID agent ini sendiri — untuk self-modification
-        api_key: API key platform — untuk memanggil API platform
     """
     from app.core.tools.builder_tools import build_builder_tools as _build
-    return _build(db_factory=db_factory, owner_phone=owner_phone, self_agent_id=self_agent_id, api_key=api_key)
+    return _build(db_factory=db_factory, owner_phone=owner_phone, self_agent_id=self_agent_id)
 
 
 def build_deployment_tools(sandbox: "DockerSandbox") -> list:

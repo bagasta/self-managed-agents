@@ -2,7 +2,7 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, Index, Integer, String, Text, func
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, Index, Integer, String, Text, event, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -94,3 +94,19 @@ class Agent(Base):
         onupdate=func.now(),
         nullable=False,
     )
+
+
+_AGENT_JSON_DEFAULTS = {
+    "tools_config": dict,
+    "sandbox_config": dict,
+    "safety_policy": dict,
+    "escalation_config": dict,
+    "operator_ids": list,
+    "capabilities": list,
+}
+
+
+@event.listens_for(Agent, "init", propagate=True)
+def _set_agent_python_defaults(_target, _args, kwargs):
+    for key, factory in _AGENT_JSON_DEFAULTS.items():
+        kwargs.setdefault(key, factory())

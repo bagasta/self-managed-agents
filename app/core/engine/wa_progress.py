@@ -6,19 +6,13 @@ import re
 from typing import Any
 
 _TOOL_PROGRESS_FALLBACK: dict[str, str] = {
-    "task": "> 🤖 Mendelegasikan ke subagent...",
-    "http_get": "> 🔍 Mengambil data dari web...",
-    "http_post": "> 📡 Mengirim request...",
-    "deploy_app": "> 🚀 Men-deploy aplikasi...",
-    "execute": "> ⚙️ Menjalankan kode...",
-    "write_file": "> ✏️ Menulis file...",
-    "edit_file": "> ✏️ Mengedit file...",
-    "read_file": "> 📖 Membaca file...",
-    "search_documents": "> 🔎 Mencari dokumen...",
-    "remember": "> 💾 Menyimpan memori...",
-    "set_reminder": "> ⏰ Mengatur pengingat...",
-    "send_whatsapp_document": "> 📎 Mengirim dokumen...",
-    "send_whatsapp_image": "> 🖼️ Mengirim gambar...",
+    "task": "Saya mulai kerjakan lewat specialist agent.",
+    "deploy_app": "File sudah siap, sekarang saya deploy dan cek link-nya.",
+    "execute": "Saya lagi menjalankan proses teknis yang dibutuhkan.",
+    "write_file": "Saya sedang menulis file project.",
+    "edit_file": "Saya sedang mengedit file project.",
+    "send_whatsapp_document": "Saya sedang menyiapkan dokumen untuk dikirim.",
+    "send_whatsapp_image": "Saya sedang menyiapkan gambar untuk dikirim.",
 }
 
 
@@ -59,17 +53,15 @@ def build_progress_message(tool_name: str, input_payload: Any) -> str | None:
         subagent_name = str(payload.get("name") or "subagent").strip()
         task_text = str(payload.get("task") or payload.get("description") or "").strip()
         if task_text:
-            return f"> 🤖 *{subagent_name}* sedang mengerjakan:\n> {truncate_preview(task_text, 80)}"
-        return f"> 🤖 Mendelegasikan ke *{subagent_name}*..."
+            return f"Saya mulai kerjakan lewat {subagent_name}: {truncate_preview(task_text, 90)}"
+        return f"Saya mulai kerjakan lewat {subagent_name}."
 
     if tool_name in {"read_file", "write_file", "edit_file"}:
         path = str(payload.get("path") or payload.get("file_path") or "").strip()
         icon = {"read_file": "📖", "write_file": "✏️", "edit_file": "✏️"}.get(tool_name, "📄")
         action = {"read_file": "Membaca", "write_file": "Menulis", "edit_file": "Mengedit"}.get(tool_name, "Memproses")
         if path:
-            # Show only filename, not full path — cleaner on WA
-            filename = path.split("/")[-1] or path
-            return f"> {icon} {action}: `{filename}`"
+            return f"{icon} {action} file: {path}"
         return _TOOL_PROGRESS_FALLBACK.get(tool_name)
 
     if tool_name == "http_get":
@@ -81,7 +73,10 @@ def build_progress_message(tool_name: str, input_payload: Any) -> str | None:
     if tool_name == "execute":
         cmd = str(payload.get("command") or payload.get("cmd") or "").strip()
         if cmd:
-            return f"> ⚙️ Menjalankan: `{truncate_preview(cmd, 60)}`"
+            lowered = cmd.lower()
+            if any(k in lowered for k in ("npm install", "npm run build", "pip install", "pnpm install", "yarn install")):
+                return f"Saya sedang menjalankan build/install: {truncate_preview(cmd, 70)}"
+            return None
 
     return _TOOL_PROGRESS_FALLBACK.get(tool_name)
 
@@ -92,8 +87,8 @@ def build_task_done_message(input_payload: Any, output: Any) -> str:
     out = output if isinstance(output, str) else str(output)
     url_match = re.search(r"https://[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}(?:/[^\s\"']*)?", out)
     if url_match:
-        return f"> ✅ *{subagent_name}* selesai\n> {url_match.group(0).rstrip('.,)')}"
+        return f"✅ {subagent_name} selesai. URL: {url_match.group(0).rstrip('.,)')}"
     preview = truncate_preview(out, 80)
     if preview:
-        return f"> ✅ *{subagent_name}* selesai: {preview}"
-    return f"> ✅ *{subagent_name}* selesai."
+        return f"✅ {subagent_name} selesai: {preview}"
+    return f"✅ {subagent_name} selesai."

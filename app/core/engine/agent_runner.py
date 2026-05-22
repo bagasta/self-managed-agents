@@ -8,19 +8,27 @@ in sibling modules.
 from __future__ import annotations
 
 import asyncio
+import copy
+import re
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, TypedDict
 
 import structlog
-from langchain_core.messages import BaseMessage, HumanMessage
+from langchain.agents.middleware.types import AgentMiddleware
+from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.core.engine.context_service import count_user_messages, db_messages_to_lc, load_history
 from app.core.domain.memory_service import build_memory_context, extract_long_term_memory, load_layered_memory
-from app.core.engine.prompt_builder import build_rag_context, build_system_prompt, maybe_summarize_context
+from app.core.engine.prompt_builder import (
+    build_mcp_tool_priority_notice,
+    build_rag_context,
+    build_system_prompt,
+    maybe_summarize_context,
+)
 from app.core.engine.tool_builder import _is_enabled
 from app.core.engine.agent_callbacks import AgentStepLogger
 from app.core.engine.agent_hitl import handle_graph_interrupt, handle_pending_interrupt
@@ -32,11 +40,13 @@ from app.models.agent import Agent as AgentModel
 from app.models.message import Message
 from app.models.run import Run
 from app.models.session import Session
+from sqlalchemy import select
 from app.core.engine.result_parser import (
     ParsedResult,
     sanitize_input_messages as _sanitize_input_messages,
     parse_agent_result,
 )
+from app.core.engine.wa_progress import build_progress_message, build_task_done_message
 from app.core.engine.reply_guard import ensure_non_empty_reply
 from app.core.engine.google_mcp_support import (
     _build_google_mcp_auth_failure_reply,
@@ -67,10 +77,142 @@ from app.core.engine.google_mcp_support import (
     google_slides_dimension_retry_directive,
     google_slides_followup_directive,
     google_slides_shape_retry_directive,
+    is_google_workspace_mcp_configured,
 )
 
 logger = structlog.get_logger(__name__)
 settings = get_settings()
+
+
+_URL_RE = re.compile(r"https://[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}(?:/[^\s\"']*)?")
+
+
+def _google_workspace_server_has_auth(runtime: Any) -> bool:
+    server = getattr(runtime, "workspace_server", None)
+    if not isinstance(server, dict):
+        return False
+    headers = server.get("headers", {})
+    if not isinstance(headers, dict):
+        return False
+    auth = headers.get("Authorization") or headers.get("authorization")
+    return bool(str(auth or "").strip())
+
+
+def _remove_google_workspace_mcp_server(tools_config: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy with google_workspace MCP removed.
+
+    Google Workspace MCP runs in external OAuth mode. Opening the MCP client
+    before a per-user bearer token exists only produces a transport-level 401,
+    so the run should surface the dev-tunnel auth link instead.
+    """
+    copied = copy.deepcopy(tools_config)
+    mcp_cfg = copied.get("mcp", {})
+    if not isinstance(mcp_cfg, dict):
+        return copied
+
+    if "servers" in mcp_cfg or "enabled" in mcp_cfg:
+        servers = mcp_cfg.get("servers", {})
+        if isinstance(servers, dict):
+            servers.pop("google_workspace", None)
+            if not servers:
+                mcp_cfg["enabled"] = False
+        return copied
+
+    mcp_cfg.pop("google_workspace", None)
+    return copied
+
+
+async def _graph_result_from_output(
+    *,
+    graph: Any,
+    graph_config: dict[str, Any],
+    graph_output: Any,
+    log: Any,
+) -> dict[str, Any]:
+    """Return graph state when a checkpointer exists, otherwise use ainvoke output."""
+    try:
+        state = await graph.aget_state(graph_config)
+        if state is not None and isinstance(getattr(state, "values", None), dict):
+            return dict(state.values)
+    except ValueError as exc:
+        if "No checkpointer set" not in str(exc):
+            raise
+        log.warning("agent_run.graph_state_unavailable_no_checkpointer")
+
+    if isinstance(graph_output, dict):
+        return graph_output
+    values = getattr(graph_output, "values", None)
+    if isinstance(values, dict):
+        return dict(values)
+    output = getattr(graph_output, "output", None)
+    if isinstance(output, dict):
+        return output
+    return {}
+
+
+def _task_result_guard_reply(final_reply: str, steps: list[dict[str, Any]], user_message: str) -> str:
+    """Prevent parent agents from claiming subagent work succeeded when it did not."""
+    if not steps:
+        return final_reply
+
+    task_results = [
+        str(step.get("result") or "")
+        for step in steps
+        if step.get("tool") == "task" and step.get("result")
+    ]
+    if not task_results:
+        return final_reply
+
+    combined = "\n".join(task_results)
+    combined_lower = combined.lower()
+    final_lower = (final_reply or "").lower()
+    user_lower = (user_message or "").lower()
+
+    has_success_artifact = bool(
+        _URL_RE.search(combined)
+        or "[document_sent]" in combined_lower
+        or "[image_sent]" in combined_lower
+        or " terkirim" in combined_lower
+        or "deployment berhasil" in combined_lower
+    )
+    blocker_markers = (
+        "belum menemukan",
+        "belum menerima",
+        "mohon bagikan",
+        "tolong kirim",
+        "perlu informasi",
+        "butuh informasi",
+        "tidak menemukan",
+        "file cv",
+        "isi cv",
+    )
+    has_blocker = any(marker in combined_lower for marker in blocker_markers)
+    promise_markers = (
+        "nanti",
+        "sedang",
+        "saya mulai",
+        "saya langsung",
+        "langsung buatkan",
+        "akan saya",
+        "hasilnya saya kirim",
+        "lagi saya",
+    )
+    final_is_promise = any(marker in final_lower for marker in promise_markers)
+    user_asks_status = any(k in user_lower for k in ("mana", "belum jadi", "udah jadi", "sudah jadi", "url", "link"))
+
+    if has_success_artifact:
+        return final_reply
+    if has_blocker:
+        return (
+            "Belum bisa saya lanjutkan karena bahan yang dibutuhkan belum tersedia di workspace agent. "
+            "Subagent minta isi/file CV dikirim ulang atau ditempel di chat dulu, baru saya bisa buat web HTML/CSS/JS-nya."
+        )
+    if final_is_promise or user_asks_status:
+        return (
+            "Belum selesai. Subagent belum mengembalikan URL, file terkirim, atau hasil final yang bisa saya serahkan. "
+            "Saya tidak akan klaim selesai sebelum ada output yang valid."
+        )
+    return final_reply
 
 
 
@@ -81,6 +223,39 @@ class AgentRunResult(TypedDict):
     run_id: uuid.UUID
     tokens_used: int
     usage: dict[str, Any]
+
+
+class BlockTaskToolMiddleware(AgentMiddleware):
+    """Block Deep Agents task delegation for flows that must execute in parent."""
+
+    name = "BlockTaskToolMiddleware"
+
+    def _blocked_message(self, request: Any) -> ToolMessage | None:
+        tool_name = getattr(getattr(request, "tool", None), "name", None)
+        if tool_name != "task":
+            return None
+        tool_call = getattr(request, "tool_call", {}) or {}
+        return ToolMessage(
+            content=(
+                "The task tool is disabled for this run. Execute the requested "
+                "Google Workspace action directly with the parent MCP tools."
+            ),
+            tool_call_id=tool_call.get("id", ""),
+            name="task",
+            status="error",
+        )
+
+    def wrap_tool_call(self, request: Any, handler: Any) -> Any:
+        blocked = self._blocked_message(request)
+        if blocked is not None:
+            return blocked
+        return handler(request)
+
+    async def awrap_tool_call(self, request: Any, handler: Any) -> Any:
+        blocked = self._blocked_message(request)
+        if blocked is not None:
+            return blocked
+        return await handler(request)
 
 
 async def run_agent(
@@ -119,6 +294,18 @@ async def run_agent(
         model=agent_model.model,
     )
     log.info("agent_run.start")
+
+    abandoned_before_current = (
+        await db.execute(
+            select(Run)
+            .where(
+                Run.session_id == session.id,
+                Run.status == "abandoned",
+            )
+            .order_by(Run.completed_at.desc().nullslast(), Run.started_at.desc().nullslast())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
 
     # --- Create Run record (status: running) ---
     _now = datetime.now(timezone.utc)
@@ -167,6 +354,21 @@ async def run_agent(
     sub_sandboxes = tool_setup.sub_sandboxes
     _memory_scope = tool_setup.memory_scope
 
+    google_mcp_parent_only = (
+        _is_google_mcp_intent(user_message)
+        and is_google_workspace_mcp_configured(tools_config)
+    )
+    if google_mcp_parent_only and subagent_list:
+        log.info(
+            "agent_run.google_mcp_subagents_removed_before_prompt",
+            subagents=len(subagent_list),
+            reason="google_workspace_mcp_parent_only",
+        )
+        subagent_list = []
+        active_groups = [
+            group for group in active_groups if not str(group).startswith("subagents(")
+        ]
+
     log.debug("agent_run.tools_ready (pre-mcp)", groups=active_groups, count=len(tools))
 
     # ------------------------------------------------------------------ #
@@ -213,7 +415,15 @@ async def run_agent(
         escalation_user_jid=escalation_user_jid,
         escalation_context=escalation_context,
         is_operator_message=is_op_msg,
+        user_message=user_message,
     )
+    if abandoned_before_current is not None:
+        system_prompt += (
+            "\n\n## Restart Recovery\n"
+            "Run sebelumnya terhenti karena service restart sebelum selesai. "
+            "JANGAN lanjutkan atau ulangi task lama secara otomatis. "
+            "Fokus pada pesan user terbaru. Jika user bertanya status task lama, jelaskan singkat bahwa proses sebelumnya terhenti saat restart dan minta konfirmasi sebelum menjalankan ulang."
+        )
 
     # ------------------------------------------------------------------ #
     # 7. Persist user message                                             #
@@ -238,6 +448,11 @@ async def run_agent(
     _wa_device_id: str = _ch_cfg.get("device_id", "")
     _wa_target: str = _ch_cfg.get("user_phone", "")
     _is_wa_session: bool = getattr(session, "channel_type", None) == "whatsapp" and bool(_wa_device_id and _wa_target)
+    _google_fallback_external_user_id = getattr(agent_model, "owner_external_id", None)
+    if not _google_fallback_external_user_id:
+        _operator_ids = getattr(agent_model, "operator_ids", None)
+        if isinstance(_operator_ids, list) and _operator_ids:
+            _google_fallback_external_user_id = str(_operator_ids[0])
 
     google_mcp = await prepare_google_mcp_runtime(
         tools_config=tools_config,
@@ -250,18 +465,58 @@ async def run_agent(
         user_message=user_message,
         system_prompt=system_prompt,
         log=log,
+        fallback_external_user_id=_google_fallback_external_user_id,
     )
     system_prompt = google_mcp.system_prompt
     _google_mcp_auth_url = google_mcp.auth_url
+    mcp_tools_config = tools_config
+    if (
+        google_mcp.enabled
+        and google_mcp.workspace_server
+        and not _google_workspace_server_has_auth(google_mcp)
+    ):
+        mcp_tools_config = _remove_google_workspace_mcp_server(tools_config)
+        log.info(
+            "agent_run.google_mcp_client_skipped_until_auth",
+            reason="missing_per_user_bearer",
+            auth_url_present=bool(_google_mcp_auth_url),
+            integration_url=google_mcp.integration_url or None,
+        )
 
-    async with mcp_client_context(tools_config) as (mcp_tools, mcp_errors):
+    async with mcp_client_context(mcp_tools_config) as (mcp_tools, mcp_errors):
         if google_mcp.preflight_error and "google_workspace" not in mcp_errors:
             mcp_errors["google_workspace"] = google_mcp.preflight_error
         if mcp_tools:
             mcp_tools = sanitize_google_forms_tools(mcp_tools, log)
-            tools = tools + mcp_tools
+            mcp_tool_names = [getattr(tool, "name", "") for tool in mcp_tools]
+            if _is_google_mcp_intent(user_message) and subagent_list:
+                log.info(
+                    "agent_run.google_mcp_subagents_disabled",
+                    subagents=len(subagent_list),
+                    reason="google_workspace_mcp_must_run_in_parent",
+                )
+                subagent_list = []
+            # Put MCP tools first so model/tool-router bias favors the connected
+            # external service over sandbox helpers when both could appear useful.
+            tools = mcp_tools + tools
             active_groups.append(f"mcp({len(mcp_tools)} tools)")
-            log.debug("agent_run.mcp_tools_added", count=len(mcp_tools))
+            if isinstance(system_prompt, str):
+                system_prompt += build_mcp_tool_priority_notice(
+                    mcp_tool_names=mcp_tool_names,
+                    sandbox_active=sandbox is not None,
+                )
+            log.debug("agent_run.mcp_tools_added", count=len(mcp_tools), names=mcp_tool_names)
+            if google_mcp_parent_only:
+                task_tools = [
+                    getattr(tool, "name", "")
+                    for tool in tools
+                    if getattr(tool, "name", "") == "task"
+                ]
+                if task_tools:
+                    log.warning(
+                        "agent_run.google_mcp_parent_only_task_tool_present",
+                        count=len(task_tools),
+                    )
         if mcp_errors:
             log.warning("agent_run.mcp_errors", errors=mcp_errors)
             _google_mcp_auth_url, system_prompt = await apply_mcp_error_notice(
@@ -273,10 +528,63 @@ async def run_agent(
                 system_prompt=system_prompt,
                 log=log,
             )
+            google_mcp_err = str(mcp_errors.get("google_workspace") or "")
+            if google_mcp_parent_only and google_mcp_err and not mcp_tools:
+                if _is_google_auth_or_scope_error(google_mcp_err):
+                    final_reply = await _build_google_mcp_auth_failure_reply(
+                        llm=llm_raw,
+                        user_message=user_message,
+                        error_text=google_mcp_err,
+                        auth_url=_google_mcp_auth_url,
+                    )
+                else:
+                    final_reply = _build_google_mcp_unavailable_reply(google_mcp_err)
+                log.warning(
+                    "agent_run.google_mcp_blocked_before_graph",
+                    error=google_mcp_err[:200],
+                    auth_url_present=bool(_google_mcp_auth_url),
+                )
+                run_record.status = "completed"
+                run_record.completed_at = datetime.now(timezone.utc)
+                run_record.error_message = google_mcp_err[:2000]
+                run_record.tokens_used = 0
+                run_record.prompt_tokens = 0
+                run_record.completion_tokens = 0
+                run_record.reasoning_tokens = 0
+                run_record.cached_tokens = 0
+                run_record.openrouter_cost_usd = Decimal("0")
+                run_record.usage_details = None
+                db.add(Message(
+                    session_id=session.id,
+                    role="assistant",
+                    content=final_reply,
+                    step_index=step_base + 1,
+                    run_id=run_id,
+                ))
+                await db.flush()
+                if sandbox:
+                    await sandbox.aclose()
+                for _ssb in sub_sandboxes:
+                    await _ssb.aclose()
+                return AgentRunResult(
+                    reply=final_reply,
+                    steps=[],
+                    run_id=run_id,
+                    tokens_used=0,
+                    usage={
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "reasoning_tokens": 0,
+                        "cached_tokens": 0,
+                        "total_tokens": 0,
+                        "openrouter_cost_usd": 0,
+                        "details": None,
+                    },
+                )
 
         backend = None
+        _checkpointer = None
         try:
-            from deepagents import create_deep_agent
             from langgraph.checkpoint.memory import MemorySaver
             from app.core.engine.deep_agent_backend import DockerBackend
 
@@ -292,6 +600,8 @@ async def run_agent(
                 _interrupt_on = {name: True for name in _raw_interrupt_on}
             else:
                 _interrupt_on = {}
+            from deepagents import create_deep_agent
+
             # PENTING: gunakan llm_raw (bukan llm yang sudah .bind()) —
             # DeepAgents SDK memanggil .count() pada model untuk parse nama provider,
             # yang gagal pada RunnableBinding dan menyebabkan AttributeError ditangkap
@@ -304,6 +614,12 @@ async def run_agent(
                 subagents=subagent_list or None,
                 checkpointer=_checkpointer,
             )
+            if google_mcp_parent_only:
+                _dag_kwargs["middleware"] = [BlockTaskToolMiddleware()]
+                log.info(
+                    "agent_run.google_mcp_deepagent_parent_only_mode",
+                    reason="block_task_tool_keep_deepagents_runtime",
+                )
             if _interrupt_on:
                 _dag_kwargs["interrupt_on"] = _interrupt_on
             graph = create_deep_agent(**_dag_kwargs)
@@ -323,7 +639,12 @@ async def run_agent(
                 has_sandbox=sandbox is not None,
             )
             from langgraph.prebuilt import create_react_agent
-            graph = create_react_agent(llm, tools=tools, prompt=system_prompt)
+            graph = create_react_agent(
+                llm,
+                tools=tools,
+                prompt=system_prompt,
+                checkpointer=_checkpointer,
+            )
 
         if media_image_b64 and media_image_mime:
             human_content: Any = [
@@ -341,7 +662,47 @@ async def run_agent(
         )
         step_counter = step_base + 1
 
-        _agent_logger = AgentStepLogger(log)
+        _progress_last_sent_at: float = 0.0
+        _progress_sent_count: int = 0
+        _progress_important_tools = {"task", "deploy_app", "execute", "send_whatsapp_document", "send_whatsapp_image"}
+
+        async def _wa_progress_callback(tool_name: str, input_payload: Any, phase: str, output: Any | None) -> None:
+            nonlocal _progress_last_sent_at, _progress_sent_count
+            if not _is_wa_session:
+                return
+            if tool_name == "notify_user":
+                return
+            if tool_name not in _progress_important_tools:
+                return
+            if phase == "end" and tool_name != "task":
+                return
+
+            import time as _time
+            now_ts = _time.monotonic()
+            min_gap = 75.0 if _progress_sent_count else 0.0
+            if now_ts - _progress_last_sent_at < min_gap:
+                return
+
+            message = (
+                build_task_done_message(input_payload, output)
+                if phase == "end" and tool_name == "task"
+                else build_progress_message(tool_name, input_payload)
+            )
+            if not message:
+                return
+            try:
+                from app.core.infra.wa_client import send_wa_message
+
+                await send_wa_message(_wa_device_id, _wa_target, message)
+                _progress_last_sent_at = now_ts
+                _progress_sent_count += 1
+                log.info("agent_run.wa_progress_sent", tool=tool_name, phase=phase)
+            except Exception as exc:
+                log.warning("agent_run.wa_progress_failed", tool=tool_name, error=str(exc)[:200])
+
+        _agent_logger = AgentStepLogger(log,
+            progress_callback=_wa_progress_callback if _is_wa_session else None,
+        )
 
         def _usage_summary() -> dict[str, Any]:
             return {
@@ -404,13 +765,22 @@ async def run_agent(
                     config=_graph_config,
                     version="v2",
                 )
-                # GraphOutput (version="v2") only carries .interrupts; get the
-                # actual state dict (with "messages") from the checkpointer.
-                _state = await graph.aget_state(_graph_config)
-                result: dict = dict(_state.values) if _state else {}
+                # GraphOutput (version="v2") may only carry .interrupts; when
+                # a checkpointer exists, get messages from graph state.
+                result = await _graph_result_from_output(
+                    graph=graph,
+                    graph_config=_graph_config,
+                    graph_output=_graph_output,
+                    log=log,
+                )
         except asyncio.CancelledError:
             # Human interrupt — user sent a new message while this run was active.
             log.info("agent_run.cancelled_by_interrupt", session_id=str(session.id))
+            run_record.status = "cancelled"
+            run_record.completed_at = datetime.now(timezone.utc)
+            run_record.error_message = "Cancelled because a newer user message interrupted this run."
+            _apply_run_usage(_agent_logger.total_tokens_from_callbacks)
+            await db.flush()
             await _cleanup_sandboxes()
             raise  # propagate so the task is properly marked cancelled
         except asyncio.TimeoutError:
@@ -455,8 +825,12 @@ async def run_agent(
                             config=_graph_config,
                             version="v2",
                         )
-                        _state = await graph.aget_state(_graph_config)
-                        result = dict(_state.values) if _state else {}
+                        result = await _graph_result_from_output(
+                            graph=graph,
+                            graph_config=_graph_config,
+                            graph_output=_graph_output,
+                            log=log,
+                        )
                     log.info("agent_run.subagent_json_error_retry_ok")
                 except Exception as _retry_json_exc:
                     log.error("agent_run.subagent_json_error_retry_failed", error=str(_retry_json_exc)[:300])
@@ -1055,6 +1429,10 @@ async def run_agent(
         api_key=settings.api_key,
         log=log,
     )
+    guarded_reply = _task_result_guard_reply(final_reply, steps, user_message)
+    if guarded_reply != final_reply:
+        log.warning("agent_run.final_reply_overridden_by_task_guard")
+        final_reply = guarded_reply
 
     final_reply = ensure_non_empty_reply(final_reply, steps)
 

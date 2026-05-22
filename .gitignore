@@ -74,6 +74,7 @@ deploy_paramiko.py
 
 # Ad-hoc test/debug scripts (may contain hardcoded keys or local paths)
 test_*.py
+!tests/test_*.py
 check_db.py
 patch_subagents.py
 update_schema.py
@@ -81,3 +82,13 @@ test_out.txt
 
 # System message drafts (large markdown, managed via scripts/seed_*.py)
 
+
+
+# Dashboard
+dashboard/.env
+dashboard/node_modules/
+dashboard/dist/
+dashboard/build/
+dashboard/.cache/
+dashboard/.next/
+dashboard/

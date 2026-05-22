@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import structlog
 from sqlalchemy import or_, select
@@ -17,6 +18,83 @@ from app.models.subscription import SubscriptionPlan, User, UserSubscription
 from app.models.user_api_key import UserApiKey, generate_user_key, hash_user_key
 
 logger = structlog.get_logger(__name__)
+
+
+DEFAULT_SUBSCRIPTION_PLANS: list[dict[str, Any]] = [
+    {
+        "id": SubscriptionPlan.TRIAL_ID,
+        "code": "trial",
+        "label": "Trial",
+        "max_agents": 1,
+        "token_quota": 2_000_000,
+        "period_days": None,
+        "grace_period_days": 3,
+        "allowed_models": ["openai/gpt-4.1-mini"],
+        "subagents_allowed": False,
+        "wa_connect": True,
+        "is_trial": True,
+        "is_active": True,
+    },
+    {
+        "id": SubscriptionPlan.TIER_1_ID,
+        "code": "tier_1",
+        "label": "Starter",
+        "max_agents": 1,
+        "token_quota": 10_000_000,
+        "period_days": 30,
+        "grace_period_days": 3,
+        "allowed_models": ["openai/gpt-4.1-mini"],
+        "subagents_allowed": True,
+        "wa_connect": True,
+        "is_trial": False,
+        "is_active": True,
+    },
+    {
+        "id": SubscriptionPlan.TIER_2_ID,
+        "code": "tier_2",
+        "label": "Pro",
+        "max_agents": 2,
+        "token_quota": 20_000_000,
+        "period_days": 30,
+        "grace_period_days": 3,
+        "allowed_models": ["openai/gpt-4.1-mini", "deepseek/deepseek-v4-flash"],
+        "subagents_allowed": True,
+        "wa_connect": True,
+        "is_trial": False,
+        "is_active": True,
+    },
+    {
+        "id": SubscriptionPlan.TIER_3_ID,
+        "code": "tier_3",
+        "label": "Enterprise",
+        "max_agents": None,
+        "token_quota": 0,
+        "period_days": None,
+        "grace_period_days": 7,
+        "allowed_models": [],
+        "subagents_allowed": True,
+        "wa_connect": True,
+        "is_trial": False,
+        "is_active": True,
+    },
+]
+
+
+async def ensure_default_subscription_plans(db: AsyncSession) -> None:
+    """Idempotently seed core plans required by auto-provisioning."""
+    existing_ids = set(
+        (
+            await db.execute(
+                select(SubscriptionPlan.id).where(
+                    SubscriptionPlan.id.in_([p["id"] for p in DEFAULT_SUBSCRIPTION_PLANS])
+                )
+            )
+        ).scalars().all()
+    )
+    for data in DEFAULT_SUBSCRIPTION_PLANS:
+        if data["id"] not in existing_ids:
+            db.add(SubscriptionPlan(**data))
+    await db.flush()
 
 
 async def get_or_create_wa_user(
@@ -30,6 +108,8 @@ async def get_or_create_wa_user(
 
     Returns (user, subscription).
     """
+    await ensure_default_subscription_plans(db)
+
     user = (
         await db.execute(select(User).where(User.external_id == external_id))
     ).scalar_one_or_none()
@@ -133,6 +213,41 @@ async def get_subscription_by_external_id(
     ).scalar_one()
 
     return user, sub, plan
+
+
+def _tool_enabled(tools_config: dict[str, Any], key: str, default: bool = False) -> bool:
+    cfg = tools_config.get(key)
+    if cfg is None:
+        return default
+    if isinstance(cfg, bool):
+        return cfg
+    if isinstance(cfg, dict):
+        return bool(cfg.get("enabled", default))
+    return default
+
+
+def validate_agent_entitlements(
+    plan: SubscriptionPlan,
+    *,
+    model: str,
+    tools_config: dict[str, Any],
+    channel_type: str | None,
+) -> list[str]:
+    """Return plan violations for a proposed agent config."""
+    violations: list[str] = []
+    allowed_models = list(plan.allowed_models or [])
+    if allowed_models and model not in allowed_models:
+        violations.append(
+            f"Model '{model}' tidak tersedia di plan {plan.label}. Model yang tersedia: {', '.join(allowed_models)}."
+        )
+
+    if _tool_enabled(tools_config, "subagents", default=False) and not plan.subagents_allowed:
+        violations.append(f"Plan {plan.label} tidak mengizinkan sub-agent.")
+
+    if channel_type == "whatsapp" and not plan.wa_connect:
+        violations.append(f"Plan {plan.label} tidak mengizinkan koneksi WhatsApp.")
+
+    return violations
 
 
 async def check_can_create_agent(

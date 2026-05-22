@@ -1,3 +1,230 @@
+# Recap: Deep Agent SaaS Hardening — MCP, Subagent, Sandbox, Builder Entitlements
+
+**Tanggal**: 2026-05-21
+**Status**: ✅ Selesai
+
+## Scope
+
+Analisa dan perbaikan bug pada project LangChain Deep Agent untuk produk SaaS:
+
+- Agent Builder sebagai interface user membuat AI agent.
+- MCP tools, terutama Google Workspace MCP.
+- Sub Agent dengan DeepAgents backend.
+- Docker Sandbox untuk eksekusi kode/file/deploy.
+- Entitlement subscription plan untuk create/update agent.
+
+## Masalah
+
+- MCP context bisa menelan exception/cancellation karena memakai `except BaseException`, sehingga error utama dari agent run dapat hilang.
+- Saat sandbox aktif, deploy tools ikut terekspos walaupun `deploy` tidak diaktifkan.
+- Subagent yang seharusnya punya sandbox sendiri bisa fallback ke plain subagent jika compile gagal; efeknya `write_file` dan `deploy_app` bisa memakai workspace berbeda.
+- File helper sandbox menerima path user tanpa boundary check yang kuat, sehingga path traversal berisiko keluar dari workspace.
+- WhatsApp media tools membaca file via shell command tanpa quote path.
+- Agent Builder hanya mengecek slot agent, belum mengecek entitlement model/subagents/WhatsApp dari subscription plan.
+- Google MCP intent belum cukup mengenali request bahasa Indonesia seperti "kalender", "surel", dan "dokumen google".
+- React/Google-MCP graph bisa tidak punya checkpointer, tetapi runner tetap memanggil `aget_state()`, sehingga run gagal dengan `ValueError: No checkpointer set`.
+- Saat run lama masih aktif, pesan user terbaru bisa tertahan terlalu lama karena cancellation menunggu task lama selesai/cleanup.
+- Test suite punya beberapa kontrak lama/stale dan fixture eksternal yang tidak tersedia (`respx_mock`).
+
+## Akar Bug
+
+- Lifecycle MCP client tidak dipisah jelas antara error saat connect dan error saat body context berjalan.
+- `deploy` dianggap implisit dari `sandbox`, padahal deploy adalah kapabilitas lebih tinggi dan harus opt-in.
+- Fallback subagent non-sandbox menyembunyikan kegagalan compile DeepAgents, tetapi merusak isolasi workspace.
+- Path `/workspace/...` belum dinormalisasi ke workspace host dengan validasi `relative_to(root)`.
+- Agent Builder tidak punya satu fungsi validasi entitlement yang dipakai konsisten saat create/update.
+- `agent_runner` mengasumsikan semua graph punya checkpointer; mode Google MCP parent-only dan fallback React agent tidak selalu aman terhadap asumsi ini.
+- `cancel_active_run()` menunggu terlalu lama pada tool/subagent yang lambat membatalkan diri, sehingga lock session tetap menahan pesan terbaru.
+- Test API berbasis `fastapi.testclient.TestClient` menggantung di environment ini bahkan untuk FastAPI minimal, sehingga perlu dipisah dari verifikasi non-TestClient.
+
+## Solusi
+
+- `mcp_client_context()` sekarang:
+  - hanya menangkap `Exception` saat connect/load tools
+  - tidak menelan `CancelledError` atau exception dari body context
+  - menutup client via `finally` dengan `aclose()`/`close()`
+- Parent deploy tools hanya dimuat jika `tools_config.deploy` aktif.
+- Sandbox file resolver baru membatasi semua path ke workspace atau shared dir:
+  - `/workspace/foo` dipetakan ke workspace host
+  - `../...` diblokir
+  - error dikembalikan sebagai `[error] ...`
+- Subagent sandbox sekarang fail-closed:
+  - jika `create_deep_agent(..., backend=DockerBackend(sub_sandbox))` gagal, sandbox ditutup dan error dinaikkan
+  - tidak ada fallback diam-diam ke plain `SubAgent`
+- WhatsApp media file read memakai `shlex.quote(path)` sebelum `base64 -w 0`.
+- Subscription entitlement dibuat eksplisit:
+  - model harus ada di `allowed_models` jika allowlist tidak kosong
+  - subagents dicek terhadap `plan.subagents_allowed`
+  - WhatsApp channel dicek terhadap `plan.wa_connect`
+  - validasi dipakai di `create_agent()` dan update `model/tools_config`
+- Google MCP intent ditambah keyword Indonesia untuk routing parent-only MCP.
+- React/Google-MCP graph sekarang diberi `MemorySaver` checkpointer saat dibuat.
+- Runner memakai fallback aman ke output `ainvoke()` jika graph tetap tidak punya checkpointer, jadi `No checkpointer set` tidak lagi menjatuhkan run.
+- Interrupted run ditandai `cancelled` dengan usage token yang sudah terkumpul.
+- Session cancellation dibuat responsif:
+  - task lama di-cancel
+  - ditunggu singkat `1.5s`
+  - jika cleanup/tool call belum berhenti, lock session di-force release agar pesan terbaru bisa diproses
+- Health endpoint dipisah:
+  - `/health` = liveness ringan tanpa DB
+  - `/health/detailed` = readiness DB/WA/scheduler dengan timeout
+- Alias kompatibilitas ditambahkan untuk import lama:
+  - `app.core.subagent_builder`
+  - `app.core.deep_agent_backend`
+  - `app.core.transcription_service`
+  - `app.core.sandbox`
+- Test helper `respx_mock` lokal ditambahkan agar test transkripsi tidak bergantung plugin eksternal.
+- `.gitignore` sekarang tetap ignore root `test_*.py`, tetapi mengizinkan `tests/test_*.py`.
+
+## Flow Kerja Agent Saat Subagent + MCP Aktif
+
+### Flow yang benar untuk intent Google Workspace
+
+1. User meminta aksi Google Workspace, misalnya kalender, sheet, docs, slides, forms, Gmail, atau Drive.
+2. `prepare_google_mcp_runtime()` menyiapkan runtime MCP dan auth state.
+3. Google MCP tools diprioritaskan di parent agent.
+4. Jika intent terdeteksi sebagai Google MCP dan MCP configured:
+   - subagent build dilewati untuk turn itu
+   - prompt memberi instruksi agar parent agent memakai MCP tool langsung
+   - sandbox tidak dipakai untuk meniru external service
+5. Tool wrapper Google MCP melakukan guard/normalisasi payload sebelum call MCP.
+6. Agent mengembalikan hasil/link final ke user.
+
+### Flow yang benar untuk coding/deploy
+
+1. Parent agent menerima request coding/deploy.
+2. Parent agent delegasi ke subagent sandbox seperti `sys_coder`.
+3. `sys_coder` dicompile sebagai DeepAgent dengan `DockerBackend(sub_sandbox)`.
+4. File operations (`write_file`, `edit_file`, `read_file`) dan deployment tools memakai workspace sub_sandbox yang sama.
+5. Jika compile subagent gagal, run gagal eksplisit; tidak fallback ke workspace parent.
+6. Jika WhatsApp media aktif, subagent boleh generate file di `/workspace/output/...` dan mengirim langsung via `send_whatsapp_document` atau `send_whatsapp_image`.
+
+### Flow yang diblokir
+
+- Google Workspace task tidak boleh dominan memakai sandbox ketika MCP tersedia.
+- Deploy tools tidak boleh muncul hanya karena sandbox aktif.
+- Sandbox subagent tidak boleh fallback ke plain SubAgent saat backend compile gagal.
+- Agent Builder tidak boleh membuat/update agent yang melebihi plan subscription.
+- Pesan terbaru user tidak boleh menunggu run lama sampai timeout penuh jika run lama bisa di-cancel.
+
+### Flow interrupt pesan terbaru
+
+1. Pesan baru masuk pada session yang masih punya run aktif.
+2. Runtime memanggil `cancel_active_run(session_id)`.
+3. Task lama menerima `CancelledError` dan run record ditandai `cancelled`.
+4. Runtime menunggu cleanup singkat sampai `1.5s`.
+5. Jika task lama belum selesai karena tool/subagent/HTTP call lambat unwind, lock session dilepas paksa.
+6. Pesan terbaru diproses sebagai run baru sehingga user mendapat respons cepat.
+7. Full pause/resume mid-tool belum dianggap aman; resume yang benar perlu checkpoint persisten dan checkpoint kooperatif di level tool/subagent.
+
+## File yang Diubah
+
+| File | Perubahan |
+|------|-----------|
+| `app/core/tools/mcp_tool.py` | MCP context tidak swallow exception/cancellation; close client via `finally` |
+| `app/core/engine/agent_tool_setup.py` | Deploy tools hanya dimuat jika `deploy` enabled; Google MCP parent-only skip subagents |
+| `app/core/engine/subagent_builder.py` | Sandbox subagent compile fail-closed dengan backend sub_sandbox |
+| `app/core/infra/sandbox.py` | Path resolver aman; traversal blocked; concurrent limit return tuple konsisten |
+| `app/core/engine/tool_builder.py` | Quote path untuk WhatsApp media file read |
+| `app/core/domain/subscription_service.py` | Tambah `validate_agent_entitlements()` |
+| `app/core/tools/builder_tools.py` | Enforce entitlement saat create/update agent; platform capabilities kompatibel |
+| `app/core/engine/google_mcp_support.py` | Tambah keyword intent Google MCP bahasa Indonesia |
+| `app/core/engine/agent_runner.py` | Checkpointer React graph, fallback hasil `ainvoke()`, dan marking run `cancelled` saat interrupt |
+| `app/core/engine/session_lock.py` | Cancellation grace responsif `1.5s` lalu force release lock untuk pesan terbaru |
+| `app/models/agent.py` | Python-side JSON defaults untuk list/dict field |
+| `app/main.py` | Health liveness/readiness dipisah; startup task diberi timeout/test guard |
+| `app/core/engine/wa_progress.py` | Progress WA kembali eksplisit dengan path dan status selesai |
+| `.gitignore` | `tests/test_*.py` tidak lagi ikut ignored |
+| `tests/conftest.py` | Fixture lokal `respx_mock` |
+| `tests/test_session_lock_and_history.py` | Regression test checkpointer fallback dan responsive cancel |
+| `app/core/subagent_builder.py`, `app/core/deep_agent_backend.py`, `app/core/transcription_service.py`, `app/core/sandbox.py` | Alias import kompatibilitas |
+
+## Command Verifikasi
+
+```bash
+.venv/bin/python -m py_compile \
+  app/core/tools/mcp_tool.py \
+  app/core/engine/agent_tool_setup.py \
+  app/core/engine/subagent_builder.py \
+  app/core/infra/sandbox.py \
+  app/core/engine/tool_builder.py \
+  app/core/engine/google_mcp_support.py \
+  app/core/domain/subscription_service.py \
+  app/core/tools/builder_tools.py \
+  app/models/agent.py \
+  app/main.py \
+  app/core/engine/session_lock.py \
+  app/core/engine/wa_progress.py \
+  app/core/subagent_builder.py \
+  app/core/deep_agent_backend.py \
+  app/core/transcription_service.py \
+  app/core/sandbox.py \
+  tests/conftest.py
+```
+
+Hasil: compile lolos.
+
+```bash
+.venv/bin/python -m pytest -q tests \
+  --ignore=tests/test_api_full_coverage.py \
+  --ignore=tests/test_users_api.py \
+  --ignore=tests/test_subscriptions_api.py \
+  --ignore=tests/test_user_api_keys.py \
+  --maxfail=1 -vv
+```
+
+Hasil: `289 passed, 9 skipped, 10 warnings`.
+
+Tambahan verifikasi untuk fix `No checkpointer set` dan interrupt run:
+
+```bash
+.venv/bin/python -m py_compile \
+  app/core/engine/agent_runner.py \
+  app/core/engine/session_lock.py \
+  tests/test_session_lock_and_history.py
+```
+
+Hasil: compile lolos.
+
+```bash
+timeout 120s .venv/bin/python -m pytest -q tests/test_session_lock_and_history.py --maxfail=1 -vv
+```
+
+Hasil: `42 passed, 7 warnings`.
+
+```bash
+timeout 240s .venv/bin/python -m pytest -q tests \
+  --ignore=tests/test_api_full_coverage.py \
+  --ignore=tests/test_users_api.py \
+  --ignore=tests/test_subscriptions_api.py \
+  --ignore=tests/test_user_api_keys.py \
+  --maxfail=1
+```
+
+Hasil: `292 passed, 9 skipped, 10 warnings`.
+
+```bash
+.venv/bin/python -m pytest -q tests/test_transcription_service.py --maxfail=1 -vv
+```
+
+Hasil: `13 passed`.
+
+```bash
+.venv/bin/python -m pytest -q tests/test_whatsapp_progress.py --maxfail=1 -vv
+```
+
+Hasil: `5 passed`.
+
+## Catatan Verifikasi
+
+- Full API suite berbasis `fastapi.testclient.TestClient` tidak dipakai sebagai gate di environment ini karena `TestClient` menggantung bahkan pada FastAPI minimal.
+- Warning tersisa:
+  - deprecation warning DeepAgents `files_update`
+  - warning lama event loop di test builder pipeline
+- Keduanya bukan failure runtime dari fix MCP/subagent/sandbox.
+
+---
+
 # Recap: WhatsApp Escalation Media Forwarding + Operator Reply Routing
 
 **Tanggal**: 2026-05-19

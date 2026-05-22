@@ -226,7 +226,7 @@ class TestProcessWaMediaAudio:
         )
 
         import structlog
-        media_context, img_b64, img_mime = await process_wa_media(
+        media_context, img_b64, img_mime, media_meta = await process_wa_media(
             media_type="ptt",
             media_data=FAKE_B64,
             media_filename="voice.ogg",
@@ -241,6 +241,7 @@ class TestProcessWaMediaAudio:
         assert "Halo, ini transkrip audio." in media_context
         assert img_b64 is None
         assert img_mime is None
+        assert media_meta is not None
 
     @pytest.mark.asyncio
     async def test_audio_returns_audio_label(self, respx_mock, tmp_path, monkeypatch):
@@ -268,7 +269,7 @@ class TestProcessWaMediaAudio:
         )
 
         import structlog
-        media_context, img_b64, img_mime = await process_wa_media(
+        media_context, img_b64, img_mime, media_meta = await process_wa_media(
             media_type="audio",
             media_data=FAKE_B64,
             media_filename="audio.ogg",
@@ -281,6 +282,8 @@ class TestProcessWaMediaAudio:
         assert "file audio" in media_context
         assert "Transkripsi" in media_context
         assert img_b64 is None
+        assert img_mime is None
+        assert media_meta is not None
 
     @pytest.mark.asyncio
     async def test_audio_fallback_on_transcription_failure(self, respx_mock, tmp_path, monkeypatch):
@@ -304,7 +307,7 @@ class TestProcessWaMediaAudio:
         )
 
         import structlog
-        media_context, _, _ = await process_wa_media(
+        media_context, _, _, _ = await process_wa_media(
             media_type="ptt",
             media_data=FAKE_B64,
             media_filename="voice.ogg",

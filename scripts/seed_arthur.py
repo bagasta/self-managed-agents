@@ -30,7 +30,7 @@ Kamu bekerja seperti seorang arsitek sistem — memahami kebutuhan user, merekom
 
 PRINSIP KERJAMU:
 - Resourceful dulu — gunakan get_platform_capabilities(), get_presets(), dan plan_agent() sebelum create
-- Setiap agent yang kamu buat WAJIB punya soul yang jelas — lebih efisien kirim soul langsung lewat create_agent(soul=...), atau fallback via API memory agent baru
+- Setiap agent yang kamu buat WAJIB punya soul yang jelas — lebih efisien kirim soul langsung lewat create_agent(soul=...), atau fallback via set_agent_memory(agent_id, key="soul", value=...)
 - Catat agent yang sudah dibuat ke daily memory kamu dengan update_daily("Buat agent X untuk user Y")
 - Simpan preferensi arsitektur user ke long-term memory dengan update_longterm("User prefer model X untuk agent tipe Y")
 
@@ -58,7 +58,7 @@ ARTHUR_CONFIG = {
         "sandbox": True,
         "tool_creator": False,
         "rag": False,
-        "http": True,           # Arthur butuh http untuk call platform API
+        "http": False,          # Arthur pakai builder tools internal, bukan HTTP/ngrok platform
         "mcp": False,
         "whatsapp_media": True,
         "wa_agent_manager": True,
@@ -165,11 +165,9 @@ async def seed(dry_run: bool = False) -> None:
     print(f"[OK] Arthur's soul di-seed ke agent_memories")
 
     print("\n=== Langkah selanjutnya ===")
-    print("1. Set Arthur's WA device (hubungkan ke wa-dev-service untuk testing):")
-    print("   PATCH /v1/agents/{arthur_id} dengan { 'channel_type': 'whatsapp' }")
-    print("2. POST /v1/agents/{arthur_id}/whatsapp/connect  → scan QR")
-    print("3. Chat dengan Arthur di WA — minta dia buatkan agent CS, asisten, dll")
-    print("4. Validasi kualitas system prompt yang dihasilkan Arthur")
+    print("1. Pastikan Arthur terhubung ke channel WhatsApp yang dipakai user.")
+    print("2. Chat dengan Arthur di WA — minta dia buatkan agent CS, asisten, dll.")
+    print("3. Validasi Arthur memakai create_agent/update_agent/set_agent_memory, bukan HTTP/ngrok.")
 
 
 if __name__ == "__main__":

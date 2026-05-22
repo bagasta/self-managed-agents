@@ -22,6 +22,38 @@ from app.core.utils.phone_utils import normalize_phone
 
 
 # ---------------------------------------------------------------------------
+# Tool priority hints
+# ---------------------------------------------------------------------------
+
+def build_mcp_tool_priority_notice(
+    *,
+    mcp_tool_names: list[str],
+    sandbox_active: bool,
+) -> str:
+    """Build a compact prompt addendum so MCP-backed services win over sandbox."""
+    visible_names = [name for name in mcp_tool_names if name][:40]
+    tool_list = ", ".join(visible_names) if visible_names else "MCP tools"
+    if len(mcp_tool_names) > len(visible_names):
+        tool_list += f", ... (+{len(mcp_tool_names) - len(visible_names)} more)"
+
+    sandbox_line = (
+        "\n- Sandbox tetap boleh dipakai untuk olah file/kode lokal, tetapi hanya sebagai pendukung setelah data/aksi eksternal dilakukan via MCP."
+        if sandbox_active
+        else ""
+    )
+
+    return (
+        "\n\n## MCP Tool Priority\n"
+        f"MCP tools aktif: {tool_list}.\n"
+        "Aturan wajib saat memilih tool:\n"
+        "- Jika request user menyangkut layanan eksternal yang tersedia via MCP (Google Workspace, Gmail, Calendar, Drive, Docs, Sheets, Slides, Forms, atau service MCP lain), panggil tool MCP yang relevan sebagai sumber kebenaran.\n"
+        "- Jangan memakai sandbox untuk mensimulasikan, membuat file lokal pengganti, scraping manual, atau menjawab normatif jika MCP tool tersedia untuk aksi tersebut.\n"
+        "- Jika MCP membutuhkan auth, scope, atau sedang error, sampaikan blocker/auth flow yang benar; jangan diam-diam fallback ke sandbox seolah task berhasil."
+        f"{sandbox_line}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Agent Context Block
 # ---------------------------------------------------------------------------
 
@@ -98,6 +130,11 @@ def build_agent_context_block(
             "- Web/coding/deploy tasks → delegate to sys_coder immediately, do NOT attempt yourself\n"
             "- Your final reply to user: relay the result from subagent, max 3 lines\n"
             "- Do NOT re-explain or expand what the subagent produced\n\n"
+            "HASIL SUBAGENT ADALAH SUMBER KEBENARAN:\n"
+            "- Jika task() return URL/deploy/file terkirim → sampaikan hasil itu.\n"
+            "- Jika task() return blocker seperti butuh CV, file tidak ditemukan, atau minta info tambahan → sampaikan blocker itu apa adanya.\n"
+            "- DILARANG bilang 'saya sudah dapat CV', 'nanti saya kirim', 'sedang saya buat', atau klaim sukses jika task() tidak mengembalikan URL/file terkirim.\n"
+            "- Untuk pertanyaan status ('mana?', 'belum jadi?', 'udah jadi?'), jawab dari hasil task terakhir; jangan delegasikan ulang kecuali user eksplisit minta coba ulang.\n\n"
             "TASK CONTEXT — WAJIB disertakan di setiap `task=` string:\n"
             f"- Bahasa user: {'Bahasa Indonesia' if sender_name or user_phone else 'ikuti bahasa user'} — subagent HARUS balas dalam bahasa yang sama\n"
             + (f"- Nama user: {sender_name}\n" if sender_name else "")
@@ -300,6 +337,7 @@ def build_system_prompt(
     escalation_user_jid: str | None,
     escalation_context: str | None,
     is_operator_message: bool,
+    user_message: str = "",
 ) -> str:
     """
     Rakit system prompt lengkap dari semua komponen.
@@ -424,6 +462,18 @@ def build_system_prompt(
     # 2. Long-term memories
     if memory_block:
         system_prompt += f"\n\n{memory_block}"
+
+    if user_message.startswith("[SCHEDULED_REMINDER]"):
+        system_prompt += (
+            "\n\n## Scheduled Reminder Mode\n"
+            "Pesan user saat ini berasal dari scheduler, bukan chat manual user.\n"
+            "Aturan wajib:\n"
+            "- Jangan panggil set_reminder, set_multiple_reminders, cancel_reminder, task, deploy, sandbox, atau tool lain.\n"
+            "- Jangan membahas task lain yang sedang berjalan di percakapan.\n"
+            "- Jangan bilang reminder baru dibuat atau jadwal diubah.\n"
+            "- Ubah payload reminder menjadi pesan singkat, personal, dan natural untuk user.\n"
+            "- Maksimal 2 kalimat. Fokus hanya pada isi reminder.\n"
+        )
 
     # 3. Safety policy
     if agent_model.safety_policy:
@@ -576,14 +626,15 @@ def build_system_prompt(
             "\n\n## Deploy Instructions\n"
             "Kamu memiliki kemampuan deploy app ke public URL via Cloudflare tunnel.\n"
             "ALUR WAJIB — ikuti urutan ini tanpa skip:\n"
-            "1. Tulis semua file ke workspace (write_file)\n"
-            "2. Panggil get_deployment_status()\n"
+            "1. Untuk profile/portfolio/landing page sederhana: buat static HTML/CSS/JS langsung, jangan install framework kecuali user minta app kompleks.\n"
+            "2. Tulis semua file ke workspace (write_file)\n"
+            "3. Panggil get_deployment_status()\n"
             "   - Status 'running' → JANGAN deploy ulang, gunakan URL yang ada\n"
-            "   - Status 'not_deployed' → lanjut ke langkah 3\n"
-            "3. Panggil deploy_app(command, port)\n"
-            "4. Verifikasi: panggil get_deployment_status() lagi — pastikan URL ada dan status 'running'\n"
+            "   - Status 'not_deployed' → lanjut ke langkah 4\n"
+            "4. Panggil deploy_app(command, port)\n"
+            "5. Verifikasi: panggil get_deployment_status() lagi — pastikan URL ada dan status 'running'\n"
             "   - Jika URL kosong atau error → panggil get_deployment_logs() → debug → perbaiki\n"
-            "5. Sampaikan URL ke user secara natural — task BELUM selesai sebelum URL dikonfirmasi\n\n"
+            "6. Sampaikan URL ke user secara natural — task BELUM selesai sebelum URL dikonfirmasi\n\n"
             "ATURAN OUTPUT:\n"
             "- Respond naturally, seperti developer yang selesai mengerjakan sesuatu\n"
             "- Selalu sertakan URL deploy di respons akhir\n"
@@ -591,6 +642,17 @@ def build_system_prompt(
             "- JANGAN gunakan format STATUS:/DEPLOY_URL:/BLOCKER: — terlalu kaku\n"
             "- npm, npx, node tersedia di sandbox\n"
             "- Static file server: edit file tidak perlu restart, deploy_app ulang HANYA jika ganti command/port/dependency\n"
+        )
+
+    if "scheduler" in active_groups:
+        system_prompt += (
+            "\n\n## Scheduler Instructions\n"
+            "Saat user meminta reminder:\n"
+            "- Jika waktu jelas, langsung panggil set_reminder. Jangan cuma bilang sudah diatur tanpa tool call.\n"
+            "- Jika user menyebut jam spesifik tanpa kata 'setiap', 'harian', 'daily', atau pola berulang, gunakan one-time ISO datetime lokal WIB.\n"
+            "- Cron hanya untuk reminder berulang yang eksplisit.\n"
+            "- Setelah set_reminder sukses, konfirmasi sebagai one-time atau recurring sesuai output tool.\n"
+            "- Jangan mengubah one-time reminder menjadi 'setiap hari' kecuali user memang minta berulang.\n"
         )
 
     if cap_parts:

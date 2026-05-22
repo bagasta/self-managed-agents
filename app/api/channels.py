@@ -175,24 +175,43 @@ async def incoming_message(
         return {"status": "ok", "reply": "Percakapan direset.", "run_id": "", "steps": [], "messages_to_user": []}
 
     # --- Jalankan agent ---
+    from app.core.engine.session_lock import (
+        cancel_active_run,
+        register_active_task,
+        session_run_lock,
+        unregister_active_task,
+    )
     from app.core.engine.agent_runner import run_agent  # deferred to avoid circular import
+
+    _prior_interrupted = False
+    if not is_operator:
+        _prior_interrupted = await cancel_active_run(session.id)
 
     try:
         async with session_run_lock(session.id):
+            current_task = asyncio.current_task()
+            if current_task and not is_operator:
+                await register_active_task(session.id, current_task)
             result = await run_agent(
                 agent_model=agent,
                 session=session,
                 user_message=user_message,
                 db=db,
+                prior_run_was_interrupted=_prior_interrupted,
             )
     except asyncio.CancelledError:
+        await unregister_active_task(session.id, asyncio.current_task())
         return {"status": "cancelled", "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
     except (TimeoutError, asyncio.TimeoutError):
+        await unregister_active_task(session.id, asyncio.current_task())
         log.warning("channels.incoming.session_lock_timeout", session_id=str(session.id))
         return {"status": "timeout", "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
     except Exception as exc:
+        await unregister_active_task(session.id, asyncio.current_task())
         log.error("channels.incoming.agent_error", error=str(exc))
         raise HTTPException(status_code=500, detail=f"Agent error: {exc}")
+    finally:
+        await unregister_active_task(session.id, asyncio.current_task())
 
     reply = result.get("reply", "")
 
@@ -427,6 +446,15 @@ async def wa_incoming(
     _prior_interrupted = False
     if not _is_operator:
         _prior_interrupted = await cancel_active_run(session.id)
+        if _prior_interrupted:
+            try:
+                await send_wa_message(
+                    body.device_id,
+                    effective_reply_target,
+                    "Oke, saya stop proses sebelumnya. Saya ikuti pesan terbaru kamu sekarang.",
+                )
+            except Exception as _interrupt_ack_exc:
+                log.warning("wa_incoming.interrupt_ack_failed", error=str(_interrupt_ack_exc))
 
     try:
         async with session_run_lock(session.id):
@@ -449,10 +477,10 @@ async def wa_incoming(
             )
     except _asyncio.CancelledError:
         log.info("wa_incoming.cancelled_by_interrupt", session_id=str(session.id))
-        await unregister_active_task(session.id)
+        await unregister_active_task(session.id, _asyncio.current_task())
         return {"status": "cancelled", "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
     except (TimeoutError, _asyncio.TimeoutError):
-        await unregister_active_task(session.id)
+        await unregister_active_task(session.id, _asyncio.current_task())
         log.warning("wa_incoming.session_lock_timeout", session_id=str(session.id))
         try:
             await send_wa_message(body.device_id, effective_reply_target,
@@ -461,7 +489,7 @@ async def wa_incoming(
             pass
         return {"status": "timeout", "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
     except Exception as exc:
-        await unregister_active_task(session.id)
+        await unregister_active_task(session.id, _asyncio.current_task())
         log.error("wa_incoming.agent_error", error=str(exc), exc_info=True)
         import traceback as _tb
         err_detail = _tb.format_exc()
@@ -480,7 +508,7 @@ async def wa_incoming(
             log.warning("wa_incoming.error_reply_failed", error=str(_send_exc))
         return {"status": "error", "reply": _GENERIC_ERROR_MSG, "run_id": "", "steps": [], "messages_to_user": []}
     finally:
-        await unregister_active_task(session.id)
+        await unregister_active_task(session.id, _asyncio.current_task())
 
     reply = result.get("reply", "")
     steps = result.get("steps", [])

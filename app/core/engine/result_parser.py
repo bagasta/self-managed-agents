@@ -160,7 +160,8 @@ def parse_agent_result(
     db_messages: list[Message] = []
     step_counter = step_start
     tool_step = 0
-    pending_tool_records: list[Message] = []
+    step_by_tool_call_id: dict[str, dict[str, Any]] = {}
+    record_by_tool_call_id: dict[str, Message] = {}
 
     for msg in new_messages:
         if isinstance(msg, AIMessage):
@@ -189,8 +190,16 @@ def parse_agent_result(
                 ))
                 step_counter += 1
             for tc in (msg.tool_calls or []):
+                tool_call_id = tc.get("id", "")
                 tool_step += 1
-                steps.append({"step": tool_step, "tool": tc["name"], "args": tc.get("args", {}), "result": ""})
+                entry = {
+                    "step": tool_step,
+                    "tool": tc["name"],
+                    "args": tc.get("args", {}),
+                    "result": "",
+                    "tool_call_id": tool_call_id,
+                }
+                steps.append(entry)
                 record = Message(
                     session_id=session_id,
                     role="tool",
@@ -200,17 +209,26 @@ def parse_agent_result(
                     run_id=run_id,
                 )
                 db_messages.append(record)
-                pending_tool_records.append(record)
+                if tool_call_id:
+                    step_by_tool_call_id[tool_call_id] = entry
+                    record_by_tool_call_id[tool_call_id] = record
                 step_counter += 1
         elif isinstance(msg, ToolMessage):
             output = msg.content if isinstance(msg.content, str) else str(msg.content)
             output = output.replace("\x00", "")
-            for entry in reversed(steps):
-                if entry["result"] == "":
-                    entry["result"] = output[:500]
-                    break
-            if pending_tool_records:
-                pending_tool_records.pop(0).tool_result = output[:2000]
+            tool_call_id = getattr(msg, "tool_call_id", "")
+            entry = step_by_tool_call_id.get(tool_call_id)
+            if entry is not None:
+                entry["result"] = output[:4000]
+            else:
+                for fallback_entry in reversed(steps):
+                    if fallback_entry["result"] == "":
+                        fallback_entry["result"] = output[:4000]
+                        break
+
+            record = record_by_tool_call_id.get(tool_call_id)
+            if record is not None:
+                record.tool_result = output[:2000]
 
     return ParsedResult(
         final_reply=final_reply,

@@ -62,6 +62,19 @@ async def _set_acquired(session_id: UUID, ts: float | None) -> None:
             _locks[session_id] = (lock, last_ts, ts)
 
 
+async def force_release_session_lock(session_id: UUID) -> None:
+    """Replace the lock entry so a new user message can proceed after interrupt.
+
+    The old asyncio.Lock object may still be held by a cancellation-stuck task.
+    Replacing the registry entry lets the next request acquire a fresh lock while
+    the old task unwinds and releases its stale lock object harmlessly.
+    """
+    async with _manager_lock:
+        new_lock = asyncio.Lock()
+        _locks[session_id] = (new_lock, time.monotonic(), None)
+    logger.warning("session_lock.force_released", session_id=str(session_id))
+
+
 async def _maybe_evict() -> None:
     now = time.monotonic()
     async with _manager_lock:
@@ -152,22 +165,20 @@ async def register_active_task(session_id: UUID, task: asyncio.Task) -> None:
         _active_tasks[session_id] = task
 
 
-async def unregister_active_task(session_id: UUID) -> None:
+async def unregister_active_task(session_id: UUID, task: asyncio.Task | None = None) -> None:
     """Remove the task entry when a run finishes."""
     async with _task_registry_lock:
-        _active_tasks.pop(session_id, None)
+        if task is None or _active_tasks.get(session_id) is task:
+            _active_tasks.pop(session_id, None)
 
 
 async def cancel_active_run(session_id: UUID) -> bool:
     """Cancel the running task for this session, if any.
 
-    Waits up to 30 seconds for the cancelled task to clean up (close
-    sandboxes, release the session lock) before returning.  Returns True
+    Waits briefly for the cancelled task to clean up (close sandboxes,
+    release the session lock). If it does not stop quickly, force-release the
+    session lock so the newest user message can be handled. Returns True
     if a task was found and cancellation was requested.
-
-    The wait is extended compared to the previous 4-second window because
-    Deep Agents graphs have in-flight HTTP calls to OpenRouter that need
-    time to unwind before the lock is released.
     """
     async with _task_registry_lock:
         task = _active_tasks.get(session_id)
@@ -178,12 +189,18 @@ async def cancel_active_run(session_id: UUID) -> bool:
     logger.info("session_lock.cancelling_active_run", session_id=str(session_id))
     task.cancel()
 
-    # Give the cancelled task time to propagate CancelledError through
-    # the Deep Agents graph and release the session lock.  30 seconds is
-    # enough for any in-flight HTTP request to time out via HTTPX defaults.
+    # Keep WhatsApp responsive: acknowledge the new message quickly. If an
+    # in-flight HTTP/tool call does not unwind promptly, release the session
+    # lock and let the cancelled task finish cleanup in the background.
+    cancel_grace_seconds = 1.5
     try:
-        await asyncio.wait_for(asyncio.shield(task), timeout=30.0)
-    except (asyncio.CancelledError, asyncio.TimeoutError):
+        await asyncio.wait_for(
+            asyncio.shield(task),
+            timeout=cancel_grace_seconds,
+        )
+    except asyncio.TimeoutError:
+        await force_release_session_lock(session_id)
+    except asyncio.CancelledError:
         pass
 
     return True

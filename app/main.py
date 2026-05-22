@@ -1,5 +1,8 @@
+import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 import httpx
 import structlog
@@ -21,6 +24,8 @@ from app.database import get_db
 from app.middleware.request_id import RequestIDMiddleware
 
 settings = get_settings()
+HEALTH_DB_TIMEOUT_SECONDS = 2.0
+STARTUP_TASK_TIMEOUT_SECONDS = 5.0
 
 structlog.configure(
     processors=[
@@ -60,10 +65,53 @@ limiter = Limiter(**limiter_opts)
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    if os.environ.get("PYTEST_CURRENT_TEST") or settings.environment == "test":
+        yield
+        return
+
     # Pre-load embedding model so the first request isn't slow.
     # Downloads model files (~130MB) on first run, cached after that.
     from app.core.domain.embedding_service import warmup_embedding_model
-    await warmup_embedding_model()
+    try:
+        await asyncio.wait_for(
+            warmup_embedding_model(),
+            timeout=STARTUP_TASK_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        structlog.get_logger(__name__).warning("startup.embedding_warmup.timeout")
+
+    # Runs cannot survive process restarts because in-memory graph state,
+    # sandboxes, active task registry, and locks are gone. Mark them explicitly
+    # so the next user message does not replay the unfinished prompt from DB
+    # history as if it still needs to be completed.
+    from sqlalchemy import update
+    from app.database import AsyncSessionLocal
+    from app.models.run import Run
+
+    async def _abandon_running_runs() -> None:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                update(Run)
+                .where(Run.status == "running")
+                .values(
+                    status="abandoned",
+                    completed_at=datetime.now(timezone.utc),
+                    error_message="Process restarted before this run completed.",
+                )
+                .returning(Run.id)
+            )
+            abandoned = result.all()
+            await db.commit()
+            if abandoned:
+                structlog.get_logger(__name__).warning("startup.abandoned_running_runs", count=len(abandoned))
+
+    try:
+        await asyncio.wait_for(
+            _abandon_running_runs(),
+            timeout=STARTUP_TASK_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        structlog.get_logger(__name__).warning("startup.abandon_running_runs.timeout")
 
     # Start proactive agent scheduler (only in non-worker deployments)
     from app.core.workers.scheduler_service import start_scheduler, stop_scheduler
@@ -119,19 +167,8 @@ Instrumentator().instrument(app).expose(app, endpoint="/metrics", tags=["meta"])
 
 
 @app.get("/health", tags=["meta"])
-async def health(db: AsyncSession = Depends(get_db)) -> dict:
-    try:
-        await db.execute(text("SELECT 1"))
-        db_ok = True
-    except Exception:
-        db_ok = False
-
-    if not db_ok:
-        return JSONResponse(
-            status_code=503,
-            content={"status": "degraded", "db": "unreachable", "version": "0.2.0"},
-        )
-    return {"status": "ok", "version": "0.2.0", "db": "ok"}
+async def health() -> dict:
+    return {"status": "ok", "version": "0.2.0"}
 
 
 @app.get("/health/detailed", tags=["meta"])
@@ -139,8 +176,13 @@ async def health_detailed(db: AsyncSession = Depends(get_db)) -> dict:
     checks: dict[str, str] = {}
 
     try:
-        await db.execute(text("SELECT 1"))
+        await asyncio.wait_for(
+            db.execute(text("SELECT 1")),
+            timeout=HEALTH_DB_TIMEOUT_SECONDS,
+        )
         checks["database"] = "ok"
+    except asyncio.TimeoutError:
+        checks["database"] = "error: timeout"
     except Exception as exc:
         checks["database"] = f"error: {exc}"
 

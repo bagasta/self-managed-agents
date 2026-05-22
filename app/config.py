@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     workspace_mcp_url_local: str = ""
     workspace_mcp_prefer_local: str = "false"
     workspace_mcp_token: str = ""
+    google_integration_service_url: str = ""
 
     # Logging
     log_level: str = "INFO"

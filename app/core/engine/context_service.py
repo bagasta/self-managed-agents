@@ -17,6 +17,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.message import Message
+from app.models.run import Run
 
 
 async def load_history(
@@ -54,7 +55,24 @@ async def load_history(
             .order_by(Message.step_index, Message.timestamp)
         )
     result = await db.execute(stmt)
-    return list(result.scalars().all())
+    rows = list(result.scalars().all())
+    if not rows:
+        return rows
+
+    run_ids = {row.run_id for row in rows if row.run_id}
+    if not run_ids:
+        return rows
+    run_result = await db.execute(select(Run.id, Run.status).where(Run.id.in_(run_ids)))
+    run_status = dict(run_result.all())
+    return [
+        row
+        for row in rows
+        if not (
+            row.role == "user"
+            and row.run_id
+            and run_status.get(row.run_id) in {"abandoned", "cancelled", "timed_out", "failed"}
+        )
+    ]
 
 
 async def count_user_messages(session_id: uuid.UUID, db: AsyncSession) -> int:

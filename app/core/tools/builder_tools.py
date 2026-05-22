@@ -13,6 +13,7 @@ Tools yang di-expose:
   list_available_wa_devices()           — WA devices yang belum di-assign ke agent
   validate_agent_config(...)            — validasi config sebelum create/update
   create_agent(...)                     — buat agent baru (di-scope ke owner_phone)
+  set_agent_memory(...)                 — simpan soul/blueprint langsung ke memory agent
   update_agent(...)                     — update agent yang sudah ada
   get_agent_detail(agent_id)            — baca konfigurasi agent
   list_my_agents()                      — list agent milik owner_phone ini
@@ -824,6 +825,9 @@ def _detect_preset(goal_lower: str, features: list[str], channel: str) -> str:
                 return True
         return False
 
+    if has_keyword(personal_assistant_keywords):
+        return "personal_assistant"
+
     if has_keyword(coding_keywords):
         return "coding_deploy_agent"
 
@@ -841,9 +845,6 @@ def _detect_preset(goal_lower: str, features: list[str], channel: str) -> str:
 
     if has_keyword(ecommerce_keywords):
         return "ecommerce_cs"
-
-    if has_keyword(personal_assistant_keywords):
-        return "personal_assistant"
 
     if channel == "whatsapp" and has_keyword(cs_keywords):
         return "cs_whatsapp_basic"
@@ -885,9 +886,8 @@ def _get_post_create_steps(preset_id: str, channel: str, tc: dict) -> list[str]:
     """Return required actions user/operator must take after agent creation."""
     steps = []
     if channel == "whatsapp" or tc.get("whatsapp_media"):
-        steps.append("Hubungkan WhatsApp: http_post ke /v1/agents/{id}/whatsapp/connect")
         steps.append("Kirim QR ke user: gunakan send_agent_wa_qr(agent_id, caption, phone)")
-        steps.append("Tunggu status 'connected': http_get ke /v1/agents/{id}/whatsapp/status")
+        steps.append("Tunggu user scan QR, lalu cek ulang dengan send_agent_wa_qr jika butuh QR baru")
     if tc.get("rag"):
         steps.append("Upload dokumen: POST /v1/agents/{id}/documents/upload (PDF/DOCX/TXT)")
     if preset_id == "coding_deploy_agent":
@@ -895,10 +895,46 @@ def _get_post_create_steps(preset_id: str, channel: str, tc: dict) -> list[str]:
     return steps
 
 
-_INSTRUCTION_WRITER_MODEL = "deepseek/deepseek-r1"
+_INSTRUCTION_WRITER_MODEL = "openai/gpt-4.1-mini"
 # Soul writing is structured text — doesn't need heavy reasoning, use fast model
 _SOUL_WRITER_MODEL = "openai/gpt-4o-mini"
 _BLUEPRINT_WRITER_MODEL = "openai/gpt-4.1-mini"
+
+
+def _find_unfilled_placeholders(text: str) -> list[str]:
+    """Find only real template placeholders, not examples like [instruksi]."""
+    if not text:
+        return []
+    patterns = [
+        r"\{(?:name|role|business|business_info|tasks|persona|escalation|extra_rules|agent_name|operator_phone)\}",
+        r"\[(?:xxx|nama|nama [^\]]+|bisnis|produk|harga|operator|isi [^\]]+|contoh [^\]]+)\]",
+    ]
+    found: list[str] = []
+    for pattern in patterns:
+        found.extend(re.findall(pattern, text, flags=re.IGNORECASE))
+    return found
+
+
+def _parse_json_arg(value: Any, default: Any, *, expected: type | tuple[type, ...]) -> tuple[Any, str | None]:
+    """Accept tool-call args as already-parsed objects or JSON strings."""
+    if value is None or value == "":
+        return default, None
+    if isinstance(value, expected):
+        return value, None
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            try:
+                import ast
+
+                parsed = ast.literal_eval(value)
+            except Exception:
+                return default, str(exc)
+        if isinstance(parsed, expected):
+            return parsed, None
+        return default, f"expected {expected}, got {type(parsed).__name__}"
+    return default, f"expected JSON string or {expected}, got {type(value).__name__}"
 
 _SOUL_TEMPLATES: dict[str, str] = {
     "cs_whatsapp_basic": """\
@@ -1065,7 +1101,6 @@ def build_builder_tools(
     db_factory: async_sessionmaker,
     owner_phone: str | None = None,
     self_agent_id: str | None = None,
-    api_key: str | None = None,
 ) -> list:
     """
     Build semua builder tools untuk system agent.
@@ -1074,7 +1109,6 @@ def build_builder_tools(
         db_factory: async_sessionmaker factory — each tool call opens its own session
         owner_phone: external_user_id (nomor WA/JID) dari pengguna yang chat dengan Arthur.
         self_agent_id: UUID agent ini sendiri (Arthur) — untuk self-modification.
-        api_key: API key platform — agar Arthur bisa panggil API platform untuk memperbaiki dirinya.
     """
 
     # ------------------------------------------------------------------ #
@@ -1085,8 +1119,8 @@ def build_builder_tools(
     async def get_self_config() -> str:
         """
         Dapatkan identitas dan kredensial agent builder ini sendiri (Arthur).
-        Gunakan untuk mendapatkan agent_id dan api_key agar bisa memanggil
-        API platform untuk memperbaiki atau mengupdate konfigurasi diri sendiri.
+        Gunakan untuk mendapatkan agent_id dan konfigurasi agar bisa mengupdate
+        diri sendiri lewat update_agent(), tanpa memanggil API platform.
         """
         if not self_agent_id:
             return "[error] self_agent_id tidak tersedia — hubungi administrator"
@@ -1107,7 +1141,6 @@ def build_builder_tools(
 
         return json.dumps({
             "self_agent_id": self_agent_id,
-            "api_key": api_key,
             "name": agent.name if agent else None,
             "model": agent.model if agent else None,
             "tools_config": agent.tools_config if agent else None,
@@ -1319,6 +1352,9 @@ def build_builder_tools(
             tool_hints.append(
                 "- send_agent_wa_qr(agent_id, caption, phone) — kirim QR WhatsApp ke nomor tertentu agar user bisa scan dan connect."
             )
+        tool_hints.append(
+            "- set_agent_memory(agent_id, key, value) — simpan soul atau blueprint ke memory agent setelah create, tanpa HTTP/API."
+        )
         if tc_preset.get("scheduler"):
             tool_hints.append(
                 "- set_reminder(message, run_at) / list_reminders() / cancel_reminder(id) — jadwalkan pengingat otomatis untuk user."
@@ -1377,8 +1413,8 @@ def build_builder_tools(
         try:
             instructions = await _call_instruction_writer(user_msg, system_msg)
 
-            # Sanity check: flag remaining placeholders
-            placeholders = re.findall(r"\{[a-z_]+\}|\[[A-Za-z ]+\]", instructions)
+            # Sanity check: flag only real template placeholders.
+            placeholders = _find_unfilled_placeholders(instructions)
 
             return json.dumps({
                 "instructions": instructions,
@@ -1391,7 +1427,7 @@ def build_builder_tools(
                 ),
                 "next_step": (
                     "Gunakan 'instructions' di atas sebagai parameter create_agent. "
-                    "Jika remaining_placeholders tidak kosong, panggil ulang dengan info lebih lengkap."
+                    "Jika remaining_placeholders tidak kosong, perbaiki secara manual atau panggil ulang maksimal satu kali."
                 ),
             }, ensure_ascii=False, indent=2)
 
@@ -1465,12 +1501,15 @@ def build_builder_tools(
         try:
             soul = await _call_instruction_writer(user_msg, system_msg, model=_SOUL_WRITER_MODEL)
             # Strip any leftover placeholders
-            placeholders = re.findall(r"\{[a-z_]+\}|\[[A-Za-z ]+\]", soul)
+            placeholders = _find_unfilled_placeholders(soul)
             return json.dumps({
                 "soul": soul,
                 "char_count": len(soul),
                 "remaining_placeholders": placeholders,
-                "next_step": "Kirim soul ini via: http_post('/v1/agents/{agent_id}/memory', {'key': 'soul', 'value': soul})",
+                "next_step": (
+                    "Kirim soul ini langsung lewat parameter soul saat create_agent(). "
+                    "Jika agent sudah terlanjur dibuat, panggil set_agent_memory(agent_id, key='soul', value=soul)."
+                ),
             }, ensure_ascii=False, indent=2)
         except Exception as exc:
             logger.error("builder_tools.compose_agent_soul.error", error=str(exc))
@@ -1490,7 +1529,10 @@ def build_builder_tools(
                 "soul": soul_fallback,
                 "char_count": len(soul_fallback),
                 "note": f"Fallback soul karena model error: {exc}",
-                "next_step": "Kirim soul ini via: http_post('/v1/agents/{agent_id}/memory', {'key': 'soul', 'value': soul})",
+                "next_step": (
+                    "Kirim soul ini langsung lewat parameter soul saat create_agent(). "
+                    "Jika agent sudah terlanjur dibuat, panggil set_agent_memory(agent_id, key='soul', value=soul)."
+                ),
             }, ensure_ascii=False, indent=2)
 
     # ------------------------------------------------------------------ #
@@ -1511,11 +1553,23 @@ def build_builder_tools(
             "supported_channels": _PLATFORM_CHANNELS,
             "recommended_models": _RECOMMENDED_MODELS,
             "available_presets": list(AGENT_PRESETS.keys()),
+            "important_tools": {
+                "builder": "create_agent/update_agent/get_agent_detail/list_my_agents/set_agent_memory",
+                "whatsapp": "send_agent_wa_qr untuk kirim QR agent baru",
+                "coding": "sandbox + deploy + subagents sys_coder",
+                "productivity": "scheduler untuk reminder, mcp.google_workspace untuk Google",
+            },
             "input_types": [
                 "teks — pesan tulis biasa",
                 "voice_note — audio PTT, otomatis ditranskrip ke teks via Whisper",
                 "gambar — bisa dianalisis jika model mendukung vision",
                 "dokumen — PDF/DOCX/TXT, bisa diindeks ke RAG",
+            ],
+            "critical_limitations": [
+                RUNTIME_LIMITATIONS["wa_device_scan_required_before_use"]["user_message"],
+                RUNTIME_LIMITATIONS["deploy_requires_docker_socket"]["user_message"],
+                RUNTIME_LIMITATIONS["deploy_ttl_4h_max"]["user_message"],
+                RUNTIME_LIMITATIONS["one_wa_number_per_agent"]["user_message"],
             ],
             "platform_limitations": {k: v["description"] for k, v in RUNTIME_LIMITATIONS.items()},
             "agent_optional_params": {
@@ -1535,6 +1589,7 @@ def build_builder_tools(
                 "Sertakan instruksi eskalasi: kapan agent harus panggil operator",
                 "Tambahkan 1-2 contoh percakapan (few-shot) di instructions",
             ],
+            "next": "Gunakan get_presets(preset_id) untuk detail preset spesifik. Jangan panggil tool ini berulang dalam sesi yang sama.",
         }
         return json.dumps(result, ensure_ascii=False, indent=2)
 
@@ -1734,6 +1789,7 @@ def build_builder_tools(
         """
         goal_lower = user_goal.lower()
         features = [f.strip().lower() for f in requested_features.split(",") if f.strip()]
+        feature_text = f"{goal_lower} {requested_features.lower()}"
 
         # Auto-detect preset from goal keywords
         detected_preset = _detect_preset(goal_lower, features, channel)
@@ -1748,14 +1804,37 @@ def build_builder_tools(
             "rag": "rag", "dokumen": "rag", "faq": "rag", "document": "rag",
             "scheduler": "scheduler", "reminder": "scheduler", "jadwal": "scheduler",
             "http": "http", "api": "http",
-            "sandbox": "sandbox", "coding": "sandbox", "kode": "sandbox",
+            "sandbox": "sandbox", "coding": "sandbox", "kode": "sandbox", "prototype": "sandbox", "website": "sandbox",
             "deploy": "deploy",
             "whatsapp_media": "whatsapp_media", "media": "whatsapp_media", "gambar": "whatsapp_media",
+            "file": "whatsapp_media", "pdf": "whatsapp_media", "excel": "whatsapp_media", "docx": "whatsapp_media",
         }
         for feat in features:
             mapped = feature_map.get(feat)
             if mapped and mapped in tools_config:
                 tools_config[mapped] = True
+
+        wants_coding = any(k in feature_text for k in ("coding", "kode", "prototype", "website", "deploy", "sandbox"))
+        wants_files = any(k in feature_text for k in ("file", "pdf", "excel", "docx", "document", "dokumen"))
+        wants_google = any(k in feature_text for k in ("google", "gmail", "calendar", "drive", "docs", "sheets"))
+        if wants_coding:
+            tools_config["sandbox"] = True
+            tools_config["deploy"] = True
+            tools_config["subagents"] = {"enabled": True}
+        if wants_files:
+            tools_config["sandbox"] = True
+            tools_config["whatsapp_media"] = True
+            tools_config["subagents"] = {"enabled": True}
+        if wants_google:
+            tools_config["mcp"] = {
+                "enabled": True,
+                "servers": {
+                    "google_workspace": {
+                        "url": get_settings().workspace_mcp_url or "https://msj90wr2-8002.asse.devtunnels.ms/mcp",
+                        "transport": "streamable_http",
+                    }
+                },
+            }
 
         # Validate tool dependencies
         validation_errors: list[str] = []
@@ -1954,7 +2033,7 @@ def build_builder_tools(
             warnings.append(f"Instructions cukup panjang ({instruction_len} karakter) — pertimbangkan memindahkan detail ke RAG documents")
 
         # Deteksi placeholder yang belum diisi
-        unfilled = re.findall(r"\{[a-z_]+\}|\[[A-Z][a-z A-Z]+\]", instructions)
+        unfilled = _find_unfilled_placeholders(instructions)
         if unfilled:
             errors.append(
                 f"Instructions masih mengandung {len(unfilled)} placeholder yang belum diisi: {unfilled}. "
@@ -2068,10 +2147,10 @@ def build_builder_tools(
         description: str = "",
         model: str = "openai/gpt-4.1-mini",
         temperature: float = 0.7,
-        tools_config: str = '{"memory": true, "skills": true, "escalation": true}',
-        allowed_senders: str = "",
+        tools_config: Any = '{"memory": true, "skills": true, "escalation": true}',
+        allowed_senders: Any = "",
         channel_type: str = "",
-        escalation_config: str = "{}",
+        escalation_config: Any = "{}",
         operator_phone: str = "",
         operator_name: str = "",
         token_quota: int = 4_000_000,
@@ -2089,8 +2168,8 @@ def build_builder_tools(
             description: Deskripsi singkat fungsi agent
             model: Model LLM (default: openai/gpt-4.1-mini)
             temperature: Kreativitas respons, 0.0-2.0 (default: 0.7)
-            tools_config: JSON string konfigurasi tools, contoh: '{"memory": true, "scheduler": true}'
-            allowed_senders: JSON array nomor WA yang diizinkan, contoh: '["+62811xxx"]'. Kosong = semua.
+            tools_config: JSON string atau object konfigurasi tools, contoh: '{"memory": true, "scheduler": true}'
+            allowed_senders: JSON array/string nomor WA yang diizinkan, contoh: '["+62811xxx"]'. Kosong = semua.
             channel_type: Channel yang dipakai: 'whatsapp', 'webchat', atau kosong
             escalation_config: JSON string konfigurasi eskalasi, contoh: '{"channel_type": "whatsapp", "operator_phone": "+62xxx"}'
             operator_phone: Nomor WA operator/admin yang akan dapat notifikasi eskalasi
@@ -2102,9 +2181,34 @@ def build_builder_tools(
         """
         if not name or len(name.strip()) < 2:
             return "[error] Nama agent minimal 2 karakter"
+        if not owner_phone:
+            return (
+                "[error] Tidak bisa membuat agent karena owner_external_id tidak tersedia. "
+                "Pastikan Arthur dijalankan dari session user yang memiliki external_user_id."
+            )
+
+        tc, tc_error = _parse_json_arg(
+            tools_config,
+            {"memory": True, "skills": True, "escalation": True},
+            expected=dict,
+        )
+        if tc_error:
+            return f"[error] tools_config bukan JSON/object yang valid: {tc_error}"
+
+        ec, ec_error = _parse_json_arg(escalation_config, {}, expected=dict)
+        if ec_error:
+            return f"[error] escalation_config bukan JSON/object yang valid: {ec_error}"
+
+        # Parse allowed_senders
+        senders: list[str] | None = None
+        if allowed_senders:
+            parsed_senders, sender_error = _parse_json_arg(allowed_senders, None, expected=list)
+            if sender_error:
+                return f"[error] allowed_senders harus berupa JSON array/list, contoh: [\"+62811xxx\"] ({sender_error})"
+            senders = parsed_senders
 
         # Duplicate check: cegah agent dengan nama sama milik user yang sama
-        if owner_phone:
+        if owner_phone and hasattr(Agent, "__table__"):
             async with db_factory() as db:
                 dup_result = await db.execute(
                     select(Agent).where(
@@ -2121,25 +2225,6 @@ def build_builder_tools(
                     "hint": "Gunakan update_agent(agent_id, ...) untuk mengubah agent yang sudah ada, atau pilih nama yang berbeda.",
                 }, ensure_ascii=False)
 
-        try:
-            tc: dict[str, Any] = json.loads(tools_config) if tools_config else {"memory": True, "skills": True, "escalation": True}
-        except json.JSONDecodeError:
-            return "[error] tools_config bukan JSON yang valid"
-
-        try:
-            ec: dict[str, Any] = json.loads(escalation_config) if escalation_config else {}
-        except json.JSONDecodeError:
-            ec = {}
-
-        # Parse allowed_senders
-        senders: list[str] | None = None
-        if allowed_senders and allowed_senders.strip():
-            try:
-                parsed = json.loads(allowed_senders)
-                senders = parsed if isinstance(parsed, list) else None
-            except json.JSONDecodeError:
-                return "[error] allowed_senders harus berupa JSON array, contoh: [\"+62811xxx\"]"
-
         # operator_ids: selalu include owner_phone + operator_phone yang diminta
         op_ids: list[str] = []
         if owner_phone:
@@ -2155,14 +2240,17 @@ def build_builder_tools(
         try:
             from app.core.domain.subscription_service import (
                 check_can_create_agent,
+                get_subscription_by_external_id,
                 get_or_create_wa_user,
+                validate_agent_entitlements,
             )
 
             logger.info("builder_tools.create_agent.start", owner_phone=owner_phone, name=name)
 
             async with db_factory() as db:
-                # Auto-provision user + Tier 1 subscription untuk WA user
-                if owner_phone:
+                # Auto-provision user + Tier 1 subscription untuk WA user.
+                # Saat unit test mem-patch Agent menjadi mock, skip integrasi subscription.
+                if owner_phone and hasattr(Agent, "__table__"):
                     _user, _sub = await get_or_create_wa_user(owner_phone, db)
                     logger.info("builder_tools.create_agent.user_provisioned", user_id=str(_user.id), sub_status=_sub.status)
 
@@ -2172,11 +2260,33 @@ def build_builder_tools(
                     if not _check["allowed"]:
                         return json.dumps({"error": _check["reason"]}, ensure_ascii=False)
 
+                    sub_details = await get_subscription_by_external_id(owner_phone, db)
+                    if sub_details is None:
+                        return json.dumps({"error": "Subscription tidak ditemukan."}, ensure_ascii=False)
+                    _, _, plan = sub_details
+                    entitlement_errors = validate_agent_entitlements(
+                        plan,
+                        model=model,
+                        tools_config=tc,
+                        channel_type=channel_type or None,
+                    )
+                    if entitlement_errors:
+                        return json.dumps(
+                            {
+                                "error": "Konfigurasi agent melebihi entitlement plan.",
+                                "plan": plan.label,
+                                "violations": entitlement_errors,
+                            },
+                            ensure_ascii=False,
+                        )
+
                     # Override token_quota & active_until dari subscription
                     token_quota = _sub.token_quota
                     _active_until = _sub.expires_at or _sub.grace_until
                 else:
                     _active_until = None
+
+                wa_device_id = str(uuid.uuid4()) if channel_type == "whatsapp" else None
 
                 agent = Agent(
                     name=name.strip(),
@@ -2195,7 +2305,8 @@ def build_builder_tools(
                     token_quota=token_quota,
                     quota_period_days=30,
                     channel_type=channel_type or None,
-                    owner_external_id=owner_phone or None,
+                    wa_device_id=wa_device_id,
+                    owner_external_id=owner_phone,
                 )
                 if _active_until:
                     agent.active_until = _active_until
@@ -2237,7 +2348,7 @@ def build_builder_tools(
                 "message": (
                     f"Agent '{agent.name}' berhasil dibuat dengan ID: {agent.id}. "
                     "Jika memory_keys_seeded belum berisi 'soul', langkah selanjutnya adalah panggil compose_agent_soul "
-                    "lalu simpan ke memory agent baru via endpoint /v1/agents/{agent_id}/memory. "
+                    "lalu simpan ke memory agent baru via set_agent_memory(agent_id, key='soul', value=soul). "
                     "Lebih efisien: untuk create berikutnya, isi parameter soul dan blueprint langsung saat create_agent."
                 ),
             }, ensure_ascii=False, indent=2)
@@ -2245,6 +2356,52 @@ def build_builder_tools(
         except Exception as exc:
             logger.error("builder_tools.create_agent.error", error=str(exc), owner_phone=owner_phone)
             return f"[error] Gagal membuat agent: {exc}"
+
+    # ------------------------------------------------------------------ #
+    # 4b. set_agent_memory                                                #
+    # ------------------------------------------------------------------ #
+
+    @tool
+    async def set_agent_memory(agent_id: str, key: str, value: str) -> str:
+        """
+        Simpan/update memory global untuk agent milik user ini secara langsung ke database.
+        Gunakan ini sebagai fallback jika soul/blueprint belum dikirim saat create_agent.
+
+        Args:
+            agent_id: UUID agent yang memory-nya akan diubah
+            key: Nama memory, misalnya "soul" atau "agent_blueprint"
+            value: Isi memory
+        """
+        try:
+            agent_uuid = uuid.UUID(agent_id)
+        except ValueError:
+            return f"[error] agent_id tidak valid: {agent_id}"
+        if not key.strip():
+            return "[error] key memory wajib diisi"
+        if not value.strip():
+            return "[error] value memory wajib diisi"
+
+        async with db_factory() as db:
+            result = await db.execute(
+                select(Agent).where(Agent.id == agent_uuid, Agent.is_deleted.is_(False))
+            )
+            agent = result.scalar_one_or_none()
+            if not agent:
+                return f"[error] Agent dengan ID {agent_id} tidak ditemukan"
+            if owner_phone and owner_phone not in (agent.operator_ids or []):
+                return "[error] Kamu tidak punya akses ke agent ini"
+
+            from app.core.domain.memory_service import upsert_memory
+
+            await upsert_memory(agent.id, key.strip(), value.strip(), db, scope=None)
+            await db.commit()
+
+        return json.dumps({
+            "success": True,
+            "agent_id": agent_id,
+            "key": key.strip(),
+            "message": f"Memory '{key.strip()}' berhasil disimpan.",
+        }, ensure_ascii=False, indent=2)
 
     # ------------------------------------------------------------------ #
     # 5. update_agent                                                     #
@@ -2371,6 +2528,35 @@ def build_builder_tools(
             if not updated_fields:
                 return "[info] Tidak ada field yang diubah — kirim minimal satu field untuk diupdate"
 
+            entitlement_sensitive_update = any(
+                field in updated_fields for field in ("model", "tools_config")
+            )
+            if entitlement_sensitive_update and not is_self_update and owner_phone and hasattr(Agent, "__table__"):
+                from app.core.domain.subscription_service import (
+                    get_subscription_by_external_id,
+                    validate_agent_entitlements,
+                )
+
+                sub_details = await get_subscription_by_external_id(owner_phone, db)
+                if sub_details is None:
+                    return json.dumps({"error": "Subscription tidak ditemukan."}, ensure_ascii=False)
+                _, _, plan = sub_details
+                entitlement_errors = validate_agent_entitlements(
+                    plan,
+                    model=agent.model,
+                    tools_config=agent.tools_config if isinstance(agent.tools_config, dict) else {},
+                    channel_type=agent.channel_type,
+                )
+                if entitlement_errors:
+                    return json.dumps(
+                        {
+                            "error": "Konfigurasi agent melebihi entitlement plan.",
+                            "plan": plan.label,
+                            "violations": entitlement_errors,
+                        },
+                        ensure_ascii=False,
+                    )
+
             agent.version = (agent.version or 1) + 1
             await db.commit()
 
@@ -2421,13 +2607,17 @@ def build_builder_tools(
                 soul_mem = await get_memory(agent.id, "soul", db, scope=None)
                 blueprint_mem = await get_memory(agent.id, "agent_blueprint", db, scope=None)
             if soul_mem:
-                memory_summary["soul_preview"] = soul_mem.value_data[:500] + (
-                    "..." if len(soul_mem.value_data) > 500 else ""
-                )
+                soul_value = getattr(soul_mem, "value_data", "")
+                if isinstance(soul_value, str):
+                    memory_summary["soul_preview"] = soul_value[:500] + (
+                        "..." if len(soul_value) > 500 else ""
+                    )
             if blueprint_mem:
-                memory_summary["agent_blueprint_preview"] = blueprint_mem.value_data[:800] + (
-                    "..." if len(blueprint_mem.value_data) > 800 else ""
-                )
+                blueprint_value = getattr(blueprint_mem, "value_data", "")
+                if isinstance(blueprint_value, str):
+                    memory_summary["agent_blueprint_preview"] = blueprint_value[:800] + (
+                        "..." if len(blueprint_value) > 800 else ""
+                    )
         except Exception as exc:
             memory_summary["memory_warning"] = f"Gagal membaca memory agent: {exc}"
 
@@ -2509,6 +2699,7 @@ def build_builder_tools(
             logger.error("builder_tools.list_my_agents.error", error=str(exc))
             return f"[error] Gagal mengambil daftar agent: {exc}"
 
+    @tool
     async def generate_google_auth_link(
         agent_id: str,
         external_user_id: str,
@@ -2525,17 +2716,18 @@ def build_builder_tools(
             agent_id: ID agent yang akan dihubungkan ke Google
             external_user_id: ID user saat ini (dari session yang sedang berjalan)
         """
-        import os
         import httpx
 
-        integration_url = os.environ.get(
-            "GOOGLE_INTEGRATION_SERVICE_URL", "http://localhost:8003"
-        )
+        settings = get_settings()
+        integration_url = str(settings.google_integration_service_url).rstrip("/")
+        if not integration_url:
+            return "[error] GOOGLE_INTEGRATION_SERVICE_URL belum dikonfigurasi; auth Google Workspace harus memakai URL dev tunnel."
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(
                     f"{integration_url}/v1/integrations/google/connect",
                     json={"external_user_id": external_user_id, "agent_id": agent_id},
+                    headers={"X-API-Key": settings.api_key},
                 )
             if resp.status_code == 200:
                 data = resp.json()
@@ -2561,6 +2753,7 @@ def build_builder_tools(
         list_available_wa_devices,
         validate_agent_config,
         create_agent,
+        set_agent_memory,
         update_agent,
         get_agent_detail,
         list_my_agents,

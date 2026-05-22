@@ -1,6 +1,7 @@
 """Callback helpers for agent graph execution."""
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from langchain_core.callbacks import AsyncCallbackHandler
@@ -11,8 +12,13 @@ from app.core.utils.log_sanitizer import redact_pii
 class AgentStepLogger(AsyncCallbackHandler):
     """Log LLM/tool activity and accumulate token usage for a graph run."""
 
-    def __init__(self, log: Any) -> None:
+    def __init__(
+        self,
+        log: Any,
+        progress_callback: Callable[[str, Any, str, Any | None], Awaitable[None]] | None = None,
+    ) -> None:
         self.log = log
+        self._progress_callback = progress_callback
         self._tool_inputs: dict[str, Any] = {}
         self._tool_names: dict[str, str] = {}
         self.total_tokens_from_callbacks: int = 0
@@ -150,14 +156,26 @@ class AgentStepLogger(AsyncCallbackHandler):
             tool_call_id=str(tool_call_id)[:36],
             input=safe_input,
         )
+        if self._progress_callback:
+            try:
+                await self._progress_callback(str(tool_name), input_str, "start", None)
+            except Exception as exc:
+                self.log.debug("agent_step.progress_callback_failed", error=str(exc)[:200])
 
     async def on_tool_end(self, output, **kwargs):
         tool_call_id = kwargs.get("tool_call_id") or kwargs.get("run_id") or "?"
+        tool_input = self._tool_inputs.get(str(tool_call_id))
+        tool_name = self._tool_names.get(str(tool_call_id), "?")
         self.log.info(
             "agent_step.tool_end",
             tool_call_id=str(tool_call_id)[:36],
             output=str(output)[:300],
         )
+        if self._progress_callback:
+            try:
+                await self._progress_callback(str(tool_name), tool_input, "end", output)
+            except Exception as exc:
+                self.log.debug("agent_step.progress_callback_failed", error=str(exc)[:200])
         self._tool_inputs.pop(str(tool_call_id), None)
         self._tool_names.pop(str(tool_call_id), None)
 

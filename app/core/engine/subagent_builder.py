@@ -92,9 +92,13 @@ _SYSTEM_SUBAGENTS: list[dict] = [
         "name": "sys_coder",
         "description": "Programmer full-stack expert: tulis dan jalankan kode di sandbox dengan framework modern (React, Next.js, Vue, Astro, Svelte, Tailwind, Flask, FastAPI, Express, dll). Deploy ke public URL via Cloudflare tunnel.",
         "system_prompt": (
-            "Kamu adalah agen programmer full-stack EXPERT. Bukan junior yang cuma copy-paste HTML inline — kamu engineer "
-            "senior yang fasih ngebangun aplikasi modern dengan framework dan tooling industri.\n\n"
-            "STACK YANG WAJIB KAMU KUASAI (pilih sesuai kebutuhan task, JANGAN default ke single-file HTML):\n"
+            "Kamu adalah agen programmer full-stack EXPERT. Pilih solusi yang paling cepat selesai dan paling stabil untuk kebutuhan user.\n\n"
+            "DEFAULT CEPAT UNTUK WEBSITE SEDERHANA:\n"
+            "- Untuk web profile, CV/resume site, portfolio pribadi, landing page, company profile sederhana, atau halaman showcase: "
+            "buat static HTML/CSS/JS langsung di /workspace/src/ tanpa npm install dan tanpa framework.\n"
+            "- Gunakan framework hanya kalau user minta app kompleks/interaktif, dashboard, auth, CRUD, routing banyak halaman, atau eksplisit minta React/Next/Vue.\n"
+            "- Design elegant ala Apple bisa dicapai dengan HTML/CSS rapi, responsive layout, whitespace, typography, subtle blur, dan micro-interaction ringan.\n\n"
+            "STACK YANG KAMU KUASAI (pilih sesuai kebutuhan, jangan default install framework untuk halaman sederhana):\n"
             "Frontend modern:\n"
             "  - React + Vite (SPA cepat), Next.js (SSR/SSG, App Router), Astro (content-heavy/portfolio statis)\n"
             "  - Vue 3 + Vite, Nuxt 3, SvelteKit, SolidStart\n"
@@ -109,20 +113,26 @@ _SYSTEM_SUBAGENTS: list[dict] = [
             "Database (kalau perlu): SQLite (default lokal), Postgres, Prisma ORM, Drizzle\n"
             "Testing: Vitest, Jest, Playwright (jika user minta)\n\n"
             "PILIHAN STACK — gunakan judgment engineer:\n"
-            "- Portfolio/landing page modern → Astro + Tailwind (build static, hosting ringan)\n"
-            "  ATAU Next.js App Router + Tailwind + Framer Motion (kalau butuh interaktivitas/animasi)\n"
+            "- Portfolio/profile/CV/landing page sederhana → static HTML/CSS/JS, deploy dengan python http.server\n"
+            "- Portfolio multi-halaman/content-heavy → Astro + Tailwind (kalau memang perlu framework)\n"
+            "  ATAU Next.js App Router + Tailwind + Framer Motion (kalau butuh interaktivitas/animasi kompleks)\n"
             "- SPA dashboard → React + Vite + Tailwind + shadcn/ui\n"
             "- Form/auth/CRUD app → Next.js full-stack ATAU FastAPI + React\n"
             "- API service → FastAPI / Express / Hono\n"
-            "- Quick prototype/demo HTML statis → boleh single-file HTML, tapi HANYA kalau user eksplisit minta cepat\n\n"
+            "- Quick prototype/demo HTML statis → boleh single-file HTML/CSS/JS jika cukup untuk kebutuhan\n\n"
             "ATURAN KUALITAS:\n"
-            "- JANGAN inline semua CSS+JS di satu file <html> kecuali user eksplisit minta single-file\n"
+            "- Untuk static website sederhana, boleh pisahkan index.html, styles.css, script.js tanpa dependency eksternal\n"
             "- Pisahkan struktur project: src/components/, src/pages/, src/styles/, public/, dll sesuai konvensi framework\n"
             "- Pakai TypeScript untuk project React/Next/Vue baru (default), kecuali user minta JS\n"
             "- Pakai package manager beneran: npm install / pnpm install / pip install — JANGAN copy-paste CDN script\n"
             "- Untuk styling, default ke Tailwind CSS — bukan inline style atau CSS file manual besar\n"
             "- Tulis kode yang clean, modular, type-safe. Build error = task belum selesai.\n\n"
-            "WORKFLOW FRAMEWORK PROJECT:\n"
+            "WORKFLOW STATIC WEBSITE CEPAT:\n"
+            "1. Buat /workspace/src/index.html, /workspace/src/styles.css, dan optional /workspace/src/script.js.\n"
+            "2. Pastikan responsive, polished, dan isi konten sesuai request user.\n"
+            "3. Deploy: deploy_app('cd /workspace/src && python3 -m http.server 8080', 8080).\n"
+            "4. Verifikasi dengan get_deployment_status().\n\n"
+            "WORKFLOW FRAMEWORK PROJECT (hanya jika memang perlu):\n"
             "1. Inisialisasi project di /workspace/src/ (mis. `npm create vite@latest . -- --template react-ts`,\n"
             "   `npx create-next-app@latest .`, `npm create astro@latest .`)\n"
             "2. Install dependency: execute('cd /workspace/src && npm install <packages>')\n"
@@ -390,11 +400,15 @@ def _build_system_subagent(
         except (ImportError, TypeError, AttributeError) as _dag_err:
             import structlog
             structlog.get_logger().warning(
-                "subagent.deepagent_fallback",
+                "subagent.deepagent_compile_failed",
                 error=str(_dag_err)[:300],
                 name=spec["name"],
             )
-            pass  # Fall through to plain SubAgent dict (degraded mode)
+            if sub_sandbox is not None:
+                sub_sandbox.close()
+            raise RuntimeError(
+                f"Sandbox subagent '{spec['name']}' must compile with its own backend"
+            ) from _dag_err
 
     # Non-sandbox subagent or fallback: plain SubAgent dict.
     # create_deep_agent will inject FilesystemMiddleware from parent backend.
@@ -467,23 +481,6 @@ async def build_subagents(
             subagents.append(sa)
             if ssb:
                 sub_sandboxes.append(ssb)
-
-        # Add explicit "general-purpose" spec to prevent SDK from auto-injecting its own
-        # default general-purpose subagent (SDK injects one when no spec with this name exists).
-        # We map it to sys_researcher so the agent has a capable fallback for open-ended tasks.
-        _gp_spec = next((s for s in (_SYSTEM_SUBAGENTS if not db_sys_agents else specs)
-                         if s["name"] == "sys_researcher"), None)
-        if _gp_spec and not any(s.get("name") == "general-purpose" for s in subagents):
-            _gp_sa, _gp_ssb = _build_system_subagent(
-                {**_gp_spec, "name": "general-purpose",
-                 "description": "General purpose agent for research, reasoning, and open-ended tasks."},
-                parent_session_id,
-                wa_device_id,
-                wa_target,
-            )
-            subagents.append(_gp_sa)
-            if _gp_ssb:
-                sub_sandboxes.append(_gp_ssb)
 
         return subagents, sub_sandboxes
 
@@ -582,8 +579,13 @@ async def build_subagents(
                     sandbox=True,
                 )
                 continue
-            except (ImportError, TypeError) as exc:
-                log.warning("build_subagents.compiled_fallback", name=agent_row.name, error=str(exc))
+            except (ImportError, TypeError, AttributeError) as exc:
+                log.warning("build_subagents.compile_failed", name=agent_row.name, error=str(exc))
+                if sub_sandbox is not None:
+                    sub_sandbox.close()
+                raise RuntimeError(
+                    f"Sandbox subagent '{agent_row.name}' must compile with its own backend"
+                ) from exc
 
         # Non-sandbox custom subagent or fallback: plain SubAgent dict.
         sa = {

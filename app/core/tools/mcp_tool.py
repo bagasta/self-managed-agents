@@ -35,6 +35,7 @@ Yields a tuple: (tools: list[BaseTool], errors: dict[str, str])
 """
 from __future__ import annotations
 
+import inspect
 import os
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
@@ -112,10 +113,6 @@ def _build_server_map(servers: dict) -> dict:
     server_map: dict = {}
     runtime_url = _get_cfg_value("WORKSPACE_MCP_RUNTIME_URL", "")
     local_url = _get_cfg_value("WORKSPACE_MCP_URL_LOCAL", "")
-    # IMPORTANT:
-    # Default must keep configured MCP URL (often public tunnel), because
-    # Google Workspace JWT audience is bound to that URL.
-    # Forcing localhost by default can cause 401 Unauthorized (aud mismatch).
     prefer_local = _get_cfg_value("WORKSPACE_MCP_PREFER_LOCAL", "false").lower() in {"1", "true", "yes", "on"}
 
     for name, cfg in servers.items():
@@ -133,10 +130,13 @@ def _build_server_map(servers: dict) -> dict:
                 "transport": cfg.get("transport", "streamable_http"),
             }
             headers = dict(cfg.get("headers", {}))
-            if "Authorization" not in headers:
+            if name != "google_workspace" and "Authorization" not in headers:
                 token = _get_cfg_value("WORKSPACE_MCP_TOKEN", "")
                 if token:
                     headers["Authorization"] = f"Bearer {token}"
+            # google_workspace must use the per-user bearer injected by
+            # prepare_google_mcp_runtime. A static global token masks the auth
+            # flow and commonly produces 401 Unauthorized from the MCP server.
             # Required by workspace-mcp — without this header → 406 Not Acceptable
             headers.setdefault("Accept", "application/json, text/event-stream")
             entry["headers"] = headers
@@ -205,7 +205,7 @@ async def mcp_client_context(
     try:
         tools: list[BaseTool] = await client.get_tools()
         logger.info("mcp_tools.loaded", count=len(tools), servers=list(server_map))
-    except BaseException as exc:
+    except Exception as exc:
         errors: dict[str, str] = {}
         if hasattr(exc, "exceptions"):
             for sub in exc.exceptions:
@@ -221,5 +221,12 @@ async def mcp_client_context(
 
     try:
         yield tools, {}
-    except BaseException:
-        pass
+    finally:
+        close = getattr(client, "aclose", None) or getattr(client, "close", None)
+        if callable(close):
+            try:
+                maybe_awaitable = close()
+                if inspect.isawaitable(maybe_awaitable):
+                    await maybe_awaitable
+            except Exception as exc:
+                logger.warning("mcp_tools.client_close_failed", error=str(exc))

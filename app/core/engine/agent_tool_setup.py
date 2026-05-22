@@ -9,6 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.database import AsyncSessionLocal
 from app.core.domain.custom_tool_service import list_custom_tools
+from app.core.engine.google_mcp_support import (
+    _is_google_mcp_intent,
+    is_google_workspace_mcp_configured,
+)
 from app.core.engine.subagent_builder import build_subagents
 from app.core.engine.tool_builder import (
     _is_enabled,
@@ -59,16 +63,29 @@ async def build_agent_tool_setup(
     active_groups: list[str] = []
     saved_custom_tools: list = []
 
+    google_mcp_parent_only = (
+        _is_google_mcp_intent(user_message)
+        and is_google_workspace_mcp_configured(tools_config)
+    )
     deploy_enabled = _is_enabled(tools_config, "deploy", default=False)
     sandbox: DockerSandbox | None = None
-    if _is_enabled(tools_config, "sandbox", default=False) or deploy_enabled:
+    sandbox_requested = _is_enabled(tools_config, "sandbox", default=False) or deploy_enabled
+    if sandbox_requested and google_mcp_parent_only:
+        log.info(
+            "agent_run.google_mcp_parent_sandbox_skipped",
+            reason="google_workspace_mcp_must_not_fallback_to_sandbox",
+            deploy_enabled=deploy_enabled,
+        )
+        active_groups.append("google_mcp_parent_only")
+    elif sandbox_requested:
         sandbox = DockerSandbox(session.id)
 
     if sandbox is not None:
         tools.extend(build_sandbox_binary_tool(sandbox))
         active_groups.append("sandbox")
-        tools.extend(build_deployment_tools(sandbox))
-        active_groups.append("deploy")
+        if deploy_enabled:
+            tools.extend(build_deployment_tools(sandbox))
+            active_groups.append("deploy")
 
     memory_scope = getattr(session, "external_user_id", None)
     if _is_enabled(tools_config, "memory", default=True):
@@ -81,7 +98,12 @@ async def build_agent_tool_setup(
         active_groups.append("skills")
 
     if _is_enabled(tools_config, "tool_creator", default=False):
-        if sandbox is None:
+        if google_mcp_parent_only:
+            log.info(
+                "agent_run.tool_creator_skipped",
+                reason="google_workspace_mcp_parent_only",
+            )
+        elif sandbox is None:
             log.warning("agent_run.tool_creator_requires_sandbox")
         else:
             tools.extend(build_tool_creator_tools(agent_id, AsyncSessionLocal, sandbox))
@@ -142,13 +164,17 @@ async def build_agent_tool_setup(
             db_factory=AsyncSessionLocal,
             owner_phone=memory_scope,
             self_agent_id=str(agent_id),
-            api_key=settings.api_key,
         ))
         active_groups.append("builder")
 
     subagent_list: list = []
     sub_sandboxes: list[DockerSandbox] = []
-    if _is_enabled(tools_config, "subagents", default=False):
+    if _is_enabled(tools_config, "subagents", default=False) and google_mcp_parent_only:
+        log.info(
+            "agent_run.google_mcp_subagents_skipped",
+            reason="google_workspace_mcp_parent_only",
+        )
+    elif _is_enabled(tools_config, "subagents", default=False):
         sub_ids: list[str] = tools_config.get("subagents", {}).get("agent_ids", [])
         sub_channel: dict = session.channel_config if isinstance(session.channel_config, dict) else {}
         subagent_list, sub_sandboxes = await build_subagents(

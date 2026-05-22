@@ -11,7 +11,7 @@ from hashlib import sha256
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -49,10 +49,15 @@ class UserCreate(BaseModel):
     )
 
 
+class PhoneLoginRequest(BaseModel):
+    phone_number: str = Field(..., description="Nomor HP terdaftar (format: 628xxx)")
+
+
 class UserResponse(BaseModel):
     id: uuid.UUID
     email: str
     full_name: str | None
+    phone_number: str | None = None
     external_id: str
     email_verified: bool
     has_used_trial: bool
@@ -66,6 +71,7 @@ class UserWithSubscriptionResponse(UserResponse):
 class UserUpdate(BaseModel):
     full_name: str | None = None
     email_verified: bool | None = None
+    phone_number: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +264,8 @@ async def update_user(
         user.full_name = payload.full_name
     if payload.email_verified is not None:
         user.email_verified = payload.email_verified
+    if payload.phone_number is not None:
+        user.phone_number = payload.phone_number
 
     await db.flush()
     await db.refresh(user)
@@ -266,8 +274,58 @@ async def update_user(
         id=user.id,
         email=user.email,
         full_name=user.full_name,
+        phone_number=user.phone_number,
         external_id=user.external_id,
         email_verified=user.email_verified,
         has_used_trial=user.has_used_trial,
         created_at=user.created_at,
+    )
+
+
+@router.post(
+    "/login/phone",
+    response_model=UserWithSubscriptionResponse,
+    summary="Login via nomor HP",
+    description="Public endpoint — tidak butuh X-API-Key. Mengembalikan profil user jika nomor terdaftar.",
+)
+async def phone_login(
+    payload: PhoneLoginRequest,
+    db: AsyncSession = Depends(get_db),
+) -> UserWithSubscriptionResponse:
+    phone = payload.phone_number.strip()
+    user = (
+        await db.execute(
+            select(User).where(
+                or_(User.phone_number == phone, User.external_id == phone)
+            )
+        )
+    ).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Nomor HP tidak terdaftar",
+        )
+
+    subscription_dict = None
+    sub = (
+        await db.execute(select(UserSubscription).where(UserSubscription.user_id == user.id))
+    ).scalar_one_or_none()
+    if sub is not None:
+        plan = (
+            await db.execute(select(SubscriptionPlan).where(SubscriptionPlan.id == sub.plan_id))
+        ).scalar_one()
+        subscription_dict = _build_subscription_dict(sub, plan)
+
+    logger.info("user.phone_login", user_id=str(user.id), phone=payload.phone_number)
+
+    return UserWithSubscriptionResponse(
+        id=user.id,
+        email=user.email,
+        full_name=user.full_name,
+        phone_number=user.phone_number,
+        external_id=user.external_id,
+        email_verified=user.email_verified,
+        has_used_trial=user.has_used_trial,
+        created_at=user.created_at,
+        subscription=subscription_dict,
     )

@@ -121,12 +121,11 @@ async def send_message(
     # is still working (e.g. subagent taking too long).
     _prior_interrupted = await cancel_active_run(session_id)
 
-    current_task = asyncio.current_task()
-    if current_task:
-        await register_active_task(session_id, current_task)
-
     try:
         async with session_run_lock(session_id):
+            current_task = asyncio.current_task()
+            if current_task:
+                await register_active_task(session_id, current_task)
             result = await run_agent(
                 agent_model=agent,
                 session=session,
@@ -139,7 +138,7 @@ async def send_message(
         # The new request will handle the reply — nothing to return here.
         raise
     finally:
-        await unregister_active_task(session_id)
+        await unregister_active_task(session_id, asyncio.current_task())
 
     # update consumed tokens
     tokens_this_run: int = result.get("tokens_used", 0)

@@ -6,6 +6,7 @@ user-facing fallback replies out of the main orchestration flow.
 from __future__ import annotations
 
 import copy
+import json
 import re
 import os
 import uuid
@@ -15,6 +16,55 @@ from typing import Any
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import StructuredTool, tool
 from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class ModifySheetValuesArgs(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    spreadsheet_id: str
+    range_name: str | None = None
+    range: str | None = None
+    values: Any = None
+    value_input_option: str = "USER_ENTERED"
+    clear_values: bool = False
+
+
+class CreateSpreadsheetArgs(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    title: str | None = None
+    spreadsheet_title: str | None = None
+    name: str | None = None
+    file_name: str | None = None
+    sheet_names: Any = None
+
+
+class CreatePresentationArgs(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    title: str | None = None
+    presentation_title: str | None = None
+    name: str | None = None
+    file_name: str | None = None
+
+
+class BatchUpdatePresentationArgs(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    presentation_id: str
+    requests: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class CreateDriveFileArgs(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    file_name: str
+    content: str | None = None
+    folder_id: str = "root"
+    mime_type: str = "text/plain"
+    fileUrl: str | None = None
+    file_url: str | None = None
 
 
 @dataclass
@@ -35,10 +85,42 @@ def _is_google_mcp_intent(message: str) -> bool:
     m = message.lower()
     keywords = (
         "google sheet", "spreadsheet", "gmail", "calendar", "drive", "docs", "sheets",
-        "slides", "presentation", "google slides", "forms", "tasks", "contacts", "chat",
+        "slide", "slides", "presentasi", "presentation", "google slides", "forms",
+        "google form", "form google", "formulir", "tasks", "contacts", "chat",
+        "kalender", "google kalender", "email", "surel", "google docs", "dokumen google",
+        "google dokumen", "google drive",
         "edit sheet", "update sheet", "buka sheet", "ubah sheet", "google workspace",
+        "akun google", "sambungkan google", "connect google", "auth google",
+        "otentikasi google", "login google",
     )
     return any(k in m for k in keywords)
+
+
+def is_google_workspace_mcp_configured(tools_config: dict[str, Any]) -> bool:
+    """Return True when the Google Workspace MCP server is configured.
+
+    This is intentionally cheaper than opening MCP connections; it is used
+    before prompt construction to decide whether Google Workspace requests
+    should run in parent-only mode instead of exposing subagent delegation.
+    """
+    mcp_cfg = tools_config.get("mcp", {}) if isinstance(tools_config, dict) else {}
+    if not isinstance(mcp_cfg, dict) or not mcp_cfg:
+        return False
+
+    has_wrapper = "enabled" in mcp_cfg or "servers" in mcp_cfg
+    if has_wrapper:
+        enabled = bool(mcp_cfg.get("enabled", bool(mcp_cfg.get("servers"))))
+        servers = mcp_cfg.get("servers", {})
+        if not enabled:
+            return False
+        if isinstance(servers, dict) and "google_workspace" in servers:
+            return True
+        return bool(os.environ.get("WORKSPACE_MCP_URL"))
+
+    workspace_server = mcp_cfg.get("google_workspace")
+    if isinstance(workspace_server, dict):
+        return "url" in workspace_server or "command" in workspace_server
+    return bool(os.environ.get("WORKSPACE_MCP_URL"))
 
 
 def _is_google_auth_or_scope_error(error_text: str) -> bool:
@@ -49,6 +131,9 @@ def _is_google_auth_or_scope_error(error_text: str) -> bool:
         "401 unauthorized",
         "invalid_token",
         "token expired",
+        "token sudah expired",
+        "belum terhubung",
+        "belum dikonfigurasi",
         "oauth credentials lack required scopes",
         "required scopes",
         "insufficient scope",
@@ -62,30 +147,42 @@ def _is_google_auth_or_scope_error(error_text: str) -> bool:
     return any(m in e for m in markers)
 
 
+_GOOGLE_MCP_TOOL_NAME_MARKERS = (
+    "gmail",
+    "calendar",
+    "event",
+    "freebusy",
+    "drive",
+    "doc",
+    "spreadsheet",
+    "sheet",
+    "chat",
+    "message",
+    "form",
+    "presentation",
+    "slide",
+    "contact",
+    "script",
+)
+
+
+def _is_google_mcp_tool_name(tool_name: str) -> bool:
+    """Return True for Google Workspace MCP tool names.
+
+    Keep this intentionally broad, but do not include generic names like
+    ``task`` because Deep Agents uses that for subagent delegation.
+    """
+    name = (tool_name or "").lower()
+    return any(marker in name for marker in _GOOGLE_MCP_TOOL_NAME_MARKERS)
+
+
 def _extract_google_mcp_step_error(steps: list[dict[str, Any]]) -> str | None:
     for step in steps:
         tool_name = str((step or {}).get("tool", "")).lower()
         result = str((step or {}).get("result", "") or "")
         if not tool_name or not result:
             continue
-        if not (
-            tool_name.startswith("search_gmail")
-            or tool_name.startswith("get_calendar")
-            or tool_name.startswith("create_calendar")
-            or tool_name.startswith("drive_")
-            or tool_name.startswith("docs_")
-            or tool_name.startswith("sheets_")
-            or tool_name.startswith("slides_")
-            or tool_name.startswith("forms_")
-            or "google" in tool_name
-            or "sheet" in tool_name
-            or "gmail" in tool_name
-            or "calendar" in tool_name
-            or "drive" in tool_name
-            or "slides" in tool_name
-            or "presentation" in tool_name
-            or "docs" in tool_name
-        ):
+        if not _is_google_mcp_tool_name(tool_name):
             continue
         if _is_google_auth_or_scope_error(result):
             return result
@@ -108,6 +205,110 @@ def _looks_like_progress_claim(reply_text: str) -> bool:
         "working on",
     )
     return any(m in t for m in markers)
+
+
+def _looks_like_google_mcp_success_claim(reply_text: str) -> bool:
+    if not reply_text:
+        return False
+    t = reply_text.lower()
+    service_markers = (
+        "google slide",
+        "slides",
+        "presentasi",
+        "google form",
+        "form",
+        "google sheet",
+        "spreadsheet",
+        "google doc",
+        "docs",
+        "drive",
+        "gmail",
+        "calendar",
+        "kalender",
+    )
+    success_markers = (
+        "sudah saya buat",
+        "sudah dibuat",
+        "berhasil dibuat",
+        "sudah saya siapkan",
+        "sudah siap",
+        "siap kamu akses",
+        "link",
+        "url",
+    )
+    return any(s in t for s in service_markers) and any(s in t for s in success_markers)
+
+
+def _looks_like_google_auth_recovery_reply(reply_text: str) -> bool:
+    if not reply_text:
+        return False
+    t = reply_text.lower()
+    google_markers = ("google", "gmail", "mcp")
+    auth_markers = (
+        "belum terhubung",
+        "tidak terhubung",
+        "login",
+        "otentikasi",
+        "autentikasi",
+        "auth",
+        "izin akses",
+        "berikan izin",
+        "reconnect",
+        "connect",
+        "sambungkan",
+        "link otentikasi",
+        "link autentikasi",
+    )
+    return any(marker in t for marker in google_markers) and any(
+        marker in t for marker in auth_markers
+    )
+
+
+def _ensure_google_auth_link_in_reply(reply_text: str, auth_url: str | None) -> str:
+    if not auth_url:
+        return reply_text
+    if auth_url in (reply_text or ""):
+        return reply_text
+    return f"{reply_text.rstrip()}\n\nLink otentikasi Google:\n{auth_url}"
+
+
+def _build_google_mcp_not_executed_reply(user_message: str) -> str:
+    lower = (user_message or "").lower()
+    if "link" in lower or "url" in lower:
+        return (
+            "Belum ada link Google Workspace yang valid untuk saya kirim. "
+            "Run sebelumnya tidak menunjukkan tool Google MCP benar-benar terpanggil, jadi saya tidak mau mengarang link. "
+            "Tolong minta saya jalankan ulang pembuatan file-nya, nanti saya akan pakai MCP Google langsung."
+        )
+    return (
+        "Belum berhasil saya eksekusi lewat MCP Google Workspace. "
+        "Run ini tidak memanggil tool Google MCP apa pun, jadi saya tidak akan mengklaim file sudah dibuat. "
+        "Silakan coba ulang, dan saya akan menjalankan tool Google MCP langsung."
+    )
+
+
+_GOOGLE_WORKSPACE_ARTIFACT_RE = re.compile(
+    r"https://docs\.google\.com/(?:presentation|spreadsheets|document|forms)/[^\s\"']+",
+    re.IGNORECASE,
+)
+
+
+def _contains_google_workspace_artifact(text: str) -> bool:
+    if not text:
+        return False
+    lowered = text.lower()
+    return bool(_GOOGLE_WORKSPACE_ARTIFACT_RE.search(text)) or any(
+        marker in lowered
+        for marker in (
+            "created and populated slide deck",
+            "created and populated google doc",
+            "successfully created and populated survey form",
+            "presentation id:",
+            "spreadsheet id:",
+            "document id:",
+            "form id:",
+        )
+    )
 
 
 def _extract_requested_slide_count(message: str) -> int | None:
@@ -295,6 +496,129 @@ def _fallback_unqualified_sheet_range(range_name: str) -> str | None:
     return None
 
 
+def _split_simple_sheet_range(range_name: str) -> tuple[str, str] | None:
+    if not range_name or "!" not in range_name:
+        return None
+    sheet_name, cell_range = range_name.split("!", 1)
+    sheet_name = sheet_name.strip().strip("'").strip('"')
+    cell_range = cell_range.strip()
+    if not sheet_name or not cell_range:
+        return None
+    return sheet_name, cell_range
+
+
+def _normalize_sheet_values_for_mcp(values: Any) -> Any:
+    if values is None:
+        return None
+    if isinstance(values, str):
+        return values
+    if isinstance(values, dict):
+        rows = [["Field", "Value"]]
+        rows.extend([[key, value] for key, value in values.items()])
+        return json.dumps(rows, ensure_ascii=False)
+    if isinstance(values, list):
+        if not values:
+            return json.dumps([], ensure_ascii=False)
+        if all(isinstance(item, dict) for item in values):
+            headers: list[str] = []
+            seen: set[str] = set()
+            for row in values:
+                for key in row:
+                    key_text = str(key)
+                    if key_text not in seen:
+                        seen.add(key_text)
+                        headers.append(key_text)
+            rows = [headers]
+            rows.extend([[row.get(header, "") for header in headers] for row in values])
+            return json.dumps(rows, ensure_ascii=False)
+        if all(not isinstance(item, list) for item in values):
+            return json.dumps([values], ensure_ascii=False)
+        return json.dumps(values, ensure_ascii=False)
+    return json.dumps([[values]], ensure_ascii=False)
+
+
+def _normalize_string_list_arg(value: Any) -> Any:
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            parsed = json.loads(stripped)
+            if isinstance(parsed, list):
+                return parsed
+        except Exception:
+            pass
+        return [part.strip() for part in stripped.split(",") if part.strip()]
+    return value
+
+
+_CALENDAR_EVENT_ID_RE = re.compile(r"\b(?:Event ID|ID):\s*([A-Za-z0-9_-]+)\b")
+
+
+def _is_missing_calendar_event_id(value: Any) -> bool:
+    if value is None:
+        return True
+    text = str(value).strip()
+    return text == "" or text.lower() in {"none", "null", "undefined", "no id"}
+
+
+def _extract_calendar_event_ids(text: str) -> list[str]:
+    if not text:
+        return []
+
+    ids: list[str] = []
+    seen: set[str] = set()
+    for match in _CALENDAR_EVENT_ID_RE.finditer(text):
+        event_id = match.group(1).strip()
+        if not event_id or event_id.lower() == "no":
+            continue
+        if event_id not in seen:
+            seen.add(event_id)
+            ids.append(event_id)
+    return ids
+
+
+async def _lookup_calendar_event_ids(
+    *,
+    get_events_tool: Any,
+    calendar_id: str,
+    summary: str | None,
+    start_time: str | None,
+    end_time: str | None,
+    log: Any,
+) -> tuple[list[str], str]:
+    lookup_kwargs: dict[str, Any] = {
+        "calendar_id": calendar_id or "primary",
+        "max_results": 10,
+        "detailed": True,
+    }
+    if start_time:
+        lookup_kwargs["time_min"] = start_time
+    if end_time:
+        lookup_kwargs["time_max"] = end_time
+    if summary:
+        lookup_kwargs["query"] = summary
+
+    lookup_result = await get_events_tool.ainvoke(lookup_kwargs)
+    lookup_text = str(lookup_result or "")
+    ids = _extract_calendar_event_ids(lookup_text)
+    if ids or not summary:
+        return ids, lookup_text
+
+    retry_kwargs = dict(lookup_kwargs)
+    retry_kwargs.pop("query", None)
+    log.warning(
+        "agent_run.calendar_event_lookup_retry_without_query",
+        calendar_id=calendar_id,
+        start_time=start_time,
+        end_time=end_time,
+        summary=summary,
+    )
+    retry_result = await get_events_tool.ainvoke(retry_kwargs)
+    retry_text = str(retry_result or "")
+    return _extract_calendar_event_ids(retry_text), retry_text
+
+
 _SLIDES_ELEMENT_PROPERTY_REQUESTS = {
     "createShape",
     "createImage",
@@ -394,15 +718,159 @@ _SLIDES_VALID_SHAPE_TYPES = {
 }
 
 
+_SLIDES_REQUEST_ALIASES = {
+    "create_slide": "createSlide",
+    "createSlide": "createSlide",
+    "create_shape": "createShape",
+    "createShape": "createShape",
+    "insert_text": "insertText",
+    "insertText": "insertText",
+    "delete_object": "deleteObject",
+    "deleteObject": "deleteObject",
+    "update_text_style": "updateTextStyle",
+    "updateTextStyle": "updateTextStyle",
+    "update_paragraph_style": "updateParagraphStyle",
+    "updateParagraphStyle": "updateParagraphStyle",
+    "create_image": "createImage",
+    "createImage": "createImage",
+    "replace_all_text": "replaceAllText",
+    "replaceAllText": "replaceAllText",
+}
+
+_SLIDES_CREATE_OBJECT_REQUEST_TYPES = (
+    "createSlide",
+    "createShape",
+    "createImage",
+    "createLine",
+    "createVideo",
+    "createSheetsChart",
+)
+
+
+def _camelize_slides_payload_keys(payload: Any) -> Any:
+    if isinstance(payload, list):
+        return [_camelize_slides_payload_keys(item) for item in payload]
+    if not isinstance(payload, dict):
+        return payload
+
+    key_map = {
+        "object_id": "objectId",
+        "page_object_id": "pageObjectId",
+        "shape_type": "shapeType",
+        "insertion_index": "insertionIndex",
+        "text_style": "style",
+        "cell_location": "cellLocation",
+        "element_properties": "elementProperties",
+        "page_element_id": "pageElementId",
+        "replace_text": "replaceText",
+        "contains_text": "containsText",
+        "match_case": "matchCase",
+    }
+    return {
+        key_map.get(str(key), key): _camelize_slides_payload_keys(value)
+        for key, value in payload.items()
+    }
+
+
+def _normalize_slides_request_aliases(requests: Any) -> Any:
+    if not isinstance(requests, list):
+        return requests
+
+    normalized: list[Any] = []
+    for request in requests:
+        if not isinstance(request, dict):
+            normalized.append(request)
+            continue
+
+        if len(request) == 1:
+            raw_type, raw_payload = next(iter(request.items()))
+            request_type = _SLIDES_REQUEST_ALIASES.get(str(raw_type), raw_type)
+            payload = _camelize_slides_payload_keys(raw_payload)
+        else:
+            matched_type = next((key for key in request if key in _SLIDES_REQUEST_ALIASES), None)
+            if matched_type is None:
+                normalized.append(_camelize_slides_payload_keys(request))
+                continue
+            request_type = _SLIDES_REQUEST_ALIASES[str(matched_type)]
+            payload = _camelize_slides_payload_keys(request.get(matched_type) or {})
+
+        if request_type == "createShape" and isinstance(payload, dict):
+            page_object_id = payload.pop("pageObjectId", None)
+            element_properties = payload.setdefault("elementProperties", {})
+            if page_object_id and isinstance(element_properties, dict):
+                element_properties.setdefault("pageObjectId", page_object_id)
+        normalized.append({request_type: payload})
+
+    return normalized
+
+
 def _normalize_slides_batch_requests(requests: Any) -> Any:
     if not isinstance(requests, list):
         return requests
 
-    normalized = copy.deepcopy(requests)
+    normalized = copy.deepcopy(_normalize_slides_request_aliases(requests))
+    _uniquify_slides_created_object_ids(normalized)
     for request in normalized:
         _normalize_slides_request(request)
 
     return normalized
+
+
+def _safe_slides_object_id(raw_object_id: str, suffix: str) -> str:
+    base = re.sub(r"[^A-Za-z0-9_:-]", "_", str(raw_object_id or "").strip())
+    if not base or not re.match(r"^[A-Za-z0-9_]", base):
+        base = f"obj_{base}"
+    # Keep comfortably below Slides' object ID length limit while preserving
+    # enough of the model-provided name for readable tool logs.
+    base = base[:36].rstrip("_:-") or "obj"
+    return f"{base}_{suffix}"
+
+
+def _replace_slides_object_id_refs(value: Any, id_map: dict[str, str]) -> None:
+    if not id_map:
+        return
+    if isinstance(value, dict):
+        for key, nested in list(value.items()):
+            if isinstance(nested, str) and nested in id_map:
+                value[key] = id_map[nested]
+            else:
+                _replace_slides_object_id_refs(nested, id_map)
+    elif isinstance(value, list):
+        for nested in value:
+            _replace_slides_object_id_refs(nested, id_map)
+
+
+def _uniquify_slides_created_object_ids(requests: list[Any]) -> None:
+    """Make newly-created Slides object IDs unique and rewrite in-batch refs.
+
+    Google Slides rejects reused object IDs across the whole presentation. LLMs
+    often retry with stable IDs like ``slide2``; replacing IDs for objects this
+    batch creates avoids collisions while preserving internal references such as
+    createShape.elementProperties.pageObjectId and insertText.objectId.
+    """
+    if not isinstance(requests, list):
+        return
+
+    id_map: dict[str, str] = {}
+    suffix = uuid.uuid4().hex[:8]
+    for index, request in enumerate(requests):
+        if not isinstance(request, dict):
+            continue
+        _replace_slides_object_id_refs(request, id_map)
+        for request_type in _SLIDES_CREATE_OBJECT_REQUEST_TYPES:
+            payload = request.get(request_type)
+            if not isinstance(payload, dict):
+                continue
+            object_id = payload.get("objectId")
+            if not isinstance(object_id, str) or not object_id.strip():
+                continue
+            new_object_id = _safe_slides_object_id(object_id, f"{suffix}_{index}")
+            payload["objectId"] = new_object_id
+            id_map[object_id] = new_object_id
+            break
+
+    for request in requests:
+        _replace_slides_object_id_refs(request, id_map)
 
 
 def _normalize_slides_request(request: Any) -> None:
@@ -668,12 +1136,23 @@ def _build_google_mcp_validation_reply(error_text: str) -> str:
 def build_google_mcp_usage_notice(user_message: str) -> str:
     notice = "\n\n[SYSTEM NOTICE - GOOGLE WORKSPACE MCP USAGE]\n"
     notice += (
+        "GOOGLE WORKSPACE MCP ADALAH PARENT-ONLY EXECUTION. "
+        "Jika user meminta Gmail, Calendar, Drive, Docs, Sheets, Slides, Forms, Contacts, Chat, atau Apps Script, "
+        "main agent WAJIB memanggil tool Google MCP langsung. "
+        "JANGAN delegasikan aksi Google Workspace ke subagent/task(), jangan meminta subagent membuat link, "
+        "dan jangan menganggap output task() sebagai bukti file Google sudah dibuat. "
+        "Jika perlu bantuan konten, pikirkan outline sendiri lalu tetap eksekusi file/link final dengan tool MCP di parent. "
+        "Task selesai hanya setelah tool Google MCP yang relevan berhasil dan URL/hasilnya berasal dari output tool tersebut. "
         "Saat memakai tool Google Workspace MCP, WAJIB ikuti schema tool secara persis. "
         "Jangan mengira-ngira nama argumen. Contoh penting: "
         "modify_sheet_values memakai argumen range_name (bukan range); "
         "draft_gmail_message.to/cc/bcc berupa string tunggal; "
         "manage_contact.emails/phones berupa list of objects; "
-        "manage_event untuk update butuh event_id, dan jika mengubah waktu sertakan start_time serta end_time; "
+        "UNTUK GOOGLE DRIVE: create_drive_folder dipakai untuk membuat folder. create_drive_file hanya untuk upload file jika ada content teks atau fileUrl/file_url valid; "
+        "jangan panggil create_drive_file dengan content null dan fileUrl null. Untuk laporan spreadsheet/xlsx baru, gunakan create_spreadsheet + modify_sheet_values, lalu pindahkan file ke folder dengan update_drive_file(add_parents=<folder_id>); "
+        "UNTUK GOOGLE CALENDAR: manage_event action update/delete/rsvp WAJIB memakai event_id asli dari Google Calendar. "
+        "Jika user meminta edit/hapus/RSVP event tetapi event_id belum ada di konteks, panggil get_events dulu dengan calendar_id, rentang waktu, dan query judul/deskripsi untuk mengambil ID; "
+        "baru panggil manage_event dengan event_id tersebut. Jangan kirim event_id None/null. Jika mengubah waktu, sertakan start_time serta end_time; "
         "UNTUK GOOGLE SLIDES: jangan pernah panggil batch_update_presentation tanpa requests; "
         "jika user minta edit slide, WAJIB panggil get_presentation dulu untuk ambil struktur slide/object; "
         "jangan insertText ke page/slide objectId (mis. 'p'), karena insertText hanya valid untuk shape atau table cell; "
@@ -709,10 +1188,27 @@ def build_google_mcp_usage_notice(user_message: str) -> str:
             "(4) resize_sheet_dimensions untuk freeze header dan auto-resize kolom bila tool tersedia; "
             "(5) read_sheet_values dengan include_formulas=True untuk verifikasi. "
             "modify_sheet_values memakai range_name, bukan range. "
+            "Jika perlu beberapa tab seperti Pemasukan/Pengeluaran/Ringkasan, sertakan sheet_names=['Pemasukan','Pengeluaran','Ringkasan'] saat create_spreadsheet atau panggil create_sheet sebelum menulis ke tab itu. "
+            "Jangan menulis ke range bertab seperti Pemasukan!A1:C10 kecuali tab Pemasukan sudah dibuat atau sudah muncul dari get_spreadsheet_info. "
             "Untuk spreadsheet baru tanpa sheet_names eksplisit, jangan hardcode Sheet1!A1:F10 karena nama tab default bisa berbeda per locale; pakai range tanpa nama sheet seperti A1:F10, atau ambil nama tab dari get_spreadsheet_info dulu. "
             "Untuk rumus, tulis formula sebagai string diawali '=' dan gunakan value_input_option='USER_ENTERED', contoh '=SUM(B2:B10)', '=AVERAGE(C2:C10)', '=IF(D2>=80,\"OK\",\"Review\")'. "
             "Jika user tidak memberi data lengkap, buat tabel template yang relevan dengan konteks user, berisi header siap pakai, beberapa baris contoh wajar, dan kolom formula yang menghitung total/rata-rata/status. "
             "Balasan final harus menyebut sheet sudah diisi dan formula apa yang dibuat, bukan hanya mengirim link file kosong."
+        )
+        notice += "\n[/SYSTEM NOTICE]\n"
+
+    if "calendar" in (user_message or "").lower() or any(
+        marker in (user_message or "").lower()
+        for marker in ("jadwal", "event", "reminder", "meeting", "rapat", "edit juga")
+    ):
+        notice += "\n\n[SYSTEM NOTICE - CALENDAR EDIT WORKFLOW]\n"
+        notice += (
+            "Untuk edit/hapus kalender, urutan wajib adalah: "
+            "(1) jika event_id belum diketahui, panggil get_events dengan calendar_id yang relevan, query dari judul/deskripsi, dan time_min/time_max jika ada; "
+            "(2) pilih event yang cocok dari output get_events dan ambil nilai `ID:` / `Event ID:`; "
+            "(3) panggil manage_event action update/delete/rsvp dengan event_id tersebut. "
+            "Jika get_events menemukan beberapa kandidat, jangan menebak; minta user memilih event atau waktu yang lebih spesifik. "
+            "Jika get_events tidak menemukan event, sampaikan bahwa event tidak ditemukan dan jangan membuat event baru kecuali user eksplisit minta create."
         )
         notice += "\n[/SYSTEM NOTICE]\n"
 
@@ -921,6 +1417,8 @@ def google_sheets_followup_directive(spreadsheet_id: str, user_message: str) -> 
 async def _fetch_google_auth_link(
     *, integration_url: str, api_key: str, agent_id: uuid.UUID, candidate_user_ids: list[str]
 ) -> str | None:
+    if not integration_url:
+        return None
     try:
         import httpx as _httpx
 
@@ -936,7 +1434,7 @@ async def _fetch_google_auth_link(
                     auth_url = data.get("auth_url") or data.get("authorization_url")
                     if auth_url:
                         auth_url = str(auth_url)
-                        if "/authorize" in auth_url:
+                        if auth_url.startswith("http://") or auth_url.startswith("https://"):
                             return auth_url
     except Exception:
         return None
@@ -946,19 +1444,10 @@ async def _fetch_google_auth_link(
 def _has_google_mcp_step(steps: list[dict[str, Any]]) -> bool:
     for step in steps:
         tool_name = str((step or {}).get("tool", "")).lower()
-        if not tool_name:
-            continue
-        if (
-            tool_name.startswith("search_gmail")
-            or tool_name.startswith("get_calendar")
-            or tool_name.startswith("create_calendar")
-            or tool_name.startswith("drive_")
-            or tool_name.startswith("docs_")
-            or tool_name.startswith("sheets_")
-            or "google" in tool_name
-            or "sheet" in tool_name
-            or "gmail" in tool_name
-        ):
+        if tool_name and _is_google_mcp_tool_name(tool_name):
+            return True
+        result = str((step or {}).get("result", "") or "")
+        if tool_name == "task" and _contains_google_workspace_artifact(result):
             return True
     return False
 
@@ -1002,10 +1491,13 @@ def _build_google_reauth_tool(
     api_key: str,
     agent_id: uuid.UUID,
     candidate_user_ids: list[str],
+    preferred_auth_url: str | None = None,
 ) -> list:
     @tool
     async def get_google_workspace_auth_link() -> str:
         """Generate and return Google Workspace re-auth link for current user."""
+        if preferred_auth_url:
+            return preferred_auth_url
         auth_url = await _fetch_google_auth_link(
             integration_url=integration_url,
             api_key=api_key,
@@ -1022,119 +1514,382 @@ def _build_google_reauth_tool(
 def sanitize_google_forms_tools(mcp_tools: list, log: Any) -> list:
     """Wrap Google Workspace tools to repair weak LLM payloads before MCP execution."""
     wrapped_tools: list = []
+    sanitized_tool_names: list[str] = []
+    get_events_tool = next((tool for tool in mcp_tools if getattr(tool, "name", "") == "get_events"), None)
+    create_sheet_tool = next((tool for tool in mcp_tools if getattr(tool, "name", "") == "create_sheet"), None)
     for mcp_tool in mcp_tools:
         tool_name = getattr(mcp_tool, "name", "")
-        if tool_name == "batch_update_presentation":
-            async def _batch_update_presentation_guarded(_tool=mcp_tool, **kwargs):
-                original_requests = kwargs.get("requests")
-                normalized_requests = _normalize_slides_batch_requests(original_requests)
-                if normalized_requests is not original_requests:
-                    kwargs["requests"] = normalized_requests
-                try:
-                    return await _tool.ainvoke(kwargs)
-                except Exception as exc:
-                    err = str(exc).lower()
-                    if (
-                        "batch_update_presentation" in err
-                        and (
-                            "unknown dimension unit" in err
-                            or "unit_unspecified" in err
-                            or "invalid value" in err
+        if tool_name == "create_spreadsheet":
+            def _build_create_spreadsheet_guarded(tool_to_call: Any):
+                async def _create_spreadsheet_guarded(**kwargs):
+                    spreadsheet_title = kwargs.pop("spreadsheet_title", None)
+                    name = kwargs.pop("name", None)
+                    file_name = kwargs.pop("file_name", None)
+                    title = kwargs.get("title") or spreadsheet_title or name or file_name
+                    if not title:
+                        return (
+                            "SHEETS_TITLE_REQUIRED: create_spreadsheet membutuhkan title. "
+                            "Tentukan judul spreadsheet dari request user, lalu panggil create_spreadsheet(title=...)."
                         )
-                        and "dimension" in err
-                    ):
-                        retry_kwargs = dict(kwargs)
-                        retry_kwargs["requests"] = _normalize_slides_batch_requests(
-                            retry_kwargs.get("requests")
-                        )
-                        log.warning(
-                            "agent_run.slides_dimension_retry_guard",
-                            error=str(exc)[:300],
-                        )
-                        return await _tool.ainvoke(retry_kwargs)
-                    raise
+                    kwargs["title"] = str(title)
+                    if kwargs.get("sheet_names") is None:
+                        kwargs.pop("sheet_names", None)
+                    elif "sheet_names" in kwargs:
+                        kwargs["sheet_names"] = _normalize_string_list_arg(kwargs.get("sheet_names"))
+                    return await tool_to_call.ainvoke(kwargs)
+
+                return _create_spreadsheet_guarded
 
             wrapped_tools.append(
                 StructuredTool.from_function(
-                    coroutine=_batch_update_presentation_guarded,
+                    coroutine=_build_create_spreadsheet_guarded(mcp_tool),
+                    name=mcp_tool.name,
+                    description=getattr(mcp_tool, "description", None),
+                    args_schema=CreateSpreadsheetArgs,
+                )
+            )
+            sanitized_tool_names.append(tool_name)
+            continue
+
+        if tool_name == "create_presentation":
+            def _build_create_presentation_guarded(tool_to_call: Any):
+                async def _create_presentation_guarded(**kwargs):
+                    presentation_title = kwargs.pop("presentation_title", None)
+                    name = kwargs.pop("name", None)
+                    file_name = kwargs.pop("file_name", None)
+                    title = kwargs.get("title") or presentation_title or name or file_name
+                    if not title:
+                        return (
+                            "SLIDES_TITLE_REQUIRED: create_presentation membutuhkan title. "
+                            "Tentukan judul presentasi dari request user, lalu panggil create_presentation(title=...)."
+                        )
+                    kwargs["title"] = str(title)
+                    return await tool_to_call.ainvoke(kwargs)
+
+                return _create_presentation_guarded
+
+            wrapped_tools.append(
+                StructuredTool.from_function(
+                    coroutine=_build_create_presentation_guarded(mcp_tool),
+                    name=mcp_tool.name,
+                    description=getattr(mcp_tool, "description", None),
+                    args_schema=CreatePresentationArgs,
+                )
+            )
+            sanitized_tool_names.append(tool_name)
+            continue
+
+        if tool_name == "create_drive_file":
+            def _build_create_drive_file_guarded(tool_to_call: Any):
+                async def _create_drive_file_guarded(**kwargs):
+                    file_url_alias = kwargs.pop("file_url", None)
+                    if not kwargs.get("fileUrl") and file_url_alias:
+                        kwargs["fileUrl"] = file_url_alias
+
+                    content = kwargs.get("content")
+                    file_url = kwargs.get("fileUrl")
+                    mime_type = str(kwargs.get("mime_type") or "text/plain")
+                    file_name = str(kwargs.get("file_name") or "")
+                    has_content = content is not None and str(content) != ""
+                    has_file_url = file_url is not None and str(file_url).strip() != ""
+                    is_folder = mime_type == "application/vnd.google-apps.folder"
+                    if not has_content and not has_file_url and not is_folder:
+                        lower_name = file_name.lower()
+                        if lower_name.endswith((".xlsx", ".xls", ".csv")) or "spreadsheet" in mime_type:
+                            return (
+                                "DRIVE_FILE_SOURCE_REQUIRED: create_drive_file tidak bisa upload spreadsheet tanpa content atau fileUrl. "
+                                "Untuk membuat laporan spreadsheet baru di Google Drive, gunakan workflow ini: "
+                                "1) create_spreadsheet(title=...), 2) modify_sheet_values(...) untuk mengisi data, "
+                                "3) jika perlu masuk folder tertentu, panggil update_drive_file(file_id=<spreadsheet_id>, add_parents=<folder_id>). "
+                                "Jangan mengklaim file sudah diupload sampai tool Sheets/Drive berhasil."
+                            )
+                        if "." not in file_name:
+                            return (
+                                "DRIVE_FOLDER_OR_CONTENT_REQUIRED: Jika user meminta folder, panggil create_drive_folder(folder_name=..., parent_folder_id=...). "
+                                "Jika user meminta file, create_drive_file wajib diberi content teks atau fileUrl/file_url yang bisa diakses MCP server."
+                            )
+                        return (
+                            "DRIVE_FILE_SOURCE_REQUIRED: create_drive_file wajib diberi salah satu dari content atau fileUrl/file_url. "
+                            "MCP server tidak bisa mengupload file kosong atau file lokal sandbox yang tidak diberikan sebagai URL. "
+                            "Buat/ambil konten file dulu, atau gunakan tool Google native yang sesuai seperti create_spreadsheet/create_presentation/create_doc."
+                        )
+
+                    return await tool_to_call.ainvoke(kwargs)
+
+                return _create_drive_file_guarded
+
+            wrapped_tools.append(
+                StructuredTool.from_function(
+                    coroutine=_build_create_drive_file_guarded(mcp_tool),
+                    name=mcp_tool.name,
+                    description=getattr(mcp_tool, "description", None),
+                    args_schema=CreateDriveFileArgs,
+                )
+            )
+            sanitized_tool_names.append(tool_name)
+            continue
+
+        if tool_name == "manage_event":
+            def _build_manage_event_guarded(tool_to_call: Any):
+                async def _manage_event_guarded(**kwargs):
+                    action = str(kwargs.get("action") or "").lower().strip()
+                    if action in {"update", "delete", "rsvp"} and _is_missing_calendar_event_id(kwargs.get("event_id")):
+                        if get_events_tool is None:
+                            return (
+                                "CALENDAR_EVENT_ID_REQUIRED: manage_event action "
+                                f"'{action}' membutuhkan event_id asli. Panggil get_events dulu untuk mencari event, "
+                                "ambil nilai ID/Event ID dari hasilnya, lalu ulangi manage_event dengan event_id tersebut."
+                            )
+
+                        calendar_id = str(kwargs.get("calendar_id") or "primary")
+                        summary = str(kwargs.get("summary") or "").strip() or None
+                        start_time = str(kwargs.get("start_time") or "").strip() or None
+                        end_time = str(kwargs.get("end_time") or "").strip() or None
+                        try:
+                            ids, lookup_text = await _lookup_calendar_event_ids(
+                                get_events_tool=get_events_tool,
+                                calendar_id=calendar_id,
+                                summary=summary,
+                                start_time=start_time,
+                                end_time=end_time,
+                                log=log,
+                            )
+                        except Exception as exc:
+                            return (
+                                "CALENDAR_EVENT_ID_REQUIRED: manage_event tidak bisa dilanjutkan tanpa event_id, "
+                                f"dan lookup get_events gagal: {exc}. Panggil get_events secara eksplisit, lalu ulangi manage_event dengan event_id."
+                            )
+
+                        if len(ids) == 1:
+                            retry_kwargs = dict(kwargs)
+                            retry_kwargs["event_id"] = ids[0]
+                            log.warning(
+                                "agent_run.calendar_manage_event_auto_event_id",
+                                action=action,
+                                event_id=ids[0],
+                                calendar_id=calendar_id,
+                                summary=summary,
+                            )
+                            return await tool_to_call.ainvoke(retry_kwargs)
+
+                        if len(ids) > 1:
+                            return (
+                                "CALENDAR_EVENT_ID_AMBIGUOUS: get_events menemukan beberapa kandidat event. "
+                                "Jangan menebak event_id. Minta user memilih event yang tepat, atau ulangi get_events dengan waktu/query yang lebih spesifik.\n\n"
+                                f"Hasil get_events:\n{lookup_text}"
+                            )
+
+                        return (
+                            "CALENDAR_EVENT_NOT_FOUND: Tidak ada event yang cocok untuk di-update/delete/rsvp. "
+                            "Jangan membuat event baru kecuali user eksplisit minta create. "
+                            "Minta user memberi judul/waktu event yang lebih spesifik, atau panggil get_events dengan rentang waktu lebih luas.\n\n"
+                            f"Hasil get_events:\n{lookup_text}"
+                        )
+
+                    return await tool_to_call.ainvoke(kwargs)
+
+                return _manage_event_guarded
+
+            wrapped_tools.append(
+                StructuredTool.from_function(
+                    coroutine=_build_manage_event_guarded(mcp_tool),
                     name=mcp_tool.name,
                     description=getattr(mcp_tool, "description", None),
                     args_schema=getattr(mcp_tool, "args_schema", None),
                 )
             )
+            sanitized_tool_names.append(tool_name)
+            continue
+
+        if tool_name == "batch_update_presentation":
+            def _build_batch_update_presentation_guarded(tool_to_call: Any):
+                async def _batch_update_presentation_guarded(**kwargs):
+                    original_requests = kwargs.get("requests")
+                    if isinstance(original_requests, dict):
+                        if isinstance(original_requests.get("requests"), list):
+                            original_requests = original_requests["requests"]
+                        else:
+                            original_requests = [original_requests]
+                    if not original_requests:
+                        return (
+                            "SLIDES_REQUESTS_REQUIRED: batch_update_presentation membutuhkan requests non-kosong. "
+                            "Untuk membuat konten slide, gunakan list request Google Slides API seperti createSlide, createShape, lalu insertText ke objectId shape."
+                        )
+                    normalized_requests = _normalize_slides_batch_requests(original_requests)
+                    if normalized_requests is not original_requests:
+                        kwargs["requests"] = normalized_requests
+                    try:
+                        return await tool_to_call.ainvoke(kwargs)
+                    except Exception as exc:
+                        err = str(exc).lower()
+                        if (
+                            "batch_update_presentation" in err
+                            and (
+                                "unknown dimension unit" in err
+                                or "unit_unspecified" in err
+                                or "invalid value" in err
+                            )
+                            and "dimension" in err
+                        ):
+                            retry_kwargs = dict(kwargs)
+                            retry_kwargs["requests"] = _normalize_slides_batch_requests(
+                                retry_kwargs.get("requests")
+                            )
+                            log.warning(
+                                "agent_run.slides_dimension_retry_guard",
+                                error=str(exc)[:300],
+                            )
+                            return await tool_to_call.ainvoke(retry_kwargs)
+                        raise
+
+                return _batch_update_presentation_guarded
+
+            wrapped_tools.append(
+                StructuredTool.from_function(
+                    coroutine=_build_batch_update_presentation_guarded(mcp_tool),
+                    name=mcp_tool.name,
+                    description=getattr(mcp_tool, "description", None),
+                    args_schema=BatchUpdatePresentationArgs,
+                )
+            )
+            sanitized_tool_names.append(tool_name)
             continue
 
         if tool_name == "create_shape":
-            async def _create_shape_guarded(_tool=mcp_tool, **kwargs):
-                normalized_kwargs = _normalize_create_shape_kwargs(kwargs)
-                return await _tool.ainvoke(normalized_kwargs)
+            def _build_create_shape_guarded(tool_to_call: Any):
+                async def _create_shape_guarded(**kwargs):
+                    normalized_kwargs = _normalize_create_shape_kwargs(kwargs)
+                    return await tool_to_call.ainvoke(normalized_kwargs)
+
+                return _create_shape_guarded
 
             wrapped_tools.append(
                 StructuredTool.from_function(
-                    coroutine=_create_shape_guarded,
+                    coroutine=_build_create_shape_guarded(mcp_tool),
                     name=mcp_tool.name,
                     description=getattr(mcp_tool, "description", None),
                     args_schema=getattr(mcp_tool, "args_schema", None),
                 )
             )
+            sanitized_tool_names.append(tool_name)
             continue
 
         if tool_name == "modify_sheet_values":
-            async def _modify_sheet_values_guarded(_tool=mcp_tool, **kwargs):
-                range_name = str(kwargs.get("range_name") or "")
-                try:
-                    return await _tool.ainvoke(kwargs)
-                except Exception as exc:
-                    err = str(exc)
-                    fallback_range = _fallback_unqualified_sheet_range(range_name)
-                    if fallback_range and "unable to parse range" in err.lower():
-                        retry_kwargs = dict(kwargs)
-                        retry_kwargs["range_name"] = fallback_range
-                        log.warning(
-                            "agent_run.sheets_range_retry_unqualified",
-                            original_range=range_name,
-                            retry_range=fallback_range,
-                        )
-                        return await _tool.ainvoke(retry_kwargs)
-                    raise
+            def _build_modify_sheet_values_guarded(tool_to_call: Any):
+                async def _modify_sheet_values_guarded(**kwargs):
+                    range_alias = kwargs.pop("range", None)
+                    if not kwargs.get("range_name") and range_alias:
+                        kwargs["range_name"] = range_alias
+                    if not kwargs.get("range_name") and kwargs.get("values") is not None:
+                        kwargs["range_name"] = "A1"
+                    kwargs["values"] = _normalize_sheet_values_for_mcp(kwargs.get("values"))
+                    range_name = str(kwargs.get("range_name") or "")
+                    try:
+                        return await tool_to_call.ainvoke(kwargs)
+                    except Exception as exc:
+                        err = str(exc)
+                        missing_range = _split_simple_sheet_range(range_name)
+                        if missing_range and "unable to parse range" in err.lower():
+                            sheet_name, cell_range = missing_range
+                            if create_sheet_tool is not None:
+                                try:
+                                    await create_sheet_tool.ainvoke(
+                                        {
+                                            "spreadsheet_id": kwargs.get("spreadsheet_id"),
+                                            "sheet_name": sheet_name,
+                                        }
+                                    )
+                                    retry_kwargs = dict(kwargs)
+                                    log.warning(
+                                        "agent_run.sheets_missing_tab_created_retry",
+                                        sheet_name=sheet_name,
+                                        range_name=range_name,
+                                    )
+                                    return await tool_to_call.ainvoke(retry_kwargs)
+                                except Exception as create_exc:
+                                    create_err = str(create_exc).lower()
+                                    if "already exists" not in create_err and "already exist" not in create_err:
+                                        log.warning(
+                                            "agent_run.sheets_missing_tab_create_failed",
+                                            sheet_name=sheet_name,
+                                            range_name=range_name,
+                                            error=str(create_exc)[:300],
+                                        )
+                                        raise
+                                    retry_kwargs = dict(kwargs)
+                                    return await tool_to_call.ainvoke(retry_kwargs)
+
+                            retry_kwargs = dict(kwargs)
+                            retry_kwargs["range_name"] = cell_range
+                            log.warning(
+                                "agent_run.sheets_missing_tab_fallback_unqualified",
+                                original_range=range_name,
+                                retry_range=cell_range,
+                            )
+                            return await tool_to_call.ainvoke(retry_kwargs)
+
+                        fallback_range = _fallback_unqualified_sheet_range(range_name)
+                        if fallback_range and "unable to parse range" in err.lower():
+                            retry_kwargs = dict(kwargs)
+                            retry_kwargs["range_name"] = fallback_range
+                            log.warning(
+                                "agent_run.sheets_range_retry_unqualified",
+                                original_range=range_name,
+                                retry_range=fallback_range,
+                            )
+                            return await tool_to_call.ainvoke(retry_kwargs)
+                        raise
+
+                return _modify_sheet_values_guarded
 
             wrapped_tools.append(
                 StructuredTool.from_function(
-                    coroutine=_modify_sheet_values_guarded,
+                    coroutine=_build_modify_sheet_values_guarded(mcp_tool),
                     name=mcp_tool.name,
                     description=getattr(mcp_tool, "description", None),
-                    args_schema=getattr(mcp_tool, "args_schema", None),
+                    args_schema=ModifySheetValuesArgs,
                 )
             )
+            sanitized_tool_names.append(tool_name)
             continue
 
         if tool_name != "create_survey_form":
             wrapped_tools.append(mcp_tool)
             continue
 
-        async def _create_survey_form_guarded(_tool=mcp_tool, **kwargs):
-            original_questions = kwargs.get("questions")
-            if _needs_generated_form_questions(original_questions):
-                kwargs["questions"] = build_default_form_questions(
-                    title=str(kwargs.get("title") or ""),
-                    description=str(kwargs.get("description") or ""),
-                    topic_hint=str(kwargs.get("topic_hint") or ""),
-                )
-                log.warning(
-                    "agent_run.forms_questions_autofilled",
-                    tool="create_survey_form",
-                    original_questions=original_questions,
-                    generated=len(kwargs["questions"]),
-                )
-            return await _tool.ainvoke(kwargs)
+        def _build_create_survey_form_guarded(tool_to_call: Any):
+            async def _create_survey_form_guarded(**kwargs):
+                original_questions = kwargs.get("questions")
+                if _needs_generated_form_questions(original_questions):
+                    kwargs["questions"] = build_default_form_questions(
+                        title=str(kwargs.get("title") or ""),
+                        description=str(kwargs.get("description") or ""),
+                        topic_hint=str(kwargs.get("topic_hint") or ""),
+                    )
+                    log.warning(
+                        "agent_run.forms_questions_autofilled",
+                        tool="create_survey_form",
+                        original_questions=original_questions,
+                        generated=len(kwargs["questions"]),
+                    )
+                return await tool_to_call.ainvoke(kwargs)
+
+            return _create_survey_form_guarded
 
         wrapped_tools.append(
             StructuredTool.from_function(
-                coroutine=_create_survey_form_guarded,
+                coroutine=_build_create_survey_form_guarded(mcp_tool),
                 name=mcp_tool.name,
                 description=getattr(mcp_tool, "description", None),
                 args_schema=getattr(mcp_tool, "args_schema", None),
             )
+        )
+        sanitized_tool_names.append(tool_name)
+    if sanitized_tool_names:
+        log.warning(
+            "agent_run.google_mcp_tools_sanitized",
+            tools=sanitized_tool_names,
+            total=len(sanitized_tool_names),
         )
     return wrapped_tools
 
@@ -1264,6 +2019,7 @@ async def prepare_google_mcp_runtime(
     user_message: str,
     system_prompt: Any,
     log: Any,
+    fallback_external_user_id: str | None = None,
 ) -> GoogleMcpRuntime:
     mcp_cfg = tools_config.get("mcp", {})
     mcp_enabled = False
@@ -1278,26 +2034,27 @@ async def prepare_google_mcp_runtime(
             workspace_server = mcp_cfg.get("google_workspace") if isinstance(mcp_cfg.get("google_workspace"), dict) else None
             mcp_enabled = bool(workspace_server)
 
-    integration_url = os.environ.get("GOOGLE_INTEGRATION_SERVICE_URL", "http://localhost:8003")
-    channel_cfg = session.channel_config if isinstance(session.channel_config, dict) else {}
-    candidate_ids = _candidate_external_user_ids(memory_scope, channel_cfg.get("user_phone"))
+    from app.config import get_settings
 
-    if mcp_enabled and workspace_server and candidate_ids:
-        tools.extend(
-            _build_google_reauth_tool(
-                integration_url=integration_url,
-                api_key=api_key,
-                agent_id=agent_id,
-                candidate_user_ids=candidate_ids,
-            )
-        )
-        active_groups.append("google_reauth")
+    integration_url = str(get_settings().google_integration_service_url).rstrip("/")
+    channel_cfg = session.channel_config if isinstance(session.channel_config, dict) else {}
+    candidate_ids = _candidate_external_user_ids(
+        memory_scope or getattr(session, "external_user_id", None) or fallback_external_user_id,
+        channel_cfg.get("user_phone") or fallback_external_user_id,
+    )
 
     connected_user_id: str | None = None
     auth_url: str | None = None
     preflight_error: str | None = None
 
-    if mcp_enabled and workspace_server:
+    if mcp_enabled and workspace_server and not integration_url:
+        preflight_error = (
+            "GOOGLE_INTEGRATION_SERVICE_URL belum dikonfigurasi; "
+            "auth Google Workspace harus memakai URL dev tunnel, bukan localhost."
+        )
+        log.warning("agent_run.google_mcp_integration_url_missing")
+
+    if mcp_enabled and workspace_server and integration_url:
         try:
             import httpx as _httpx
 
@@ -1373,6 +2130,18 @@ async def prepare_google_mcp_runtime(
         except Exception as err:
             log.warning("agent_run.google_mcp_token_error", error=str(err))
 
+    if mcp_enabled and workspace_server and integration_url and candidate_ids:
+        tools.extend(
+            _build_google_reauth_tool(
+                integration_url=integration_url,
+                api_key=api_key,
+                agent_id=agent_id,
+                candidate_user_ids=candidate_ids,
+                preferred_auth_url=auth_url,
+            )
+        )
+        active_groups.append("google_reauth")
+
     if mcp_enabled and workspace_server and isinstance(system_prompt, str):
         system_prompt += build_google_mcp_usage_notice(user_message)
 
@@ -1439,7 +2208,11 @@ async def apply_google_mcp_reply_overrides(
     google_mcp_err = mcp_errors.get("google_workspace") if isinstance(mcp_errors, dict) else None
     google_mcp_step_err = _extract_google_mcp_step_error(steps)
     google_mcp_auth_err = google_mcp_err or google_mcp_step_err
-    must_override_google_auth = bool(google_mcp_auth_err) and _is_google_auth_or_scope_error(str(google_mcp_auth_err))
+    must_override_google_auth = (
+        bool(google_mcp_auth_err)
+        and _is_google_mcp_intent(user_message)
+        and _is_google_auth_or_scope_error(str(google_mcp_auth_err))
+    )
 
     if must_override_google_auth:
         if not auth_url:
@@ -1473,6 +2246,43 @@ async def apply_google_mcp_reply_overrides(
             error=str(google_mcp_err)[:200],
             previous_reply=previous_reply[:200],
         )
+
+    must_override_google_not_executed = (
+        not google_mcp_err
+        and not must_override_google_auth
+        and _is_google_mcp_intent(user_message)
+        and not _has_google_mcp_step(steps)
+        and not _contains_google_workspace_artifact(final_reply)
+        and not _looks_like_google_auth_recovery_reply(final_reply)
+        and (
+            _looks_like_progress_claim(final_reply)
+            or _looks_like_google_mcp_success_claim(final_reply)
+        )
+    )
+    if must_override_google_not_executed:
+        previous_reply = final_reply or ""
+        final_reply = _build_google_mcp_not_executed_reply(user_message)
+        log.warning(
+            "agent_run.reply_overridden_google_mcp_not_executed",
+            previous_reply=previous_reply[:200],
+        )
+
+    if (
+        not must_override_google_not_executed
+        and not google_mcp_err
+        and not must_override_google_auth
+        and auth_url
+        and (
+            _is_google_mcp_intent(user_message)
+            or _looks_like_google_auth_recovery_reply(final_reply)
+        )
+        and not _has_google_mcp_step(steps)
+        and _looks_like_google_auth_recovery_reply(final_reply)
+    ):
+        updated_reply = _ensure_google_auth_link_in_reply(final_reply, auth_url)
+        if updated_reply != final_reply:
+            log.warning("agent_run.google_mcp_auth_link_appended_to_recovery_reply")
+            final_reply = updated_reply
 
     return final_reply, steps, auth_url
 

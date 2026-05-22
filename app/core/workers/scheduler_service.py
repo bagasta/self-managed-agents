@@ -226,7 +226,7 @@ async def _run_job(job_id) -> None:
             result = await run_agent(
                 agent_model=agent_model,
                 session=session,
-                user_message=f"[SCHEDULED] {job.payload}",
+                user_message=f"[SCHEDULED_REMINDER] {job.payload}",
                 db=db,
             )
             reply = result.get("reply", "")
