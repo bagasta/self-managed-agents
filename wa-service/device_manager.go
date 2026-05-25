@@ -29,9 +29,10 @@ import (
 type DeviceStatus string
 
 const (
-	StatusWaitingQR    DeviceStatus = "waiting_qr"
-	StatusConnected    DeviceStatus = "connected"
-	StatusDisconnected DeviceStatus = "disconnected"
+	StatusWaitingQR       DeviceStatus = "waiting_qr"
+	StatusConnected       DeviceStatus = "connected"
+	StatusDisconnected    DeviceStatus = "disconnected"
+	typingRefreshInterval              = 4 * time.Second
 )
 
 type DeviceInfo struct {
@@ -49,6 +50,99 @@ type DeviceManager struct {
 	pythonWebhook string
 	storeDir      string
 	typingCancels sync.Map // key: "deviceID:chatJID" → context.CancelFunc
+}
+
+func quotedMessageText(ctx *waE2E.ContextInfo) string {
+	if ctx == nil {
+		return ""
+	}
+	qm := ctx.GetQuotedMessage()
+	if qm == nil {
+		return ""
+	}
+	if q := qm.GetConversation(); q != "" {
+		return q
+	}
+	if qe := qm.GetExtendedTextMessage(); qe != nil {
+		return qe.GetText()
+	}
+	if qi := qm.GetImageMessage(); qi != nil {
+		return qi.GetCaption()
+	}
+	if qd := qm.GetDocumentMessage(); qd != nil {
+		if caption := qd.GetCaption(); caption != "" {
+			return caption
+		}
+		if name := qd.GetFileName(); name != "" {
+			return name
+		}
+	}
+	if qs := qm.GetStickerMessage(); qs != nil {
+		return "[Sticker]"
+	}
+	return ""
+}
+
+type quotedMessageContext struct {
+	StanzaID    string
+	Participant string
+	RemoteJID   string
+	Text        string
+}
+
+func extractQuotedMessageContext(ctx *waE2E.ContextInfo) quotedMessageContext {
+	if ctx == nil {
+		return quotedMessageContext{}
+	}
+	return quotedMessageContext{
+		StanzaID:    ctx.GetStanzaID(),
+		Participant: ctx.GetParticipant(),
+		RemoteJID:   ctx.GetRemoteJID(),
+		Text:        quotedMessageText(ctx),
+	}
+}
+
+func (dm *DeviceManager) startTypingKeepAlive(deviceID string, chatJID types.JID) {
+	dm.mu.RLock()
+	info, ok := dm.devices[deviceID]
+	dm.mu.RUnlock()
+	if !ok || info.Client == nil {
+		return
+	}
+
+	typingKey := deviceID + ":" + chatJID.String()
+	if prev, loaded := dm.typingCancels.LoadAndDelete(typingKey); loaded {
+		prev.(context.CancelFunc)()
+	}
+	typingCtx, typingCancel := context.WithCancel(context.Background())
+	dm.typingCancels.Store(typingKey, typingCancel)
+	typingClient := info.Client
+	_ = typingClient.SendChatPresence(context.Background(), chatJID, types.ChatPresenceComposing, types.ChatPresenceMediaText)
+	go func() {
+		ticker := time.NewTicker(typingRefreshInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-typingCtx.Done():
+				return
+			case <-ticker.C:
+				_ = typingClient.SendChatPresence(context.Background(), chatJID, types.ChatPresenceComposing, types.ChatPresenceMediaText)
+			}
+		}
+	}()
+}
+
+func (dm *DeviceManager) stopTypingKeepAlive(deviceID string, chatJID types.JID) {
+	typingKey := deviceID + ":" + chatJID.String()
+	if cancel, loaded := dm.typingCancels.LoadAndDelete(typingKey); loaded {
+		cancel.(context.CancelFunc)()
+	}
+	dm.mu.RLock()
+	info, ok := dm.devices[deviceID]
+	dm.mu.RUnlock()
+	if ok && info.Client != nil {
+		_ = info.Client.SendChatPresence(context.Background(), chatJID, types.ChatPresencePaused, types.ChatPresenceMediaText)
+	}
 }
 
 func NewDeviceManager(pythonWebhook, storeDir string) (*DeviceManager, error) {
@@ -232,16 +326,16 @@ func (dm *DeviceManager) GetStatus(deviceID string) (DeviceStatus, string, error
 }
 
 // SendMessage sends a text message to a WhatsApp number.
-func (dm *DeviceManager) SendMessage(deviceID, to, text string) error {
+func (dm *DeviceManager) SendMessage(deviceID, to, text string) (types.MessageID, error) {
 	dm.mu.RLock()
 	info, ok := dm.devices[deviceID]
 	dm.mu.RUnlock()
 
 	if !ok {
-		return fmt.Errorf("device %s not found", deviceID)
+		return "", fmt.Errorf("device %s not found", deviceID)
 	}
 	if info.Status != StatusConnected {
-		return fmt.Errorf("device %s not connected (status: %s)", deviceID, info.Status)
+		return "", fmt.Errorf("device %s not connected (status: %s)", deviceID, info.Status)
 	}
 
 	// Verify the client has a valid device JID
@@ -250,37 +344,68 @@ func (dm *DeviceManager) SendMessage(deviceID, to, text string) error {
 		log.Printf("[%s] store has no device JID, attempting reconnect...", deviceID)
 		if !info.Client.IsConnected() {
 			if err := info.Client.Connect(); err != nil {
-				return fmt.Errorf("device %s: reconnect failed: %w", deviceID, err)
+				return "", fmt.Errorf("device %s: reconnect failed: %w", deviceID, err)
 			}
 			time.Sleep(2 * time.Second) // give it a moment to establish
 		}
 		if info.Client.Store.ID == nil {
-			return fmt.Errorf("device %s: no valid WA session (needs re-scan QR)", deviceID)
+			return "", fmt.Errorf("device %s: no valid WA session (needs re-scan QR)", deviceID)
 		}
 	}
 
 	// Resolve JID — handles full JID strings, phone numbers, and LID accounts.
 	jid, err := resolveJID(info.Client, to)
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	// Cancel typing keep-alive goroutine and stop composing indicator.
-	typingKey := deviceID + ":" + jid.String()
-	if cancel, loaded := dm.typingCancels.LoadAndDelete(typingKey); loaded {
-		cancel.(context.CancelFunc)()
-	}
-	_ = info.Client.SendChatPresence(context.Background(), jid, types.ChatPresencePaused, types.ChatPresenceMediaText)
+	// Final outbound messages stop the inbound typing keep-alive for this chat.
+	dm.stopTypingKeepAlive(deviceID, jid)
 
 	msg := &waE2E.Message{
 		Conversation: proto.String(text),
 	}
 
-	_, sendErr := info.Client.SendMessage(context.Background(), jid, msg)
+	resp, sendErr := info.Client.SendMessage(context.Background(), jid, msg)
 	if sendErr != nil {
 		log.Printf("[%s] send to %s failed: %v", deviceID, to, sendErr)
 	}
-	return sendErr
+	return resp.ID, sendErr
+}
+
+// StartTyping starts or refreshes the typing keep-alive for a chat.
+func (dm *DeviceManager) StartTyping(deviceID, to string) error {
+	dm.mu.RLock()
+	info, ok := dm.devices[deviceID]
+	dm.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("device %s not found", deviceID)
+	}
+	if info.Status != StatusConnected {
+		return fmt.Errorf("device %s not connected (status: %s)", deviceID, info.Status)
+	}
+	jid, err := resolveJID(info.Client, to)
+	if err != nil {
+		return err
+	}
+	dm.startTypingKeepAlive(deviceID, jid)
+	return nil
+}
+
+// StopTyping stops the typing keep-alive for a chat.
+func (dm *DeviceManager) StopTyping(deviceID, to string) error {
+	dm.mu.RLock()
+	info, ok := dm.devices[deviceID]
+	dm.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("device %s not found", deviceID)
+	}
+	jid, err := resolveJID(info.Client, to)
+	if err != nil {
+		return err
+	}
+	dm.stopTypingKeepAlive(deviceID, jid)
+	return nil
 }
 
 // Disconnect logs out and removes the device.
@@ -448,24 +573,24 @@ func resolveJID(client *whatsmeow.Client, to string) (types.JID, error) {
 
 // SendImage uploads and sends an image to a WhatsApp number.
 // imageData is the raw image bytes, mimetype e.g. "image/jpeg".
-func (dm *DeviceManager) SendImage(deviceID, to string, imageData []byte, caption, mimetype string) error {
+func (dm *DeviceManager) SendImage(deviceID, to string, imageData []byte, caption, mimetype string) (types.MessageID, error) {
 	dm.mu.RLock()
 	info, ok := dm.devices[deviceID]
 	dm.mu.RUnlock()
 
 	if !ok {
-		return fmt.Errorf("device %s not found", deviceID)
+		return "", fmt.Errorf("device %s not found", deviceID)
 	}
 	if info.Status != StatusConnected {
-		return fmt.Errorf("device %s not connected (status: %s)", deviceID, info.Status)
+		return "", fmt.Errorf("device %s not connected (status: %s)", deviceID, info.Status)
 	}
 	if info.Client.Store.ID == nil {
-		return fmt.Errorf("device %s: no valid WA session (needs re-scan QR)", deviceID)
+		return "", fmt.Errorf("device %s: no valid WA session (needs re-scan QR)", deviceID)
 	}
 
 	jid, err := resolveJID(info.Client, to)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	if mimetype == "" {
@@ -475,7 +600,7 @@ func (dm *DeviceManager) SendImage(deviceID, to string, imageData []byte, captio
 	// Upload to WhatsApp servers
 	resp, err := info.Client.Upload(context.Background(), imageData, whatsmeow.MediaImage)
 	if err != nil {
-		return fmt.Errorf("upload image: %w", err)
+		return "", fmt.Errorf("upload image: %w", err)
 	}
 
 	msg := &waE2E.Message{
@@ -491,33 +616,33 @@ func (dm *DeviceManager) SendImage(deviceID, to string, imageData []byte, captio
 		},
 	}
 
-	_, err = info.Client.SendMessage(context.Background(), jid, msg)
+	sendResp, err := info.Client.SendMessage(context.Background(), jid, msg)
 	if err != nil {
 		log.Printf("[%s] send image to %s failed: %v", deviceID, to, err)
 	}
-	return err
+	return sendResp.ID, err
 }
 
 // SendDocument uploads and sends a document to a WhatsApp number.
 // docData is the raw file bytes; filename is the display name; mimetype e.g. "application/pdf".
-func (dm *DeviceManager) SendDocument(deviceID, to string, docData []byte, filename, caption, mimetype string) error {
+func (dm *DeviceManager) SendDocument(deviceID, to string, docData []byte, filename, caption, mimetype string) (types.MessageID, error) {
 	dm.mu.RLock()
 	info, ok := dm.devices[deviceID]
 	dm.mu.RUnlock()
 
 	if !ok {
-		return fmt.Errorf("device %s not found", deviceID)
+		return "", fmt.Errorf("device %s not found", deviceID)
 	}
 	if info.Status != StatusConnected {
-		return fmt.Errorf("device %s not connected (status: %s)", deviceID, info.Status)
+		return "", fmt.Errorf("device %s not connected (status: %s)", deviceID, info.Status)
 	}
 	if info.Client.Store.ID == nil {
-		return fmt.Errorf("device %s: no valid WA session (needs re-scan QR)", deviceID)
+		return "", fmt.Errorf("device %s: no valid WA session (needs re-scan QR)", deviceID)
 	}
 
 	jid, err := resolveJID(info.Client, to)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	if mimetype == "" {
@@ -529,7 +654,7 @@ func (dm *DeviceManager) SendDocument(deviceID, to string, docData []byte, filen
 
 	resp, err := info.Client.Upload(context.Background(), docData, whatsmeow.MediaDocument)
 	if err != nil {
-		return fmt.Errorf("upload document: %w", err)
+		return "", fmt.Errorf("upload document: %w", err)
 	}
 
 	msg := &waE2E.Message{
@@ -546,11 +671,11 @@ func (dm *DeviceManager) SendDocument(deviceID, to string, docData []byte, filen
 		},
 	}
 
-	_, err = info.Client.SendMessage(context.Background(), jid, msg)
+	sendResp, err := info.Client.SendMessage(context.Background(), jid, msg)
 	if err != nil {
 		log.Printf("[%s] send document to %s failed: %v", deviceID, to, err)
 	}
-	return err
+	return sendResp.ID, err
 }
 
 func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
@@ -575,7 +700,7 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 	mediaData := ""
 	mediaFilename := ""
 
-	quotedText := "" // text of the message being replied to (for escalation routing)
+	quotedCtx := quotedMessageContext{} // identity/text of the quoted message for escalation routing
 
 	if conv := evt.Message.GetConversation(); conv != "" {
 		text = conv
@@ -583,15 +708,7 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 		text = ext.GetText()
 		if ctx := ext.GetContextInfo(); ctx != nil {
 			mentionedJIDs = ctx.GetMentionedJID()
-			// Extract quoted message text so Python can route operator replies
-			// to the correct escalation case using the case_id embedded in the quote.
-			if qm := ctx.GetQuotedMessage(); qm != nil {
-				if q := qm.GetConversation(); q != "" {
-					quotedText = q
-				} else if qe := qm.GetExtendedTextMessage(); qe != nil {
-					quotedText = qe.GetText()
-				}
-			}
+			quotedCtx = extractQuotedMessageContext(ctx)
 		}
 	} else if img := evt.Message.GetImageMessage(); img != nil {
 		// Image message
@@ -619,6 +736,10 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 		} else {
 			text = "[Gambar]"
 		}
+		if ctx := img.GetContextInfo(); ctx != nil {
+			mentionedJIDs = ctx.GetMentionedJID()
+			quotedCtx = extractQuotedMessageContext(ctx)
+		}
 	} else if doc := evt.Message.GetDocumentMessage(); doc != nil {
 		// Document message
 		dm.mu.RLock()
@@ -642,6 +763,10 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 		} else {
 			text = fmt.Sprintf("[Dokumen: %s]", doc.GetFileName())
 		}
+		if ctx := doc.GetContextInfo(); ctx != nil {
+			mentionedJIDs = ctx.GetMentionedJID()
+			quotedCtx = extractQuotedMessageContext(ctx)
+		}
 	} else if sticker := evt.Message.GetStickerMessage(); sticker != nil {
 		dm.mu.RLock()
 		info, ok := dm.devices[deviceID]
@@ -655,6 +780,10 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 			}
 		}
 		text = "[Sticker]"
+		if ctx := sticker.GetContextInfo(); ctx != nil {
+			mentionedJIDs = ctx.GetMentionedJID()
+			quotedCtx = extractQuotedMessageContext(ctx)
+		}
 	} else if audio := evt.Message.GetAudioMessage(); audio != nil {
 		// Voice note (PTT) atau file audio biasa
 		dm.mu.RLock()
@@ -676,6 +805,10 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 			} else {
 				log.Printf("[%s] download audio err: %v", deviceID, err)
 			}
+		}
+		if ctx := audio.GetContextInfo(); ctx != nil {
+			mentionedJIDs = ctx.GetMentionedJID()
+			quotedCtx = extractQuotedMessageContext(ctx)
 		}
 	}
 
@@ -758,46 +891,25 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 	}
 
 	// Send typing indicator and keep it alive until the reply is sent.
-	// WhatsApp auto-expires composing after ~15s, so we refresh every 10s.
-	dm.mu.RLock()
-	typingInfo, typingOk := dm.devices[deviceID]
-	dm.mu.RUnlock()
-	if typingOk {
-		typingKey := deviceID + ":" + chatJID.String()
-		// Cancel any previous typing keep-alive for this chat
-		if prev, loaded := dm.typingCancels.LoadAndDelete(typingKey); loaded {
-			prev.(context.CancelFunc)()
-		}
-		typingCtx, typingCancel := context.WithCancel(context.Background())
-		dm.typingCancels.Store(typingKey, typingCancel)
-		typingClient := typingInfo.Client
-		_ = typingClient.SendChatPresence(typingCtx, chatJID, types.ChatPresenceComposing, types.ChatPresenceMediaText)
-		go func() {
-			ticker := time.NewTicker(10 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-typingCtx.Done():
-					return
-				case <-ticker.C:
-					_ = typingClient.SendChatPresence(context.Background(), chatJID, types.ChatPresenceComposing, types.ChatPresenceMediaText)
-				}
-			}
-		}()
-	}
+	// WhatsApp can expire composing quickly, so refresh more often than the
+	// common 10-15s window.
+	dm.startTypingKeepAlive(deviceID, chatJID)
 
 	payload := map[string]interface{}{
-		"device_id":      deviceID,
-		"from":           from,
-		"phone_from":     phoneFrom, // resolved phone number (same as from for non-LID accounts)
-		"chat_id":        chatID,
-		"message":        text,
-		"timestamp":      evt.Info.Timestamp.Unix(),
-		"push_name":      evt.Info.PushName,
-		"media_type":     mediaType,
-		"media_data":     mediaData,
-		"media_filename": mediaFilename,
-		"quoted_text":    quotedText,
+		"device_id":          deviceID,
+		"from":               from,
+		"phone_from":         phoneFrom, // resolved phone number (same as from for non-LID accounts)
+		"chat_id":            chatID,
+		"message":            text,
+		"timestamp":          evt.Info.Timestamp.Unix(),
+		"push_name":          evt.Info.PushName,
+		"media_type":         mediaType,
+		"media_data":         mediaData,
+		"media_filename":     mediaFilename,
+		"quoted_text":        quotedCtx.Text,
+		"quoted_stanza_id":   quotedCtx.StanzaID,
+		"quoted_participant": quotedCtx.Participant,
+		"quoted_remote_jid":  quotedCtx.RemoteJID,
 	}
 	data, _ := json.Marshal(payload)
 

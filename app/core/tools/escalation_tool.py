@@ -142,12 +142,21 @@ def build_escalation_tools(
 
         try:
             from app.core.infra.channel_service import send_message
-            await send_message(
+            send_result = await send_message(
                 channel_type=operator_channel,
                 channel_config=operator_config,
                 text=notif_text,
             )
             logger.info("escalation_tool.notified_operator", reason=reason, operator=operator_phone)
+
+            sent_message_ids: list[str] = []
+            if isinstance(send_result, dict) and send_result.get("message_id"):
+                sent_message_ids.append(str(send_result["message_id"]))
+                sess_meta = dict(session.metadata_ or {})
+                sess_meta["escalation_message_id"] = sent_message_ids[0]
+                sess_meta["escalation_message_ids"] = sent_message_ids.copy()
+                session.metadata_ = sess_meta
+                await db.commit()
 
             sess_meta = dict(session.metadata_ or {})
             media_meta = sess_meta.get("last_incoming_media") if isinstance(sess_meta, dict) else None
@@ -169,11 +178,26 @@ def build_escalation_tools(
                     caption = f"Lampiran dari customer untuk kasus {case_id}"
                     device_id = operator_config.get("device_id", "")
                     if media_type in ("image", "sticker"):
-                        await send_wa_image(device_id, operator_phone, encoded, caption, mimetype)
+                        media_result = await send_wa_image(device_id, operator_phone, encoded, caption, mimetype)
                     elif media_type == "document":
-                        await send_wa_document(device_id, operator_phone, encoded, filename, caption, mimetype)
+                        media_result = await send_wa_document(device_id, operator_phone, encoded, filename, caption, mimetype)
                     else:
+                        media_result = None
                         logger.info("escalation_tool.media_not_forwarded_type", media_type=media_type)
+                    if isinstance(media_result, dict) and media_result.get("message_id"):
+                        sent_message_ids.append(str(media_result["message_id"]))
+                        sess_meta = dict(session.metadata_ or {})
+                        existing_ids = sess_meta.get("escalation_message_ids")
+                        if not isinstance(existing_ids, list):
+                            existing_ids = []
+                        for message_id in sent_message_ids:
+                            if message_id not in existing_ids:
+                                existing_ids.append(message_id)
+                        sess_meta["escalation_message_ids"] = existing_ids
+                        if not sess_meta.get("escalation_message_id") and existing_ids:
+                            sess_meta["escalation_message_id"] = existing_ids[0]
+                        session.metadata_ = sess_meta
+                        await db.commit()
                     logger.info(
                         "escalation_tool.forwarded_media_to_operator",
                         media_type=media_type,
@@ -244,7 +268,9 @@ def build_escalation_tools(
     async def send_to_number(phone_or_target: str, message: str) -> str:
         """
         Kirim pesan ke nomor telepon atau target lain (berbeda dari user utama).
-        Berguna saat operator memerintahkan agent untuk menghubungi pihak lain.
+        Bisa dipakai saat user utama eksplisit meminta agent mengirim WhatsApp
+        ke nomor lain, atau saat operator memerintahkan agent menghubungi pihak
+        lain. Jangan dipakai untuk membalas user utama dalam sesi normal.
 
         Args:
             phone_or_target: Nomor tujuan (contoh: "+62812xxx") atau chat_id

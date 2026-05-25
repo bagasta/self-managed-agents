@@ -151,14 +151,63 @@ func (h *Handlers) sendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("[%s] send request → %s: %q", deviceID, req.To, preview)
 
-	if err := h.dm.SendMessage(deviceID, req.To, req.Message); err != nil {
+	messageID, err := h.dm.SendMessage(deviceID, req.To, req.Message)
+	if err != nil {
 		log.Printf("[%s] send FAILED → %s: %v", deviceID, req.To, err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	log.Printf("[%s] send OK → %s", deviceID, req.To)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
+	log.Printf("[%s] send OK → %s (message_id=%s)", deviceID, req.To, messageID)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "sent", "message_id": string(messageID)})
+}
+
+// POST /devices/{id}/typing/start
+// Body: {"to": "+628xxx"}
+func (h *Handlers) startTyping(w http.ResponseWriter, r *http.Request) {
+	deviceID := r.PathValue("id")
+	if deviceID == "" {
+		writeError(w, http.StatusBadRequest, "device id required")
+		return
+	}
+
+	var req struct {
+		To string `json:"to"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.To == "" {
+		writeError(w, http.StatusBadRequest, "to required")
+		return
+	}
+	if err := h.dm.StartTyping(deviceID, req.To); err != nil {
+		log.Printf("[%s] typing start FAILED → %s: %v", deviceID, req.To, err)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "typing"})
+}
+
+// POST /devices/{id}/typing/stop
+// Body: {"to": "+628xxx"}
+func (h *Handlers) stopTyping(w http.ResponseWriter, r *http.Request) {
+	deviceID := r.PathValue("id")
+	if deviceID == "" {
+		writeError(w, http.StatusBadRequest, "device id required")
+		return
+	}
+
+	var req struct {
+		To string `json:"to"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.To == "" {
+		writeError(w, http.StatusBadRequest, "to required")
+		return
+	}
+	if err := h.dm.StopTyping(deviceID, req.To); err != nil {
+		log.Printf("[%s] typing stop FAILED → %s: %v", deviceID, req.To, err)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "paused"})
 }
 
 // POST /devices/{id}/send-image
@@ -189,14 +238,15 @@ func (h *Handlers) sendImageMessage(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[%s] send-image request → %s (%d bytes, caption: %q)", deviceID, req.To, len(imageData), req.Caption)
 
-	if err := h.dm.SendImage(deviceID, req.To, imageData, req.Caption, req.Mimetype); err != nil {
+	messageID, err := h.dm.SendImage(deviceID, req.To, imageData, req.Caption, req.Mimetype)
+	if err != nil {
 		log.Printf("[%s] send-image FAILED → %s: %v", deviceID, req.To, err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	log.Printf("[%s] send-image OK → %s", deviceID, req.To)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
+	log.Printf("[%s] send-image OK → %s (message_id=%s)", deviceID, req.To, messageID)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "sent", "message_id": string(messageID)})
 }
 
 // POST /devices/{id}/send-document
@@ -228,14 +278,15 @@ func (h *Handlers) sendDocumentMessage(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[%s] send-document request → %s (%d bytes, filename: %q)", deviceID, req.To, len(docData), req.Filename)
 
-	if err := h.dm.SendDocument(deviceID, req.To, docData, req.Filename, req.Caption, req.Mimetype); err != nil {
+	messageID, err := h.dm.SendDocument(deviceID, req.To, docData, req.Filename, req.Caption, req.Mimetype)
+	if err != nil {
 		log.Printf("[%s] send-document FAILED → %s: %v", deviceID, req.To, err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	log.Printf("[%s] send-document OK → %s", deviceID, req.To)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
+	log.Printf("[%s] send-document OK → %s (message_id=%s)", deviceID, req.To, messageID)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "sent", "message_id": string(messageID)})
 }
 
 // POST /devices/{id}/resolve-phones

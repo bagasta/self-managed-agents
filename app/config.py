@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     # Mistral (used for PDF OCR)
     mistral_api_key: str = ""
 
+    # Tavily (web search / browsing for agents)
+    tavily_api_key: str = ""
+    tavily_force_ipv4: bool = True
+
     # Sandbox
     sandbox_base_dir: str = "/tmp/agent-sandboxes"
     docker_sandbox_image: str = "managed-agents-sandbox:latest"

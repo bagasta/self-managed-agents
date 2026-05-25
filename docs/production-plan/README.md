@@ -14,6 +14,7 @@ yang mampu melayani 500+ user aktif secara andal.
 | [05-security.md](05-security.md) | Hardening keamanan sebelum expose ke public |
 | [06-roadmap.md](06-roadmap.md) | Urutan pengerjaan dan estimasi effort |
 | [07-ai-staff-features.md](07-ai-staff-features.md) | Fitur baru: allowlist, on/off chat, voice note |
+| [11-sandbox-production-qa.md](11-sandbox-production-qa.md) | QA terbaru untuk Docker sandbox, deploy, dan security go-live gate |
 
 ## Prioritas Singkat
 

@@ -1,5 +1,39 @@
 # Recap: Deep Agent SaaS Hardening — MCP, Subagent, Sandbox, Builder Entitlements
 
+## 2026-05-22 — Refactor `agent_runner.py` (Phase 1)
+
+### Latar Belakang
+- `app/core/engine/agent_runner.py` tumbuh terlalu panjang dan menampung banyak concern sekaligus (prompting, tool assembly, subagent setup, progress formatting, dan runtime orchestration).
+- Dampaknya: code review lambat, regression risk tinggi saat patch kecil, dan sulit melakukan isolasi test per concern.
+
+### Perubahan Refactor
+- Ekstraksi concern setup tools ke modul terpisah:
+  - `app/core/engine/agent_tool_setup.py`
+  - `app/core/engine/tool_builder.py`
+- Ekstraksi concern prompt/context builder ke modul terpisah:
+  - `app/core/engine/prompt_builder.py`
+- Ekstraksi concern subagent construction ke modul terpisah:
+  - `app/core/engine/subagent_builder.py`
+- Ekstraksi helper WhatsApp progress message ke modul ringan:
+  - `app/core/engine/wa_progress.py`
+- `agent_runner.py` diposisikan sebagai orchestration entrypoint (`run_agent`) dan wiring antar komponen, bukan lokasi implementasi detail semua concern.
+
+### Dampak Teknis
+- Separation of concerns lebih jelas: perubahan di prompt/tool/subagent tidak perlu menyentuh orchestration utama.
+- Risiko conflict antar patch turun karena area edit lebih sempit per fitur.
+- Lebih mudah menambah unit test terarah per modul (builder/formatter) tanpa mem-bloat test `run_agent`.
+- Fondasi untuk phase berikutnya: memecah guard/helper yang masih tersisa di `agent_runner.py` agar ukuran file terus turun bertahap tanpa rewrite besar.
+
+### Catatan Status
+- Refactor ini fokus pada modularisasi internal dan mempertahankan behavior existing (non-breaking intent).
+- File target utama yang di-refactor:
+  - `app/core/engine/agent_runner.py`
+  - `app/core/engine/agent_tool_setup.py`
+  - `app/core/engine/prompt_builder.py`
+  - `app/core/engine/subagent_builder.py`
+  - `app/core/engine/tool_builder.py`
+  - `app/core/engine/wa_progress.py`
+
 **Tanggal**: 2026-05-22
 **Status**: ✅ Selesai lokal + live Google Slides verified
 
@@ -12,6 +46,10 @@ Perbaikan lanjutan untuk bug AI Staff 21 Mei pada Google Workspace MCP:
 - Arthur tetap builder-first dan tidak ikut terdampak policy runtime operasional.
 - Saat Google auth belum tersambung atau token expired, agent harus langsung memberi reconnect link.
 - Tool call MCP Google Workspace harus memakai runtime lokal `http://localhost:8002/mcp`, bukan devtunnel/port auth 8003.
+- Agent coding dengan `deploy=true` + subagent harus otomatis lanjut deploy via Cloudflare tunnel setelah berhasil menulis website/app; tidak boleh berhenti hanya dengan laporan file/kode sudah dibuat.
+- Agent coder untuk website/web app/frontend harus memakai vanilla HTML/CSS/JavaScript terpisah tanpa framework, npm/npx, Tailwind, CDN library, atau inline CSS/JS agar cepat dan ringan di sandbox.
+- Arthur dan semua agent baru yang dibuat Arthur default punya browsing Tavily (`tavily_search`, `tavily_extract`) selama `TAVILY_API_KEY` tersedia di environment.
+- WhatsApp progress message tidak boleh mengirim pesan awal seperti "Saya mulai kerjakan lewat subagent..." saat user hanya minta cek/search; cukup typing indicator dan final answer.
 
 ## Masalah Terbaru
 
@@ -26,6 +64,10 @@ Perbaikan lanjutan untuk bug AI Staff 21 Mei pada Google Workspace MCP:
 - Ada kebingungan antara dua endpoint:
   - `8002` = MCP runtime untuk tool execution.
   - `8003` = integration/auth management untuk status, token, connect, dan short auth link.
+- Untuk agent coding/deploy dengan subagent, `sys_coder` sudah punya tool `deploy_app`, tetapi runner belum punya post-run correction. Jika subagent menulis `/workspace/src/index.html` lalu final reply tidak berisi URL, parent bisa menganggap task selesai tanpa Cloudflare tunnel.
+- Prompt coder lama masih membuka peluang framework modern untuk dashboard/app kompleks. Ini membuat task website bisa lama karena npm install/build dan membebani sandbox, padahal kebutuhan SaaS saat ini lebih cocok static HTML/CSS/JS untuk hasil cepat.
+- Agent baru buatan Arthur sebelumnya tidak punya semantic web search default; yang ada hanya HTTP raw opsional. Untuk SaaS, default browsing harus tersedia tanpa user memahami API/URL.
+- Auto-progress callback WhatsApp sebelumnya mengirim message langsung saat tool `task` start. Untuk subagent research, ini terlihat seperti jawaban mengganggu sebelum hasil final.
 
 ## Akar Bug
 
@@ -61,6 +103,28 @@ Perbaikan lanjutan untuk bug AI Staff 21 Mei pada Google Workspace MCP:
 - Follow-up Slides sekarang dipicu juga ketika total slide hasil `get_presentation` masih kurang dari jumlah yang diminta user.
 - Runtime MCP Google Workspace tetap diarahkan ke `WORKSPACE_MCP_RUNTIME_URL` / `WORKSPACE_MCP_URL_LOCAL`, yaitu `http://localhost:8002/mcp` pada env lokal.
 - Port 8003 tetap dipakai hanya untuk integration/auth service (`/v1/integrations/google/connect`, `/status`, `/token`, `/start`), bukan untuk MCP tool execution.
+- Tambah deploy follow-up guard:
+  - hanya aktif saat `deploy=true`, user meminta website/web app/landing page/portfolio/dashboard/frontend, dan langkah sebelumnya menunjukkan file/kode sudah dibuat.
+  - jika belum ada URL public di final reply atau tool steps, runner melanjutkan graph satu putaran khusus untuk deploy.
+  - jika subagent aktif, follow-up menginstruksikan parent memanggil `task()` ke `sys_coder` agar `deploy_app()` dijalankan dari workspace subagent yang berisi file, bukan workspace parent yang berbeda.
+  - jika URL sudah ada, deploy tidak diulang.
+- Prompt coding/deploy disederhanakan untuk web:
+  - `sys_coder` wajib membuat `/workspace/src/index.html`, `/workspace/src/styles.css`, dan `/workspace/src/script.js` jika butuh interaksi.
+  - tidak boleh inline CSS/JS di HTML.
+  - tidak boleh memakai React/Next/Vue/Svelte/Astro/Tailwind/Bootstrap/Vite/npm/npx/CDN library/framework frontend untuk task web.
+  - Arthur preset `coding_deploy_agent` dan deploy prompt umum ikut menyuntikkan aturan vanilla ini saat mendelegasikan ke `sys_coder`.
+- Tambah Tavily browsing:
+  - `.env` memakai `TAVILY_API_KEY`; `.env.example` mendokumentasikan variabelnya tanpa secret.
+  - `.env` juga memakai `TAVILY_FORCE_IPV4=true` karena host lokal sempat resolve `api.tavily.com` ke IPv6/NAT64 dan TLS timeout; IPv4 langsung berhasil.
+  - Runtime memuat Tavily secara default jika key tersedia; agent tetap bisa mematikan dengan `tools_config.tavily=false`.
+  - Arthur seed dan semua preset builder default `tavily=true`.
+  - `system-message-builder.md` mengarahkan Arthur memakai Tavily untuk riset eksternal, bukan HTTP/ngrok untuk operasi platform internal.
+  - Live API test ke agent `Bas` berhasil memanggil `tavily_search` dan mengembalikan URL sumber Tavily.
+- WhatsApp progress behavior:
+  - Auto progress untuk `task`/subagent start tidak lagi dikirim ke user.
+  - Auto progress text umum diganti menjadi delayed long-process notice maksimal 1x setelah 75 detik: "Masih saya proses ya..."
+  - Notice dibatalkan jika final reply selesai sebelum delay.
+  - Prompt WA sekarang melarang progress awal seperti "saya mulai" dan membatasi `notify_user` hanya untuk proses lama, retry/error, atau blocker.
 
 ## File yang Diubah
 
@@ -77,6 +141,19 @@ Perbaikan lanjutan untuk bug AI Staff 21 Mei pada Google Workspace MCP:
   - Fetch auth link ulang jika belum ada sebelum mengirim reply auth failure.
   - Treat auth-recovery follow-up sebagai kelanjutan Google Workspace request untuk pre-graph blocker.
   - Tambah MCP-only retry setelah fallback guard memblokir `task` untuk aksi Google Workspace.
+  - Tambah auto deploy follow-up untuk website/app yang sudah ditulis tapi belum mengembalikan URL public.
+- `app/core/engine/subagent_builder.py`
+  - Prompt `sys_coder` sekarang hard default vanilla HTML/CSS/JS terpisah untuk semua task web/frontend agar tidak membebani sandbox.
+- `app/core/engine/prompt_builder.py`
+  - Deploy instructions umum sekarang melarang framework/frontend package dan inline CSS/JS untuk website/web app.
+- `app/core/tools/builder_tools.py`
+  - Preset Arthur `coding_deploy_agent` dan template instruksi coding agent sekarang meneruskan aturan vanilla web stack ke `sys_coder`.
+- `app/core/tools/tavily_tool.py`
+  - Tool baru `tavily_search` dan `tavily_extract` berbasis Tavily API.
+- `scripts/seed_arthur.py`
+  - Arthur default `tavily=true` untuk browsing eksternal.
+- `app/core/engine/wa_progress.py`
+  - `task` progress message disuppress agar WhatsApp tidak menerima preview delegasi subagent.
 - `app/core/engine/google_mcp_support.py`
   - Auth failure reply fixed, jujur, dan langsung menyertakan reconnect link jika tersedia.
   - Tambah detector `is_google_auth_recovery_followup()` untuk follow-up OAuth berbasis history.

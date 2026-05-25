@@ -31,16 +31,20 @@ const (
 )
 
 type IncomingMessage struct {
-	From          string
-	PhoneFrom     string // resolved phone (LID → PN); falls back to From if unresolvable
-	ChatID        string
-	Text          string
-	PushName      string // WhatsApp display name of sender
-	MediaType     string // "image" | "document" | "sticker" | ""
-	MediaData     string // base64
-	MediaFilename string
-	MediaMimetype string
-	Timestamp     int64
+	From              string
+	PhoneFrom         string // resolved phone (LID → PN); falls back to From if unresolvable
+	ChatID            string
+	Text              string
+	PushName          string // WhatsApp display name of sender
+	MediaType         string // "image" | "document" | "sticker" | ""
+	MediaData         string // base64
+	MediaFilename     string
+	MediaMimetype     string
+	QuotedText        string
+	QuotedStanzaID    string
+	QuotedParticipant string
+	QuotedRemoteJID   string
+	Timestamp         int64
 }
 
 type WhatsAppClient struct {
@@ -52,6 +56,47 @@ type WhatsAppClient struct {
 	latestQR    string
 	latestQRRaw string // raw QR code text for terminal rendering
 	onMessage   func(msg IncomingMessage)
+}
+
+func quotedMessageText(ctx *waE2E.ContextInfo) string {
+	if ctx == nil {
+		return ""
+	}
+	qm := ctx.GetQuotedMessage()
+	if qm == nil {
+		return ""
+	}
+	if q := qm.GetConversation(); q != "" {
+		return q
+	}
+	if qe := qm.GetExtendedTextMessage(); qe != nil {
+		return qe.GetText()
+	}
+	if qi := qm.GetImageMessage(); qi != nil {
+		return qi.GetCaption()
+	}
+	if qd := qm.GetDocumentMessage(); qd != nil {
+		if caption := qd.GetCaption(); caption != "" {
+			return caption
+		}
+		if name := qd.GetFileName(); name != "" {
+			return name
+		}
+	}
+	if qs := qm.GetStickerMessage(); qs != nil {
+		return "[Sticker]"
+	}
+	return ""
+}
+
+func applyQuotedContext(msg *IncomingMessage, ctx *waE2E.ContextInfo) {
+	if ctx == nil || msg == nil {
+		return
+	}
+	msg.QuotedText = quotedMessageText(ctx)
+	msg.QuotedStanzaID = ctx.GetStanzaID()
+	msg.QuotedParticipant = ctx.GetParticipant()
+	msg.QuotedRemoteJID = ctx.GetRemoteJID()
 }
 
 func NewWhatsAppClient(storeDir string, onMessage func(msg IncomingMessage)) (*WhatsAppClient, error) {
@@ -165,38 +210,38 @@ func (wa *WhatsAppClient) GetStatus() (WAStatus, string, string, string) {
 	return wa.status, wa.phoneNumber, wa.latestQR, wa.latestQRRaw
 }
 
-func (wa *WhatsAppClient) SendText(chatID, text string) error {
+func (wa *WhatsAppClient) SendText(chatID, text string) (types.MessageID, error) {
 	if err := wa.checkConnected(); err != nil {
-		return err
+		return "", err
 	}
 	jid, err := parseJID(chatID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	// Stop typing indicator before sending the actual reply.
 	_ = wa.client.SendChatPresence(context.Background(), jid, types.ChatPresencePaused, types.ChatPresenceMediaText)
-	_, err = wa.client.SendMessage(context.Background(), jid, &waE2E.Message{
+	resp, err := wa.client.SendMessage(context.Background(), jid, &waE2E.Message{
 		Conversation: proto.String(text),
 	})
-	return err
+	return resp.ID, err
 }
 
-func (wa *WhatsAppClient) SendImage(to string, imageData []byte, caption, mimetype string) error {
+func (wa *WhatsAppClient) SendImage(to string, imageData []byte, caption, mimetype string) (types.MessageID, error) {
 	if err := wa.checkConnected(); err != nil {
-		return err
+		return "", err
 	}
 	jid, err := parseJID(to)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if mimetype == "" {
 		mimetype = "image/jpeg"
 	}
 	resp, err := wa.client.Upload(context.Background(), imageData, whatsmeow.MediaImage)
 	if err != nil {
-		return fmt.Errorf("upload image: %w", err)
+		return "", fmt.Errorf("upload image: %w", err)
 	}
-	_, err = wa.client.SendMessage(context.Background(), jid, &waE2E.Message{
+	sendResp, err := wa.client.SendMessage(context.Background(), jid, &waE2E.Message{
 		ImageMessage: &waE2E.ImageMessage{
 			Caption:       proto.String(caption),
 			Mimetype:      proto.String(mimetype),
@@ -208,16 +253,16 @@ func (wa *WhatsAppClient) SendImage(to string, imageData []byte, caption, mimety
 			FileLength:    proto.Uint64(resp.FileLength),
 		},
 	})
-	return err
+	return sendResp.ID, err
 }
 
-func (wa *WhatsAppClient) SendDocument(to string, docData []byte, filename, caption, mimetype string) error {
+func (wa *WhatsAppClient) SendDocument(to string, docData []byte, filename, caption, mimetype string) (types.MessageID, error) {
 	if err := wa.checkConnected(); err != nil {
-		return err
+		return "", err
 	}
 	jid, err := parseJID(to)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if mimetype == "" {
 		mimetype = "application/octet-stream"
@@ -227,9 +272,9 @@ func (wa *WhatsAppClient) SendDocument(to string, docData []byte, filename, capt
 	}
 	resp, err := wa.client.Upload(context.Background(), docData, whatsmeow.MediaDocument)
 	if err != nil {
-		return fmt.Errorf("upload document: %w", err)
+		return "", fmt.Errorf("upload document: %w", err)
 	}
-	_, err = wa.client.SendMessage(context.Background(), jid, &waE2E.Message{
+	sendResp, err := wa.client.SendMessage(context.Background(), jid, &waE2E.Message{
 		DocumentMessage: &waE2E.DocumentMessage{
 			Caption:       proto.String(caption),
 			Mimetype:      proto.String(mimetype),
@@ -242,7 +287,7 @@ func (wa *WhatsAppClient) SendDocument(to string, docData []byte, filename, capt
 			FileLength:    proto.Uint64(resp.FileLength),
 		},
 	})
-	return err
+	return sendResp.ID, err
 }
 
 // ResolvePhones resolves phone numbers to their WA JIDs via IsOnWhatsApp.
@@ -375,6 +420,7 @@ func (wa *WhatsAppClient) handleMessage(evt *events.Message) {
 		msg.Text = ext.GetText()
 		if ctx := ext.GetContextInfo(); ctx != nil {
 			mentionedJIDs = ctx.GetMentionedJID()
+			applyQuotedContext(&msg, ctx)
 		}
 
 	case evt.Message.GetImageMessage() != nil:
@@ -388,6 +434,7 @@ func (wa *WhatsAppClient) handleMessage(evt *events.Message) {
 		}
 		if ctx := img.GetContextInfo(); ctx != nil {
 			mentionedJIDs = ctx.GetMentionedJID()
+			applyQuotedContext(&msg, ctx)
 		}
 		msg.Text = img.GetCaption()
 		if msg.Text == "" {
@@ -410,6 +457,10 @@ func (wa *WhatsAppClient) handleMessage(evt *events.Message) {
 		if msg.Text == "" {
 			msg.Text = fmt.Sprintf("[Dokumen: %s]", doc.GetFileName())
 		}
+		if ctx := doc.GetContextInfo(); ctx != nil {
+			mentionedJIDs = ctx.GetMentionedJID()
+			applyQuotedContext(&msg, ctx)
+		}
 
 	case evt.Message.GetAudioMessage() != nil:
 		audio := evt.Message.GetAudioMessage()
@@ -430,6 +481,10 @@ func (wa *WhatsAppClient) handleMessage(evt *events.Message) {
 			log.Printf("[wa-dev] download audio err: %v", err)
 			msg.Text = "[Audio]"
 		}
+		if ctx := audio.GetContextInfo(); ctx != nil {
+			mentionedJIDs = ctx.GetMentionedJID()
+			applyQuotedContext(&msg, ctx)
+		}
 
 	case evt.Message.GetStickerMessage() != nil:
 		sticker := evt.Message.GetStickerMessage()
@@ -441,6 +496,10 @@ func (wa *WhatsAppClient) handleMessage(evt *events.Message) {
 			msg.MediaFilename = "sticker.webp"
 		}
 		msg.Text = "[Sticker]"
+		if ctx := sticker.GetContextInfo(); ctx != nil {
+			mentionedJIDs = ctx.GetMentionedJID()
+			applyQuotedContext(&msg, ctx)
+		}
 
 	default:
 		return

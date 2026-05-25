@@ -55,7 +55,7 @@ async def get_wa_status(device_id: str) -> dict:
         return resp.json()
 
 
-async def send_wa_message(device_id: str, to: str, text: str) -> None:
+async def send_wa_message(device_id: str, to: str, text: str) -> dict:
     """Send a WhatsApp text message via Go service."""
     if device_id.startswith("wadev_"):
         async with httpx.AsyncClient(timeout=_WA_TIMEOUT_DEFAULT) as client:
@@ -64,11 +64,36 @@ async def send_wa_message(device_id: str, to: str, text: str) -> None:
                 json={"to": to, "text": text},
             )
             resp.raise_for_status()
-        return
+            return resp.json() if resp.content else {"status": "sent"}
     async with httpx.AsyncClient(timeout=_WA_TIMEOUT_DEFAULT) as client:
         resp = await client.post(
             f"{_base_url()}/devices/{device_id}/send",
             json={"to": to, "message": text},
+        )
+        resp.raise_for_status()
+        return resp.json() if resp.content else {"status": "sent"}
+
+
+async def start_wa_typing(device_id: str, to: str) -> None:
+    """Start or refresh the WhatsApp typing keep-alive for a chat."""
+    if device_id.startswith("wadev_"):
+        return
+    async with httpx.AsyncClient(timeout=_WA_TIMEOUT_DEFAULT) as client:
+        resp = await client.post(
+            f"{_base_url()}/devices/{device_id}/typing/start",
+            json={"to": to},
+        )
+        resp.raise_for_status()
+
+
+async def stop_wa_typing(device_id: str, to: str) -> None:
+    """Stop the WhatsApp typing keep-alive for a chat."""
+    if device_id.startswith("wadev_"):
+        return
+    async with httpx.AsyncClient(timeout=_WA_TIMEOUT_DEFAULT) as client:
+        resp = await client.post(
+            f"{_base_url()}/devices/{device_id}/typing/stop",
+            json={"to": to},
         )
         resp.raise_for_status()
 
@@ -79,7 +104,7 @@ async def send_wa_image(
     image_base64: str,
     caption: str = "",
     mimetype: str = "image/jpeg",
-) -> None:
+) -> dict:
     """Send a WhatsApp image message via Go service. image_base64 is raw base64-encoded image bytes."""
     if device_id.startswith("wadev_"):
         async with httpx.AsyncClient(timeout=30) as client:
@@ -88,13 +113,14 @@ async def send_wa_image(
                 json={"to": to, "image": image_base64, "caption": caption, "mimetype": mimetype},
             )
             resp.raise_for_status()
-        return
+            return resp.json() if resp.content else {"status": "sent"}
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             f"{_base_url()}/devices/{device_id}/send-image",
             json={"to": to, "image_base64": image_base64, "caption": caption, "mimetype": mimetype},
         )
         resp.raise_for_status()
+        return resp.json() if resp.content else {"status": "sent"}
 
 
 async def send_wa_document(
@@ -104,7 +130,7 @@ async def send_wa_document(
     filename: str = "file",
     caption: str = "",
     mimetype: str = "application/octet-stream",
-) -> None:
+) -> dict:
     """Send a WhatsApp document message via Go service. document_base64 is raw base64-encoded file bytes."""
     if device_id.startswith("wadev_"):
         async with httpx.AsyncClient(timeout=60) as client:
@@ -119,7 +145,7 @@ async def send_wa_document(
                 },
             )
             resp.raise_for_status()
-        return
+            return resp.json() if resp.content else {"status": "sent"}
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.post(
             f"{_base_url()}/devices/{device_id}/send-document",
@@ -132,6 +158,7 @@ async def send_wa_document(
             },
         )
         resp.raise_for_status()
+        return resp.json() if resp.content else {"status": "sent"}
 
 
 async def delete_wa_device(device_id: str) -> None:

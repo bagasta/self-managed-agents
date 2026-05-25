@@ -13,6 +13,7 @@ Daftar fungsi:
   build_whatsapp_media_tools(session, sandbox)
   build_wa_agent_manager_tools(session)
   build_http_tools(tools_config)
+  build_tavily_tools(tools_config)
   build_builder_tools(db, owner_phone)      ← hanya untuk capability "builder"
   build_deployment_tools(sandbox)           ← opt-in via tools_config deploy: true
   _is_enabled(tools_config, key, default)   ← re-exported untuk backward compat
@@ -513,8 +514,14 @@ def build_wa_notify_tool(session: Any) -> list:
         if not device_id or not default_target:
             return "[notify_user] no WA device/target configured"
         try:
-            from app.core.infra.wa_client import send_wa_message
+            from app.core.infra.wa_client import send_wa_message, start_wa_typing
             await send_wa_message(device_id, default_target, message)
+            # notify_user is not the final reply. Restart typing immediately so
+            # WhatsApp keeps showing the agent is still working until final send.
+            try:
+                await start_wa_typing(device_id, default_target)
+            except Exception:
+                pass
             return "notifikasi terkirim"
         except Exception as exc:
             return f"[notify_user] gagal: {exc}"
@@ -774,6 +781,15 @@ def build_wa_agent_manager_tools(session: Any, db_factory: async_sessionmaker) -
 
 def build_http_tools(tools_config: dict[str, Any]) -> list:
     from app.core.tools.http_tool import build_http_tools as _build
+    return _build(tools_config)
+
+
+# ---------------------------------------------------------------------------
+# Tavily browsing tools
+# ---------------------------------------------------------------------------
+
+def build_tavily_tools(tools_config: dict[str, Any]) -> list:
+    from app.core.tools.tavily_tool import build_tavily_tools as _build
     return _build(tools_config)
 
 

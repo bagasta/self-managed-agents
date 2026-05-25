@@ -103,6 +103,39 @@ def test_sys_coder_returns_compiled_subagent():
     print("✓ sys_coder returns CompiledSubAgent with backend")
 
 
+def test_sys_coder_web_prompt_forces_vanilla_static_files():
+    """Web work must stay lightweight: no frontend framework, no inline CSS/JS."""
+    from app.core.engine.subagent_builder import _SYSTEM_SUBAGENTS
+
+    sys_coder_spec = next(s for s in _SYSTEM_SUBAGENTS if s["name"] == "sys_coder")
+    prompt = sys_coder_spec["system_prompt"].lower()
+
+    assert "vanilla html, css, dan javascript saja" in prompt
+    assert "index.html" in prompt
+    assert "styles.css" in prompt
+    assert "script.js" in prompt
+    assert "jangan inline css" in prompt
+    assert "jangan inline javascript" in prompt
+    assert "jangan pakai react" in prompt
+    assert "tailwind" in prompt
+    assert "npm" in prompt
+
+
+def test_builder_coding_preset_instructs_vanilla_web_stack():
+    """Arthur-created coding agents should pass the same lightweight web rule to sys_coder."""
+    from app.core.tools.builder_tools import AGENT_PRESETS, _SOUL_TEMPLATES
+
+    skeleton = AGENT_PRESETS["coding_deploy_agent"]["instruction_skeleton"].lower()
+    soul_template = _SOUL_TEMPLATES["coding_deploy_agent"].lower()
+
+    for text in (skeleton, soul_template):
+        assert "vanilla html/css/javascript" in text
+        assert "index.html" in text
+        assert "styles.css" in text
+        assert "script.js" in text
+        assert "tanpa framework" in text or "jangan pakai react" in text
+
+
 # ---------------------------------------------------------------------------
 # Test 2: sys_writer returns plain SubAgent dict (no sandbox)
 # ---------------------------------------------------------------------------
@@ -280,6 +313,7 @@ async def test_parent_deploy_tools_require_deploy_enabled(monkeypatch):
             "memory": False,
             "skills": False,
             "escalation": False,
+            "tavily": False,
         },
         raw_tools_config={},
         db=AsyncMock(),
@@ -311,6 +345,83 @@ def test_docker_sandbox_blocks_path_traversal(tmp_path):
 
     assert result.startswith("[error]")
     assert not (tmp_path / "escape.txt").exists()
+
+
+def test_deploy_followup_needed_after_subagent_codes_without_url():
+    """deploy=true website runs must continue if code exists but no public URL was returned."""
+    from app.core.engine.agent_runner import _needs_deploy_followup
+
+    steps = [
+        {
+            "tool": "task",
+            "args": {"name": "sys_coder"},
+            "result": "Saya sudah membuat file /workspace/src/index.html dan /workspace/src/styles.css.",
+        }
+    ]
+
+    assert _needs_deploy_followup(
+        "buatkan website portfolio modern",
+        {"deploy": True},
+        steps,
+        "Website sudah dibuat di sandbox.",
+    ) is True
+
+
+def test_deploy_followup_not_needed_when_public_url_exists():
+    """A returned deploy URL is the completion proof; do not redeploy."""
+    from app.core.engine.agent_runner import _needs_deploy_followup
+
+    steps = [
+        {
+            "tool": "task",
+            "result": "Deploy berhasil: https://abc-def.trycloudflare.com",
+        }
+    ]
+
+    assert _needs_deploy_followup(
+        "buatkan website portfolio modern",
+        {"deploy": True},
+        steps,
+        "Ini URL-nya: https://abc-def.trycloudflare.com",
+    ) is False
+
+
+def test_deploy_followup_requires_deploy_enabled():
+    """Sandbox coding agents without deploy=true should not be forced into public tunnels."""
+    from app.core.engine.agent_runner import _needs_deploy_followup
+
+    steps = [
+        {
+            "tool": "task",
+            "result": "File /workspace/src/index.html sudah dibuat.",
+        }
+    ]
+
+    assert _needs_deploy_followup(
+        "buatkan website portfolio modern",
+        {"deploy": False},
+        steps,
+        "Website sudah dibuat.",
+    ) is False
+
+
+def test_deploy_followup_ignores_non_website_requests():
+    """Code evidence alone is not enough; the user request must need a web/app URL."""
+    from app.core.engine.agent_runner import _needs_deploy_followup
+
+    steps = [
+        {
+            "tool": "execute",
+            "result": "created report.csv",
+        }
+    ]
+
+    assert _needs_deploy_followup(
+        "buatkan script analisis csv",
+        {"deploy": True},
+        steps,
+        "Script sudah dibuat.",
+    ) is False
 
 
 # ---------------------------------------------------------------------------

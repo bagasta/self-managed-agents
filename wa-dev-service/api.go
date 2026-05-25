@@ -68,11 +68,12 @@ func (a *API) SendText(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"to and text are required"}`, http.StatusBadRequest)
 		return
 	}
-	if err := a.wa.SendText(body.To, body.Text); err != nil {
+	messageID, err := a.wa.SendText(body.To, body.Text)
+	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]string{"status": "sent"})
+	writeJSON(w, map[string]string{"status": "sent", "message_id": string(messageID)})
 }
 
 // POST /send/image
@@ -80,7 +81,7 @@ func (a *API) SendText(w http.ResponseWriter, r *http.Request) {
 func (a *API) SendImage(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		To       string `json:"to"`
-		Image    string `json:"image"`    // base64
+		Image    string `json:"image"` // base64
 		Caption  string `json:"caption"`
 		Mimetype string `json:"mimetype"` // default: image/jpeg
 	}
@@ -93,11 +94,12 @@ func (a *API) SendImage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"image must be valid base64"}`, http.StatusBadRequest)
 		return
 	}
-	if err := a.wa.SendImage(body.To, imgData, body.Caption, body.Mimetype); err != nil {
+	messageID, err := a.wa.SendImage(body.To, imgData, body.Caption, body.Mimetype)
+	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]string{"status": "sent"})
+	writeJSON(w, map[string]string{"status": "sent", "message_id": string(messageID)})
 }
 
 // POST /send/image/url
@@ -118,11 +120,12 @@ func (a *API) SendImageURL(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf(`{"error":"download url failed: %s"}`, err.Error()), http.StatusBadRequest)
 		return
 	}
-	if err := a.wa.SendImage(body.To, imgData, body.Caption, body.Mimetype); err != nil {
+	messageID, err := a.wa.SendImage(body.To, imgData, body.Caption, body.Mimetype)
+	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]string{"status": "sent"})
+	writeJSON(w, map[string]string{"status": "sent", "message_id": string(messageID)})
 }
 
 // POST /send/document
@@ -130,7 +133,7 @@ func (a *API) SendImageURL(w http.ResponseWriter, r *http.Request) {
 func (a *API) SendDocument(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		To       string `json:"to"`
-		Data     string `json:"data"`     // base64
+		Data     string `json:"data"` // base64
 		Filename string `json:"filename"`
 		Caption  string `json:"caption"`
 		Mimetype string `json:"mimetype"`
@@ -144,11 +147,12 @@ func (a *API) SendDocument(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"data must be valid base64"}`, http.StatusBadRequest)
 		return
 	}
-	if err := a.wa.SendDocument(body.To, docData, body.Filename, body.Caption, body.Mimetype); err != nil {
+	messageID, err := a.wa.SendDocument(body.To, docData, body.Filename, body.Caption, body.Mimetype)
+	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]string{"status": "sent"})
+	writeJSON(w, map[string]string{"status": "sent", "message_id": string(messageID)})
 }
 
 // POST /send/document/url
@@ -170,11 +174,12 @@ func (a *API) SendDocumentURL(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf(`{"error":"download url failed: %s"}`, err.Error()), http.StatusBadRequest)
 		return
 	}
-	if err := a.wa.SendDocument(body.To, docData, body.Filename, body.Caption, body.Mimetype); err != nil {
+	messageID, err := a.wa.SendDocument(body.To, docData, body.Filename, body.Caption, body.Mimetype)
+	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]string{"status": "sent"})
+	writeJSON(w, map[string]string{"status": "sent", "message_id": string(messageID)})
 }
 
 // POST /resolve-phones

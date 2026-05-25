@@ -37,6 +37,7 @@ class ToolsConfig(BaseModel):
     # Communication
     scheduler: bool = False
     http: bool = False
+    tavily: bool = True
     escalation: bool = True
 
     # Knowledge
@@ -97,37 +98,37 @@ class ProfileConfig(BaseModel):
 PROFILE_PRESETS: dict[AgentProfile, ProfileConfig] = {
     AgentProfile.ASSISTANT: ProfileConfig(
         tools_config=ToolsConfig(memory=True, skills=True, escalation=False, scheduler=True),
-        default_model="openai/gpt-4o-mini",
+        default_model="openai/gpt-4.1-mini",
         safety_policy="Standard",
         description="General purpose assistant with memory and scheduling",
     ),
     AgentProfile.SUPPORT: ProfileConfig(
         tools_config=ToolsConfig(memory=True, skills=True, escalation=True, whatsapp_media=True),
-        default_model="openai/gpt-4o-mini",
+        default_model="openai/gpt-4.1-mini",
         safety_policy="Strict: must not leak internal docs or break character",
         description="Customer support agent with escalation capabilities",
     ),
     AgentProfile.RESEARCH: ProfileConfig(
-        tools_config=ToolsConfig(memory=True, skills=True, http=True, sandbox=False),
-        default_model="openai/gpt-4o",
+        tools_config=ToolsConfig(memory=True, skills=True, http=True, tavily=True, sandbox=False),
+        default_model="openai/gpt-4.1-mini",
         safety_policy="Standard",
-        description="Research agent capable of web browsing via HTTP",
+        description="Research agent capable of web browsing via Tavily and HTTP",
     ),
     AgentProfile.KNOWLEDGE: ProfileConfig(
-        tools_config=ToolsConfig(memory=True, skills=True, rag=True),
-        default_model="openai/gpt-4o-mini",
+        tools_config=ToolsConfig(memory=True, skills=True, tavily=True, rag=True),
+        default_model="openai/gpt-4.1-mini",
         safety_policy="Strict: only answer based on documents",
         description="RAG-enabled agent for answering from knowledge base",
     ),
     AgentProfile.OPS: ProfileConfig(
         tools_config=ToolsConfig(memory=True, skills=True, sandbox=True, tool_creator=True, deploy=True),
-        default_model="anthropic/claude-3.5-sonnet",
+        default_model="openai/gpt-4.1-mini",
         safety_policy="High Risk: has sandbox access. Monitor strictly.",
         description="Operations/Coding agent with sandbox and deployment access",
     ),
     AgentProfile.BUILDER: ProfileConfig(
-        tools_config=ToolsConfig(memory=True, skills=False), # Builder tools handled via capabilities
-        default_model="anthropic/claude-3.5-sonnet",
+        tools_config=ToolsConfig(memory=True, skills=False, tavily=True), # Builder tools handled via capabilities
+        default_model="openai/gpt-4.1-mini",
         safety_policy="Admin only",
         description="Agent Builder system agent",
     ),

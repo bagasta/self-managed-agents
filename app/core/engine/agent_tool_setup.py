@@ -24,6 +24,7 @@ from app.core.engine.tool_builder import (
     build_heartbeat_tools,
     build_sandbox_binary_tool,
     build_skill_tools,
+    build_tavily_tools,
     build_tool_creator_tools,
     build_wa_agent_manager_tools,
     build_wa_notify_tool,
@@ -141,7 +142,7 @@ async def build_agent_tool_setup(
         )
         active_groups.append("escalation")
 
-    if user_message.startswith("[OPERATOR] "):
+    if user_message.startswith("[OPERATOR] ") or user_message.startswith("<OPERATOR>"):
         from app.core.tools.operator_tools import build_operator_tools
 
         tools.extend(build_operator_tools(agent_id=agent_id, db_factory=AsyncSessionLocal))
@@ -150,6 +151,10 @@ async def build_agent_tool_setup(
     if _is_enabled(tools_config, "http", default=False):
         tools.extend(build_http_tools(tools_config))
         active_groups.append("http")
+
+    if _is_enabled(tools_config, "tavily", default=True) and settings.tavily_api_key:
+        tools.extend(build_tavily_tools(tools_config))
+        active_groups.append("tavily")
 
     if getattr(session, "channel_type", None) == "whatsapp":
         tools.extend(build_wa_notify_tool(session))

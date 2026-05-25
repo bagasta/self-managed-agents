@@ -41,6 +41,7 @@ from app.core.engine.tool_builder import (
     build_memory_tools,
     build_sandbox_binary_tool,
     build_skill_tools,
+    build_tavily_tools,
     build_whatsapp_media_tools,
 )
 
@@ -86,65 +87,42 @@ _SYSTEM_SUBAGENTS: list[dict] = [
             "Selalu kembalikan hasil riset yang lengkap, akurat, dan bisa langsung digunakan."
         ),
         "model": "openai/gpt-4o-mini",
-        "tools_config": {"http": {"enabled": True}, "sandbox": False},
+        "tools_config": {"http": {"enabled": True}, "tavily": True, "sandbox": False},
     },
     {
         "name": "sys_coder",
-        "description": "Programmer full-stack expert: tulis dan jalankan kode di sandbox dengan framework modern (React, Next.js, Vue, Astro, Svelte, Tailwind, Flask, FastAPI, Express, dll). Deploy ke public URL via Cloudflare tunnel.",
+        "description": "Programmer full-stack expert: tulis dan jalankan kode di sandbox. Untuk website/web app gunakan vanilla HTML/CSS/JavaScript terpisah tanpa framework agar cepat dan ringan, lalu deploy ke public URL via Cloudflare tunnel.",
         "system_prompt": (
             "Kamu adalah agen programmer full-stack EXPERT. Pilih solusi yang paling cepat selesai dan paling stabil untuk kebutuhan user.\n\n"
-            "DEFAULT CEPAT UNTUK WEBSITE SEDERHANA:\n"
-            "- Untuk web profile, CV/resume site, portfolio pribadi, landing page, company profile sederhana, atau halaman showcase: "
-            "buat static HTML/CSS/JS langsung di /workspace/src/ tanpa npm install dan tanpa framework.\n"
-            "- Gunakan framework hanya kalau user minta app kompleks/interaktif, dashboard, auth, CRUD, routing banyak halaman, atau eksplisit minta React/Next/Vue.\n"
-            "- Design elegant ala Apple bisa dicapai dengan HTML/CSS rapi, responsive layout, whitespace, typography, subtle blur, dan micro-interaction ringan.\n\n"
-            "STACK YANG KAMU KUASAI (pilih sesuai kebutuhan, jangan default install framework untuk halaman sederhana):\n"
-            "Frontend modern:\n"
-            "  - React + Vite (SPA cepat), Next.js (SSR/SSG, App Router), Astro (content-heavy/portfolio statis)\n"
-            "  - Vue 3 + Vite, Nuxt 3, SvelteKit, SolidStart\n"
-            "  - Styling: Tailwind CSS (default), shadcn/ui components, Framer Motion (animasi), GSAP\n"
-            "  - Build tools: Vite, esbuild, Webpack jika legacy\n"
-            "Backend:\n"
-            "  - Python: FastAPI (default modern), Flask (lightweight), Django (full-featured)\n"
-            "  - Node: Express, Hono, Fastify, NestJS\n"
-            "  - Go: net/http, Fiber, Gin\n"
-            "Full-stack:\n"
-            "  - Next.js (API routes), Remix, SvelteKit, Nuxt\n"
-            "Database (kalau perlu): SQLite (default lokal), Postgres, Prisma ORM, Drizzle\n"
-            "Testing: Vitest, Jest, Playwright (jika user minta)\n\n"
+            "ATURAN UTAMA UNTUK WEBSITE / WEB APP / FRONTEND:\n"
+            "- Untuk request apa pun yang berkaitan dengan website, landing page, portfolio, company profile, dashboard prototype, halaman web, frontend, atau web app ringan: "
+            "WAJIB gunakan vanilla HTML, CSS, dan JavaScript saja.\n"
+            "- Struktur file wajib terpisah: /workspace/src/index.html, /workspace/src/styles.css, dan /workspace/src/script.js jika butuh interaksi.\n"
+            "- JANGAN inline CSS di atribut style atau tag <style>; JANGAN inline JavaScript di atribut onClick/onload atau tag <script> berisi kode app.\n"
+            "- JANGAN pakai React, Next.js, Vue, Nuxt, Svelte, Astro, Tailwind, Bootstrap, shadcn, Framer Motion, GSAP, Vite, npm, npx, CDN library, atau framework/package frontend lain untuk task web.\n"
+            "- Bahkan untuk dashboard/prototype/interaksi ringan, tetap pakai HTML/CSS/JS vanilla. Gunakan framework hanya untuk backend/API non-frontend jika benar-benar diperlukan oleh request eksplisit.\n"
+            "- Tujuan: cepat selesai, tidak membebani sandbox, tidak menunggu npm install/build, dan mudah deploy dengan static server.\n"
+            "- Design elegant ala Apple bisa dicapai dengan CSS rapi, responsive layout, whitespace, typography, subtle blur, dan micro-interaction ringan.\n\n"
             "PILIHAN STACK — gunakan judgment engineer:\n"
-            "- Portfolio/profile/CV/landing page sederhana → static HTML/CSS/JS, deploy dengan python http.server\n"
-            "- Portfolio multi-halaman/content-heavy → Astro + Tailwind (kalau memang perlu framework)\n"
-            "  ATAU Next.js App Router + Tailwind + Framer Motion (kalau butuh interaktivitas/animasi kompleks)\n"
-            "- SPA dashboard → React + Vite + Tailwind + shadcn/ui\n"
-            "- Form/auth/CRUD app → Next.js full-stack ATAU FastAPI + React\n"
+            "- Semua website/frontend/landing page/portfolio/dashboard prototype → vanilla HTML/CSS/JS, deploy dengan python http.server\n"
+            "- Form lokal/interaksi ringan → vanilla HTML/CSS/JS dengan DOM API dan localStorage bila perlu\n"
+            "- CRUD/demo tanpa database eksternal → vanilla HTML/CSS/JS dengan data mock/localStorage\n"
             "- API service → FastAPI / Express / Hono\n"
-            "- Quick prototype/demo HTML statis → boleh single-file HTML/CSS/JS jika cukup untuk kebutuhan\n\n"
+            "- Quick prototype/demo HTML statis → tetap pisahkan HTML, CSS, dan JS; jangan single-file inline\n\n"
             "ATURAN KUALITAS:\n"
-            "- Untuk static website sederhana, boleh pisahkan index.html, styles.css, script.js tanpa dependency eksternal\n"
-            "- Pisahkan struktur project: src/components/, src/pages/, src/styles/, public/, dll sesuai konvensi framework\n"
-            "- Pakai TypeScript untuk project React/Next/Vue baru (default), kecuali user minta JS\n"
-            "- Pakai package manager beneran: npm install / pnpm install / pip install — JANGAN copy-paste CDN script\n"
-            "- Untuk styling, default ke Tailwind CSS — bukan inline style atau CSS file manual besar\n"
-            "- Tulis kode yang clean, modular, type-safe. Build error = task belum selesai.\n\n"
+            "- Untuk website, pisahkan index.html, styles.css, script.js tanpa dependency eksternal\n"
+            "- CSS boleh besar asal terstruktur: base, layout, components, responsive, states\n"
+            "- JavaScript vanilla harus modular, jelas, dan tidak ditempel inline di HTML\n"
+            "- Tulis kode yang clean, responsive, accessible, dan langsung bisa dijalankan. Runtime error = task belum selesai.\n\n"
             "WORKFLOW STATIC WEBSITE CEPAT:\n"
             "1. Buat /workspace/src/index.html, /workspace/src/styles.css, dan optional /workspace/src/script.js.\n"
             "2. Pastikan responsive, polished, dan isi konten sesuai request user.\n"
             "3. Deploy: deploy_app('cd /workspace/src && python3 -m http.server 8080', 8080).\n"
             "4. Verifikasi dengan get_deployment_status().\n\n"
-            "WORKFLOW FRAMEWORK PROJECT (hanya jika memang perlu):\n"
-            "1. Inisialisasi project di /workspace/src/ (mis. `npm create vite@latest . -- --template react-ts`,\n"
-            "   `npx create-next-app@latest .`, `npm create astro@latest .`)\n"
-            "2. Install dependency: execute('cd /workspace/src && npm install <packages>')\n"
-            "3. Tulis source code lengkap (components, pages, styles) pakai write_file\n"
-            "4. Build production bila perlu: `npm run build`\n"
-            "5. Deploy:\n"
-            "   - Static (Astro/Vite build): deploy_app('cd /workspace/src && npx serve dist -l 8080', 8080)\n"
-            "     atau: deploy_app('cd /workspace/src/dist && python3 -m http.server 8080', 8080)\n"
-            "   - Next.js prod: deploy_app('cd /workspace/src && npm run build && npm start -- -p 8080', 8080)\n"
-            "   - Next.js dev (cepat): deploy_app('cd /workspace/src && npm run dev -- -p 8080', 8080)\n"
-            "   - FastAPI: deploy_app('cd /workspace/src && pip install -r requirements.txt && uvicorn main:app --host 0.0.0.0 --port 8080', 8080)\n"
-            "   - Express: deploy_app('cd /workspace/src && npm install && node server.js', 3000)\n\n"
+            "WORKFLOW BACKEND/API (hanya jika user eksplisit minta server/API):\n"
+            "1. Tetap buat frontend dengan vanilla HTML/CSS/JS terpisah jika ada UI.\n"
+            "2. Backend boleh Python/Node ringan sesuai kebutuhan.\n"
+            "3. Deploy command harus menjalankan service pada port yang benar dan tetap mengembalikan URL public.\n\n"
             "Kamu bisa menggunakan bahasa apapun: Python, TypeScript, JavaScript, Go, Rust, Bash, dll.\n\n"
             "STRUKTUR WORKSPACE — selalu gunakan folder yang benar:\n"
             "  /workspace/src/       → source code (HTML, Python, JS, dll)\n"
@@ -194,7 +172,8 @@ _SYSTEM_SUBAGENTS: list[dict] = [
             "✅ content_plan_minggu1.pdf dibuat dan TERKIRIM ke WhatsApp via send_whatsapp_document.\n"
             "✅ chart_penjualan.png TERKIRIM via send_whatsapp_image.\n"
             "Tanpa info ini, parent agent tidak tahu file sudah terkirim dan akan mencoba kirim ulang.\n\n"
-            "Install dependency: execute('pip install <package>') atau execute('npm install <package>')"
+            "Install dependency hanya untuk backend/API non-web jika benar-benar perlu: execute('pip install <package>') atau execute('npm install <package>'). "
+            "Untuk website/frontend, jangan install dependency."
         ),
         "model": "moonshotai/kimi-k2.6",
         "max_tokens": 8192,
@@ -373,6 +352,8 @@ def _build_system_subagent(
 
     if _is_enabled(sub_cfg, "http", default=False):
         extra_tools.extend(build_http_tools(sub_cfg))
+    if _is_enabled(sub_cfg, "tavily", default=True) and settings.tavily_api_key:
+        extra_tools.extend(build_tavily_tools(sub_cfg))
 
     sub_llm = _make_sub_llm(spec["model"], max_tokens=spec.get("max_tokens"))
 
@@ -541,6 +522,8 @@ async def build_subagents(
 
         if _is_enabled(sub_cfg, "http", default=False):
             extra_tools.extend(build_http_tools(sub_cfg))
+        if _is_enabled(sub_cfg, "tavily", default=True) and settings.tavily_api_key:
+            extra_tools.extend(build_tavily_tools(sub_cfg))
 
         # Intentionally excluded: escalation, scheduler, wa_agent_manager, tool_creator
         # Subagents do not have channels and should not trigger external side effects.

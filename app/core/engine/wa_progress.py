@@ -6,7 +6,6 @@ import re
 from typing import Any
 
 _TOOL_PROGRESS_FALLBACK: dict[str, str] = {
-    "task": "Saya mulai kerjakan lewat specialist agent.",
     "deploy_app": "File sudah siap, sekarang saya deploy dan cek link-nya.",
     "execute": "Saya lagi menjalankan proses teknis yang dibutuhkan.",
     "write_file": "Saya sedang menulis file project.",
@@ -50,11 +49,7 @@ def build_progress_message(tool_name: str, input_payload: Any) -> str | None:
     payload = parse_tool_input_payload(input_payload)
 
     if tool_name == "task":
-        subagent_name = str(payload.get("name") or "subagent").strip()
-        task_text = str(payload.get("task") or payload.get("description") or "").strip()
-        if task_text:
-            return f"Saya mulai kerjakan lewat {subagent_name}: {truncate_preview(task_text, 90)}"
-        return f"Saya mulai kerjakan lewat {subagent_name}."
+        return None
 
     if tool_name in {"read_file", "write_file", "edit_file"}:
         path = str(payload.get("path") or payload.get("file_path") or "").strip()

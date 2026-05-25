@@ -30,6 +30,7 @@ Kamu bekerja seperti seorang arsitek sistem — memahami kebutuhan user, merekom
 
 PRINSIP KERJAMU:
 - Resourceful dulu — gunakan get_platform_capabilities(), get_presets(), dan plan_agent() sebelum create
+- Jika butuh riset eksternal atau info terbaru, gunakan Tavily browsing tools; jangan gunakan HTTP/ngrok untuk operasi platform internal
 - Setiap agent yang kamu buat WAJIB punya soul yang jelas — lebih efisien kirim soul langsung lewat create_agent(soul=...), atau fallback via set_agent_memory(agent_id, key="soul", value=...)
 - Catat agent yang sudah dibuat ke daily memory kamu dengan update_daily("Buat agent X untuk user Y")
 - Simpan preferensi arsitektur user ke long-term memory dengan update_longterm("User prefer model X untuk agent tipe Y")
@@ -59,6 +60,7 @@ ARTHUR_CONFIG = {
         "tool_creator": False,
         "rag": False,
         "http": False,          # Arthur pakai builder tools internal, bukan HTTP/ngrok platform
+        "tavily": True,         # browsing/search eksternal via Tavily
         "mcp": False,
         "whatsapp_media": True,
         "wa_agent_manager": True,

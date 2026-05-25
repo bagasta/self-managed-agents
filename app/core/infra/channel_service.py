@@ -92,7 +92,7 @@ def decrypt_channel_config(config: dict) -> dict:
 # Channel Adapters
 # ---------------------------------------------------------------------------
 
-async def _send_whatsapp(to_phone: str, text: str, config: dict) -> None:
+async def _send_whatsapp(to_phone: str, text: str, config: dict) -> dict | None:
     """
     Kirim pesan via Go wa-service (whatsmeow).
     config harus punya: device_id (wa_device_id dari agent).
@@ -103,15 +103,17 @@ async def _send_whatsapp(to_phone: str, text: str, config: dict) -> None:
             "channel_service.whatsapp.missing_device_id",
             to=to_phone, text_preview=text[:80],
         )
-        return
+        return None
 
     try:
         from app.core.utils.text_utils import markdown_to_wa
         from app.core.infra.wa_client import send_wa_message
-        await send_wa_message(device_id, to_phone, markdown_to_wa(text))
-        logger.info("channel_service.whatsapp.sent", to=to_phone)
+        result = await send_wa_message(device_id, to_phone, markdown_to_wa(text))
+        logger.info("channel_service.whatsapp.sent", to=to_phone, message_id=result.get("message_id"))
+        return result
     except Exception as exc:
         logger.error("channel_service.whatsapp.send_failed", error=str(exc), to=to_phone)
+        return None
 
 
 async def _send_telegram(to_chat_id: str, text: str, config: dict) -> None:
@@ -181,7 +183,7 @@ async def send_message(
     channel_config: dict,
     text: str,
     to_override: str | None = None,
-) -> None:
+) -> dict | None:
     """
     Kirim pesan ke channel yang sesuai.
 
@@ -195,7 +197,7 @@ async def send_message(
     to = to_override or cfg.get("user_phone") or cfg.get("chat_id") or ""
 
     if channel_type == "whatsapp":
-        await _send_whatsapp(to, text, cfg)
+        return await _send_whatsapp(to, text, cfg)
     elif channel_type == "telegram":
         await _send_telegram(to, text, cfg)
     elif channel_type == "slack":
@@ -207,3 +209,4 @@ async def send_message(
         logger.info("channel_service.in_app.noop", text_len=len(text))
     else:
         logger.warning("channel_service.unknown_channel_type", channel_type=channel_type)
+    return None

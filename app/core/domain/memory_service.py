@@ -24,6 +24,51 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
+_BUSINESS_DOMAIN_MARKERS = (
+    "customer service",
+    " cs ",
+    "ecommerce",
+    "e-commerce",
+    "toko",
+    "shop",
+    "order",
+    "pesanan",
+    "produk",
+    "pelanggan",
+    "mukena",
+)
+
+_PERSONAL_PROFILE_MARKERS = (
+    "cv",
+    "resume",
+    "portfolio",
+    "profil personal",
+    "personal profile",
+    "job_title",
+    "work_experience",
+)
+
+
+def _is_business_agent_context(agent_text: str) -> bool:
+    text = f" {agent_text.lower()} "
+    return any(marker in text for marker in _BUSINESS_DOMAIN_MARKERS)
+
+
+def _conversation_mentions_personal_profile(conv_text: str) -> bool:
+    text = conv_text.lower()
+    return any(marker in text for marker in _PERSONAL_PROFILE_MARKERS)
+
+
+def _is_personal_profile_memory_key(key: str) -> bool:
+    clean = key.lower()
+    return (
+        clean.startswith("cv_")
+        or clean.startswith("resume_")
+        or "cv_" in clean
+        or "resume" in clean
+        or "portfolio" in clean
+    )
+
 
 async def upsert_memory(
     agent_id: uuid.UUID,
@@ -205,23 +250,52 @@ async def extract_long_term_memory(
         return
 
     conv_text = "\n".join(lines)
+    agent_text = ""
+    try:
+        from app.models.agent import Agent
+
+        agent = await db.get(Agent, agent_id)
+        if agent:
+            agent_text = " ".join(
+                str(part or "")
+                for part in (
+                    getattr(agent, "name", ""),
+                    getattr(agent, "description", ""),
+                    getattr(agent, "instructions", ""),
+                )
+            )
+    except Exception as exc:
+        log.warning("ltm.agent_context_load_failed", error=str(exc))
+
+    business_agent_context = _is_business_agent_context(agent_text)
+    profile_context_allowed = (
+        _conversation_mentions_personal_profile(conv_text)
+        and not business_agent_context
+    )
+    profile_line = (
+        "- Personal profile/CV/resume content: full_name, job_title, skills, education, work_experience (only when the current agent is explicitly a personal/profile/career assistant)\n"
+        if profile_context_allowed
+        else ""
+    )
     prompt = (
         "Analyze this conversation and extract ALL important facts worth remembering long-term. "
         "Focus on actionable context that would help an AI assistant continue work in future sessions.\n\n"
         "Extract facts from these categories (include ALL that appear in the conversation):\n"
         "- User identity: name, job, company, phone\n"
-        "- CV/resume content: full_name, job_title, skills, education, work_experience (summarize concisely)\n"
+        f"{profile_line}"
         "- Deployed apps: deploy_url, project_name, tech_stack, port\n"
         "- Files/projects created: file names, purpose, workspace location\n"
         "- User preferences: language, framework, coding style, communication style\n"
+        "- For customer-service/ecommerce agents: customer name, product preference, order status, complaint, escalation status, and next action\n"
         "- Important decisions or agreements made\n"
         "- Any task that was completed or is in progress\n\n"
         "Return ONLY a compact JSON object — keys are short snake_case labels, values are concise strings. "
-        "If a value is long (e.g. CV content), summarize to max 300 chars.\n\n"
+        "If a value is long, summarize to max 300 chars. "
+        "Do not create CV/resume/portfolio keys unless the current task and agent domain are explicitly about personal profile/career content.\n\n"
         "Example:\n"
-        '{"user_name": "Bagas", "cv_skills": "Python, FastAPI, Docker, LangChain", '
-        '"cv_education": "S1 Informatika Univ X 2020", "deploy_url": "https://abc.trycloudflare.com", '
-        '"project_name": "portfolio website", "preferred_language": "Indonesian"}\n\n'
+        '{"user_name": "Bagas", "customer_preference": "mukena warna pink", '
+        '"order_status": "menunggu pembayaran", "deploy_url": "https://abc.trycloudflare.com", '
+        '"project_name": "landing page", "preferred_language": "Indonesian"}\n\n'
         f"Conversation:\n{conv_text}\n\nJSON:"
     )
 
@@ -246,6 +320,9 @@ async def extract_long_term_memory(
         saved = 0
         for key, value in facts.items():
             if isinstance(key, str) and value is not None:
+                if _is_personal_profile_memory_key(key) and not profile_context_allowed:
+                    log.info("ltm.skip_profile_memory_key", key=key, business_agent=business_agent_context)
+                    continue
                 safe_key = f"auto_{key[:80]}"
                 await upsert_memory(agent_id, safe_key, str(value)[:1000], db, scope=scope)
                 saved += 1

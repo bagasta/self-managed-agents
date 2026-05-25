@@ -65,7 +65,7 @@ func (r *Router) HandleMessage(msg IncomingMessage) {
 
 	if connected && isDisconnect(msg.Text) {
 		_ = r.store.Delete(msg.From)
-		_ = r.wa.SendText(msg.ChatID, "✅ Kamu berhasil disconnect dari agent.\n\nKirim *connect AGENT_ID* kapan saja untuk connect ke agent lagi.")
+		_, _ = r.wa.SendText(msg.ChatID, "✅ Kamu berhasil disconnect dari agent.\n\nKirim *connect AGENT_ID* kapan saja untuk connect ke agent lagi.")
 		log.Printf("[dev-router] %s disconnected from agent %s", msg.From, conn.AgentID)
 		return
 	}
@@ -92,12 +92,12 @@ func (r *Router) HandleMessage(msg IncomingMessage) {
 }
 
 func (r *Router) handleConnect(from, chatID, agentID string) {
-	_ = r.wa.SendText(chatID, "⏳ Menghubungkan ke agent...")
+	_, _ = r.wa.SendText(chatID, "⏳ Menghubungkan ke agent...")
 
 	agentName, err := r.fetchAgentName(agentID)
 	if err != nil {
 		log.Printf("[dev-router] fetch agent %s err: %v", agentID, err)
-		_ = r.wa.SendText(chatID, fmt.Sprintf("❌ Agent ID *%s* tidak ditemukan. Pastikan Agent ID benar dan coba lagi.", agentID))
+		_, _ = r.wa.SendText(chatID, fmt.Sprintf("❌ Agent ID *%s* tidak ditemukan. Pastikan Agent ID benar dan coba lagi.", agentID))
 		return
 	}
 
@@ -110,7 +110,7 @@ func (r *Router) handleConnect(from, chatID, agentID string) {
 		log.Printf("[dev-router] store set err: %v", err)
 	}
 
-	_ = r.wa.SendText(chatID, fmt.Sprintf("✅ Berhasil terhubung ke agent *%s*!\n\nSekarang kamu bisa chat langsung di sini.\nKirim *berhenti* atau */stop* untuk disconnect.", agentName))
+	_, _ = r.wa.SendText(chatID, fmt.Sprintf("✅ Berhasil terhubung ke agent *%s*!\n\nSekarang kamu bisa chat langsung di sini.\nKirim *berhenti* atau */stop* untuk disconnect.", agentName))
 	log.Printf("[dev-router] %s connected to agent %s", from, agentID)
 }
 
@@ -120,16 +120,20 @@ func (r *Router) handleConnect(from, chatID, agentID string) {
 func (r *Router) forwardToAgent(agentID string, msg IncomingMessage) {
 	deviceID := "wadev_" + agentID
 	payload := map[string]interface{}{
-		"device_id":      deviceID,
-		"from":           msg.From,
-		"phone_from":     msg.PhoneFrom,
-		"chat_id":        msg.ChatID,
-		"message":        msg.Text,
-		"timestamp":      msg.Timestamp,
-		"push_name":      msg.PushName,
-		"media_type":     msg.MediaType,
-		"media_data":     msg.MediaData,
-		"media_filename": msg.MediaFilename,
+		"device_id":          deviceID,
+		"from":               msg.From,
+		"phone_from":         msg.PhoneFrom,
+		"chat_id":            msg.ChatID,
+		"message":            msg.Text,
+		"timestamp":          msg.Timestamp,
+		"push_name":          msg.PushName,
+		"media_type":         msg.MediaType,
+		"media_data":         msg.MediaData,
+		"media_filename":     msg.MediaFilename,
+		"quoted_text":        msg.QuotedText,
+		"quoted_stanza_id":   msg.QuotedStanzaID,
+		"quoted_participant": msg.QuotedParticipant,
+		"quoted_remote_jid":  msg.QuotedRemoteJID,
 	}
 
 	data, _ := json.Marshal(payload)
@@ -137,7 +141,7 @@ func (r *Router) forwardToAgent(agentID string, msg IncomingMessage) {
 	req, err := http.NewRequest("POST", url, bytes.NewReader(data))
 	if err != nil {
 		log.Printf("[dev-router] build request err: %v", err)
-		_ = r.wa.SendText(msg.ChatID, "❌ Error internal. Coba lagi.")
+		_, _ = r.wa.SendText(msg.ChatID, "❌ Error internal. Coba lagi.")
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -146,7 +150,7 @@ func (r *Router) forwardToAgent(agentID string, msg IncomingMessage) {
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		log.Printf("[dev-router] forward to python err: %v", err)
-		_ = r.wa.SendText(msg.ChatID, "❌ Terjadi error saat menghubungi agent. Coba lagi nanti.")
+		_, _ = r.wa.SendText(msg.ChatID, "❌ Terjadi error saat menghubungi agent. Coba lagi nanti.")
 		return
 	}
 	defer resp.Body.Close()
@@ -154,7 +158,7 @@ func (r *Router) forwardToAgent(agentID string, msg IncomingMessage) {
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(resp.Body)
 		log.Printf("[dev-router] python returned HTTP %d: %s", resp.StatusCode, string(b))
-		_ = r.wa.SendText(msg.ChatID, "❌ Terjadi error saat menghubungi agent. Coba lagi nanti.")
+		_, _ = r.wa.SendText(msg.ChatID, "❌ Terjadi error saat menghubungi agent. Coba lagi nanti.")
 		return
 	}
 
@@ -221,14 +225,18 @@ func (r *Router) fetchAgentName(agentID string) (string, error) {
 
 func (r *Router) forwardWebhook(msg IncomingMessage) {
 	payload := map[string]interface{}{
-		"from":           msg.From,
-		"chat_id":        msg.ChatID,
-		"text":           msg.Text,
-		"media_type":     msg.MediaType,
-		"media_data":     msg.MediaData,
-		"media_filename": msg.MediaFilename,
-		"media_mimetype": msg.MediaMimetype,
-		"timestamp":      msg.Timestamp,
+		"from":               msg.From,
+		"chat_id":            msg.ChatID,
+		"text":               msg.Text,
+		"media_type":         msg.MediaType,
+		"media_data":         msg.MediaData,
+		"media_filename":     msg.MediaFilename,
+		"media_mimetype":     msg.MediaMimetype,
+		"quoted_text":        msg.QuotedText,
+		"quoted_stanza_id":   msg.QuotedStanzaID,
+		"quoted_participant": msg.QuotedParticipant,
+		"quoted_remote_jid":  msg.QuotedRemoteJID,
+		"timestamp":          msg.Timestamp,
 	}
 	data, _ := json.Marshal(payload)
 	resp, err := http.Post(r.webhookURL, "application/json", bytes.NewReader(data))

@@ -8,6 +8,7 @@ in sibling modules.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import re
 import uuid
@@ -52,7 +53,6 @@ from app.core.engine.result_parser import (
     sanitize_input_messages as _sanitize_input_messages,
     parse_agent_result,
 )
-from app.core.engine.wa_progress import build_progress_message, build_task_done_message
 from app.core.engine.reply_guard import ensure_non_empty_reply
 from app.core.engine.google_mcp_support import (
     _build_google_mcp_auth_failure_reply,
@@ -223,9 +223,519 @@ def _task_result_guard_reply(final_reply: str, steps: list[dict[str, Any]], user
     return final_reply
 
 
+_DIRECT_WA_SEND_RE = re.compile(
+    r"\b(kirim|send|wa|whatsapp)\b.{0,80}\b(pesan|message|wa|whatsapp)?\b.{0,120}(?:\+?62|08)\d{7,15}",
+    re.IGNORECASE,
+)
+_DIRECT_WA_CONFIRM_WORDS = {
+    "kirim",
+    "kirim pesan",
+    "kirim pesan wa",
+    "kirim wa",
+    "yes",
+    "yes kirim",
+    "ya",
+    "ya kirim",
+    "iya",
+    "iya kirim",
+    "ok",
+    "ok kirim",
+    "oke",
+    "oke kirim",
+    "lanjut",
+    "lanjut kirim",
+}
+_WA_MEDIA_REQUEST_MARKERS = (
+    "gambar",
+    "foto",
+    "image",
+    "img",
+    "dokumen",
+    "document",
+    "file",
+    "pdf",
+    "excel",
+    "xlsx",
+    "chart",
+    "grafik",
+)
+_DIRECT_WA_META_REQUEST_MARKERS = (
+    "agent",
+    "arthur",
+    "bas",
+    "bug",
+    "error",
+    "log",
+    "perbaiki",
+    "benerin",
+    "fix",
+    "debug",
+    "cek",
+    "lihat",
+    "kenapa",
+    "masalah",
+    "kendala",
+    "gabisa",
+    "gak bisa",
+    "ga bisa",
+    "tidak bisa",
+    "konfigurasi",
+    "config",
+    "setting",
+    "tools_config",
+    "kemampuan",
+    "disuruh",
+)
+_DIRECT_WA_TEXT_WRONG_TOOLS = {
+    "send_message",  # Google Chat MCP; needs spaces/... and is not WhatsApp.
+    "send_whatsapp_image",
+    "send_whatsapp_document",
+    "notify_user",
+}
+
+
+def _operator_message_payload(message: str) -> str:
+    """Return the actual operator text from WA/API operator envelopes."""
+    text = message or ""
+    if text.startswith("[OPERATOR] "):
+        return text.removeprefix("[OPERATOR] ").strip()
+    if text.startswith("<OPERATOR>"):
+        marker = "\nPesan:"
+        idx = text.find(marker)
+        if idx != -1:
+            return text[idx + len(marker):].strip()
+    return text
+
+
+def _is_operator_envelope(message: str) -> bool:
+    text = message or ""
+    return text.startswith("[OPERATOR] ") or text.startswith("<OPERATOR>")
+
+
+def _is_direct_whatsapp_send_confirmation(user_message: str) -> bool:
+    text = _operator_message_payload(user_message).strip().lower()
+    return text in _DIRECT_WA_CONFIRM_WORDS
+
+
+def _is_direct_whatsapp_send_request(user_message: str) -> bool:
+    text = _operator_message_payload(user_message).lower()
+    if not text:
+        return False
+    if _is_direct_whatsapp_meta_request(user_message):
+        return False
+    if _DIRECT_WA_SEND_RE.search(text):
+        return True
+    has_send_word = any(word in text for word in ("kirim", "send"))
+    has_message_word = any(word in text for word in ("pesan", "message", "wa", "whatsapp"))
+    has_phone = bool(re.search(r"(?:\+?62|08)\d{7,15}", text))
+    return has_send_word and has_message_word and has_phone
+
+
+def _is_direct_whatsapp_meta_request(user_message: str) -> bool:
+    """True when user discusses/fixes WA sending capability, not asks to send now."""
+    if _is_operator_envelope(user_message):
+        return False
+    text = _operator_message_payload(user_message).lower()
+    if not text:
+        return False
+    has_wa_send_topic = any(marker in text for marker in ("kirim wa", "kirim pesan", "whatsapp", "wa ke", "pesan wa"))
+    if not has_wa_send_topic:
+        return False
+    return any(marker in text for marker in _DIRECT_WA_META_REQUEST_MARKERS)
+
+
+def _is_direct_whatsapp_text_send_context(user_message: str, history_rows: list[Any] | None = None) -> bool:
+    """Detect text-message-to-number turns so WhatsApp routing can prefer send_to_number."""
+    text = _operator_message_payload(user_message).strip().lower()
+    if _is_direct_whatsapp_meta_request(user_message):
+        return False
+    if any(marker in text for marker in _WA_MEDIA_REQUEST_MARKERS):
+        return False
+    if _is_direct_whatsapp_send_request(user_message):
+        return True
+    if text not in _DIRECT_WA_CONFIRM_WORDS:
+        return False
+
+    recent_contents = []
+    for row in (history_rows or [])[-10:]:
+        content = _operator_message_payload(getattr(row, "content", "") or "")
+        if content:
+            recent_contents.append(str(content).lower())
+    recent_text = "\n".join(recent_contents)
+    if _is_direct_whatsapp_meta_request(recent_text):
+        return False
+    if any(marker in recent_text for marker in _WA_MEDIA_REQUEST_MARKERS):
+        return False
+    has_recent_phone = bool(re.search(r"(?:\+?62|08)\d{7,15}", recent_text))
+    has_recent_direct_send = any(
+        marker in recent_text
+        for marker in (
+            "kirim pesan",
+            "kirim wa",
+            "whatsapp ke",
+            "pesan whatsapp ke",
+            "pesan wa ke",
+            "nomor",
+            "draft",
+        )
+    )
+    return has_recent_phone and has_recent_direct_send
+
+
+def _extract_direct_whatsapp_confirmation_payload(
+    user_message: str,
+    history_rows: list[Any] | None,
+) -> tuple[str, str] | None:
+    """Extract target phone and last confirmed text draft for deterministic WA send."""
+    if not _is_direct_whatsapp_send_confirmation(user_message):
+        return None
+
+    rows = list(history_rows or [])[-12:]
+    target_phone = ""
+    for row in reversed(rows):
+        content = _operator_message_payload(getattr(row, "content", "") or "")
+        phones = re.findall(r"(?:\+?62|08)\d{7,15}", content)
+        if phones:
+            target_phone = phones[-1]
+            break
+    if not target_phone:
+        return None
+
+    draft = ""
+    for row in reversed(rows):
+        if getattr(row, "role", "") not in {"agent", "assistant"}:
+            continue
+        content = str(getattr(row, "content", "") or "").strip()
+        if not content or content.lower().startswith("belum saya kirim"):
+            continue
+
+        quoted = re.findall(r'"([^"\n]{6,1000})"|“([^”\n]{6,1000})”', content)
+        quote_candidates = [a or b for a, b in quoted if (a or b)]
+        if quote_candidates:
+            draft = quote_candidates[-1].strip()
+            break
+
+        marker_match = re.search(
+            r"(?:draft(?:\s+untuk\s+[^:]+)?|pesan(?:\s+sopan)?(?:\s+untuk\s+[^:]+)?|isi pesan)\s*:\s*(.+)",
+            content,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if marker_match:
+            candidate = marker_match.group(1).strip()
+            candidate = re.split(
+                r"\b(?:ketik|balas|sudah ok|sudah oke|konfirmasi)\b",
+                candidate,
+                maxsplit=1,
+                flags=re.IGNORECASE,
+            )[0].strip(" \n\t\"'")
+            if len(candidate) >= 6:
+                draft = candidate
+                break
+
+    if not draft:
+        return None
+    return target_phone, draft
+
+
+def _is_google_chat_intent(user_message: str) -> bool:
+    text = _operator_message_payload(user_message).lower()
+    return any(
+        marker in text
+        for marker in (
+            "google chat",
+            "gchat",
+            "google space",
+            "space google",
+            "spaces/",
+            "chat space",
+        )
+    )
+
+
+def _filter_whatsapp_unsafe_mcp_tools(mcp_tools: list[Any], *, user_message: str, log: Any) -> list[Any]:
+    """Remove MCP tools whose names collide with WhatsApp intents in WhatsApp sessions."""
+    if _is_google_chat_intent(user_message):
+        return mcp_tools
+
+    filtered: list[Any] = []
+    removed: list[str] = []
+    for tool in mcp_tools:
+        name = getattr(tool, "name", "")
+        if name == "send_message":
+            removed.append(name)
+            continue
+        filtered.append(tool)
+    if removed:
+        log.info(
+            "agent_run.whatsapp_mcp_tool_collision_filtered",
+            removed=removed,
+            reason="send_message_is_google_chat_not_whatsapp",
+        )
+    return filtered
+
+
+def _prioritize_direct_whatsapp_text_send_tools(tools: list[Any], log: Any) -> list[Any]:
+    """Remove ambiguous non-text/direct-WA tools and place send_to_number first."""
+    send_tools = [tool for tool in tools if getattr(tool, "name", "") == "send_to_number"]
+    if not send_tools:
+        log.warning("agent_run.direct_wa_send_to_number_unavailable")
+        return tools
+
+    filtered: list[Any] = []
+    removed: list[str] = []
+    for tool in tools:
+        name = getattr(tool, "name", "")
+        if name in _DIRECT_WA_TEXT_WRONG_TOOLS:
+            removed.append(name)
+            continue
+        if name == "send_to_number":
+            continue
+        filtered.append(tool)
+    log.info(
+        "agent_run.direct_wa_text_tool_filter_applied",
+        removed=removed,
+        send_to_number_count=len(send_tools),
+    )
+    return send_tools + filtered
+
+
+def _has_send_to_number_step(steps: list[dict[str, Any]]) -> bool:
+    return any((step or {}).get("tool") == "send_to_number" for step in steps or [])
+
+
+def _looks_like_direct_send_success_claim(final_reply: str) -> bool:
+    text = (final_reply or "").lower()
+    if not text:
+        return False
+    has_whatsapp_or_phone_context = bool(
+        "whatsapp" in text
+        or " wa " in f" {text} "
+        or "nomor" in text
+        or re.search(r"(?:\+?62|08)\d{7,15}", text)
+    )
+    if not has_whatsapp_or_phone_context:
+        return False
+    success_markers = (
+        "sudah saya kirim",
+        "sudah dikirim",
+        "sudah terkirim",
+        "berhasil dikirim",
+        "telah saya kirim",
+        "pesan whatsapp ke",
+        "pesan wa ke",
+        "terkirim ke",
+    )
+    return any(marker in text for marker in success_markers)
+
+
+def _has_prior_send_to_number_evidence(messages: list[BaseMessage] | None) -> bool:
+    for msg in messages or []:
+        name = getattr(msg, "name", None)
+        if name == "send_to_number":
+            return True
+        content = getattr(msg, "content", "")
+        if "[SENT_TO_NUMBER" in str(content or ""):
+            return True
+        tool_calls = getattr(msg, "tool_calls", None) or []
+        if any((tc or {}).get("name") == "send_to_number" for tc in tool_calls):
+            return True
+    return False
+
+
+def _has_reply_to_user_step(steps: list[dict[str, Any]]) -> bool:
+    return any((step or {}).get("tool") == "reply_to_user" for step in steps or [])
+
+
+def _has_prior_reply_to_user_evidence(messages: list[BaseMessage] | None) -> bool:
+    for msg in messages or []:
+        name = getattr(msg, "name", None)
+        if name == "reply_to_user":
+            return True
+        content = getattr(msg, "content", "")
+        text = str(content or "")
+        if "[SENT_TO_USER]" in text or "[TO_USER_MEDIA]" in text:
+            return True
+        tool_calls = getattr(msg, "tool_calls", None) or []
+        if any((tc or {}).get("name") == "reply_to_user" for tc in tool_calls):
+            return True
+    return False
+
+
+def _direct_whatsapp_send_guard_reply(
+    final_reply: str,
+    steps: list[dict[str, Any]],
+    user_message: str,
+    history_messages: list[BaseMessage] | None = None,
+) -> str:
+    """Prevent false WhatsApp-send success claims when send_to_number did not run."""
+    if not _looks_like_direct_send_success_claim(final_reply):
+        return final_reply
+    if _is_operator_envelope(user_message):
+        return final_reply
+    if _has_reply_to_user_step(steps) or _has_prior_reply_to_user_evidence(history_messages):
+        return final_reply
+    if _has_send_to_number_step(steps) or _has_prior_send_to_number_evidence(history_messages):
+        return final_reply
+    if _is_direct_whatsapp_meta_request(user_message):
+        return final_reply
+    if not (
+        _is_direct_whatsapp_send_request(user_message)
+        or _is_direct_whatsapp_send_confirmation(user_message)
+    ):
+        return final_reply
+    return (
+        "Belum saya kirim. Saya tidak menemukan eksekusi tool kirim WhatsApp ke nomor tujuan, "
+        "jadi saya tidak akan mengklaim pesan sudah terkirim. Ketik `kirim` jika draftnya sudah benar."
+    )
+
+
 def _has_external_service_fallback_blocked_step(steps: list[dict[str, Any]]) -> bool:
     marker = "This is a Google Workspace external-service action"
     return any(marker in str((step or {}).get("result", "") or "") for step in steps or [])
+
+
+def _step_text(step: dict[str, Any]) -> str:
+    return "\n".join(
+        str(step.get(key) or "")
+        for key in ("tool", "args", "result", "content")
+        if step.get(key) is not None
+    )
+
+
+def _has_public_url_in_text(text: str) -> bool:
+    return bool(_URL_RE.search(text or ""))
+
+
+def _has_public_url_in_steps(steps: list[dict[str, Any]]) -> bool:
+    return any(_has_public_url_in_text(_step_text(step)) for step in steps or [])
+
+
+def _is_website_or_app_request(user_message: str) -> bool:
+    text = (user_message or "").lower()
+    markers = (
+        "website",
+        "web site",
+        "webapp",
+        "web app",
+        "landing page",
+        "portfolio",
+        "company profile",
+        "profile page",
+        "homepage",
+        "frontend",
+        "react",
+        "next.js",
+        "nextjs",
+        "vue",
+        "svelte",
+        "astro",
+        "html",
+        "css",
+        "dashboard",
+        "situs",
+        "halaman web",
+        "aplikasi web",
+        "buatkan web",
+        "bikin web",
+    )
+    if any(marker in text for marker in markers):
+        return True
+    return bool(re.search(r"\bweb\b", text))
+
+
+def _has_code_creation_evidence(steps: list[dict[str, Any]]) -> bool:
+    direct_code_tools = {
+        "write_file",
+        "edit_file",
+        "execute",
+        "sandbox_write_binary_file",
+    }
+    code_markers = (
+        "/workspace/src",
+        "index.html",
+        ".html",
+        ".css",
+        ".js",
+        ".jsx",
+        ".tsx",
+        "package.json",
+        "vite",
+        "next",
+        "react",
+        "tailwind",
+        "npm run build",
+        "build berhasil",
+        "file dibuat",
+        "file berhasil",
+        "berhasil dibuat",
+        "sudah dibuat",
+        "telah dibuat",
+        "ditulis",
+        "menulis file",
+        "created",
+        "wrote",
+        "generated",
+        "source code",
+        "kode",
+    )
+    failure_markers = (
+        "error",
+        "failed",
+        "gagal",
+        "exception",
+        "traceback",
+        "not found",
+    )
+    for step in steps or []:
+        tool_name = str(step.get("tool") or "")
+        text = _step_text(step)
+        lower = text.lower()
+        if tool_name in direct_code_tools and not any(marker in lower for marker in failure_markers):
+            return True
+        if tool_name == "task" and any(marker in lower for marker in code_markers):
+            return True
+    return False
+
+
+def _needs_deploy_followup(
+    user_message: str,
+    tools_config: dict[str, Any],
+    steps: list[dict[str, Any]],
+    final_reply: str,
+) -> bool:
+    """Detect website/app work that stopped after coding without public deploy URL."""
+    if not _is_enabled(tools_config, "deploy", default=False):
+        return False
+    if not _is_website_or_app_request(user_message):
+        return False
+    if _has_public_url_in_text(final_reply) or _has_public_url_in_steps(steps):
+        return False
+    return _has_code_creation_evidence(steps)
+
+
+def _deploy_followup_message(final_reply: str, steps: list[dict[str, Any]], *, has_subagents: bool) -> str:
+    tool_names = ", ".join(
+        str(step.get("tool") or "?")
+        for step in (steps or [])[-8:]
+        if step.get("tool")
+    )
+    subagent_instruction = (
+        "Jika file website dibuat di workspace sys_coder/subagent, panggil task() ke sys_coder dan instruksikan "
+        "sys_coder untuk memanggil deploy_app() dari workspace-nya sendiri. Parent tidak boleh mencoba deploy "
+        "workspace kosong yang berbeda."
+        if has_subagents
+        else "Panggil deploy_app() dari workspace sandbox yang berisi file website."
+    )
+    return (
+        "LANJUTKAN TASK SEBELUMNYA: user meminta website/app dan agent ini memiliki deploy=true, "
+        "tetapi percobaan sebelumnya belum mengembalikan URL public.\n\n"
+        f"Ringkasan jawaban sebelumnya: {(final_reply or '').strip()[:1200]}\n"
+        f"Tool terakhir: {tool_names or '-'}\n\n"
+        "Wajib sekarang deploy hasil website/app dengan Cloudflare tunnel.\n"
+        f"{subagent_instruction}\n"
+        "Gunakan get_deployment_status() jika perlu, lalu deploy_app(command, port), lalu verifikasi status. "
+        "Jangan berhenti pada menulis file/build. Jawaban akhir harus menyertakan URL https public dari deploy_app."
+    )
 
 
 class AgentRunResult(TypedDict):
@@ -380,6 +890,7 @@ async def run_agent(
         started_at=_now,
     )
     db.add(run_record)
+
     await db.flush()
 
     # HITL action_requests use .get("name", ...) and .get("args", ...);
@@ -471,13 +982,19 @@ async def run_agent(
     )
     execution_user_message = google_auth_recovery_request or user_message
     log.debug("agent_run.history_loaded", turns=len(prior_messages) // 2)
+    direct_wa_text_send_context = (
+        getattr(session, "channel_type", None) == "whatsapp"
+        and _is_direct_whatsapp_text_send_context(user_message, history_rows)
+    )
+    if direct_wa_text_send_context:
+        log.info("agent_run.direct_wa_text_send_context_detected")
     if google_auth_recovery_followup:
         log.info(
             "agent_run.google_mcp_auth_recovery_followup_detected",
             has_prior_request=bool(google_auth_recovery_request),
         )
 
-    is_op_msg = user_message.startswith("[OPERATOR] ")
+    is_op_msg = _is_operator_envelope(user_message)
 
     # ------------------------------------------------------------------ #
     # 6. System prompt                                                    #
@@ -517,6 +1034,15 @@ async def run_agent(
             "Lanjutkan request Google Workspace terakhir dari percakapan sebelumnya memakai MCP Google Workspace langsung. "
             "Jika MCP Google masih belum authorized, jangan gunakan task, sandbox, atau filesystem sebagai fallback; kirim blocker auth yang berisi link reconnect baru."
             f"{_prior_google_request}"
+        )
+    if direct_wa_text_send_context:
+        system_prompt += (
+            "\n\n## Direct WhatsApp Text Send — Tool Lock\n"
+            "Turn ini adalah konteks kirim pesan teks WhatsApp ke nomor tertentu. "
+            "Satu-satunya tool pengiriman yang boleh dipakai untuk aksi ini adalah `send_to_number(phone_or_target, message)`.\n"
+            "- Jangan gunakan `send_message` karena itu Google Chat/space, bukan WhatsApp.\n"
+            "- Jangan gunakan `send_whatsapp_image` atau `send_whatsapp_document` karena user meminta pesan teks, bukan media.\n"
+            "- Jangan gunakan `notify_user` untuk mengklaim sukses. Setelah `send_to_number` sukses, baru tulis final singkat ke operator/user.\n"
         )
 
     # ------------------------------------------------------------------ #
@@ -582,7 +1108,14 @@ async def run_agent(
             mcp_errors["google_workspace"] = google_mcp.preflight_error
         if mcp_tools:
             mcp_tools = sanitize_google_forms_tools(mcp_tools, log)
+            if getattr(session, "channel_type", None) == "whatsapp":
+                mcp_tools = _filter_whatsapp_unsafe_mcp_tools(
+                    mcp_tools,
+                    user_message=user_message,
+                    log=log,
+                )
             mcp_tool_names = [getattr(tool, "name", "") for tool in mcp_tools]
+        if mcp_tools:
             if google_mcp_parent_only and subagent_list:
                 log.info(
                     "agent_run.google_mcp_subagents_disabled",
@@ -611,6 +1144,8 @@ async def run_agent(
                         "agent_run.google_mcp_parent_only_task_tool_present",
                         count=len(task_tools),
                     )
+        if direct_wa_text_send_context:
+            tools = _prioritize_direct_whatsapp_text_send_tools(tools, log)
         if mcp_errors:
             log.warning("agent_run.mcp_errors", errors=mcp_errors)
             _google_mcp_auth_url, system_prompt = await apply_mcp_error_notice(
@@ -796,40 +1331,59 @@ async def run_agent(
         _progress_last_sent_at: float = 0.0
         _progress_sent_count: int = 0
         _progress_important_tools = {"task", "deploy_app", "execute", "send_whatsapp_document", "send_whatsapp_image"}
+        _progress_notice_task: asyncio.Task | None = None
+        _progress_notice_sent: bool = False
+        _progress_finished: bool = False
+        _long_progress_notice_seconds = 75.0
 
         async def _wa_progress_callback(tool_name: str, input_payload: Any, phase: str, output: Any | None) -> None:
-            nonlocal _progress_last_sent_at, _progress_sent_count
+            nonlocal _progress_last_sent_at, _progress_sent_count, _progress_notice_task, _progress_notice_sent
             if not _is_wa_session:
                 return
             if tool_name == "notify_user":
                 return
             if tool_name not in _progress_important_tools:
                 return
-            if phase == "end" and tool_name != "task":
+            if phase != "start":
                 return
 
             import time as _time
             now_ts = _time.monotonic()
-            min_gap = 75.0 if _progress_sent_count else 0.0
-            if now_ts - _progress_last_sent_at < min_gap:
+            if _progress_notice_task is not None or _progress_notice_sent:
                 return
+            _progress_last_sent_at = now_ts
 
-            message = (
-                build_task_done_message(input_payload, output)
-                if phase == "end" and tool_name == "task"
-                else build_progress_message(tool_name, input_payload)
-            )
-            if not message:
+            async def _send_delayed_notice() -> None:
+                nonlocal _progress_sent_count, _progress_notice_sent
+                try:
+                    await asyncio.sleep(_long_progress_notice_seconds)
+                    if _progress_finished or _progress_notice_sent:
+                        return
+                    from app.core.infra.wa_client import send_wa_message, start_wa_typing
+
+                    message = "Masih saya proses ya. Saya akan kirim hasilnya begitu selesai."
+                    await send_wa_message(_wa_device_id, _wa_target, message)
+                    with contextlib.suppress(Exception):
+                        await start_wa_typing(_wa_device_id, _wa_target)
+                    _progress_notice_sent = True
+                    _progress_sent_count += 1
+                    log.info("agent_run.wa_long_progress_notice_sent", tool=tool_name)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    log.warning("agent_run.wa_long_progress_notice_failed", tool=tool_name, error=str(exc)[:200])
+
+            _progress_notice_task = asyncio.create_task(_send_delayed_notice())
+
+        async def _cancel_wa_long_progress_notice() -> None:
+            nonlocal _progress_finished, _progress_notice_task
+            _progress_finished = True
+            if _progress_notice_task is None:
                 return
-            try:
-                from app.core.infra.wa_client import send_wa_message
-
-                await send_wa_message(_wa_device_id, _wa_target, message)
-                _progress_last_sent_at = now_ts
-                _progress_sent_count += 1
-                log.info("agent_run.wa_progress_sent", tool=tool_name, phase=phase)
-            except Exception as exc:
-                log.warning("agent_run.wa_progress_failed", tool=tool_name, error=str(exc)[:200])
+            _progress_notice_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await _progress_notice_task
+            _progress_notice_task = None
 
         _agent_logger = AgentStepLogger(log,
             progress_callback=_wa_progress_callback if _is_wa_session else None,
@@ -868,6 +1422,71 @@ async def run_agent(
                 await sandbox.aclose()
             for _ssb in sub_sandboxes:
                 await _ssb.aclose()
+
+        direct_wa_confirmation_payload = (
+            _extract_direct_whatsapp_confirmation_payload(user_message, history_rows)
+            if direct_wa_text_send_context
+            else None
+        )
+        if direct_wa_confirmation_payload:
+            target_phone, draft_message = direct_wa_confirmation_payload
+            steps = [
+                {
+                    "step": 1,
+                    "tool": "send_to_number",
+                    "args": {"phone_or_target": target_phone, "message": draft_message},
+                    "result": "",
+                }
+            ]
+            try:
+                from app.core.infra.channel_service import send_message as _channel_send_message
+
+                _raw_cfg = session.channel_config
+                _channel_cfg = _raw_cfg if isinstance(_raw_cfg, dict) else {}
+                await _channel_send_message(
+                    channel_type=session.channel_type,
+                    channel_config=_channel_cfg,
+                    text=draft_message,
+                    to_override=target_phone,
+                )
+                tool_result = f"[SENT_TO_NUMBER:{target_phone}] {draft_message}"
+                steps[0]["result"] = tool_result
+                final_reply = f"Pesan WhatsApp ke {target_phone} sudah saya kirim."
+                log.info("agent_run.direct_wa_confirmation_sent", target=target_phone)
+            except Exception as exc:
+                tool_result = f"[error] Gagal kirim WhatsApp ke {target_phone}: {exc}"
+                steps[0]["result"] = tool_result
+                final_reply = f"Gagal mengirim pesan WhatsApp ke {target_phone}: {exc}"
+                log.warning("agent_run.direct_wa_confirmation_send_failed", target=target_phone, error=str(exc)[:300])
+
+            db.add(Message(
+                session_id=session.id,
+                role="tool",
+                tool_name="send_to_number",
+                tool_args={"phone_or_target": target_phone, "message": draft_message},
+                tool_result=tool_result[:2000],
+                step_index=step_counter,
+                run_id=run_id,
+            ))
+            db.add(Message(
+                session_id=session.id,
+                role="agent",
+                content=final_reply,
+                step_index=step_counter + 1,
+                run_id=run_id,
+            ))
+            run_record.status = "completed"
+            run_record.completed_at = datetime.now(timezone.utc)
+            _apply_run_usage(0)
+            await db.flush()
+            await _cleanup_sandboxes()
+            return AgentRunResult(
+                reply=final_reply,
+                steps=steps,
+                run_id=run_id,
+                tokens_used=0,
+                usage=_usage_summary(),
+            )
 
         # Initialize so UnboundLocalError can't happen if an exception bypasses parse_agent_result
         final_reply: str = ""
@@ -912,6 +1531,7 @@ async def run_agent(
             run_record.error_message = "Cancelled because a newer user message interrupted this run."
             _apply_run_usage(_agent_logger.total_tokens_from_callbacks)
             await db.flush()
+            await _cancel_wa_long_progress_notice()
             await _cleanup_sandboxes()
             raise  # propagate so the task is properly marked cancelled
         except asyncio.TimeoutError:
@@ -924,6 +1544,7 @@ async def run_agent(
             run_record.completed_at = datetime.now(timezone.utc)
             run_record.error_message = f"Timeout after {_timeout}s"
             await db.flush()
+            await _cancel_wa_long_progress_notice()
             await _cleanup_sandboxes()
             await send_agent_recovery_message(
                 is_wa_session=_is_wa_session,
@@ -970,6 +1591,7 @@ async def run_agent(
                     run_record.error_message = str(_retry_json_exc)[:2000]
                     _apply_run_usage(_agent_logger.total_tokens_from_callbacks)
                     await db.flush()
+                    await _cancel_wa_long_progress_notice()
                     await _cleanup_sandboxes()
                     await send_agent_recovery_message(
                         is_wa_session=_is_wa_session,
@@ -1393,6 +2015,56 @@ async def run_agent(
                     "agent_run.google_mcp_retry_after_blocked_fallback_failed",
                     error=str(_mcp_retry_exc)[:300],
                 )
+
+        if _needs_deploy_followup(execution_user_message, tools_config, steps, final_reply):
+            log.warning(
+                "agent_run.deploy_followup_continue",
+                has_subagents=bool(subagent_list),
+                steps=len(steps),
+            )
+            _deploy_followup_input = _sanitize_input_messages(input_messages)
+            _deploy_followup_input.append(
+                HumanMessage(
+                    content=_deploy_followup_message(
+                        final_reply,
+                        steps,
+                        has_subagents=bool(subagent_list),
+                    )
+                )
+            )
+            try:
+                async with asyncio.timeout(_timeout):
+                    _deploy_graph_output = await graph.ainvoke(
+                        {"messages": _deploy_followup_input},
+                        config=_graph_config,
+                        version="v2",
+                    )
+                    result = await _graph_result_from_output(
+                        graph=graph,
+                        graph_config=_graph_config,
+                        graph_output=_deploy_graph_output,
+                        log=log,
+                    )
+                parsed = parse_agent_result(
+                    result=result,
+                    input_messages=input_messages,
+                    session_id=session.id,
+                    run_id=run_id,
+                    step_start=step_counter,
+                    log=log,
+                )
+                final_reply = parsed["final_reply"]
+                steps = parsed["steps"]
+                total_tokens_used = _agent_logger.total_tokens_from_callbacks or parsed["total_tokens_used"]
+                log.info(
+                    "agent_run.deploy_followup_continue_ok",
+                    has_url=_has_public_url_in_text(final_reply) or _has_public_url_in_steps(steps),
+                )
+            except Exception as _deploy_followup_exc:
+                log.warning(
+                    "agent_run.deploy_followup_continue_failed",
+                    error=str(_deploy_followup_exc)[:300],
+                )
         for _msg_record in parsed["db_messages"]:
             db.add(_msg_record)
 
@@ -1570,6 +2242,8 @@ async def run_agent(
                 scope=_memory_scope,
             )
 
+    await _cancel_wa_long_progress_notice()
+
     # cleanup
     if sandbox:
         await sandbox.aclose()
@@ -1607,6 +2281,10 @@ async def run_agent(
     guarded_reply = _task_result_guard_reply(final_reply, steps, execution_user_message)
     if guarded_reply != final_reply:
         log.warning("agent_run.final_reply_overridden_by_task_guard")
+        final_reply = guarded_reply
+    guarded_reply = _direct_whatsapp_send_guard_reply(final_reply, steps, execution_user_message, input_messages)
+    if guarded_reply != final_reply:
+        log.warning("agent_run.final_reply_overridden_by_direct_wa_send_guard")
         final_reply = guarded_reply
 
     final_reply = ensure_non_empty_reply(final_reply, steps)

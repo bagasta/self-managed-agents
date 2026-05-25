@@ -1,14 +1,12 @@
 from app.core.engine.wa_progress import build_progress_message, build_task_done_message
 
 
-def test_task_progress_uses_real_subagent_and_task_text():
+def test_task_progress_is_suppressed_for_whatsapp_noise():
     msg = build_progress_message(
         "task",
         '{"name":"sys_coder","task":"Bikin redesign portfolio dark-bold ala Russell Brand lalu deploy."}',
     )
-    assert msg is not None
-    assert "sys_coder" in msg
-    assert "redesign portfolio" in msg.lower()
+    assert msg is None
 
 
 def test_read_file_progress_includes_path():

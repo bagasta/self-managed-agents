@@ -42,6 +42,7 @@ def _make_mock_agent(
     agent_id: uuid.UUID | None = None,
     name: str = "Test Agent",
     operator_ids: list[str] | None = None,
+    owner_external_id: str | None = None,
     capabilities: list[str] | None = None,
     is_deleted: bool = False,
     tools_config: dict | None = None,
@@ -58,6 +59,7 @@ def _make_mock_agent(
     agent.safety_policy = {}
     agent.escalation_config = {}
     agent.operator_ids = operator_ids or []
+    agent.owner_external_id = owner_external_id
     agent.allowed_senders = None
     agent.capabilities = capabilities or []
     agent.is_deleted = is_deleted
@@ -163,6 +165,36 @@ class TestBuilderToolsReturnsList:
         assert len(tools) == 17
 
 
+class TestBuilderOwnershipHelpers:
+    def test_owner_external_id_grants_access_without_operator_id(self):
+        from app.core.tools.builder_tools import _agent_belongs_to_owner
+
+        agent = _make_mock_agent(operator_ids=[], owner_external_id="62811xxx")
+
+        assert _agent_belongs_to_owner(agent, "+62811xxx") is True
+
+    def test_unrelated_operator_id_does_not_grant_access(self):
+        from app.core.tools.builder_tools import _agent_belongs_to_owner
+
+        agent = _make_mock_agent(operator_ids=["62999yyy"], owner_external_id="62999yyy")
+
+        assert _agent_belongs_to_owner(agent, "+62811xxx") is False
+
+
+class TestMemoryLeakGuards:
+    def test_business_agent_context_detected(self):
+        from app.core.domain.memory_service import _is_business_agent_context
+
+        assert _is_business_agent_context("CS toko online mukena Veselka order pelanggan")
+
+    def test_profile_memory_keys_are_recognized(self):
+        from app.core.domain.memory_service import _is_personal_profile_memory_key
+
+        assert _is_personal_profile_memory_key("cv_skills")
+        assert _is_personal_profile_memory_key("auto_portfolio_website")
+        assert not _is_personal_profile_memory_key("customer_preference")
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # Section 2: get_platform_capabilities
 # ────────────────────────────────────────────────────────────────────────────
@@ -189,7 +221,7 @@ class TestGetPlatformCapabilities:
         result = _run(tool.ainvoke({}))
         data = json.loads(result)
         required_keys = ["memory", "skills", "escalation", "sandbox", "tool_creator",
-                         "scheduler", "rag", "http", "mcp", "whatsapp_media",
+                         "scheduler", "rag", "http", "tavily", "mcp", "whatsapp_media",
                          "wa_agent_manager", "subagents"]
         for key in required_keys:
             assert key in data["tools_config_options"], f"Key '{key}' harus ada di tools_config_options"
@@ -313,6 +345,8 @@ class TestCreateAgent:
 
             assert "+62811xxx" in captured_kwargs.get("operator_ids", []), \
                 "owner_phone harus masuk ke operator_ids saat create_agent"
+            assert captured_kwargs.get("tools_config", {}).get("tavily") is True, \
+                "agent yang dibuat Arthur harus default punya browsing Tavily"
 
     def test_invalid_name_returns_error(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -358,6 +392,33 @@ class TestListMyAgents:
 
         assert data["count"] == 1
         assert data["agents"][0]["name"] == "My Agent"
+
+    def test_returns_agents_owned_by_owner_external_id_even_without_operator_id(self):
+        from app.core.tools.builder_tools import build_builder_tools
+        db = _make_mock_db()
+
+        my_agent = _make_mock_agent(
+            name="Owned via owner field",
+            operator_ids=[],
+            owner_external_id="62811xxx",
+        )
+        other_agent = _make_mock_agent(
+            name="Other Agent",
+            operator_ids=[],
+            owner_external_id="62999yyy",
+        )
+
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = [my_agent, other_agent]
+        db.execute = AsyncMock(return_value=mock_result)
+
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "list_my_agents")
+        result = _run(tool.ainvoke({}))
+        data = json.loads(result)
+
+        assert data["count"] == 1
+        assert data["agents"][0]["name"] == "Owned via owner field"
 
     def test_empty_if_no_agents(self):
         from app.core.tools.builder_tools import build_builder_tools

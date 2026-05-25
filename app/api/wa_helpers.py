@@ -26,6 +26,200 @@ log = structlog.get_logger(__name__)
 # Fallback in-memory cache jika Redis mati/tidak ada.
 # Menghindari db.execute (lambat) untuk deduplikasi.
 _mem_dedup_cache: dict[str, float] = {}
+_mem_spam_windows: dict[str, list[float]] = {}
+
+
+def extract_escalation_case_id(text: str | None) -> str | None:
+    """Extract an escalation/spam case id from quoted WhatsApp text."""
+    if not text:
+        return None
+    match = re.search(r"\b(esc_\d+_[a-zA-Z0-9]+)\b", text)
+    return match.group(1) if match else None
+
+
+def extract_escalation_customer_phone(text: str | None) -> str | None:
+    """Extract customer phone from an operator-facing escalation quote."""
+    if not text:
+        return None
+    match = re.search(
+        r"Nomor\s+customer/user\s*:\s*([+\d][\d \t().-]{6,24})",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    normalized = normalize_phone(match.group(1))
+    return normalized or None
+
+
+async def find_session_by_quoted_case(
+    agent,
+    db: AsyncSession,
+    quoted_text: str | None,
+):
+    """Strict quoted lookup for operator actions that must not fallback to latest."""
+    from app.models.session import Session
+
+    case_id = extract_escalation_case_id(quoted_text)
+    if case_id:
+        result = await db.execute(
+            select(Session).where(
+                Session.agent_id == agent.id,
+                (
+                    (Session.metadata_["escalation_case_id"].astext == case_id)
+                    | (Session.metadata_["spam_case_id"].astext == case_id)
+                ),
+            )
+        )
+        session = result.scalars().first()
+        if session:
+            return session, case_id
+
+    customer_phone = extract_escalation_customer_phone(quoted_text)
+    if not customer_phone:
+        return None, case_id
+
+    result = await db.execute(
+        select(Session).where(
+            Session.agent_id == agent.id,
+            Session.external_user_id == customer_phone,
+        )
+    )
+    return result.scalars().first(), case_id or customer_phone
+
+
+async def find_session_by_quoted_message_id(
+    agent,
+    db: AsyncSession,
+    quoted_stanza_id: str | None,
+):
+    """Lookup escalation target by WhatsApp quoted message ID."""
+    from app.models.session import Session
+
+    message_id = (quoted_stanza_id or "").strip()
+    if not message_id:
+        return None, None
+
+    result = await db.execute(
+        select(Session).where(
+            Session.agent_id == agent.id,
+            (
+                (Session.metadata_["escalation_message_id"].astext == message_id)
+                | (Session.metadata_.contains({"escalation_message_ids": [message_id]}))
+            ),
+        )
+    )
+    session = result.scalars().first()
+    if not session:
+        return None, message_id
+
+    meta = session.metadata_ or {}
+    case_id = meta.get("escalation_case_id") or meta.get("spam_case_id") or message_id
+    return session, case_id
+
+
+def _route_case_id(session, fallback: str | None = None) -> str | None:
+    meta = session.metadata_ or {}
+    if isinstance(meta, dict):
+        return meta.get("escalation_case_id") or meta.get("spam_case_id") or fallback
+    return fallback
+
+
+async def remember_operator_escalation_route(
+    operator_session,
+    target_session,
+    case_id: str | None,
+    db: AsyncSession,
+) -> None:
+    """Persist the customer target selected by an operator quoted reply."""
+    ch = target_session.channel_config if isinstance(target_session.channel_config, dict) else {}
+    target = ch.get("user_phone") or target_session.external_user_id or ""
+    customer_phone = ch.get("phone_number") or target_session.external_user_id or ""
+    route = {
+        "target_session_id": str(target_session.id),
+        "target": target,
+        "case_id": case_id or _route_case_id(target_session),
+        "customer_phone": normalize_phone(customer_phone) or customer_phone,
+    }
+    meta = dict(operator_session.metadata_ or {})
+    meta["active_escalation_reply"] = route
+    operator_session.metadata_ = meta
+    db.add(operator_session)
+    await db.commit()
+
+
+async def find_session_by_operator_active_route(
+    agent,
+    db: AsyncSession,
+    operator_session,
+):
+    """Find the escalation customer currently selected in the operator session."""
+    from app.models.session import Session
+
+    meta = dict(operator_session.metadata_ or {})
+    route = meta.get("active_escalation_reply")
+    if not isinstance(route, dict):
+        return None, None
+
+    target_session_id = route.get("target_session_id")
+    if not target_session_id:
+        return None, route.get("case_id")
+
+    try:
+        target_session = await db.get(Session, uuid.UUID(str(target_session_id)))
+    except (ValueError, TypeError):
+        return None, route.get("case_id")
+    if not target_session or target_session.agent_id != agent.id:
+        return None, route.get("case_id")
+    return target_session, route.get("case_id") or _route_case_id(target_session)
+
+
+async def check_wa_spam_window(
+    *,
+    agent_id: str,
+    session_id: str,
+    sender_id: str,
+    limit: int = 5,
+    window_seconds: int = 60,
+) -> tuple[bool, int]:
+    """
+    Sliding-window spam detector per agent + user/session.
+
+    Returns (is_spam, count). The first `limit` messages are allowed; message
+    number `limit + 1` inside the window triggers auto-disable.
+    """
+    import time
+    from app.core.infra.redis_client import get_redis
+
+    now = time.time()
+    identity = normalize_phone(sender_id) or str(session_id)
+    key = f"wa_spam:{agent_id}:{identity}"
+    r = await get_redis()
+
+    if r:
+        try:
+            await r.zremrangebyscore(key, 0, now - window_seconds)
+            await r.zadd(key, {str(now): now})
+            await r.expire(key, window_seconds * 2)
+            count = int(await r.zcard(key))
+            return count > limit, count
+        except Exception as exc:
+            log.warning("wa_spam.redis_fail", error=str(exc))
+
+    timestamps = _mem_spam_windows.setdefault(key, [])
+    timestamps[:] = [ts for ts in timestamps if now - ts <= window_seconds]
+    timestamps.append(now)
+
+    if len(_mem_spam_windows) > 5000:
+        stale_keys = [
+            k for k, values in _mem_spam_windows.items()
+            if not values or now - values[-1] > window_seconds * 2
+        ]
+        for stale_key in stale_keys:
+            _mem_spam_windows.pop(stale_key, None)
+
+    count = len(timestamps)
+    return count > limit, count
 
 async def is_duplicate_message(device_id: str, from_phone: str, timestamp: int, db: AsyncSession) -> bool:
     """
@@ -163,6 +357,8 @@ async def find_escalation_context(
     agent,
     db: AsyncSession,
     quoted_text: str | None = None,
+    quoted_stanza_id: str | None = None,
+    operator_session = None,
 ) -> tuple[str | None, str | None]:
     """
     Cari session user yang sedang dalam eskalasi aktif untuk agent ini.
@@ -182,24 +378,30 @@ async def find_escalation_context(
 
     routed_by_quoted_case = False
 
-    # Strategy 1: operator reply (quote) pesan eskalasi → parse case_id dari quoted_text
-    if quoted_text:
-        m = re.search(r'ID Kasus:\s*(esc_\d+_[a-f0-9]+)', quoted_text)
-        if m:
-            case_id = m.group(1)
-            # Cari session yang punya case_id ini di metadata_
-            case_result = await db.execute(
-                select(Session).where(
-                    Session.agent_id == agent.id,
-                    Session.metadata_["escalation_case_id"].astext == case_id,
-                )
-            )
-            esc_session = case_result.scalars().first()
-            if esc_session:
-                routed_by_quoted_case = True
-                log.info("find_escalation_context.by_case_id", case_id=case_id, session_id=str(esc_session.id))
+    # Strategy 1: operator reply (quote) pesan eskalasi → match WhatsApp message ID.
+    esc_session, case_id = await find_session_by_quoted_message_id(agent, db, quoted_stanza_id)
+    if esc_session:
+        routed_by_quoted_case = True
+        log.info("find_escalation_context.by_message_id", case_id=case_id, session_id=str(esc_session.id))
 
-    # Strategy 2: fallback — ambil session eskalasi terbaru
+    # Strategy 2: fallback parse case_id/customer phone from quoted_text.
+    if not esc_session:
+        esc_session, case_id = await find_session_by_quoted_case(agent, db, quoted_text)
+        if esc_session:
+            routed_by_quoted_case = True
+            log.info("find_escalation_context.by_case_id", case_id=case_id, session_id=str(esc_session.id))
+
+    if esc_session and operator_session is not None:
+        await remember_operator_escalation_route(operator_session, esc_session, case_id, db)
+
+    # Strategy 3: continue the customer selected by an earlier quoted operator reply.
+    if not esc_session and operator_session is not None:
+        esc_session, case_id = await find_session_by_operator_active_route(agent, db, operator_session)
+        if esc_session:
+            routed_by_quoted_case = True
+            log.info("find_escalation_context.by_operator_active_route", case_id=case_id, session_id=str(esc_session.id))
+
+    # Strategy 4: fallback — ambil session eskalasi terbaru
     if not esc_session:
         esc_result = await db.execute(
             select(Session)
@@ -213,6 +415,9 @@ async def find_escalation_context(
         )
         esc_session = esc_result.scalars().first()
         if esc_session:
+            case_id = _route_case_id(esc_session)
+            if operator_session is not None:
+                await remember_operator_escalation_route(operator_session, esc_session, case_id, db)
             log.info("find_escalation_context.by_latest", session_id=str(esc_session.id))
 
     if not esc_session:
@@ -248,7 +453,7 @@ async def find_escalation_context(
     if routed_by_quoted_case:
         route_note = (
             "ROUTING: operator_reply_quoted_escalation. "
-            "Operator membalas pesan eskalasi dengan fitur reply WhatsApp; balasan operator saat ini ditujukan untuk customer ini."
+            "Operator sedang berada dalam konteks reply eskalasi WhatsApp; pesan operator saat ini ditujukan untuk customer ini."
         )
         escalation_context = f"{route_note}\n{escalation_context or ''}".strip()
 

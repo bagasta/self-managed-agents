@@ -33,13 +33,46 @@ from typing import Any
 import structlog
 from langchain_core.tools import tool
 from openai import AsyncOpenAI
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import get_settings
+from app.core.utils.phone_utils import normalize_phone
 from app.models.agent import Agent
 
 logger = structlog.get_logger(__name__)
+
+
+def _owner_variants(owner_phone: str | None) -> list[str]:
+    """Return stable owner identifiers used by old and new agent rows."""
+    variants: list[str] = []
+    for candidate in (owner_phone, normalize_phone(owner_phone or "")):
+        if candidate and candidate not in variants:
+            variants.append(candidate)
+    return variants
+
+
+def _agent_belongs_to_owner(agent: Agent, owner_phone: str | None) -> bool:
+    """Check ownership via canonical owner field and legacy operator_ids."""
+    variants = set(_owner_variants(owner_phone))
+    if not variants:
+        return False
+    owner_external_id = getattr(agent, "owner_external_id", None)
+    if owner_external_id in variants or normalize_phone(owner_external_id or "") in variants:
+        return True
+    for op in (getattr(agent, "operator_ids", None) or []):
+        if op in variants or normalize_phone(op or "") in variants:
+            return True
+    return False
+
+
+def _owner_filter(owner_phone: str | None):
+    variants = _owner_variants(owner_phone)
+    if not variants:
+        return Agent.id.is_(None)
+    clauses = [Agent.owner_external_id.in_(variants)]
+    clauses.extend(Agent.operator_ids.contains([variant]) for variant in variants)
+    return or_(*clauses)
 
 # ---------------------------------------------------------------------------
 # Structured preset definitions — source of truth for agent types
@@ -78,21 +111,25 @@ AGENT_PRESETS: dict[str, dict] = {
         "instruction_skeleton": (
             "Kamu adalah {name}, programmer full-stack yang mengeksekusi task coding dan deploy.\n\n"
             "CARA KERJA WAJIB untuk setiap task coding/web/deploy:\n"
-            "1. Tulis semua file ke workspace (write_file) — jangan tanya konfirmasi dulu\n"
-            "2. Cek status: panggil get_deployment_status()\n"
+            "1. Untuk website/web app/frontend/landing page/portfolio/dashboard prototype: gunakan vanilla HTML/CSS/JavaScript saja\n"
+            "   - File wajib terpisah: index.html, styles.css, script.js jika perlu interaksi\n"
+            "   - JANGAN inline CSS/JS di HTML\n"
+            "   - JANGAN pakai React/Next/Vue/Svelte/Astro/Tailwind/Bootstrap/Vite/npm/npx/CDN library/framework frontend\n"
+            "2. Tulis semua file ke workspace (write_file) — jangan tanya konfirmasi dulu\n"
+            "3. Cek status: panggil get_deployment_status()\n"
             "   - Jika 'running' → kembalikan URL yang ada, jangan deploy ulang\n"
-            "   - Jika 'not_deployed' → lanjut ke langkah 3\n"
-            "3. Deploy: panggil deploy_app(command, port)\n"
-            "4. Verifikasi: panggil get_deployment_status() lagi — pastikan URL ada dan status 'running'\n"
+            "   - Jika 'not_deployed' → lanjut ke langkah 4\n"
+            "4. Deploy: panggil deploy_app(command, port)\n"
+            "5. Verifikasi: panggil get_deployment_status() lagi — pastikan URL ada dan status 'running'\n"
             "   - Jika URL kosong atau error → panggil get_deployment_logs() → debug → perbaiki\n"
-            "5. Jawab user dengan ramah dan asisten-like (seperti asisten manusia), tapi WAJIB sertakan URL hasil deploy.\n\n"
+            "6. Jawab user dengan ramah dan asisten-like (seperti asisten manusia), tapi WAJIB sertakan URL hasil deploy.\n\n"
             "ATURAN KERAS:\n"
             "- Bersikaplah seperti AI Assistant yang ramah, gunakan bahasa yang natural.\n"
             "- JANGAN menggunakan format robotik/algoritma seperti 'STATUS: SUCCESS | DEPLOY_URL:'.\n"
             "- JANGAN tampilkan source code di jawaban akhir kecuali user eksplisit minta\n"
             "- JANGAN jelaskan cara kerja kode panjang lebar — langsung eksekusi\n"
             "- Task BELUM selesai sampai deploy_app() sukses dan URL dikonfirmasi\n"
-            "- Untuk static website: deploy_app('python3 -m http.server 8080', 8080)\n"
+            "- Untuk static website vanilla: deploy_app('cd /workspace/src && python3 -m http.server 8080', 8080)\n"
             "- Untuk Flask/FastAPI: deploy_app('pip install flask && python app.py', 8080)\n"
             "- Untuk Node.js: deploy_app('npm install && node server.js', 3000)"
         ),
@@ -647,6 +684,11 @@ AGENT_PRESETS: dict[str, dict] = {
     },
 }
 
+for _preset in AGENT_PRESETS.values():
+    _preset_tools_config = _preset.get("tools_config")
+    if isinstance(_preset_tools_config, dict):
+        _preset_tools_config.setdefault("tavily", True)
+
 # ---------------------------------------------------------------------------
 # Known runtime limitations — machine-readable
 # ---------------------------------------------------------------------------
@@ -741,6 +783,7 @@ _TOOLS_CONFIG_DOCS = {
     "scheduler": "Set reminder, cron job, tugas terjadwal. Default OFF.",
     "rag": "Cari jawaban dari dokumen yang diupload. Default OFF.",
     "http": "HTTP GET/POST/PATCH/DELETE ke API eksternal. Default OFF.",
+    "tavily": "Web browsing/search via Tavily (tavily_search/tavily_extract). Default ON jika TAVILY_API_KEY tersedia.",
     "mcp": "Koneksi ke MCP server eksternal (Notion, Google Calendar, dll). Default OFF.",
     "whatsapp_media": "Kirim gambar dan dokumen via WhatsApp. Default OFF. Aktifkan untuk agent WA.",
     "wa_agent_manager": "Kelola WA device/QR agent lain. Default OFF. Khusus meta-agent.",
@@ -974,12 +1017,19 @@ KEPRIBADIAN
 
 CARA KERJA WAJIB untuk setiap task coding/web:
 Delegasikan semua task coding dan deploy ke sys_coder via tool task().
-Contoh: task(name="sys_coder", task="Buat landing page HTML dengan judul 'Halo Dunia', deploy, kembalikan URL")
+Contoh: task(name="sys_coder", task="Buat landing page vanilla HTML/CSS/JS terpisah dengan judul 'Halo Dunia', tanpa framework/inline CSS/JS, deploy, kembalikan URL")
 
 sys_coder menangani:
 - Menulis semua file kode ke workspace
 - Mengecek dan menjalankan deployment
 - Mendapatkan URL publik yang bisa diakses
+
+ATURAN WEB RINGAN
+- Untuk website/web app/frontend/landing page/portfolio/dashboard prototype, instruksikan sys_coder memakai vanilla HTML/CSS/JavaScript saja.
+- File wajib terpisah: index.html, styles.css, script.js jika butuh interaksi.
+- Jangan pakai inline CSS/JS.
+- Jangan pakai React, Next.js, Vue, Svelte, Astro, Tailwind, Bootstrap, Vite, npm/npx, CDN library, atau framework/package frontend lain.
+- Tujuan aturan ini: task lebih cepat, sandbox lebih ringan, dan deploy cukup pakai python http.server.
 
 Kamu (main agent) menangani:
 - Menerima dan memahami request user
@@ -1348,6 +1398,11 @@ def build_builder_tools(
                 "- http_get(url) / http_post(url, body) / http_patch(url, body) / http_delete(url) — "
                 "akses API eksternal, ambil data dari web, atau kirim data ke sistem lain."
             )
+        if tc_preset.get("tavily", True):
+            tool_hints.append(
+                "- tavily_search(query) / tavily_extract(urls, query) — browsing web dengan Tavily. "
+                "Gunakan untuk info terbaru, riset, rekomendasi, berita, harga, dan membaca sumber URL."
+            )
         if tc_preset.get("wa_agent_manager"):
             tool_hints.append(
                 "- send_agent_wa_qr(agent_id, caption, phone) — kirim QR WhatsApp ke nomor tertentu agar user bisa scan dan connect."
@@ -1386,7 +1441,8 @@ def build_builder_tools(
                 "Agent ini memiliki subagent bernama sys_coder yang tugasnya KHUSUS eksekusi kode dan deploy website.\n"
                 "System prompt HARUS instruksikan agent untuk:\n"
                 "- Delegasikan SEMUA task coding/web/deploy ke sys_coder via task(name='sys_coder', task='...')\n"
-                "- task description ke sys_coder harus RINGKAS (maks 3-4 kalimat): sebutkan apa yang dibuat, teknologi, port jika perlu\n"
+                "- Untuk request web/frontend, task description WAJIB menyebut: vanilla HTML/CSS/JavaScript terpisah, tanpa framework, tanpa inline CSS/JS\n"
+                "- task description ke sys_coder harus RINGKAS (maks 3-4 kalimat): sebutkan apa yang dibuat, teknologi vanilla, port jika perlu\n"
                 "- JANGAN sertakan spec detail, pseudocode, atau desain panjang di task description — sys_coder sudah tau cara kerjanya\n"
                 "- sys_coder akan menulis file, deploy, dan kembalikan URL publik\n"
                 "- Main agent hanya orchestrate: terima request → delegate ke sys_coder → relay hasil ke user\n"
@@ -1557,6 +1613,7 @@ def build_builder_tools(
                 "builder": "create_agent/update_agent/get_agent_detail/list_my_agents/set_agent_memory",
                 "whatsapp": "send_agent_wa_qr untuk kirim QR agent baru",
                 "coding": "sandbox + deploy + subagents sys_coder",
+                "browsing": "tavily_search/tavily_extract untuk web search dan baca URL",
                 "productivity": "scheduler untuk reminder, mcp.google_workspace untuk Google",
             },
             "input_types": [
@@ -1617,7 +1674,6 @@ def build_builder_tools(
             )
             from app.models.agent import Agent
             from app.models.subscription import SubscriptionPlan
-            from sqlalchemy import or_
 
             target_phone = phone or owner_phone
             if not target_phone:
@@ -1644,10 +1700,7 @@ def build_builder_tools(
                 active_count_result = await db.execute(
                     select(Agent).where(
                         Agent.is_deleted.is_(False),
-                        or_(
-                            Agent.owner_external_id == target_phone,
-                            Agent.operator_ids.contains([target_phone]),
-                        ),
+                        _owner_filter(target_phone),
                     )
                 )
                 active_agents = active_count_result.scalars().all()
@@ -1798,12 +1851,14 @@ def build_builder_tools(
         tools_config = dict(preset.get("tools_config", {
             "memory": True, "skills": True, "escalation": True
         }))
+        tools_config.setdefault("tavily", True)
 
         # Override with explicitly requested features
         feature_map = {
             "rag": "rag", "dokumen": "rag", "faq": "rag", "document": "rag",
             "scheduler": "scheduler", "reminder": "scheduler", "jadwal": "scheduler",
             "http": "http", "api": "http",
+            "tavily": "tavily", "browse": "tavily", "browser": "tavily", "search": "tavily",
             "sandbox": "sandbox", "coding": "sandbox", "kode": "sandbox", "prototype": "sandbox", "website": "sandbox",
             "deploy": "deploy",
             "whatsapp_media": "whatsapp_media", "media": "whatsapp_media", "gambar": "whatsapp_media",
@@ -2057,6 +2112,8 @@ def build_builder_tools(
         except json.JSONDecodeError:
             errors.append("tools_config bukan JSON yang valid")
             tc = {}
+        if isinstance(tc, dict):
+            tc.setdefault("tavily", True)
 
         # Dependency checks — machine-enforced
         if tc.get("tool_creator") and not tc.get("sandbox"):
@@ -2194,6 +2251,8 @@ def build_builder_tools(
         )
         if tc_error:
             return f"[error] tools_config bukan JSON/object yang valid: {tc_error}"
+        tc.setdefault("tavily", True)
+        owner_ids = _owner_variants(owner_phone)
 
         ec, ec_error = _parse_json_arg(escalation_config, {}, expected=dict)
         if ec_error:
@@ -2212,9 +2271,9 @@ def build_builder_tools(
             async with db_factory() as db:
                 dup_result = await db.execute(
                     select(Agent).where(
-                        Agent.name == name.strip(),
+                        func.lower(Agent.name) == name.strip().lower(),
                         Agent.is_deleted.is_(False),
-                        Agent.operator_ids.contains([owner_phone]),
+                        _owner_filter(owner_phone),
                     )
                 )
                 dup = dup_result.scalar_one_or_none()
@@ -2227,8 +2286,9 @@ def build_builder_tools(
 
         # operator_ids: selalu include owner_phone + operator_phone yang diminta
         op_ids: list[str] = []
-        if owner_phone:
-            op_ids.append(owner_phone)
+        for owner_id in owner_ids:
+            if owner_id and owner_id not in op_ids:
+                op_ids.append(owner_id)
         if operator_phone and operator_phone not in op_ids:
             op_ids.append(operator_phone)
 
@@ -2388,7 +2448,7 @@ def build_builder_tools(
             agent = result.scalar_one_or_none()
             if not agent:
                 return f"[error] Agent dengan ID {agent_id} tidak ditemukan"
-            if owner_phone and owner_phone not in (agent.operator_ids or []):
+            if owner_phone and not _agent_belongs_to_owner(agent, owner_phone):
                 return "[error] Kamu tidak punya akses ke agent ini"
 
             from app.core.domain.memory_service import upsert_memory
@@ -2454,17 +2514,32 @@ def build_builder_tools(
             # Cek kepemilikan
             is_self_update = self_agent_id and str(agent_uuid) == self_agent_id
             if is_self_update:
-                if owner_phone and owner_phone not in (agent.operator_ids or []):
+                if owner_phone and not _agent_belongs_to_owner(agent, owner_phone):
                     return (
                         "[error] Hanya operator yang terdaftar yang boleh memodifikasi konfigurasi agent builder ini. "
                         f"Nomor kamu ({owner_phone}) tidak ada di daftar operator."
                     )
-            elif owner_phone and owner_phone not in (agent.operator_ids or []):
+            elif owner_phone and not _agent_belongs_to_owner(agent, owner_phone):
                 return f"[error] Kamu tidak punya akses ke agent ini. Hanya agent milikmu yang bisa diubah."
 
             updated_fields: list[str] = []
 
             if name and name.strip():
+                dup_result = await db.execute(
+                    select(Agent).where(
+                        Agent.id != agent_uuid,
+                        func.lower(Agent.name) == name.strip().lower(),
+                        Agent.is_deleted.is_(False),
+                        _owner_filter(owner_phone),
+                    )
+                )
+                duplicate = dup_result.scalar_one_or_none()
+                if duplicate and getattr(duplicate, "id", None) != agent_uuid:
+                    return json.dumps({
+                        "error": f"Agent lain dengan nama '{name.strip()}' sudah ada.",
+                        "existing_agent_id": str(duplicate.id),
+                        "hint": "Pilih nama agent yang unik atau update agent tersebut memakai existing_agent_id.",
+                    }, ensure_ascii=False)
                 agent.name = name.strip()
                 updated_fields.append("name")
 
@@ -2489,6 +2564,7 @@ def build_builder_tools(
                     new_tc = json.loads(tools_config)
                     existing = dict(agent.tools_config) if agent.tools_config else {}
                     existing.update(new_tc)
+                    existing.setdefault("tavily", True)
                     agent.tools_config = existing
                     updated_fields.append("tools_config")
                 except json.JSONDecodeError:
@@ -2597,7 +2673,7 @@ def build_builder_tools(
 
         # Cek kepemilikan — bypass jika membaca diri sendiri
         is_self = self_agent_id and str(agent_uuid) == self_agent_id
-        if not is_self and owner_phone and owner_phone not in (agent.operator_ids or []):
+        if not is_self and owner_phone and not _agent_belongs_to_owner(agent, owner_phone):
             return f"[error] Kamu tidak punya akses ke agent ini"
 
         memory_summary: dict[str, str] = {}
@@ -2664,10 +2740,7 @@ def build_builder_tools(
                 )
                 all_agents = result.scalars().all()
 
-            my_agents = [
-                a for a in all_agents
-                if owner_phone in (a.operator_ids or [])
-            ]
+                my_agents = [a for a in all_agents if _agent_belongs_to_owner(a, owner_phone)]
 
             if not my_agents:
                 return json.dumps({

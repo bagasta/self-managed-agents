@@ -105,6 +105,8 @@ class TestArthurConfig:
         src = p.read_text()
         assert '"http": False' in src or "'http': False" in src, \
             "Arthur harus memakai builder tools internal, bukan HTTP/ngrok platform"
+        assert '"tavily": True' in src or "'tavily': True" in src, \
+            "Arthur harus default punya browsing Tavily"
         assert "wa_agent_manager" in src, \
             "Arthur butuh wa_agent_manager untuk kirim QR ke user"
 
