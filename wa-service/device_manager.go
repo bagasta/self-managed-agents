@@ -373,6 +373,41 @@ func (dm *DeviceManager) SendMessage(deviceID, to, text string) (types.MessageID
 	return resp.ID, sendErr
 }
 
+func (dm *DeviceManager) SendContact(deviceID, to, displayName, phone string) (types.MessageID, error) {
+	dm.mu.RLock()
+	info, ok := dm.devices[deviceID]
+	dm.mu.RUnlock()
+
+	if !ok {
+		return "", fmt.Errorf("device %s not found", deviceID)
+	}
+	if info.Status != StatusConnected {
+		return "", fmt.Errorf("device %s not connected (status: %s)", deviceID, info.Status)
+	}
+	if info.Client.Store.ID == nil {
+		return "", fmt.Errorf("device %s: no valid WA session (needs re-scan QR)", deviceID)
+	}
+
+	jid, err := resolveJID(info.Client, to)
+	if err != nil {
+		return "", err
+	}
+	dm.stopTypingKeepAlive(deviceID, jid)
+
+	cleanPhone := strings.TrimPrefix(strings.TrimSpace(phone), "+")
+	vcard := fmt.Sprintf("BEGIN:VCARD\nVERSION:3.0\nFN:%s\nTEL;type=CELL;type=VOICE;waid=%s:+%s\nEND:VCARD", displayName, cleanPhone, cleanPhone)
+	resp, sendErr := info.Client.SendMessage(context.Background(), jid, &waE2E.Message{
+		ContactMessage: &waE2E.ContactMessage{
+			DisplayName: proto.String(displayName),
+			Vcard:       proto.String(vcard),
+		},
+	})
+	if sendErr != nil {
+		log.Printf("[%s] send contact to %s failed: %v", deviceID, to, sendErr)
+	}
+	return resp.ID, sendErr
+}
+
 // StartTyping starts or refreshes the typing keep-alive for a chat.
 func (dm *DeviceManager) StartTyping(deviceID, to string) error {
 	dm.mu.RLock()

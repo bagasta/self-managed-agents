@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode"
 )
 
 type Router struct {
@@ -49,6 +50,37 @@ func isDisconnect(text string) bool {
 	return false
 }
 
+func normalizeTrialCode(text string) string {
+	var b strings.Builder
+	for _, r := range strings.ToUpper(strings.TrimSpace(text)) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+		}
+	}
+	code := b.String()
+	if len(code) > 6 {
+		return code[:6]
+	}
+	return code
+}
+
+func trialCodeCandidates(text string) []string {
+	seen := map[string]bool{}
+	candidates := []string{}
+	for _, token := range strings.Fields(text) {
+		code := normalizeTrialCode(token)
+		if len(code) == 6 && strings.IndexFunc(code, unicode.IsDigit) >= 0 && !seen[code] {
+			seen[code] = true
+			candidates = append(candidates, code)
+		}
+	}
+	code := normalizeTrialCode(text)
+	if len(code) == 6 && strings.IndexFunc(code, unicode.IsDigit) >= 0 && !seen[code] {
+		candidates = append(candidates, code)
+	}
+	return candidates
+}
+
 func (r *Router) HandleMessage(msg IncomingMessage) {
 	// Forward raw message to optional webhook regardless of routing
 	if r.webhookURL != "" {
@@ -65,9 +97,20 @@ func (r *Router) HandleMessage(msg IncomingMessage) {
 
 	if connected && isDisconnect(msg.Text) {
 		_ = r.store.Delete(msg.From)
-		_, _ = r.wa.SendText(msg.ChatID, "✅ Kamu berhasil disconnect dari agent.\n\nKirim *connect AGENT_ID* kapan saja untuk connect ke agent lagi.")
+		_, _ = r.wa.SendText(msg.ChatID, "✅ Kamu berhasil disconnect dari agent.\n\nKirim kode baru dari Arthur kapan saja untuk connect ke agent lagi.")
 		log.Printf("[dev-router] %s disconnected from agent %s", msg.From, conn.AgentID)
 		return
+	}
+
+	if connected {
+		for _, code := range trialCodeCandidates(msg.Text) {
+			if agentID, agentName, ok := r.claimTrialCode(code, msg.From, msg.ChatID, msg.PushName); ok {
+				r.saveConnection(msg.From, msg.ChatID, agentID)
+				_, _ = r.wa.SendText(msg.ChatID, fmt.Sprintf("✅ Berhasil switch ke agent *%s*.\n\nSekarang kamu bisa chat langsung di sini.\nKirim */stop* kalau mau disconnect.", agentName))
+				log.Printf("[dev-router] %s switched from agent %s to agent %s via trial code", msg.From, conn.AgentID, agentID)
+				return
+			}
+		}
 	}
 
 	if !connected {
@@ -75,6 +118,23 @@ func (r *Router) HandleMessage(msg IncomingMessage) {
 		if strings.HasPrefix(lower, "connect ") {
 			agentID := strings.TrimSpace(msg.Text[len("connect "):])
 			r.handleConnect(msg.From, msg.ChatID, agentID)
+			return
+		}
+		codes := trialCodeCandidates(msg.Text)
+		if len(codes) > 0 {
+			for _, code := range codes {
+				if agentID, agentName, ok := r.claimTrialCode(code, msg.From, msg.ChatID, msg.PushName); ok {
+					r.saveConnection(msg.From, msg.ChatID, agentID)
+					_, _ = r.wa.SendText(msg.ChatID, fmt.Sprintf("✅ Berhasil terhubung ke agent *%s*!\n\nSekarang kamu bisa chat langsung di sini.\nKirim */stop* kalau mau disconnect.", agentName))
+					log.Printf("[dev-router] %s connected to agent %s via trial code", msg.From, agentID)
+					return
+				}
+			}
+			if len(codes) == 1 {
+				_, _ = r.wa.SendText(msg.ChatID, "❌ Kode tidak ditemukan atau sudah tidak aktif.\n\nMinta kode baru dari Arthur, lalu kirim 6 karakter kodenya ke sini.")
+				return
+			}
+			_, _ = r.wa.SendText(msg.ChatID, "❌ Kode di pesan ini tidak ditemukan atau sudah tidak aktif.\n\nBuka link dari Arthur lagi, atau kirim 6 karakter kode saja.")
 			return
 		}
 		// Check if this phone is an operator for any agent — auto-route without requiring 'connect'
@@ -91,6 +151,17 @@ func (r *Router) HandleMessage(msg IncomingMessage) {
 	r.forwardToAgent(conn.AgentID, msg)
 }
 
+func (r *Router) saveConnection(from, chatID, agentID string) {
+	conn := &UserConnection{
+		AgentID:     agentID,
+		ConnectedAt: time.Now(),
+		ChatID:      chatID,
+	}
+	if err := r.store.Set(from, conn); err != nil {
+		log.Printf("[dev-router] store set err: %v", err)
+	}
+}
+
 func (r *Router) handleConnect(from, chatID, agentID string) {
 	_, _ = r.wa.SendText(chatID, "⏳ Menghubungkan ke agent...")
 
@@ -101,17 +172,50 @@ func (r *Router) handleConnect(from, chatID, agentID string) {
 		return
 	}
 
-	conn := &UserConnection{
-		AgentID:     agentID,
-		ConnectedAt: time.Now(),
-		ChatID:      chatID,
-	}
-	if err := r.store.Set(from, conn); err != nil {
-		log.Printf("[dev-router] store set err: %v", err)
-	}
+	r.saveConnection(from, chatID, agentID)
 
 	_, _ = r.wa.SendText(chatID, fmt.Sprintf("✅ Berhasil terhubung ke agent *%s*!\n\nSekarang kamu bisa chat langsung di sini.\nKirim *berhenti* atau */stop* untuk disconnect.", agentName))
 	log.Printf("[dev-router] %s connected to agent %s", from, agentID)
+}
+
+func (r *Router) claimTrialCode(codeText, from, chatID, pushName string) (string, string, bool) {
+	payload := map[string]string{
+		"code":      normalizeTrialCode(codeText),
+		"phone":     from,
+		"chat_id":   chatID,
+		"push_name": pushName,
+	}
+	data, _ := json.Marshal(payload)
+	req, err := http.NewRequest("POST", r.mainAPIURL+"/v1/channels/wa-dev/claim-code", bytes.NewReader(data))
+	if err != nil {
+		log.Printf("[dev-router] build claim-code request err: %v", err)
+		return "", "", false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", r.mainAPIKey)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("[dev-router] claim-code request err: %v", err)
+		return "", "", false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		log.Printf("[dev-router] claim-code HTTP %d: %s", resp.StatusCode, string(b))
+		return "", "", false
+	}
+
+	var result struct {
+		AgentID   string `json:"agent_id"`
+		AgentName string `json:"agent_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		log.Printf("[dev-router] decode claim-code err: %v", err)
+		return "", "", false
+	}
+	return result.AgentID, result.AgentName, result.AgentID != ""
 }
 
 // forwardToAgent POSTs the message to Python /v1/channels/wa/incoming using a

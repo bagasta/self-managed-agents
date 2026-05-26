@@ -116,7 +116,7 @@ class TestBuilderToolsReturnsList:
         from app.core.tools.builder_tools import build_builder_tools
         db = _make_mock_db()
         tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
-        assert len(tools) == 17, f"Harus ada 17 tools, dapat {len(tools)}"
+        assert len(tools) == 19, f"Harus ada 19 tools, dapat {len(tools)}"
 
     def test_all_tools_have_name(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -150,8 +150,10 @@ class TestBuilderToolsReturnsList:
             "list_available_wa_devices",
             "validate_agent_config",
             "create_agent",
+            "create_wa_dev_trial_link",
             "set_agent_memory",
             "update_agent",
+            "delete_agent",
             "get_agent_detail",
             "list_my_agents",
             "generate_google_auth_link",
@@ -162,7 +164,7 @@ class TestBuilderToolsReturnsList:
         from app.core.tools.builder_tools import build_builder_tools
         db = _make_mock_db()
         tools = build_builder_tools(db_factory=db, owner_phone=None)
-        assert len(tools) == 17
+        assert len(tools) == 19
 
 
 class TestBuilderOwnershipHelpers:
@@ -370,7 +372,116 @@ class TestCreateAgent:
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Section 5: list_my_agents
+# Section 5: create_wa_dev_trial_link
+# ────────────────────────────────────────────────────────────────────────────
+
+class TestCreateWADevTrialLink:
+    def test_uses_whatsapp_context_when_phone_omitted(self):
+        from app.core.tools.builder_tools import build_builder_tools
+        db = _make_mock_db()
+
+        my_agent = _make_mock_agent(name="Agent Baru", operator_ids=["+62811xxx"])
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = my_agent
+        db.execute = AsyncMock(return_value=mock_result)
+
+        settings = MagicMock()
+        settings.wa_dev_public_name = "Arthur AI Dev"
+        settings.wa_dev_public_phone = "+628123456789"
+
+        with (
+            patch("app.core.tools.builder_tools.get_settings", return_value=settings),
+            patch(
+                "app.core.domain.wa_dev_trial_service.ensure_wa_dev_trial_code",
+                new=AsyncMock(return_value="AB234C"),
+            ),
+            patch("app.core.infra.wa_client.send_wa_contact", new=AsyncMock()) as send_contact,
+        ):
+            tools = build_builder_tools(
+                db_factory=db,
+                owner_phone="+62811xxx",
+                device_id="arthur-device",
+                default_target="+62811xxx",
+            )
+            tool = next(t for t in tools if t.name == "create_wa_dev_trial_link")
+            result = _run(tool.ainvoke({"agent_id": str(my_agent.id)}))
+
+        data = json.loads(result)
+        assert data["success"] is True
+        assert data["code"] == "AB234C"
+        assert data["contact_sent"] is True
+        send_contact.assert_awaited_once_with(
+            "arthur-device",
+            "+62811xxx",
+            "Arthur AI Dev",
+            "628123456789",
+        )
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Section 6: delete_agent
+# ────────────────────────────────────────────────────────────────────────────
+
+class TestDeleteAgent:
+    def test_requires_exact_name_confirmation(self):
+        from app.core.tools.builder_tools import build_builder_tools
+        db = _make_mock_db()
+
+        my_agent = _make_mock_agent(name="Agent Lama", operator_ids=["+62811xxx"])
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = my_agent
+        db.execute = AsyncMock(return_value=mock_result)
+
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "delete_agent")
+        result = _run(tool.ainvoke({"agent_id": str(my_agent.id)}))
+        data = json.loads(result)
+        assert data["needs_confirmation"] is True
+        assert my_agent.is_deleted is False
+        db.commit.assert_not_awaited()
+
+    def test_soft_deletes_owned_agent_after_confirmation(self):
+        from app.core.tools.builder_tools import build_builder_tools
+        db = _make_mock_db()
+
+        my_agent = _make_mock_agent(name="Agent Lama", operator_ids=["+62811xxx"])
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = my_agent
+        db.execute = AsyncMock(return_value=mock_result)
+
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "delete_agent")
+        result = _run(tool.ainvoke({
+            "agent_id": str(my_agent.id),
+            "confirm_name": "Agent Lama",
+        }))
+        data = json.loads(result)
+        assert data["success"] is True
+        assert my_agent.is_deleted is True
+        assert my_agent.version == 2
+        db.commit.assert_awaited()
+
+    def test_rejects_access_to_others_agent(self):
+        from app.core.tools.builder_tools import build_builder_tools
+        db = _make_mock_db()
+
+        other_agent = _make_mock_agent(name="Agent Orang", operator_ids=["+62999yyy"])
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = other_agent
+        db.execute = AsyncMock(return_value=mock_result)
+
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "delete_agent")
+        result = _run(tool.ainvoke({
+            "agent_id": str(other_agent.id),
+            "confirm_name": "Agent Orang",
+        }))
+        assert "[error]" in result
+        assert other_agent.is_deleted is False
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Section 6: list_my_agents
 # ────────────────────────────────────────────────────────────────────────────
 
 class TestListMyAgents:

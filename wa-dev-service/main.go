@@ -64,6 +64,7 @@ func main() {
 
 	// Send messages
 	mux.HandleFunc("POST /send/text", api.SendText)
+	mux.HandleFunc("POST /send/contact", api.SendContact)
 	mux.HandleFunc("POST /send/image", api.SendImage)
 	mux.HandleFunc("POST /send/image/url", api.SendImageURL)
 	mux.HandleFunc("POST /send/document", api.SendDocument)

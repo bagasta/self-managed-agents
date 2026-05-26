@@ -44,6 +44,7 @@ func main() {
 	mux.HandleFunc("POST /devices/{id}/qr", h.refreshQR)
 	mux.HandleFunc("GET /devices/{id}/status", h.getStatus)
 	mux.HandleFunc("POST /devices/{id}/send", h.sendMessage)
+	mux.HandleFunc("POST /devices/{id}/send-contact", h.sendContactMessage)
 	mux.HandleFunc("POST /devices/{id}/typing/start", h.startTyping)
 	mux.HandleFunc("POST /devices/{id}/typing/stop", h.stopTyping)
 	mux.HandleFunc("POST /devices/{id}/send-image", h.sendImageMessage)

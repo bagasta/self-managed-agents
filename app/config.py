@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     # WhatsApp microservice
     wa_service_url: str = "http://localhost:8080"
     wa_dev_service_url: str = "http://localhost:8081"
+    wa_dev_public_phone: str = ""
+    wa_dev_public_name: str = "Arthur AI Dev"
 
     # Google Workspace MCP runtime routing
     workspace_mcp_url: str = ""

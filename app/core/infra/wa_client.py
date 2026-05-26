@@ -74,6 +74,38 @@ async def send_wa_message(device_id: str, to: str, text: str) -> dict:
         return resp.json() if resp.content else {"status": "sent"}
 
 
+async def get_wa_dev_status() -> dict:
+    """Return shared wa-dev-service connection status."""
+    async with httpx.AsyncClient(timeout=_WA_TIMEOUT_DEFAULT) as client:
+        resp = await client.get(f"{_wa_dev_base_url()}/status")
+        resp.raise_for_status()
+        return resp.json() if resp.content else {}
+
+
+async def send_wa_dev_contact(to: str, display_name: str, phone: str) -> dict:
+    """Send the shared wa-dev-service number as a WhatsApp contact card."""
+    async with httpx.AsyncClient(timeout=_WA_TIMEOUT_DEFAULT) as client:
+        resp = await client.post(
+            f"{_wa_dev_base_url()}/send/contact",
+            json={"to": to, "display_name": display_name, "phone": phone},
+        )
+        resp.raise_for_status()
+        return resp.json() if resp.content else {"status": "sent"}
+
+
+async def send_wa_contact(device_id: str, to: str, display_name: str, phone: str) -> dict:
+    """Send a WhatsApp contact card from the specified device."""
+    if device_id.startswith("wadev_"):
+        return await send_wa_dev_contact(to, display_name, phone)
+    async with httpx.AsyncClient(timeout=_WA_TIMEOUT_DEFAULT) as client:
+        resp = await client.post(
+            f"{_base_url()}/devices/{device_id}/send-contact",
+            json={"to": to, "display_name": display_name, "phone": phone},
+        )
+        resp.raise_for_status()
+        return resp.json() if resp.content else {"status": "sent"}
+
+
 async def start_wa_typing(device_id: str, to: str) -> None:
     """Start or refresh the WhatsApp typing keep-alive for a chat."""
     if device_id.startswith("wadev_"):

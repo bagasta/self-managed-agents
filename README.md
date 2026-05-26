@@ -79,6 +79,8 @@ AGENT_TIMEOUT_SECONDS=300
 # WhatsApp microservices
 WA_SERVICE_URL=http://localhost:8080
 WA_DEV_SERVICE_URL=http://localhost:8081
+WA_DEV_PUBLIC_PHONE=628xxxxxxxxxx
+WA_DEV_PUBLIC_NAME=Arthur AI Dev
 ```
 
 ### 3. Jalankan PostgreSQL
@@ -276,8 +278,9 @@ Satu nomor WA shared untuk semua agent. Cocok untuk testing tanpa menyiapkan dev
 
 **Cara pakai:**
 ```
-connect {agentID}   → mulai sesi dengan agent tertentu
-berhenti            → disconnect dari agent
+ABC123              → mulai/switch sesi dengan agent lewat kode 6 karakter dari Arthur
+connect {agentID}   → legacy/dev: mulai sesi dengan agent tertentu
+berhenti atau /stop → disconnect dari agent
 ```
 
 **Fitur khusus wa-dev:**
@@ -294,6 +297,8 @@ Environment variables wa-dev-service (dibaca dari `.env` via `make wa-dev`):
 | `MAIN_API_KEY` | — | Sama dengan `API_KEY` di `.env` |
 | `WA_DEV_STORE_DIR` | `wa-dev-store` | Direktori SQLite session WA |
 | `CONNECTIONS_FILE` | `connections.json` | File mapping phone→agent |
+| `WA_DEV_PUBLIC_PHONE` | — | Nomor shared wa-dev untuk link `wa.me` Arthur |
+| `WA_DEV_PUBLIC_NAME` | `Arthur AI Dev` | Nama kontak vCard shared wa-dev |
 
 ---
 

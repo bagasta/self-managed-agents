@@ -162,6 +162,40 @@ func (h *Handlers) sendMessage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "sent", "message_id": string(messageID)})
 }
 
+// POST /devices/{id}/send-contact
+// Body: {"to": "+628xxx", "display_name": "Arthur AI Dev", "phone": "+628xxx"}
+func (h *Handlers) sendContactMessage(w http.ResponseWriter, r *http.Request) {
+	deviceID := r.PathValue("id")
+	if deviceID == "" {
+		writeError(w, http.StatusBadRequest, "device id required")
+		return
+	}
+
+	var req struct {
+		To          string `json:"to"`
+		DisplayName string `json:"display_name"`
+		Phone       string `json:"phone"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.To == "" || req.Phone == "" {
+		writeError(w, http.StatusBadRequest, "to and phone required")
+		return
+	}
+	if req.DisplayName == "" {
+		req.DisplayName = "Arthur AI"
+	}
+
+	log.Printf("[%s] send-contact request → %s (%s)", deviceID, req.To, req.DisplayName)
+	messageID, err := h.dm.SendContact(deviceID, req.To, req.DisplayName, req.Phone)
+	if err != nil {
+		log.Printf("[%s] send-contact FAILED → %s: %v", deviceID, req.To, err)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	log.Printf("[%s] send-contact OK → %s (message_id=%s)", deviceID, req.To, messageID)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "sent", "message_id": string(messageID)})
+}
+
 // POST /devices/{id}/typing/start
 // Body: {"to": "+628xxx"}
 func (h *Handlers) startTyping(w http.ResponseWriter, r *http.Request) {

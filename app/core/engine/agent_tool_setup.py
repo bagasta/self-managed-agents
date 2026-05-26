@@ -168,10 +168,14 @@ async def build_agent_tool_setup(
 
     capabilities = getattr(agent_model, "capabilities", []) or []
     if "builder" in capabilities:
+        channel_cfg = getattr(session, "channel_config", None)
+        channel_cfg = channel_cfg if isinstance(channel_cfg, dict) else {}
         tools.extend(build_builder_tools(
             db_factory=AsyncSessionLocal,
             owner_phone=memory_scope,
             self_agent_id=str(agent_id),
+            device_id=channel_cfg.get("device_id", "") or "",
+            default_target=channel_cfg.get("user_phone", "") or "",
         ))
         active_groups.append("builder")
 

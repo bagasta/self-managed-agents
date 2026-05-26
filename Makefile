@@ -28,7 +28,7 @@ install:
 dev:
 	uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
-wa:
+wa: wa-build
 	cd wa-service && PYTHON_WEBHOOK_URL=http://localhost:8000/v1/channels/wa/incoming ./wa-service
 
 wa-build:
@@ -37,7 +37,7 @@ wa-build:
 wa-dev-build:
 	cd wa-dev-service && go build -o wa-dev-service .
 
-wa-dev:
+wa-dev: wa-dev-build
 	cd wa-dev-service && set -a && . ../.env && set +a && MAIN_API_KEY=$$API_KEY MAIN_API_URL=http://localhost:8000 ./wa-dev-service
 
 dev-all:

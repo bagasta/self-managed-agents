@@ -226,6 +226,25 @@ func (wa *WhatsAppClient) SendText(chatID, text string) (types.MessageID, error)
 	return resp.ID, err
 }
 
+func (wa *WhatsAppClient) SendContact(to, displayName, phone string) (types.MessageID, error) {
+	if err := wa.checkConnected(); err != nil {
+		return "", err
+	}
+	jid, err := parseJID(to)
+	if err != nil {
+		return "", err
+	}
+	cleanPhone := strings.TrimPrefix(strings.TrimSpace(phone), "+")
+	vcard := fmt.Sprintf("BEGIN:VCARD\nVERSION:3.0\nFN:%s\nTEL;type=CELL;type=VOICE;waid=%s:+%s\nEND:VCARD", displayName, cleanPhone, cleanPhone)
+	resp, err := wa.client.SendMessage(context.Background(), jid, &waE2E.Message{
+		ContactMessage: &waE2E.ContactMessage{
+			DisplayName: proto.String(displayName),
+			Vcard:       proto.String(vcard),
+		},
+	})
+	return resp.ID, err
+}
+
 func (wa *WhatsAppClient) SendImage(to string, imageData []byte, caption, mimetype string) (types.MessageID, error) {
 	if err := wa.checkConnected(); err != nil {
 		return "", err

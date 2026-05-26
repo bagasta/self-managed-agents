@@ -801,6 +801,8 @@ def build_builder_tools(
     db_factory: async_sessionmaker,
     owner_phone: str | None = None,
     self_agent_id: str | None = None,
+    device_id: str = "",
+    default_target: str = "",
 ) -> list:
     """
     Build tools eksklusif untuk system agent (Agent Builder / Arthur).
@@ -810,9 +812,16 @@ def build_builder_tools(
         db_factory: async_sessionmaker factory — each tool call opens its own session
         owner_phone: external_user_id caller (nomor WA/JID) untuk scoping keamanan
         self_agent_id: UUID agent ini sendiri — untuk self-modification
+        device_id/default_target: konteks WhatsApp saat tersedia
     """
     from app.core.tools.builder_tools import build_builder_tools as _build
-    return _build(db_factory=db_factory, owner_phone=owner_phone, self_agent_id=self_agent_id)
+    return _build(
+        db_factory=db_factory,
+        owner_phone=owner_phone,
+        self_agent_id=self_agent_id,
+        device_id=device_id,
+        default_target=default_target,
+    )
 
 
 def build_deployment_tools(sandbox: "DockerSandbox") -> list:

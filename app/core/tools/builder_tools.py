@@ -13,14 +13,16 @@ Tools yang di-expose:
   list_available_wa_devices()           — WA devices yang belum di-assign ke agent
   validate_agent_config(...)            — validasi config sebelum create/update
   create_agent(...)                     — buat agent baru (di-scope ke owner_phone)
+  create_wa_dev_trial_link(...)         — generate kode + link shared WA Arthur untuk coba agent tanpa scan QR
   set_agent_memory(...)                 — simpan soul/blueprint langsung ke memory agent
   update_agent(...)                     — update agent yang sudah ada
   get_agent_detail(agent_id)            — baca konfigurasi agent
   list_my_agents()                      — list agent milik owner_phone ini
+  delete_agent(...)                     — soft delete agent milik owner_phone ini
 
 Keamanan:
   - create_agent otomatis memasukkan owner_phone ke operator_ids → agen terisolasi per user
-  - update_agent / get_agent_detail memverifikasi kepemilikan via operator_ids
+  - update_agent / get_agent_detail / delete_agent memverifikasi kepemilikan via operator_ids
   - list_my_agents hanya tampilkan agent yang memiliki owner_phone di operator_ids
 """
 from __future__ import annotations
@@ -29,6 +31,7 @@ import json
 import re
 import uuid
 from typing import Any
+from urllib.parse import quote
 
 import structlog
 from langchain_core.tools import tool
@@ -1151,6 +1154,8 @@ def build_builder_tools(
     db_factory: async_sessionmaker,
     owner_phone: str | None = None,
     self_agent_id: str | None = None,
+    device_id: str = "",
+    default_target: str = "",
 ) -> list:
     """
     Build semua builder tools untuk system agent.
@@ -1159,6 +1164,7 @@ def build_builder_tools(
         db_factory: async_sessionmaker factory — each tool call opens its own session
         owner_phone: external_user_id (nomor WA/JID) dari pengguna yang chat dengan Arthur.
         self_agent_id: UUID agent ini sendiri (Arthur) — untuk self-modification.
+        device_id/default_target: konteks WhatsApp saat Arthur dipanggil dari WA.
     """
 
     # ------------------------------------------------------------------ #
@@ -1408,6 +1414,10 @@ def build_builder_tools(
                 "- send_agent_wa_qr(agent_id, caption, phone) — kirim QR WhatsApp ke nomor tertentu agar user bisa scan dan connect."
             )
         tool_hints.append(
+            "- create_wa_dev_trial_link(agent_id, phone, force_new_code, send_contact) — "
+            "buat kode 6 karakter + link wa.me untuk user mencoba agent lewat nomor WhatsApp shared Arthur tanpa scan QR."
+        )
+        tool_hints.append(
             "- set_agent_memory(agent_id, key, value) — simpan soul atau blueprint ke memory agent setelah create, tanpa HTTP/API."
         )
         if tc_preset.get("scheduler"):
@@ -1610,7 +1620,7 @@ def build_builder_tools(
             "recommended_models": _RECOMMENDED_MODELS,
             "available_presets": list(AGENT_PRESETS.keys()),
             "important_tools": {
-                "builder": "create_agent/update_agent/get_agent_detail/list_my_agents/set_agent_memory",
+                "builder": "create_agent/update_agent/delete_agent/get_agent_detail/list_my_agents/set_agent_memory",
                 "whatsapp": "send_agent_wa_qr untuk kirim QR agent baru",
                 "coding": "sandbox + deploy + subagents sys_coder",
                 "browsing": "tavily_search/tavily_extract untuk web search dan baca URL",
@@ -2418,6 +2428,118 @@ def build_builder_tools(
             return f"[error] Gagal membuat agent: {exc}"
 
     # ------------------------------------------------------------------ #
+    # 4a. create_wa_dev_trial_link                                        #
+    # ------------------------------------------------------------------ #
+
+    @tool
+    async def create_wa_dev_trial_link(
+        agent_id: str,
+        phone: str = "",
+        force_new_code: bool = False,
+        send_contact: bool = True,
+    ) -> str:
+        """
+        Generate kode 6 karakter untuk menghubungkan agent ke nomor WhatsApp shared Arthur.
+
+        Gunakan setelah create_agent saat user ingin mencoba agent di WhatsApp tanpa
+        punya nomor khusus atau scan QR. Kirimkan hasilnya ke user sebagai opsi:
+        1) scan QR nomor sendiri via send_agent_wa_qr, atau
+        2) pakai nomor Arthur/shared trial dengan mengirim kode ini.
+
+        Args:
+            agent_id: UUID agent yang akan dicoba di nomor shared Arthur
+            phone: Nomor/JID tujuan untuk dikirimi vCard. Kosong = user saat ini.
+            force_new_code: True untuk rotate kode lama
+            send_contact: True untuk kirim contact card nomor shared Arthur ke user
+        """
+        try:
+            agent_uuid = uuid.UUID(agent_id)
+        except ValueError:
+            return f"[error] agent_id tidak valid: {agent_id}"
+
+        target = phone or default_target or owner_phone or ""
+        settings = get_settings()
+        contact_name = settings.wa_dev_public_name or "Arthur AI Dev"
+
+        async with db_factory() as db:
+            result = await db.execute(
+                select(Agent).where(Agent.id == agent_uuid, Agent.is_deleted.is_(False))
+            )
+            agent = result.scalar_one_or_none()
+            if not agent:
+                return f"[error] Agent dengan ID {agent_id} tidak ditemukan"
+            if owner_phone and not _agent_belongs_to_owner(agent, owner_phone):
+                return "[error] Kamu tidak punya akses ke agent ini"
+
+            from app.core.domain.wa_dev_trial_service import ensure_wa_dev_trial_code
+
+            code = await ensure_wa_dev_trial_code(db, agent, force_new=force_new_code)
+            await db.commit()
+
+        shared_phone = normalize_phone(settings.wa_dev_public_phone)
+        wa_status_error = ""
+        if not shared_phone:
+            try:
+                from app.core.infra.wa_client import get_wa_dev_status
+
+                status = await get_wa_dev_status()
+                shared_phone = normalize_phone(status.get("phone_number") or "")
+            except Exception as exc:
+                wa_status_error = str(exc)
+
+        if not shared_phone:
+            return json.dumps({
+                "success": True,
+                "agent_id": agent_id,
+                "code": code,
+                "contact_sent": False,
+                "warning": (
+                    "Kode berhasil dibuat, tapi WA_DEV_PUBLIC_PHONE belum dikonfigurasi "
+                    "dan nomor wa-dev-service tidak bisa dibaca."
+                ),
+                "wa_status_error": wa_status_error,
+            }, ensure_ascii=False, indent=2)
+
+        prefill = f"Halo Arthur, saya mau coba agent saya. Kode saya: {code}"
+        wa_me_url = f"https://wa.me/{shared_phone}?text={quote(prefill)}"
+
+        contact_sent = False
+        contact_error = ""
+        if send_contact and target:
+            if device_id and not device_id.startswith("wadev_"):
+                try:
+                    from app.core.infra.wa_client import send_wa_contact
+
+                    await send_wa_contact(device_id, target, contact_name, shared_phone)
+                    contact_sent = True
+                except Exception as exc:
+                    contact_error = str(exc)
+            elif device_id and device_id.startswith("wadev_"):
+                contact_error = (
+                    "Arthur sedang berjalan lewat nomor shared wa-dev, jadi vCard tidak dikirim "
+                    "agar kontak tidak terlihat dikirim dari nomor trial itu sendiri."
+                )
+            else:
+                contact_error = "Arthur session tidak punya device_id WhatsApp, jadi vCard tidak bisa dikirim dari nomor Arthur."
+
+        return json.dumps({
+            "success": True,
+            "agent_id": agent_id,
+            "code": code,
+            "shared_whatsapp_name": contact_name,
+            "shared_whatsapp_phone": f"+{shared_phone}",
+            "wa_me_url": wa_me_url,
+            "contact_sent": contact_sent,
+            "contact_error": contact_error,
+            "instruction_for_user": (
+                f"Simpan kontak {contact_name}, atau buka link wa.me. "
+                f"Kirim kode {code} untuk menghubungkan WhatsApp ke agent ini. "
+                "Kode bisa dipakai ulang; kirim /stop di WhatsApp kalau ingin disconnect. "
+                "Untuk switch agent, minta kode baru dari Arthur lalu kirim kode baru itu."
+            ),
+        }, ensure_ascii=False, indent=2)
+
+    # ------------------------------------------------------------------ #
     # 4b. set_agent_memory                                                #
     # ------------------------------------------------------------------ #
 
@@ -2646,7 +2768,88 @@ def build_builder_tools(
         }, ensure_ascii=False, indent=2)
 
     # ------------------------------------------------------------------ #
-    # 6. get_agent_detail                                                 #
+    # 6. delete_agent                                                     #
+    # ------------------------------------------------------------------ #
+
+    @tool
+    async def delete_agent(
+        agent_id: str,
+        confirm_name: str = "",
+    ) -> str:
+        """
+        Hapus agent milik user ini secara soft-delete.
+
+        Gunakan hanya setelah user eksplisit meminta hapus/delete agent dan sudah
+        mengonfirmasi nama agent. Jika user belum menyebut agent mana, panggil
+        list_my_agents() dulu. Jika confirm_name kosong atau tidak sama dengan
+        nama agent, tool akan meminta konfirmasi dan tidak menghapus.
+
+        Args:
+            agent_id: UUID agent yang akan dihapus
+            confirm_name: Nama agent persis sebagai konfirmasi hapus
+        """
+        try:
+            agent_uuid = uuid.UUID(agent_id)
+        except ValueError:
+            return f"[error] agent_id tidak valid: {agent_id}"
+
+        if self_agent_id and str(agent_uuid) == self_agent_id:
+            return "[error] Arthur tidak boleh menghapus dirinya sendiri."
+
+        async with db_factory() as db:
+            result = await db.execute(
+                select(Agent).where(Agent.id == agent_uuid, Agent.is_deleted.is_(False))
+            )
+            agent = result.scalar_one_or_none()
+            if not agent:
+                return f"[error] Agent dengan ID {agent_id} tidak ditemukan"
+            if owner_phone and not _agent_belongs_to_owner(agent, owner_phone):
+                return "[error] Kamu tidak punya akses untuk menghapus agent ini"
+
+            expected_name = (agent.name or "").strip()
+            if not confirm_name or confirm_name.strip() != expected_name:
+                return json.dumps({
+                    "success": False,
+                    "needs_confirmation": True,
+                    "agent_id": str(agent.id),
+                    "agent_name": expected_name,
+                    "message": (
+                        f"Konfirmasi dulu sebelum menghapus agent '{expected_name}'. "
+                        "Panggil delete_agent lagi dengan confirm_name persis sama dengan nama agent."
+                    ),
+                }, ensure_ascii=False, indent=2)
+
+            wa_device_id = agent.wa_device_id
+            wa_disconnect_error = ""
+            if wa_device_id and not str(wa_device_id).startswith("wadev_"):
+                try:
+                    from app.core.infra.wa_client import delete_wa_device
+
+                    await delete_wa_device(wa_device_id)
+                except Exception as exc:
+                    wa_disconnect_error = str(exc)
+                    logger.warning(
+                        "builder_tools.delete_agent.wa_disconnect_failed",
+                        agent_id=str(agent.id),
+                        error=wa_disconnect_error,
+                    )
+
+            agent.is_deleted = True
+            agent.version = (agent.version or 1) + 1
+            await db.commit()
+
+        logger.info("builder_tools.delete_agent.success", agent_id=agent_id, owner_phone=owner_phone)
+        return json.dumps({
+            "success": True,
+            "agent_id": agent_id,
+            "agent_name": expected_name,
+            "wa_device_id": wa_device_id,
+            "wa_disconnect_error": wa_disconnect_error,
+            "message": f"Agent '{expected_name}' berhasil dihapus.",
+        }, ensure_ascii=False, indent=2)
+
+    # ------------------------------------------------------------------ #
+    # 7. get_agent_detail                                                 #
     # ------------------------------------------------------------------ #
 
     @tool
@@ -2718,7 +2921,7 @@ def build_builder_tools(
         }, ensure_ascii=False, indent=2)
 
     # ------------------------------------------------------------------ #
-    # 7. list_my_agents                                                   #
+    # 8. list_my_agents                                                   #
     # ------------------------------------------------------------------ #
 
     @tool
@@ -2826,8 +3029,10 @@ def build_builder_tools(
         list_available_wa_devices,
         validate_agent_config,
         create_agent,
+        create_wa_dev_trial_link,
         set_agent_memory,
         update_agent,
+        delete_agent,
         get_agent_detail,
         list_my_agents,
         generate_google_auth_link,
