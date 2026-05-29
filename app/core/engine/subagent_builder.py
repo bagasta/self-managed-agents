@@ -25,6 +25,7 @@ Subagent tanpa sandbox: plain SubAgent dict, dapat FilesystemMiddleware dari par
 from __future__ import annotations
 
 import uuid
+import re
 from typing import Any
 
 from langchain_openai import ChatOpenAI
@@ -44,6 +45,51 @@ from app.core.engine.tool_builder import (
     build_tavily_tools,
     build_whatsapp_media_tools,
 )
+
+
+def should_expose_wa_media_tools(user_message: str) -> bool:
+    """Only expose direct WA media tools when the user's requested deliverable is media/file."""
+    text = (user_message or "").lower()
+    link_only_markers = (
+        "link aja",
+        "link saja",
+        "url aja",
+        "url saja",
+        "bentuk link",
+        "cukup link",
+        "hanya link",
+        "tanpa qr",
+        "jangan qr",
+        "ga usah qr",
+        "gak usah qr",
+        "nggak usah qr",
+    )
+    if any(marker in text for marker in link_only_markers):
+        return False
+
+    file_markers = (
+        "kirim file",
+        "kirim dokumen",
+        "kirim gambar",
+        "kirim foto",
+        "send file",
+        "send document",
+        "send image",
+        "pdf",
+        "docx",
+        "xlsx",
+        "csv",
+        "zip",
+        "gambar",
+        "foto",
+        "chart",
+        "grafik",
+        "laporan",
+        "dokumen",
+        "attachment",
+        "lampiran",
+    )
+    return any(re.search(rf"\b{re.escape(marker)}\b", text) for marker in file_markers)
 
 settings = get_settings()
 
@@ -306,6 +352,7 @@ def _build_system_subagent(
     parent_session_id: uuid.UUID,
     wa_device_id: str = "",
     wa_target: str = "",
+    expose_wa_media_tools: bool = False,
 ) -> tuple[dict, DockerSandbox | None]:
     """
     Build a SubAgent (or CompiledSubAgent) dict and optional DockerSandbox from a system sub-agent spec.
@@ -317,8 +364,8 @@ def _build_system_subagent(
     For non-sandbox subagents:
       Returns a plain SubAgent dict; FilesystemMiddleware from parent backend is sufficient.
 
-    wa_device_id / wa_target: when set, sandbox subagents get send_whatsapp_image and
-      send_whatsapp_document tools so they can deliver output directly to the user.
+    expose_wa_media_tools: when true and WA context exists, sandbox subagents get
+      send_whatsapp_image/send_whatsapp_document for direct file delivery.
     """
     sub_cfg = spec.get("tools_config", {})
     extra_tools: list = []
@@ -340,7 +387,7 @@ def _build_system_subagent(
         # Give sandbox subagents WA media tools when parent session is on WhatsApp.
         # Subagents write output to /workspace/output/ and call send_whatsapp_image /
         # send_whatsapp_document to deliver results without routing through main agent.
-        if wa_device_id and wa_target:
+        if expose_wa_media_tools and wa_device_id and wa_target:
             extra_tools.extend(
                 build_whatsapp_media_tools(
                     None,
@@ -409,6 +456,7 @@ async def build_subagents(
     log: Any,
     wa_device_id: str = "",
     wa_target: str = "",
+    user_message: str = "",
 ) -> tuple[list, list[DockerSandbox]]:
     """
     Build SubAgent / CompiledSubAgent list untuk Deep Agents SDK.
@@ -424,6 +472,7 @@ async def build_subagents(
     """
     subagents: list = []
     sub_sandboxes: list[DockerSandbox] = []
+    expose_wa_media_tools = should_expose_wa_media_tools(user_message)
 
     if not agent_ids:
         # Try loading system agents from DB first (seeded via scripts/seed_system_agents.py)
@@ -458,7 +507,13 @@ async def build_subagents(
             log.info("build_subagents.from_hardcoded", count=len(specs))
 
         for spec in specs:
-            sa, ssb = _build_system_subagent(spec, parent_session_id, wa_device_id, wa_target)
+            sa, ssb = _build_system_subagent(
+                spec,
+                parent_session_id,
+                wa_device_id,
+                wa_target,
+                expose_wa_media_tools=expose_wa_media_tools,
+            )
             subagents.append(sa)
             if ssb:
                 sub_sandboxes.append(ssb)
@@ -504,7 +559,7 @@ async def build_subagents(
             if _is_enabled(sub_cfg, "deploy", default=False):
                 extra_tools.extend(build_deployment_tools(sub_sandbox))
 
-            if wa_device_id and wa_target:
+            if expose_wa_media_tools and wa_device_id and wa_target:
                 extra_tools.extend(
                     build_whatsapp_media_tools(
                         None,

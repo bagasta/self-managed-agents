@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     wa_dev_service_url: str = "http://localhost:8081"
     wa_dev_public_phone: str = ""
     wa_dev_public_name: str = "Arthur AI Dev"
+    wa_long_progress_notice_seconds: float = 25.0
 
     # Google Workspace MCP runtime routing
     workspace_mcp_url: str = ""

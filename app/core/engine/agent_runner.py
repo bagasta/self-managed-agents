@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
+import json
 import re
 import uuid
 from datetime import datetime, timezone
@@ -171,10 +172,41 @@ def _task_result_guard_reply(final_reply: str, steps: list[dict[str, Any]], user
     if not task_results:
         return final_reply
 
+    task_payload_text = "\n".join(
+        json.dumps(step.get("args") or {}, ensure_ascii=False)
+        for step in steps
+        if step.get("tool") == "task"
+    ).lower()
+    user_lower = (user_message or "").lower()
+    artifact_required = any(
+        marker in f"{task_payload_text}\n{user_lower}"
+        for marker in (
+            "deploy",
+            "trycloudflare",
+            "website",
+            "web app",
+            "landing page",
+            "html",
+            "css",
+            "javascript",
+            "prototype",
+            "portfolio",
+            "portofolio",
+            "aplikasi",
+            "app web",
+            "url",
+            "link website",
+            "file final",
+            "dokumen final",
+            "kirim file",
+            "cv ats",
+            "buat cv",
+        )
+    )
+
     combined = "\n".join(task_results)
     combined_lower = combined.lower()
     final_lower = (final_reply or "").lower()
-    user_lower = (user_message or "").lower()
 
     has_success_artifact = bool(
         _URL_RE.search(combined)
@@ -208,6 +240,8 @@ def _task_result_guard_reply(final_reply: str, steps: list[dict[str, Any]], user
     final_is_promise = any(marker in final_lower for marker in promise_markers)
     user_asks_status = any(k in user_lower for k in ("mana", "belum jadi", "udah jadi", "sudah jadi", "url", "link"))
 
+    if not artifact_required:
+        return final_reply
     if has_success_artifact:
         return final_reply
     if has_blocker:
@@ -221,6 +255,64 @@ def _task_result_guard_reply(final_reply: str, steps: list[dict[str, Any]], user
             "Saya tidak akan klaim selesai sebelum ada output yang valid."
         )
     return final_reply
+
+
+def _operator_escalation_reply_guard(
+    final_reply: str,
+    steps: list[dict[str, Any]],
+    user_message: str,
+    escalation_user_jid: str | None,
+) -> str:
+    """Block operator turns from hallucinating completed customer deliverables."""
+    if not escalation_user_jid or not _is_operator_envelope(user_message):
+        return final_reply
+    if _has_reply_to_user_step(steps) or _has_send_to_number_step(steps):
+        return final_reply
+
+    text = (final_reply or "").strip()
+    lowered = text.lower()
+    if "draft" in lowered and ("ketik" in lowered or "sudah ok" in lowered):
+        return final_reply
+
+    deliverable_markers = (
+        "cv",
+        "file",
+        "pdf",
+        "dokumen",
+        "document",
+        "website",
+        "web",
+    )
+    unsafe_completion_markers = (
+        "sudah selesai",
+        "selesai dibuat",
+        "siap dikirim",
+        "siap saya kirim",
+        "berhasil dibuat",
+        "akan saya kirim",
+        "harus dilakukan secara manual",
+    )
+    if not (
+        any(marker in lowered for marker in deliverable_markers)
+        and any(marker in lowered for marker in unsafe_completion_markers)
+    ):
+        return final_reply
+
+    operator_text = _operator_message_payload(user_message).lower()
+    if any(marker in operator_text for marker in ("pembayaran", "transfer", "bayar", "payment", "paid", "valid", "approve")):
+        return (
+            "Draft pesan untuk customer:\n"
+            "----\n"
+            "Halo, pembayaran Anda sudah kami terima. Proses pembuatan CV akan kami lanjutkan, "
+            "dan hasilnya akan kami kirimkan setelah siap.\n"
+            "----\n"
+            "Sudah OK? Ketik 'kirim' untuk saya teruskan ke customer."
+        )
+
+    return (
+        "Saya belum mengirim atau membuat ulang deliverable dari sesi operator ini. "
+        "Silakan tulis pesan yang ingin diteruskan ke customer, lalu ketik 'kirim' setelah draft-nya sudah OK."
+    )
 
 
 _DIRECT_WA_SEND_RE = re.compile(
@@ -759,7 +851,7 @@ class BlockTaskToolMiddleware(AgentMiddleware):
         return ToolMessage(
             content=(
                 "The task tool is disabled for this run. Execute the requested "
-                "Google Workspace action directly with the parent MCP tools."
+                "Google Workspace action directly with the connected Google Workspace tools."
             ),
             tool_call_id=tool_call.get("id", ""),
             name="task",
@@ -811,8 +903,8 @@ class ExternalServiceFallbackGuardMiddleware(AgentMiddleware):
             content=(
                 "This is a Google Workspace external-service action. Do not use "
                 "sandbox, filesystem, or task delegation as a fallback. Call the "
-                "relevant Google Workspace MCP tool directly, or return the MCP "
-                "auth/unavailable blocker if MCP cannot run."
+                "relevant Google Workspace tool directly, or return the Google "
+                "auth/unavailable blocker if the integration cannot run."
             ),
             tool_call_id=tool_call.get("id", ""),
             name=tool_name,
@@ -1031,8 +1123,9 @@ async def run_agent(
         system_prompt += (
             "\n\n## Google Workspace Auth Recovery\n"
             "Pesan user terbaru adalah konfirmasi bahwa OAuth Google sudah dicoba/diselesaikan. "
-            "Lanjutkan request Google Workspace terakhir dari percakapan sebelumnya memakai MCP Google Workspace langsung. "
-            "Jika MCP Google masih belum authorized, jangan gunakan task, sandbox, atau filesystem sebagai fallback; kirim blocker auth yang berisi link reconnect baru."
+            "Lanjutkan request Google Workspace terakhir dari percakapan sebelumnya memakai tool Google Workspace langsung. "
+            "Jika integrasi Google masih belum authorized, jangan gunakan task, sandbox, atau filesystem sebagai fallback; kirim blocker auth yang berisi link reconnect baru. "
+            "Jangan menyebut istilah teknis internal/protokol tool kepada user."
             f"{_prior_google_request}"
         )
     if direct_wa_text_send_context:
@@ -1068,6 +1161,31 @@ async def run_agent(
     _wa_device_id: str = _ch_cfg.get("device_id", "")
     _wa_target: str = _ch_cfg.get("user_phone", "")
     _is_wa_session: bool = getattr(session, "channel_type", None) == "whatsapp" and bool(_wa_device_id and _wa_target)
+    _wa_typing_started: bool = False
+
+    async def _start_wa_run_typing() -> None:
+        nonlocal _wa_typing_started
+        if not _is_wa_session:
+            return
+        try:
+            from app.core.infra.wa_client import start_wa_typing
+
+            await start_wa_typing(_wa_device_id, _wa_target)
+            _wa_typing_started = True
+        except Exception as exc:
+            log.warning("agent_run.wa_typing_start_failed", error=str(exc)[:200])
+
+    async def _stop_wa_run_typing() -> None:
+        if not _is_wa_session or not _wa_typing_started:
+            return
+        try:
+            from app.core.infra.wa_client import stop_wa_typing
+
+            await stop_wa_typing(_wa_device_id, _wa_target)
+        except Exception as exc:
+            log.warning("agent_run.wa_typing_stop_failed", error=str(exc)[:200])
+
+    await _start_wa_run_typing()
     _google_fallback_external_user_id = getattr(agent_model, "owner_external_id", None)
     if not _google_fallback_external_user_id:
         _operator_ids = getattr(agent_model, "operator_ids", None)
@@ -1207,6 +1325,7 @@ async def run_agent(
                     run_id=run_id,
                 ))
                 await db.flush()
+                await _stop_wa_run_typing()
                 if sandbox:
                     await sandbox.aclose()
                 for _ssb in sub_sandboxes:
@@ -1316,7 +1435,7 @@ async def run_agent(
             if google_auth_recovery_followup and google_auth_recovery_request:
                 human_content = (
                     "Saya sudah menyelesaikan OAuth/reconnect Google. "
-                    "Lanjutkan request Google Workspace sebelumnya sekarang dengan MCP Google Workspace langsung:\n"
+                    "Lanjutkan request Google Workspace sebelumnya sekarang dengan tool Google Workspace langsung:\n"
                     f"{google_auth_recovery_request}"
                 )
 
@@ -1330,21 +1449,31 @@ async def run_agent(
 
         _progress_last_sent_at: float = 0.0
         _progress_sent_count: int = 0
-        _progress_important_tools = {"task", "deploy_app", "execute", "send_whatsapp_document", "send_whatsapp_image"}
+        _progress_important_tools = {
+            "task",
+            "deploy_app",
+            "execute",
+            "send_whatsapp_document",
+            "send_whatsapp_image",
+            "plan_agent",
+            "compose_agent_blueprint",
+            "compose_agent_instructions",
+            "compose_agent_soul",
+            "validate_agent_config",
+            "create_agent",
+            "update_agent",
+        }
         _progress_notice_task: asyncio.Task | None = None
         _progress_notice_sent: bool = False
         _progress_finished: bool = False
-        _long_progress_notice_seconds = 75.0
+        _long_progress_notice_seconds = max(
+            5.0,
+            float(getattr(settings, "wa_long_progress_notice_seconds", 25.0) or 25.0),
+        )
 
-        async def _wa_progress_callback(tool_name: str, input_payload: Any, phase: str, output: Any | None) -> None:
+        async def _schedule_wa_long_progress_notice(reason: str) -> None:
             nonlocal _progress_last_sent_at, _progress_sent_count, _progress_notice_task, _progress_notice_sent
             if not _is_wa_session:
-                return
-            if tool_name == "notify_user":
-                return
-            if tool_name not in _progress_important_tools:
-                return
-            if phase != "start":
                 return
 
             import time as _time
@@ -1367,13 +1496,22 @@ async def run_agent(
                         await start_wa_typing(_wa_device_id, _wa_target)
                     _progress_notice_sent = True
                     _progress_sent_count += 1
-                    log.info("agent_run.wa_long_progress_notice_sent", tool=tool_name)
+                    log.info("agent_run.wa_long_progress_notice_sent", reason=reason)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
-                    log.warning("agent_run.wa_long_progress_notice_failed", tool=tool_name, error=str(exc)[:200])
+                    log.warning("agent_run.wa_long_progress_notice_failed", reason=reason, error=str(exc)[:200])
 
             _progress_notice_task = asyncio.create_task(_send_delayed_notice())
+
+        async def _wa_progress_callback(tool_name: str, input_payload: Any, phase: str, output: Any | None) -> None:
+            if tool_name == "notify_user":
+                return
+            if tool_name not in _progress_important_tools:
+                return
+            if phase != "start":
+                return
+            await _schedule_wa_long_progress_notice(tool_name)
 
         async def _cancel_wa_long_progress_notice() -> None:
             nonlocal _progress_finished, _progress_notice_task
@@ -1384,6 +1522,9 @@ async def run_agent(
             with contextlib.suppress(asyncio.CancelledError):
                 await _progress_notice_task
             _progress_notice_task = None
+
+        if _is_wa_session:
+            await _schedule_wa_long_progress_notice("run")
 
         _agent_logger = AgentStepLogger(log,
             progress_callback=_wa_progress_callback if _is_wa_session else None,
@@ -1418,6 +1559,7 @@ async def run_agent(
         }
 
         async def _cleanup_sandboxes() -> None:
+            await _stop_wa_run_typing()
             if sandbox:
                 await sandbox.aclose()
             for _ssb in sub_sandboxes:
@@ -1492,6 +1634,7 @@ async def run_agent(
         final_reply: str = ""
         steps: list = []
         total_tokens_used: int = 0
+        _graph_output: Any | None = None
         parsed: dict = {"final_reply": "", "steps": [], "total_tokens_used": 0, "has_output": False, "db_messages": []}
 
         _agent_caps = getattr(agent_model, "capabilities", []) or []
@@ -1658,6 +1801,7 @@ async def run_agent(
                         run_record.error_message = "Dangling tool call after retry"
                         _apply_run_usage(_agent_logger.total_tokens_from_callbacks)
                         await db.commit()
+                        await _cleanup_sandboxes()
                         return AgentRunResult(
                             reply="Maaf, terjadi kesalahan internal. Silakan coba lagi.",
                             steps=[],
@@ -1986,11 +2130,12 @@ async def run_agent(
 
                 _mcp_only_prompt = (
                     (system_prompt if isinstance(system_prompt, str) else "")
-                    + "\n\n## Google Workspace MCP Retry\n"
+                    + "\n\n## Google Workspace Tool Retry\n"
                     "The previous attempt incorrectly used a delegated/sandbox fallback for a Google Workspace action. "
-                    "Retry now using only the Google Workspace MCP tools. "
-                    "Do not call task, filesystem, sandbox, or non-MCP tools. "
-                    "Return the Google Workspace URL only after the MCP tool output contains it."
+                    "Retry now using only the Google Workspace tools. "
+                    "Do not call task, filesystem, sandbox, or non-Google tools. "
+                    "Return the Google Workspace URL only after the Google tool output contains it. "
+                    "Do not mention internal tool protocol terms to the user."
                 )
                 _mcp_only_graph = _cra(llm, tools=mcp_tools, prompt=_mcp_only_prompt)
                 _mcp_retry_input = _sanitize_input_messages(input_messages)
@@ -2285,6 +2430,10 @@ async def run_agent(
     guarded_reply = _direct_whatsapp_send_guard_reply(final_reply, steps, execution_user_message, input_messages)
     if guarded_reply != final_reply:
         log.warning("agent_run.final_reply_overridden_by_direct_wa_send_guard")
+        final_reply = guarded_reply
+    guarded_reply = _operator_escalation_reply_guard(final_reply, steps, execution_user_message, escalation_user_jid)
+    if guarded_reply != final_reply:
+        log.warning("agent_run.final_reply_overridden_by_operator_escalation_guard")
         final_reply = guarded_reply
 
     final_reply = ensure_non_empty_reply(final_reply, steps)

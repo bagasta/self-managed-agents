@@ -38,6 +38,20 @@ func (s *ConnectionStore) Get(phone string) (*UserConnection, bool) {
 	return c, ok
 }
 
+func (s *ConnectionStore) GetAny(keys ...string) (*UserConnection, string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		if c, ok := s.connections[key]; ok {
+			return c, key, true
+		}
+	}
+	return nil, "", false
+}
+
 func (s *ConnectionStore) Set(phone string, conn *UserConnection) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -45,10 +59,32 @@ func (s *ConnectionStore) Set(phone string, conn *UserConnection) error {
 	return s.save()
 }
 
+func (s *ConnectionStore) SetMany(keys []string, conn *UserConnection) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, key := range keys {
+		if key != "" {
+			s.connections[key] = conn
+		}
+	}
+	return s.save()
+}
+
 func (s *ConnectionStore) Delete(phone string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.connections, phone)
+	return s.save()
+}
+
+func (s *ConnectionStore) DeleteMany(keys ...string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, key := range keys {
+		if key != "" {
+			delete(s.connections, key)
+		}
+	}
 	return s.save()
 }
 

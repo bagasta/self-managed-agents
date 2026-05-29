@@ -151,8 +151,9 @@ def test_google_mcp_usage_notice_marks_workspace_parent_only() -> None:
     notice = build_google_mcp_usage_notice("buat google slide")
 
     assert "PARENT-ONLY EXECUTION" in notice
-    assert "main agent WAJIB memanggil tool Google MCP langsung" in notice
+    assert "main agent WAJIB memanggil tool Google Workspace langsung" in notice
     assert "JANGAN delegasikan aksi Google Workspace ke subagent/task()" in notice
+    assert "GOOGLE WORKSPACE MCP" not in notice
 
 
 def test_google_mcp_intent_detects_indonesian_calendar_terms() -> None:

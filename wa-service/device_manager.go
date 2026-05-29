@@ -936,6 +936,7 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 		"phone_from":         phoneFrom, // resolved phone number (same as from for non-LID accounts)
 		"chat_id":            chatID,
 		"message":            text,
+		"message_id":         evt.Info.ID,
 		"timestamp":          evt.Info.Timestamp.Unix(),
 		"push_name":          evt.Info.PushName,
 		"media_type":         mediaType,

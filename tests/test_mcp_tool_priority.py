@@ -7,10 +7,11 @@ def test_mcp_tool_priority_notice_prefers_mcp_over_sandbox() -> None:
         sandbox_active=True,
     )
 
-    assert "MCP tools aktif: create_spreadsheet, modify_sheet_values" in notice
-    assert "panggil tool MCP yang relevan sebagai sumber kebenaran" in notice
+    assert "Tool integrasi eksternal aktif: create_spreadsheet, modify_sheet_values" in notice
+    assert "panggil tool integrasi yang relevan sebagai sumber kebenaran" in notice
     assert "Jangan memakai sandbox" in notice
     assert "hanya sebagai pendukung" in notice
+    assert "MCP tools aktif" not in notice
 
 
 def test_mcp_tool_priority_notice_truncates_long_tool_lists() -> None:

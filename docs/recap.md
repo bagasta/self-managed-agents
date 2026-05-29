@@ -1,5 +1,191 @@
 # Recap: Deep Agent SaaS Hardening — MCP, Subagent, Sandbox, Builder Entitlements
 
+## 2026-05-28 — Arthur Builder Quota Exemption
+
+### Masalah yang Ditemukan
+- Arthur adalah platform agent builder, tetapi masih melewati gate quota yang sama seperti agent customer biasa.
+- Jika quota token agent atau subscription owner habis, Arthur bisa ikut terblokir dan user tidak bisa membuat, memperbaiki, atau menyiapkan agent.
+- Usage token Arthur juga masih berpotensi tercatat ke usage agent/owner, padahal Arthur harus diperlakukan sebagai infrastruktur builder.
+- Arthur masih bisa salah memperlakukan link Google Form existing dari user sebagai request Google Workspace, lalu reply guard mengganti jawaban normal menjadi error "tool Google belum terpanggil".
+- Pada flow edit agent, Arthur masih bisa membalas janji progress seperti "langsung aku betulin" atau meminta placeholder, bukan langsung menjalankan update agent.
+
+### Perubahan Utama
+- `app/core/domain/agent_quota_service.py` sekarang mengenali builder/system agent lewat `capabilities=["builder"|"system"]` atau `tools_config.builder=True`.
+- Builder agent langsung lolos dari `check_agent_quota()`, termasuk limit token agent, masa aktif agent, status subscription owner, dan limit token subscription owner.
+- `record_agent_token_usage()` tidak lagi menambah `tokens_used` agent maupun owner subscription untuk builder agent.
+- Agent customer biasa tetap memakai enforcement quota yang sama seperti sebelumnya.
+- Google Workspace intent detector sekarang mengabaikan Google Form link yang diberikan sebagai info order/customer flow, sehingga link `forms.gle` existing tidak memicu override "Google tool belum dieksekusi".
+- Prompt Arthur diperketat untuk kode trial, edit agent existing, kemampuan baca file Excel/WhatsApp media, dan larangan meminta placeholder yang tidak perlu.
+- Reply guard builder sekarang mengganti janji progress setelah `update_agent` sukses dengan pesan hasil update yang jelas.
+
+### Validasi
+- `PYTHONPATH=. .venv/bin/python -m pytest -q tests/test_google_mcp_reply_overrides.py tests/test_whatsapp_direct_send.py tests/test_reply_guard.py tests/test_agent_quota_service.py --maxfail=1` -> 68 passed.
+
+## 2026-05-28 — WhatsApp Spam Auto-Disable, Session Concurrency, dan Locust Harness
+
+### Masalah yang Ditemukan
+- Spam burst dari nomor WhatsApp yang sama bisa lolos dari auto-disable karena deduplikasi inbound masih berbasis `timestamp` detik, bukan `message_id`.
+- Request yang dibatalkan saat spam/interruption bisa berakhir `HTTP 500` karena session DB mencoba `commit()` pada transaksi yang sudah invalid.
+- Request yang sudah telanjur menunggu `session_run_lock` masih bisa lanjut menjalankan agent setelah sesi customer di-set `ai_disabled`, sehingga token tetap terbakar.
+- Burst request paralel dari sender yang sama bisa membuat beberapa row `sessions` baru sekaligus, sehingga spam counter dan status AI terpecah antar session.
+- Repo belum punya harness load test khusus untuk memukul `/v1/channels/wa/incoming` sebagai banyak user sekaligus.
+
+### Perubahan Utama
+- `wa-service` dan `wa-dev-service` sekarang meneruskan `message_id` WhatsApp ke backend Python.
+- Deduplikasi inbound WA di `app/api/wa_helpers.py` diprioritaskan ke `message_id`, dengan fallback ke key berbasis `timestamp` hanya untuk payload lama.
+- Handler `/v1/channels/wa/incoming` melakukan `db.rollback()` eksplisit untuk jalur `cancelled` dan `timeout`, lalu cleanup task memakai `session_id` lokal agar tidak menyentuh ORM object yang sudah expired.
+- Setelah lock session didapat, backend sekarang re-check `ai_disabled`; request lama yang terlambat masuk lock langsung berhenti tanpa menjalankan LLM.
+- `find_or_create_wa_session()` sekarang memakai `pg_advisory_xact_lock` per `agent + normalized sender` untuk mencegah duplikasi session saat burst paralel.
+- Ditambahkan folder `locust-load/` berisi `locustfile.py`, `README.md`, dan `requirements.txt` untuk test normal traffic, probe Arthur, dan spam burst WhatsApp.
+- Assertion Locust untuk spam disesuaikan: burst dianggap sukses jika sesi menjadi `ai_disabled`, baik response pertama membawa `reason=spam_auto_disabled` maupun request lanjutan hanya mengembalikan `status=ai_disabled`.
+
+### Validasi
+- `PYTHONPATH=. .venv/bin/python -m pytest -q tests/test_whatsapp_spam_escalation.py tests/test_whatsapp_direct_send.py tests/test_whatsapp_progress.py --maxfail=1` -> 67 passed.
+- `.venv/bin/locust -f locust-load/locustfile.py --host http://127.0.0.1:18000 --headless --users 1 --spawn-rate 1 --run-time 12s --stop-timeout 240 --tags spam --only-summary` -> exit code 0, 24 request, 0 fail.
+- Smoke lokal juga menunjukkan batas lingkungan yang nyata: device `b1992dcc-dcfd-49ec-a0d2-ca2068ac0d64` belum ada di `wa-service` lokal, jadi delivery WA nyata masih `send_failed` walaupun backend spam guard sudah bekerja.
+
+## 2026-05-28 — Arthur Builder Guard, Progress Notice, dan WA Dev Delivery Fallback
+
+### Masalah yang Ditemukan
+- `update_agent()` bisa crash dengan `UnboundLocalError` saat edit biasa tidak menyentuh Google Workspace karena `google_workspace_enabled` hanya dibuat di cabang tertentu.
+- Arthur masih bisa berhenti di tengah flow builder dengan jawaban seperti "soul sudah siap", sehingga user tidak mendapat kepastian agent benar-benar sudah dibuat.
+- Request agent untuk buzzer/politik belum diblok di layer tool, jadi prompt saja tidak cukup.
+- Progress WhatsApp terlalu lambat dan hanya aktif untuk sebagian tool panjang; flow Arthur builder bisa terlihat diam saat banyak user mengetes bersamaan.
+- Pada `wa-dev-service`, Python bisa sudah punya final reply di response API tetapi gagal mengirim balik ke WhatsApp; router Go sebelumnya tidak punya fallback jika Python melaporkan final delivery gagal.
+
+### Perubahan Utama
+- `update_agent()` sekarang menginisialisasi `google_workspace_enabled=False` sebelum cabang update apa pun.
+- Policy guard deterministik ditambahkan di `plan_agent`, `validate_agent_config`, `create_agent`, dan `update_agent` untuk menolak agent buzzer/politik.
+- Prompt Arthur, rulebook seed, dan reply guard diperketat:
+  - Arthur dilarang berhenti setelah `compose_agent_soul`.
+  - Jika tool `create_agent`/`update_agent` sukses tapi final reply tidak jelas, reply guard membangun pesan sukses natural dari hasil tool.
+- Runtime WA menjadwalkan notice proses panjang sejak awal run dan juga untuk tool builder penting, dengan delay default `wa_long_progress_notice_seconds=25`.
+- `send_wa_message()` memakai timeout send 30 detik dan retry singkat untuk text send.
+- `/v1/channels/wa/incoming` sekarang mengembalikan metadata `reply_delivery`; jika final send gagal, status menjadi `send_failed`.
+- `wa-dev-service` membaca status `send_failed` dan mengirim fallback langsung ke `msg.ChatID` supaya response yang sudah dibuat tidak hilang.
+
+### Validasi
+- `PYTHONPATH=. .venv/bin/python -m pytest -q tests/test_reply_guard.py tests/test_builder_tools.py tests/test_whatsapp_progress.py --maxfail=1` -> 75 passed, 1 warning.
+- `PYTHONPATH=. .venv/bin/python -m pytest -q tests/test_whatsapp_spam_escalation.py tests/test_whatsapp_direct_send.py --maxfail=1` -> 55 passed.
+- `cd wa-dev-service && go test ./...` -> passed.
+
+## 2026-05-26 — Hardening WhatsApp, Arthur Builder, Escalation, Quota, dan Agent Research
+
+### Latar Belakang
+- Fokus hari ini adalah menaikkan kualitas SaaS agent builder supaya user non-teknis bisa membuat agent yang benar-benar operasional untuk personal assistant, CS usaha, riset, dan workflow berbasis WhatsApp.
+- Bug yang muncul mayoritas ada di area runtime WhatsApp, eskalasi admin, Arthur sebagai builder, quota token, dan agent yang memakai integrasi eksternal seperti Google Docs.
+- Target perbaikan: agent tidak boleh asal klaim sukses, tidak boleh salah route pesan, tidak boleh spam hasil, dan harus bisa mengubah konfigurasi agent secara nyata ketika user meminta fitur baru.
+
+### Masalah yang Ditemukan
+- Tool `create_wa_dev_trial_link` crash dengan `NameError: default_target is not defined`, sehingga flow Arthur untuk membuat link trial WA bisa gagal.
+- Agent coding/deploy bisa mengirim hasil berulang kali di WhatsApp: QR, URL, file `.txt`, lalu pesan final lagi, padahal user hanya meminta link.
+- Media atau dokumen dari user/admin di WhatsApp bisa salah dianggap sebagai eskalasi, terutama saat dikirim dari nomor admin atau saat tidak ada quoted escalation message yang valid.
+- Reply WhatsApp belum selalu membawa konteks pesan yang dibalas, sehingga agent kehilangan referensi saat user membalas chat lama.
+- Eskalasi payment proof tidak stabil: saat admin reply kasus dengan jawaban valid, agent bisa memproses ulang task customer atau membuat ulang output, bukan hanya meneruskan keputusan admin ke customer.
+- Interruption/spam message sempat mengirim pesan tambahan seperti “Oke, saya stop proses sebelumnya...”, yang membingungkan customer.
+- Tier 3 perlu unlimited agent dan quota token 100 juta, tetapi enforcement token per agent belum menghentikan agent ketika limit tercapai.
+- Arthur terlalu sering meminta konfirmasi berulang saat membuat agent, termasuk setelah user sudah jelas bilang “langsung”, “buatkan”, atau “gausah banyak tanya”.
+- Arthur bisa klaim agent sudah di-update untuk Google Docs tanpa readback konfigurasi agent yang benar.
+- User-facing reply masih membocorkan istilah teknis internal seperti “MCP”, padahal istilah itu tidak cocok untuk customer SaaS.
+- Agent research bisa muter saat `write_file` gagal karena file sudah ada, lalu mencoba path yang sama lagi.
+- `compose_agent_blueprint` bisa gagal parse JSON dari model (`Expecting ',' delimiter`) dan hanya fallback ke blueprint generik.
+- Dokumentasi arsitektur belum lengkap untuk kebutuhan presentasi project.
+
+### Perubahan Utama
+- WhatsApp escalation routing diperketat:
+  - media/dokumen operator hanya dianggap eskalasi jika pesan tersebut adalah reply ke pesan eskalasi yang berisi ID kasus dan nomor customer.
+  - media/dokumen biasa dari admin tidak lagi otomatis dianggap eskalasi.
+  - quoted/reply context WhatsApp sekarang diteruskan ke agent agar agent memahami konteks pesan yang sedang dibalas.
+- Flow eskalasi admin diperjelas:
+  - balasan admin ke kasus eskalasi diperlakukan sebagai keputusan/operator reply untuk customer.
+  - agent tidak boleh menjalankan ulang pekerjaan customer hanya karena admin menjawab eskalasi.
+  - lampiran customer untuk kasus eskalasi tetap dikirim ke operator dengan konteks kasus.
+- Runtime interruption diperbaiki:
+  - proses lama bisa dihentikan saat user mengirim pesan baru.
+  - pesan internal “saya stop proses sebelumnya” tidak lagi dikirim ke customer.
+- Arthur builder diperkuat:
+  - instruksi builder mengurangi confirmation loop saat intent user sudah jelas.
+  - update agent sekarang harus dibuktikan dengan readback `get_agent_detail` sebelum Arthur mengklaim selesai.
+  - untuk Google Docs/Sheets/Drive/Gmail/Calendar, Arthur memakai flag update khusus `enable_google_workspace=true` agar konfigurasi benar-benar berubah, bukan sekadar menulis instruksi umum.
+  - setelah integrasi Google aktif, Arthur diarahkan membuat link koneksi Google lewat tool resmi, bukan menyuruh user memahami endpoint internal.
+- Istilah teknis internal disanitasi:
+  - user-facing prompt dan reply tidak lagi memakai kata “MCP”.
+  - wording diganti menjadi “integrasi Google”, “Google Docs”, atau “Google Workspace”.
+  - guard Google Workspace tetap jujur jika tool belum dieksekusi, tetapi tidak membocorkan detail internal.
+- Trial WA dev diperbaiki:
+  - bug `default_target` di `create_wa_dev_trial_link` ditutup.
+  - jika agent target kosong, flow memilih agent milik user yang terbaru dan bukan Arthur/builder agar trial tidak nyasar ke agent lama seperti CV Maker.
+- Token dan tier diperbaiki:
+  - Tier 3 disiapkan untuk unlimited agent.
+  - quota token Tier 3 dinaikkan menjadi 100 juta.
+  - enforcement quota agent ditambahkan agar agent tidak terus berjalan setelah limit tercapai.
+- Agent research dan file workspace diperbaiki:
+  - prompt memory tidak lagi mendorong agent menyimpan semua hal ke file.
+  - `write_file` yang gagal karena file sudah ada tidak boleh diretry terus ke path sama; agent harus edit/read atau membuat path baru bila file memang dibutuhkan.
+  - research default diarahkan menjawab di chat dan menyimpan memori penting, bukan muter di virtual FS.
+- Blueprint generation diperkuat:
+  - parsing output JSON dibuat lebih robust dengan repair/extraction fallback.
+  - fallback blueprint dibuat lebih kontekstual agar tidak terlalu generik ketika generator gagal.
+- Dokumentasi presentasi ditambahkan:
+  - folder `Dokumentasi Arsitektur/` dibuat.
+  - isi dokumentasi menjelaskan layer backend, Arthur, memory, RAG, WhatsApp services, sandbox, subagent, token/quota, MCP/integrasi eksternal, dan visualisasi ASCII arsitektur/flow.
+
+### File dan Area yang Tersentuh
+- Backend/runtime:
+  - `app/core/engine/agent_runner.py`
+  - `app/core/engine/prompt_builder.py`
+  - `app/core/engine/google_mcp_support.py`
+  - `app/core/engine/wa_reply_delivery.py`
+  - `app/core/engine/agent_tool_setup.py`
+  - `app/core/engine/subagent_builder.py`
+- Builder tools dan Arthur:
+  - `app/core/tools/builder_tools.py`
+  - `system-message-builder.md`
+  - `scripts/seed_arthur.py`
+- WhatsApp API/service boundary:
+  - `app/api/channels.py`
+  - `app/api/messages.py`
+  - `app/api/wa_helpers.py`
+  - `wa-service`
+  - `wa-dev-service`
+- Subscription/quota:
+  - `app/core/domain/subscription_service.py`
+  - `app/core/domain/agent_quota_service.py`
+  - `alembic/versions/016_tier3_token_quota_100m.py`
+- Dokumentasi:
+  - `Dokumentasi Arsitektur/`
+  - `docs/recap.md`
+- Regression tests:
+  - `tests/test_builder_tools.py`
+  - `tests/test_whatsapp_direct_send.py`
+  - `tests/test_whatsapp_progress.py`
+  - `tests/test_whatsapp_spam_escalation.py`
+  - `tests/test_agent_quota_service.py`
+  - `tests/test_subscription_service.py`
+  - `tests/test_mcp_tool_priority.py`
+  - `tests/test_google_mcp_reply_overrides.py`
+  - `tests/test_google_mcp_subagent_routing.py`
+
+### Validasi
+- Focused Python tests:
+  - `PYTHONPATH=. .venv/bin/python -m pytest tests/test_builder_tools.py tests/test_whatsapp_direct_send.py tests/test_mcp_tool_priority.py tests/test_google_mcp_reply_overrides.py tests/test_google_mcp_subagent_routing.py -q`
+  - Hasil: `117 passed, 1 warning`.
+- Google Workspace compatibility/guard tests:
+  - `PYTHONPATH=. .venv/bin/python -m pytest tests/test_mcp_config_compat.py tests/test_mcp_server_map.py tests/test_google_drive_tool_guard.py tests/test_google_calendar_manage_event_guard.py -q`
+  - Hasil: `15 passed`.
+- Compile check:
+  - `PYTHONPATH=. .venv/bin/python -m compileall app/core/tools/builder_tools.py app/core/engine/prompt_builder.py app/core/engine/google_mcp_support.py app/core/engine/agent_runner.py scripts/seed_arthur.py`
+- Go WhatsApp service tests dijalankan untuk perubahan reply/escalation boundary pada service WhatsApp.
+
+### Catatan Operasional
+- Setelah deploy/restart backend, Arthur perlu di-seed ulang agar rulebook terbaru dari `system-message-builder.md` masuk ke konfigurasi Arthur:
+  - `PYTHONPATH=. .venv/bin/python scripts/seed_arthur.py`
+- Backend/worker/WhatsApp service perlu restart agar prompt runtime, sanitizer, routing escalation, dan quota enforcement aktif di proses yang sedang berjalan.
+- Untuk agent lama yang perlu Google Docs, Arthur sekarang harus menjalankan update konfigurasi agent lalu readback, bukan hanya menjawab “sudah saya update”.
+
+**Tanggal**: 2026-05-26  
+**Status**: Selesai lokal + regression tests focused pass
+
 ## 2026-05-22 — Refactor `agent_runner.py` (Phase 1)
 
 ### Latar Belakang

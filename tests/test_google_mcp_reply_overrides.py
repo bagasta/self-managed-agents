@@ -35,6 +35,19 @@ def test_google_mcp_intent_detects_google_auth_requests() -> None:
     assert _is_google_mcp_intent("tolong login google dulu")
 
 
+def test_google_form_link_reference_is_not_google_workspace_intent() -> None:
+    assert not _is_google_mcp_intent(
+        "cara order: pelanggan isi google form ini https://forms.gle/pe5C1XncFhu56E7M9"
+    )
+    assert not _is_google_mcp_intent(
+        "cara order pelanggan isi google form yang udah aku buat ini linknya https://forms.gle/pe5C1XncFhu56E7M9"
+    )
+    assert not _is_google_mcp_intent(
+        "https://forms.gle/pe5C1XncFhu56E7M9 ini link yang pelanggan isi kalau mau order"
+    )
+    assert _is_google_mcp_intent("tolong bikin google form survei dan kirim link")
+
+
 def test_google_auth_recovery_reply_is_not_success_claim() -> None:
     assert _looks_like_google_auth_recovery_reply(
         "Karena saat ini saya belum terhubung dengan akun Gmail kamu melalui MCP, "
@@ -452,8 +465,46 @@ async def test_google_mcp_success_claim_without_google_tool_is_overridden() -> N
 
     lowered = reply.lower()
     assert "belum berhasil" in lowered or "belum ada" in lowered
-    assert "tidak memanggil tool google mcp" in lowered
+    assert "tidak memanggil tool google" in lowered
+    assert "mcp" not in lowered
     assert steps == [{"tool": "task", "result": "done"}]
+
+
+@pytest.mark.asyncio
+async def test_google_form_order_link_reply_is_not_overridden_without_google_step() -> None:
+    runtime = GoogleMcpRuntime(
+        enabled=True,
+        workspace_server={},
+        connected_user_id="user@example.com",
+        auth_url=None,
+        preflight_error=None,
+        integration_url="http://localhost:8002",
+        candidate_user_ids=["user@example.com"],
+        system_prompt="",
+    )
+    original = (
+        "Sip, link Google Form itu saya catat sebagai link order pelanggan. "
+        "Nanti agent akan mengarahkan pelanggan untuk isi form tersebut."
+    )
+
+    reply, steps, _ = await apply_google_mcp_reply_overrides(
+        final_reply=original,
+        steps=[],
+        mcp_errors={},
+        runtime=runtime,
+        auth_url=None,
+        llm_raw=None,
+        user_message=(
+            "cara order pelanggan isi google form yang udah aku buat ini linknya "
+            "https://forms.gle/pe5C1XncFhu56E7M9"
+        ),
+        agent_id="00000000-0000-0000-0000-000000000000",
+        api_key="test",
+        log=type("Log", (), {"warning": lambda *args, **kwargs: None})(),
+    )
+
+    assert reply == original
+    assert steps == []
 
 
 @pytest.mark.asyncio
@@ -488,7 +539,8 @@ async def test_google_auth_recovery_reply_is_preserved_and_gets_link() -> None:
     )
 
     assert "Run ini tidak memanggil tool Google MCP" not in reply
-    assert original in reply
+    assert "MCP" not in reply
+    assert "melalui integrasi Google" in reply
     assert "https://devtunnel.example/v1/integrations/google/start?t=abc" in reply
     assert steps == []
     assert auth_url == runtime.auth_url

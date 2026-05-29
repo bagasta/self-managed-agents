@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -25,9 +26,11 @@ class _FakeDB:
         self.added = []
         self.commits = 0
         self.executed = 0
+        self.exec_calls = []
 
-    async def execute(self, _stmt):
+    async def execute(self, _stmt, params=None):
         self.executed += 1
+        self.exec_calls.append((_stmt, params))
         if self.results:
             return _ScalarResult(self.results.pop(0))
         return _ScalarResult(None)
@@ -62,6 +65,185 @@ def _session(**overrides):
     return SimpleNamespace(**values)
 
 
+def test_owner_in_operator_ids_is_not_escalation_operator():
+    from app.api.wa_helpers import is_operator_message
+
+    agent = SimpleNamespace(
+        escalation_config={},
+        owner_external_id="628owner",
+        operator_ids=["628owner"],
+    )
+
+    assert is_operator_message("628owner", "628owner@s.whatsapp.net", agent) is False
+
+
+def test_configured_operator_phone_is_escalation_operator_even_if_owner_differs():
+    from app.api.wa_helpers import is_operator_message
+
+    agent = SimpleNamespace(
+        escalation_config={"operator_phone": "628operator"},
+        owner_external_id="628owner",
+        operator_ids=["628owner"],
+    )
+
+    assert is_operator_message("628operator", "628operator@s.whatsapp.net", agent) is True
+
+
+def test_non_owner_operator_ids_still_work_for_legacy_extra_operator():
+    from app.api.wa_helpers import is_operator_message
+
+    agent = SimpleNamespace(
+        escalation_config={},
+        owner_external_id="628owner",
+        operator_ids=["628owner", "628operator2"],
+    )
+
+    assert is_operator_message("628operator2", "628operator2@s.whatsapp.net", agent) is True
+
+
+@pytest.mark.asyncio
+async def test_operator_phone_without_escalation_reply_is_customer_turn():
+    from app.api.channels import _should_treat_as_operator_turn
+
+    agent = SimpleNamespace(
+        id=uuid.uuid4(),
+        escalation_config={"operator_phone": "628operator"},
+        owner_external_id="628owner",
+        operator_ids=["628owner"],
+    )
+    db = _FakeDB()
+
+    is_operator_turn = await _should_treat_as_operator_turn(
+        agent=agent,
+        db=db,
+        from_phone="628operator",
+        reply_target="628operator@s.whatsapp.net",
+        message="[Gambar]",
+        media_type="image",
+        quoted_text=None,
+        quoted_stanza_id=None,
+    )
+
+    assert is_operator_turn is False
+    assert db.executed == 0
+
+
+@pytest.mark.asyncio
+async def test_operator_phone_with_quoted_escalation_is_operator_turn():
+    from app.api.channels import _should_treat_as_operator_turn
+
+    agent = _agent()
+    target = _session()
+    db = _FakeDB(result=target)
+
+    is_operator_turn = await _should_treat_as_operator_turn(
+        agent=agent,
+        db=db,
+        from_phone="628operator",
+        reply_target="628operator@s.whatsapp.net",
+        message="pembayaran sudah masuk",
+        media_type=None,
+        quoted_text="ESKALASI PESAN DARI CUSTOMER\nID Kasus: esc_123456_ab12cd\nNomor customer/user: 628customer",
+        quoted_stanza_id=None,
+    )
+
+    assert is_operator_turn is True
+    assert db.executed == 1
+
+
+@pytest.mark.asyncio
+async def test_operator_send_confirmation_uses_pending_draft_without_quote():
+    from app.api.channels import _should_treat_as_operator_turn
+
+    agent = _agent()
+    operator_session = _session(
+        external_user_id="628operator",
+        metadata_={
+            "pending_operator_text_reply": {
+                "target_session_id": str(uuid.uuid4()),
+                "message": "Baik, pembayaran sudah diterima.",
+                "expires_at": int(time.time()) + 60,
+            }
+        },
+    )
+    db = _FakeDB(result=operator_session)
+
+    is_operator_turn = await _should_treat_as_operator_turn(
+        agent=agent,
+        db=db,
+        from_phone="628operator",
+        reply_target="628operator@s.whatsapp.net",
+        message="kirim",
+        media_type=None,
+        quoted_text=None,
+        quoted_stanza_id=None,
+    )
+
+    assert is_operator_turn is True
+    assert db.executed == 1
+
+
+@pytest.mark.asyncio
+async def test_find_or_create_wa_session_takes_advisory_lock_before_insert():
+    from app.api.wa_helpers import find_or_create_wa_session
+
+    agent = _agent()
+    db = _FakeDB(result=None)
+    db.flush = AsyncMock()
+    db.refresh = AsyncMock()
+
+    session, was_created = await find_or_create_wa_session(
+        agent=agent,
+        lookup_user_id="+628123456789",
+        effective_reply_target="628123456789@s.whatsapp.net",
+        device_id="dev-1",
+        db=db,
+        is_operator=False,
+        phone_number="628123456789",
+    )
+
+    assert was_created is True
+    assert session.external_user_id == "628123456789"
+    assert db.executed == 2
+    lock_stmt, lock_params = db.exec_calls[0]
+    assert "pg_advisory_xact_lock" in str(lock_stmt)
+    assert lock_params == {
+        "agent_key": f"wa_session:{agent.id}",
+        "user_key": "628123456789",
+    }
+
+
+def test_quoted_reply_context_is_added_to_normal_whatsapp_message():
+    from app.api.channels import _append_quoted_reply_context
+
+    result = _append_quoted_reply_context(
+        "ini gimana jadinya?",
+        "kok koneknya ke CV Maker?",
+    )
+
+    assert "[WHATSAPP_REPLY_CONTEXT]" in result
+    assert "kok koneknya ke CV Maker?" in result
+    assert result.endswith("ini gimana jadinya?")
+
+
+def test_whatsapp_interrupt_does_not_send_manual_ack_message():
+    import inspect
+    from app.api import channels
+
+    source = inspect.getsource(channels.wa_incoming)
+    assert "Oke, saya stop proses sebelumnya" not in source
+    assert "interrupt_ack" not in source
+
+
+def test_operator_identity_customer_turn_is_not_final_reply_suppressed():
+    import inspect
+    from app.api import channels
+
+    source = inspect.getsource(channels.wa_incoming)
+    assert "operator_identity_treated_as_customer" in source
+    assert "normalized_target == normalized_operator and not _operator_identity" in source
+
+
 @pytest.mark.asyncio
 async def test_spam_window_triggers_only_after_limit(monkeypatch):
     from app.api import wa_helpers
@@ -89,6 +271,43 @@ async def test_spam_window_triggers_only_after_limit(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_dedup_uses_message_id_for_same_second_distinct_messages(monkeypatch):
+    from app.api import wa_helpers
+
+    async def no_redis():
+        return None
+
+    monkeypatch.setattr("app.core.infra.redis_client.get_redis", no_redis)
+    wa_helpers._mem_dedup_cache.clear()
+
+    first = await wa_helpers.is_duplicate_message(
+        "dev-1",
+        "628customer",
+        1770000000,
+        _FakeDB(),
+        message_id="MSG-1",
+    )
+    second_same_second = await wa_helpers.is_duplicate_message(
+        "dev-1",
+        "628customer",
+        1770000000,
+        _FakeDB(),
+        message_id="MSG-2",
+    )
+    duplicate_retry = await wa_helpers.is_duplicate_message(
+        "dev-1",
+        "628customer",
+        1770000000,
+        _FakeDB(),
+        message_id="MSG-2",
+    )
+
+    assert first is False
+    assert second_same_second is False
+    assert duplicate_retry is True
+
+
+@pytest.mark.asyncio
 async def test_case_lookup_is_strict_without_quote():
     from app.api.wa_helpers import find_session_by_quoted_case
 
@@ -100,12 +319,71 @@ async def test_case_lookup_is_strict_without_quote():
     assert db.executed == 0
 
 
+@pytest.mark.asyncio
+async def test_operator_context_without_quote_does_not_fallback_to_latest_escalation():
+    from app.api.wa_helpers import find_escalation_context
+
+    agent = SimpleNamespace(id=uuid.uuid4())
+    operator = _session(metadata_={})
+    latest_escalation_session = _session(agent_id=agent.id)
+    db = _FakeDB(result=latest_escalation_session)
+
+    escalation_user_jid, escalation_context = await find_escalation_context(
+        agent,
+        db,
+        quoted_text=None,
+        quoted_stanza_id=None,
+        operator_session=operator,
+    )
+
+    assert escalation_user_jid is None
+    assert escalation_context is None
+    assert db.executed == 0
+
+
+@pytest.mark.asyncio
+async def test_expired_operator_active_route_is_not_used():
+    from app.api.wa_helpers import find_session_by_operator_active_route
+
+    agent = SimpleNamespace(id=uuid.uuid4())
+    target = _session(id=uuid.uuid4(), agent_id=agent.id)
+    operator = _session(
+        metadata_={
+            "active_escalation_reply": {
+                "target_session_id": str(target.id),
+                "target": "628customer@s.whatsapp.net",
+                "case_id": "esc_123456_ab12cd",
+                "expires_at": int(time.time()) - 1,
+            }
+        }
+    )
+    db = _FakeDB()
+    db.get_results[target.id] = target
+
+    session, case_id = await find_session_by_operator_active_route(agent, db, operator)
+
+    assert session is None
+    assert case_id == "esc_123456_ab12cd"
+    assert "active_escalation_reply" not in operator.metadata_
+    assert db.commits == 1
+
+
 def test_case_id_parser_accepts_media_caption_case_id():
     from app.api.wa_helpers import extract_escalation_case_id
 
     text = "Lampiran dari customer untuk kasus esc_1779679409_690800"
 
     assert extract_escalation_case_id(text) == "esc_1779679409_690800"
+
+
+def test_operator_payment_approval_detection_requires_payment_context():
+    from app.api.channels import _is_operator_payment_approval
+
+    assert _is_operator_payment_approval("iya pembayaran sudah masuk") is True
+    assert _is_operator_payment_approval("transfer sudah valid") is True
+    assert _is_operator_payment_approval("pembayaran belum masuk") is False
+    assert _is_operator_payment_approval("iya") is False
+    assert _is_operator_payment_approval("ok kirim") is False
 
 
 def test_customer_phone_parser_accepts_escalation_text():
@@ -294,17 +572,69 @@ async def test_operator_image_forward_uses_quoted_customer_target(monkeypatch):
 
     assert result["status"] == "queued"
     assert operator.metadata_["pending_operator_media"]["caption_hint"] == "ini bukti"
+    assert operator.metadata_["pending_operator_media"]["expires_at"] > int(time.time())
     assert operator.metadata_["active_escalation_reply"]["target"] == "628customer@s.whatsapp.net"
     send_msg.assert_not_awaited()
     assert db.commits == 2
 
 
-def test_operator_tools_are_enabled_for_angle_bracket_operator_envelope():
+@pytest.mark.asyncio
+async def test_operator_image_without_reply_does_not_use_active_route(monkeypatch):
+    from app.api.channels import _forward_operator_media_to_customer
+
+    target = _session(id=uuid.uuid4())
+    operator = _session(
+        external_user_id="628operator",
+        metadata_={
+            "active_escalation_reply": {
+                "target_session_id": str(target.id),
+                "target": "628customer@s.whatsapp.net",
+                "case_id": "esc_123456_ab12cd",
+                "expires_at": int(time.time()) + 60,
+            }
+        },
+    )
+    db = _FakeDB()
+    db.get_results[target.id] = target
+    send_msg = AsyncMock()
+    process_media = AsyncMock()
+    monkeypatch.setattr("app.api.channels.send_wa_message", send_msg)
+    monkeypatch.setattr("app.api.channels.process_wa_media", process_media)
+
+    result = await _forward_operator_media_to_customer(
+        agent=_agent(),
+        quoted_text=None,
+        quoted_stanza_id=None,
+        device_id="dev-1",
+        operator_reply_target="628operator",
+        media_type="image",
+        media_data="aW1hZ2U=",
+        media_filename="photo.png",
+        caption="ini bukti",
+        operator_session=operator,
+        db=db,
+        log=SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None),
+    )
+
+    assert result["status"] == "ok"
+    assert "Reply pesan eskalasi yang benar" in result["reply"]
+    send_msg.assert_awaited_once()
+    process_media.assert_not_awaited()
+
+
+def test_operator_turn_detection_accepts_angle_bracket_operator_envelope():
+    from app.core.engine.agent_tool_setup import is_operator_turn
+
+    assert is_operator_turn("<OPERATOR>\nPesan: iya pembayaran sudah masuk") is True
+
+
+def test_operator_tool_setup_skips_subagents_and_business_tools():
     import inspect
     from app.core.engine.agent_tool_setup import build_agent_tool_setup
 
     src = inspect.getsource(build_agent_tool_setup)
-    assert 'user_message.startswith("<OPERATOR>")' in src
+    assert "operator_subagents_skipped" in src
+    assert "and not operator_turn" in src
 
 
 def test_extract_operator_text_draft_uses_corrected_separator_block():
@@ -363,3 +693,111 @@ async def test_pending_operator_text_confirmation_sends_saved_corrected_draft(mo
         "Halo Ka Wira, silakan cek paket di https://jet.co.id/track.",
     )
     assert send_msg.await_args_list[1].args == ("dev-1", "628operator", "Terkirim ✓")
+
+
+@pytest.mark.asyncio
+async def test_expired_pending_operator_text_confirmation_is_cleared(monkeypatch):
+    from app.api.channels import _send_pending_operator_text_reply
+
+    target = _session(id=uuid.uuid4())
+    operator = _session(
+        id=uuid.uuid4(),
+        external_user_id="628operator",
+        metadata_={
+            "pending_operator_text_reply": {
+                "target_session_id": str(target.id),
+                "target": "628customer@s.whatsapp.net",
+                "case_id": "esc_123456_ab12cd",
+                "message": "Halo Ka Wira.",
+                "expires_at": int(time.time()) - 1,
+            }
+        },
+    )
+    db = _FakeDB()
+    db.get_results[target.id] = target
+    send_msg = AsyncMock()
+    monkeypatch.setattr("app.api.channels.send_wa_message", send_msg)
+
+    result = await _send_pending_operator_text_reply(
+        operator_session=operator,
+        device_id="dev-1",
+        operator_reply_target="628operator",
+        db=db,
+        log=SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None),
+    )
+
+    assert result["status"] == "error"
+    assert "kedaluwarsa" in result["reply"]
+    assert "pending_operator_text_reply" not in operator.metadata_
+    assert send_msg.await_args.args == ("dev-1", "628operator", result["reply"])
+
+
+@pytest.mark.asyncio
+async def test_operator_confirmation_without_pending_gets_clarifying_reply(monkeypatch):
+    from app.api.channels import _reply_no_pending_operator_confirmation
+
+    send_msg = AsyncMock()
+    monkeypatch.setattr("app.api.channels.send_wa_message", send_msg)
+
+    result = await _reply_no_pending_operator_confirmation(
+        device_id="dev-1",
+        operator_reply_target="628operator",
+    )
+
+    assert result["status"] == "ok"
+    assert "Belum ada draft atau lampiran" in result["reply"]
+    assert send_msg.await_args.args == ("dev-1", "628operator", result["reply"])
+
+
+@pytest.mark.asyncio
+async def test_operator_payment_approval_resumes_customer_session(monkeypatch):
+    from app.api.channels import _resume_customer_workflow_after_operator_approval
+
+    class _Lock:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    async def fake_run_agent(**kwargs):
+        assert kwargs["session"] is target
+        assert kwargs["user_message"].startswith("[SYSTEM_OPERATOR_APPROVAL]")
+        assert "pembayaran customer sudah dikonfirmasi" in kwargs["user_message"]
+        return {
+            "reply": "CV ATS Anda sedang saya finalkan dan akan saya kirim di sini.",
+            "steps": [],
+            "run_id": "run-1",
+        }
+
+    agent = SimpleNamespace(id=uuid.uuid4(), name="CV Maker")
+    target = _session(
+        id=uuid.uuid4(),
+        channel_config={"user_phone": "628customer@s.whatsapp.net", "device_id": "dev-1"},
+        metadata_={},
+    )
+    db = _FakeDB()
+    send_msg = AsyncMock()
+    monkeypatch.setattr("app.api.channels.send_wa_message", send_msg)
+    monkeypatch.setattr("app.core.engine.agent_runner.run_agent", fake_run_agent)
+    monkeypatch.setattr("app.core.engine.session_lock.session_run_lock", lambda _session_id: _Lock())
+
+    result = await _resume_customer_workflow_after_operator_approval(
+        agent=agent,
+        target_session=target,
+        case_id="esc_123456_ab12cd",
+        approval_text="iya pembayaran sudah masuk",
+        device_id="dev-1",
+        operator_reply_target="628operator",
+        db=db,
+        log=SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None),
+    )
+
+    assert result["status"] == "ok"
+    assert target.metadata_["last_operator_approval"]["type"] == "payment"
+    assert send_msg.await_args_list[0].args == (
+        "dev-1",
+        "628customer@s.whatsapp.net",
+        "CV ATS Anda sedang saya finalkan dan akan saya kirim di sini.",
+    )
+    assert send_msg.await_args_list[1].args == ("dev-1", "628operator", result["reply"])

@@ -77,6 +77,22 @@ def test_sheets_notice_requires_values_and_formulas() -> None:
     assert "jangan hardcode sheet1" in notice
 
 
+def test_sheets_notice_with_jadwal_does_not_trigger_calendar_workflow() -> None:
+    notice = build_google_mcp_usage_notice(
+        "tolong edit google sheet jadwal kerja dan tambah kolom status"
+    ).lower()
+    assert "sheets workflow mode" in notice
+    assert "jangan panggil manage_event" in notice
+    assert "calendar edit workflow" not in notice
+
+
+def test_explicit_calendar_notice_still_triggers_calendar_workflow() -> None:
+    notice = build_google_mcp_usage_notice(
+        "tolong edit event di google calendar untuk meeting proposal"
+    ).lower()
+    assert "calendar edit workflow" in notice
+
+
 def test_sheets_followup_directive_populates_existing_file() -> None:
     directive = google_sheets_followup_directive(
         "sheet123abc", "buat spreadsheet budget dengan tabel dan formula"

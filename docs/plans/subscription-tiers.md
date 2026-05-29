@@ -205,7 +205,7 @@ INSERT INTO subscription_plans (code, label, max_agents, token_quota, period_day
 ('trial',  'Trial',      1, 2000000,  NULL, '["openai/gpt-4.1-mini"]', false, true),
 ('tier_1', 'Starter',    1, 10000000, 30,   '["openai/gpt-4.1-mini"]', true,  false),
 ('tier_2', 'Pro',        2, 20000000, 30,   '["openai/gpt-4.1-mini","deepseek/deepseek-v4-flash"]', true, false),
-('tier_3', 'Enterprise', NULL, 0,     NULL, '[]', true, false);  -- quota & models dikonfigurasi per kontrak
+('tier_3', 'Enterprise', NULL, 100000000, NULL, '[]', true, false);  -- unlimited agent, quota 100 juta token
 ```
 
 ---
@@ -381,26 +381,24 @@ AND grace_until < now();
 - [x] Grace period: **3 hari**
 - [x] Trial: **1 agent, gpt-4.1-mini, \$1 quota, tanpa sub-agent**
 - [x] Model Tier 2: bisa **ganti kapan saja** melalui Arthur (bukan hanya saat buat agent)
-- [x] Tier 3 / Enterprise: **akan ada**, desain tabel harus extensible
+- [x] Tier 3 / Enterprise: **unlimited agent, 100 juta token shared**
 - [x] Upgrade dari Trial: agent yang sudah dibuat **tetap jalan**, tidak perlu buat ulang
 
 ---
 
-## Tier 3 — Enterprise *(placeholder, detail menyusul)*
+## Tier 3 — Enterprise
 
 | Properti | Nilai |
 |----------|-------|
 | **Harga** | Custom / kontrak |
 | **Masa Aktif** | Custom |
-| **Jumlah Agent** | Unlimited (atau sesuai kontrak) |
+| **Jumlah Agent** | Unlimited |
 | **Model** | Semua model tersedia (termasuk GPT-4.1, Claude, Gemini, dll) |
 | **WhatsApp** | ✅ unlimited nomor |
 | **Sub-agent** | ✅ default aktif |
-| **Token Quota** | Custom (shared, sesuai kontrak) |
+| **Token Quota** | 100.000.000 token shared |
 | **Grace Period** | Custom (default 7 hari) |
 | **Support** | Priority support |
-
-> Detail Tier 3 akan diisi setelah ada keputusan harga dan paket dari tim bisnis.
 
 ---
 

@@ -45,6 +45,35 @@ from app.models.agent import Agent
 
 logger = structlog.get_logger(__name__)
 
+_PROHIBITED_AGENT_POLICY_MESSAGE = (
+    "Tidak bisa membuat atau mengubah agent untuk keperluan buzzer, kampanye politik, "
+    "propaganda politik, atau manipulasi opini publik."
+)
+
+_PROHIBITED_AGENT_POLICY_PATTERNS = (
+    re.compile(r"\bbuzzer\b", re.IGNORECASE),
+    re.compile(r"\bpolitik(?:al)?\b", re.IGNORECASE),
+    re.compile(r"\bpolitic(?:al|s)?\b", re.IGNORECASE),
+    re.compile(r"\bpemilu\b", re.IGNORECASE),
+    re.compile(r"\bpilkada\b", re.IGNORECASE),
+    re.compile(r"\bpilpres\b", re.IGNORECASE),
+    re.compile(r"\bcaleg\b", re.IGNORECASE),
+    re.compile(r"\bcapres\b", re.IGNORECASE),
+    re.compile(r"\bcawapres\b", re.IGNORECASE),
+    re.compile(r"\bpartai\b", re.IGNORECASE),
+    re.compile(r"\bpropaganda\b", re.IGNORECASE),
+)
+
+
+def _blocked_agent_policy_reason(*parts: Any) -> str:
+    text = "\n".join(str(part or "") for part in parts)
+    if not text.strip():
+        return ""
+    for pattern in _PROHIBITED_AGENT_POLICY_PATTERNS:
+        if pattern.search(text):
+            return _PROHIBITED_AGENT_POLICY_MESSAGE
+    return ""
+
 
 def _owner_variants(owner_phone: str | None) -> list[str]:
     """Return stable owner identifiers used by old and new agent rows."""
@@ -53,6 +82,25 @@ def _owner_variants(owner_phone: str | None) -> list[str]:
         if candidate and candidate not in variants:
             variants.append(candidate)
     return variants
+
+
+def _is_probable_lid(value: str | None) -> bool:
+    normalized = normalize_phone(value or "")
+    return bool(normalized and normalized.isdigit() and len(normalized) > 15)
+
+
+def _best_owner_identifier(*candidates: str | None) -> str:
+    """Prefer real phone identifiers; fall back to LID only for lookup, not provisioning."""
+    fallback = ""
+    for candidate in candidates:
+        normalized = normalize_phone(str(candidate or ""))
+        if not normalized:
+            continue
+        if not fallback:
+            fallback = normalized
+        if not _is_probable_lid(normalized):
+            return normalized
+    return fallback
 
 
 def _agent_belongs_to_owner(agent: Agent, owner_phone: str | None) -> bool:
@@ -76,6 +124,34 @@ def _owner_filter(owner_phone: str | None):
     clauses = [Agent.owner_external_id.in_(variants)]
     clauses.extend(Agent.operator_ids.contains([variant]) for variant in variants)
     return or_(*clauses)
+
+
+async def _latest_owned_agent_for_trial(
+    db: AsyncSession,
+    *,
+    owner_phone: str | None,
+    self_agent_id: str | None,
+) -> Agent | None:
+    """Resolve the newest user-owned agent for shared WA trial fallback."""
+    if not owner_phone:
+        return None
+    stmt = (
+        select(Agent)
+        .where(Agent.is_deleted.is_(False), _owner_filter(owner_phone))
+        .order_by(Agent.created_at.desc(), Agent.updated_at.desc())
+        .limit(8)
+    )
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+    for agent in rows:
+        if self_agent_id and str(getattr(agent, "id", "")) == str(self_agent_id):
+            continue
+        capabilities = getattr(agent, "capabilities", None) or []
+        tools_config = getattr(agent, "tools_config", None) or {}
+        if "builder" in capabilities or (isinstance(tools_config, dict) and tools_config.get("builder")):
+            continue
+        return agent
+    return None
 
 # ---------------------------------------------------------------------------
 # Structured preset definitions — source of truth for agent types
@@ -489,6 +565,11 @@ AGENT_PRESETS: dict[str, dict] = {
             "- Gunakan http_get untuk akses URL, API, dan sumber data\n"
             "- Untuk riset paralel yang kompleks, delegate ke sys_researcher via task()\n"
             "- Selalu cite sumber informasi\n\n"
+            "CARA MENYERAHKAN HASIL:\n"
+            "- Default: jawab hasil riset langsung di chat dengan ringkasan, insight, rekomendasi, dan sumber\n"
+            "- Simpan ringkasan penting ke memory dengan remember/update_longterm jika tool memory tersedia\n"
+            "- Jangan membuat file laporan dengan write_file kecuali user eksplisit minta file/export atau laporan sangat panjang\n"
+            "- Jika file laporan sudah dibuat, jangan tulis ulang path yang sama; gunakan read_file + edit_file atau beri jawaban final\n\n"
             "CARA BICARA:\n"
             "Bahasa: Indonesia (atau sesuai bahasa user)\n"
             "Format output: terstruktur dengan poin-poin jelas\n"
@@ -787,7 +868,7 @@ _TOOLS_CONFIG_DOCS = {
     "rag": "Cari jawaban dari dokumen yang diupload. Default OFF.",
     "http": "HTTP GET/POST/PATCH/DELETE ke API eksternal. Default OFF.",
     "tavily": "Web browsing/search via Tavily (tavily_search/tavily_extract). Default ON jika TAVILY_API_KEY tersedia.",
-    "mcp": "Koneksi ke MCP server eksternal (Notion, Google Calendar, dll). Default OFF.",
+    "mcp": "Integrasi eksternal tingkat lanjut seperti Google Workspace/Docs/Sheets/Drive. Default OFF.",
     "whatsapp_media": "Kirim gambar dan dokumen via WhatsApp. Default OFF. Aktifkan untuk agent WA.",
     "wa_agent_manager": "Kelola WA device/QR agent lain. Default OFF. Khusus meta-agent.",
     "subagents": (
@@ -823,6 +904,68 @@ _RECOMMENDED_MODELS = [
 _DEFAULT_MODEL = "openai/gpt-4.1-mini"
 
 
+def _google_workspace_mcp_server_config() -> dict[str, str]:
+    settings = get_settings()
+    return {
+        "url": settings.workspace_mcp_url or "https://msj90wr2-8002.asse.devtunnels.ms/mcp",
+        "transport": "streamable_http",
+    }
+
+
+def _enable_google_workspace_tools(tools_config: dict[str, Any] | None) -> dict[str, Any]:
+    """Enable Google Workspace tooling without clobbering other tool config."""
+    merged = dict(tools_config or {})
+    raw_mcp = merged.get("mcp")
+    mcp_cfg = dict(raw_mcp) if isinstance(raw_mcp, dict) else {}
+
+    if "servers" in mcp_cfg or "enabled" in mcp_cfg:
+        servers = dict(mcp_cfg.get("servers") or {})
+    else:
+        servers = {
+            name: dict(cfg)
+            for name, cfg in mcp_cfg.items()
+            if isinstance(cfg, dict)
+        }
+
+    existing_google = dict(servers.get("google_workspace") or {})
+    google_cfg = _google_workspace_mcp_server_config()
+    existing_google.setdefault("url", google_cfg["url"])
+    existing_google.setdefault("transport", google_cfg["transport"])
+    servers["google_workspace"] = existing_google
+
+    mcp_cfg["enabled"] = True
+    mcp_cfg["servers"] = servers
+    merged["mcp"] = mcp_cfg
+    merged.setdefault("tavily", True)
+    return merged
+
+
+def _has_google_workspace_tools(tools_config: dict[str, Any] | None) -> bool:
+    if not isinstance(tools_config, dict):
+        return False
+    mcp_cfg = tools_config.get("mcp")
+    if not isinstance(mcp_cfg, dict):
+        return False
+    if "servers" in mcp_cfg or "enabled" in mcp_cfg:
+        return bool(mcp_cfg.get("enabled")) and "google_workspace" in (mcp_cfg.get("servers") or {})
+    return isinstance(mcp_cfg.get("google_workspace"), dict)
+
+
+def _append_google_workspace_instruction(instructions: str | None) -> tuple[str, bool]:
+    base = (instructions or "").rstrip()
+    if "Google Workspace tools aktif" in base or "Google Docs" in base and "Google Drive" in base:
+        return base, False
+    block = (
+        "\n\nKEMAMPUAN GOOGLE WORKSPACE\n"
+        "Jika user meminta membuat atau mengedit Google Docs, Google Sheets, Google Drive, Gmail, Calendar, Slides, atau Forms, "
+        "gunakan integrasi Google Workspace yang tersedia. Jangan mengatakan tidak punya akses jika integrasi Google aktif. "
+        "Untuk laporan riset di Google Docs, lakukan riset terlebih dahulu, susun konten lengkap, lalu buat dokumen Google Docs dan kirim link dokumennya. "
+        "Jika akun Google belum terhubung atau perlu izin ulang, jelaskan secara natural bahwa user perlu menghubungkan Google lagi dan berikan link otentikasi jika tersedia. "
+        "Jangan menyebut istilah teknis internal/protokol tool kepada user."
+    )
+    return f"{base}{block}" if base else block.strip(), True
+
+
 # ---------------------------------------------------------------------------
 # Helper functions for preset detection and post-create step generation
 # ---------------------------------------------------------------------------
@@ -834,8 +977,9 @@ def _detect_preset(goal_lower: str, features: list[str], channel: str) -> str:
                        "javascript", "flask", "fastapi", "node"}
     cs_keywords = {"cs", "customer service", "pelanggan", "toko", "jawab pertanyaan",
                    "customer", "support", "layanan", "klien"}
-    faq_keywords = {"faq", "dokumen", "rag", "knowledge base", "pertanyaan umum",
-                    "manual", "kebijakan", "katalog", "produk info"}
+    faq_keywords = {"faq", "rag", "knowledge base", "pertanyaan umum",
+                    "manual", "kebijakan", "katalog", "produk info",
+                    "baca dokumen", "upload dokumen", "dokumen referensi"}
     scheduler_keywords = {"reminder", "jadwal", "pengingat", "schedule", "alarm",
                           "kalkulator", "timer", "tanggal", "waktu"}
     social_media_keywords = {"sosmed", "social media", "konten", "content", "instagram", "tiktok",
@@ -853,7 +997,10 @@ def _detect_preset(goal_lower: str, features: list[str], channel: str) -> str:
                            "shopee", "tokopedia", "lazada", "stok", "inventory", "harga"}
     personal_assistant_keywords = {"asisten pribadi", "personal assistant", "pa", "sekretaris",
                                     "to-do", "todo", "task", "agenda", "manajemen waktu",
-                                    "time management", "kalender", "email", "meeting"}
+                                    "time management", "kalender", "email", "meeting",
+                                    "liburan", "travel", "perjalanan", "itinerary",
+                                    "rencana perjalanan", "checklist", "barang bawaan",
+                                    "packing", "visa", "paspor", "budget", "h-7", "h-1"}
     hr_keywords = {"hr", "hrd", "rekrutmen", "recruitment", "karyawan", "onboarding",
                    "sdm", "human resource", "interview", "cv", "resume", "absensi",
                    "cuti", "gaji", "payroll", "training", "performa"}
@@ -928,6 +1075,65 @@ def _detect_preset_from_config(tc: dict, channel_type: str) -> str:
     return "cs_whatsapp_basic"
 
 
+def _google_workspace_option(feature_text: str, explicit_google: bool) -> dict[str, Any]:
+    text = (feature_text or "").lower()
+    app_reasons: list[tuple[str, str]] = []
+
+    def add(app: str, reason: str) -> None:
+        if not any(existing == app for existing, _ in app_reasons):
+            app_reasons.append((app, reason))
+
+    if any(k in text for k in ("gmail", "email", "inbox", "kirim email", "balas email")):
+        add("Gmail", "membaca atau mengirim email dari akun user")
+    if any(k in text for k in ("calendar", "kalender", "jadwal", "reminder", "pengingat", "meeting", "deadline", "h-7", "h-1")):
+        add("Google Calendar", "membuat jadwal dan pengingat langsung di kalender user")
+    if any(k in text for k in ("docs", "google docs", "laporan", "notulen", "proposal", "surat", "itinerary", "checklist")):
+        add("Google Docs", "membuat atau memperbarui dokumen yang bisa dibuka user")
+    if any(k in text for k in ("sheets", "spreadsheet", "excel", "tabel", "budget", "anggaran", "data", "laporan angka")):
+        add("Google Sheets", "menyimpan data, budget, atau tabel dalam spreadsheet")
+    if any(k in text for k in ("drive", "file", "folder", "upload", "lampiran", "dokumen referensi")):
+        add("Google Drive", "menyimpan dan membaca file dari Drive user")
+
+    should_offer = bool(app_reasons)
+    apps = [app for app, _ in app_reasons]
+    reasons = [reason for _, reason in app_reasons]
+    if explicit_google and not apps:
+        apps = ["Google Workspace"]
+        reasons = ["menghubungkan agent ke akun Google user"]
+        should_offer = True
+
+    if not should_offer:
+        return {
+            "should_offer": False,
+            "enabled": False,
+            "suggested_apps": [],
+            "reasons": [],
+            "user_facing_pitch": "",
+            "if_user_declines": "Lanjutkan tanpa integrasi Google.",
+        }
+
+    app_text = ", ".join(apps)
+    pitch = (
+        f"Kebutuhan ini bisa lebih praktis kalau agent terhubung ke {app_text}: "
+        f"{'; '.join(reasons)}. Mau saya konekkan ke Google, atau dibuat tanpa Google dulu?"
+    )
+    if explicit_google:
+        pitch = (
+            f"Karena kamu sudah minta pakai {app_text}, agent akan saya siapkan dengan integrasi Google. "
+            "Nanti kamu tinggal buka link login Google supaya agent bisa akses akunmu."
+        )
+
+    return {
+        "should_offer": should_offer and not explicit_google,
+        "enabled": explicit_google,
+        "suggested_apps": apps,
+        "reasons": reasons,
+        "user_facing_pitch": pitch,
+        "if_user_accepts": "Panggil plan_agent lagi dengan requested_features memuat google, lalu create/update dengan integrasi Google aktif.",
+        "if_user_declines": "Lanjutkan tanpa integrasi Google; agent tetap bisa berjalan dengan memory/reminder internal sesuai tools yang tersedia.",
+    }
+
+
 def _get_post_create_steps(preset_id: str, channel: str, tc: dict) -> list[str]:
     """Return required actions user/operator must take after agent creation."""
     steps = []
@@ -981,6 +1187,274 @@ def _parse_json_arg(value: Any, default: Any, *, expected: type | tuple[type, ..
             return parsed, None
         return default, f"expected {expected}, got {type(parsed).__name__}"
     return default, f"expected JSON string or {expected}, got {type(value).__name__}"
+
+
+def _strip_json_wrapper(raw: str) -> str:
+    """Remove common LLM wrappers before parsing a JSON object."""
+    text = re.sub(r"<think>.*?</think>", "", raw or "", flags=re.DOTALL).strip()
+    fence = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
+    if fence:
+        return fence.group(1).strip()
+    return text
+
+
+def _extract_balanced_json_object(raw: str) -> str:
+    """Extract the first balanced JSON object, even when the JSON is not fully valid."""
+    text = _strip_json_wrapper(raw)
+    start = text.find("{")
+    if start < 0:
+        raise ValueError("No JSON object found in model output")
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for idx in range(start, len(text)):
+        char = text[idx]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:idx + 1]
+
+    return text[start:]
+
+
+def _repair_llm_json_text(text: str) -> str:
+    """Repair conservative JSON mistakes common in model output."""
+    repaired = text.strip().lstrip("\ufeff")
+    repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+
+    # Missing comma between object fields:
+    # {"a": "x"\n "b": "y"} -> {"a": "x",\n "b": "y"}
+    repaired = re.sub(
+        r'(?<=[}\]"0-9eE])\s*\n\s*(?="[^"\n]+"\s*:)',
+        ",\n",
+        repaired,
+    )
+    for literal in ("true", "false", "null"):
+        repaired = re.sub(
+            rf'(?<={literal})\s*\n\s*(?="[^"\n]+"\s*:)',
+            ",\n",
+            repaired,
+        )
+
+    # Missing comma between array values, especially object/string entries.
+    repaired = re.sub(r'(?<=[}\]"])\s*\n\s*(?=\{)', ",\n", repaired)
+    repaired = re.sub(r'(?<=")\s*\n\s*(?=")', ",\n", repaired)
+    return repaired
+
+
+def _parse_llm_json_object(raw: str) -> tuple[dict[str, Any], bool]:
+    """Parse model JSON with a small deterministic repair pass."""
+    candidate = _extract_balanced_json_object(raw)
+    try:
+        parsed = json.loads(candidate)
+        repaired = False
+    except json.JSONDecodeError:
+        repaired_text = _repair_llm_json_text(candidate)
+        parsed = json.loads(repaired_text)
+        repaired = repaired_text != candidate
+
+    if not isinstance(parsed, dict):
+        raise ValueError(f"Expected JSON object, got {type(parsed).__name__}")
+    return parsed, repaired
+
+
+def _enabled_tool_plan(tools_config: dict[str, Any]) -> list[dict[str, str]]:
+    plans: list[dict[str, str]] = []
+    for key, value in tools_config.items():
+        if not value:
+            continue
+        plans.append({
+            "tool": key,
+            "why": "Aktif dari preset dan relevan dengan workflow agent.",
+            "when_to_use": "Gunakan hanya saat langkah kerja membutuhkan kapabilitas ini.",
+        })
+    return plans
+
+
+def _fallback_agent_blueprint(
+    *,
+    preset_id: str,
+    user_goal: str,
+    agent_name: str,
+    business_context: str,
+    target_users: str,
+    channel: str,
+    requested_features: str,
+    known_constraints: str,
+    tools_config: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a useful deterministic blueprint when the LLM JSON is unrecoverable."""
+    name = agent_name or "Agent"
+    context_text = " ".join([
+        preset_id,
+        user_goal,
+        business_context,
+        target_users,
+        requested_features,
+        known_constraints,
+    ]).lower()
+    tool_plan = _enabled_tool_plan(tools_config)
+
+    if (
+        preset_id == "research_agent"
+        or any(keyword in context_text for keyword in ("riset", "research", "artikel", "topik", "ringkas", "summary", "marketing"))
+    ):
+        return {
+            "agent_summary": f"{name} membantu riset, membaca artikel/topik, menyusun ringkasan penting, dan menyimpan temuan untuk tanya ulang.",
+            "assumptions": [
+                "User membutuhkan ringkasan riset yang bisa ditelusuri ulang, bukan jawaban sekali pakai.",
+                "Sumber riset dapat berasal dari URL yang diberikan user, topik bebas, atau dokumen knowledge yang diunggah.",
+            ],
+            "workflow_steps": [
+                {
+                    "step": 1,
+                    "name": "Intake topik riset",
+                    "agent_action": "Identifikasi topik, tujuan riset, bahasa output, kedalaman ringkasan, dan apakah user memberi URL/dokumen.",
+                    "required_user_data": ["topik atau URL", "tujuan penggunaan hasil riset", "format output yang diinginkan jika ada"],
+                    "success_criteria": "Scope riset jelas dan agent tahu apakah perlu browsing, baca dokumen, atau memakai memory sebelumnya.",
+                },
+                {
+                    "step": 2,
+                    "name": "Pengumpulan sumber",
+                    "agent_action": "Ambil sumber relevan, prioritaskan sumber yang kredibel, dan catat judul, URL, tanggal jika tersedia, serta poin utama.",
+                    "required_user_data": ["URL/dokumen opsional", "batasan sumber jika ada"],
+                    "success_criteria": "Minimal ada sumber atau konteks yang cukup untuk diringkas dengan jujur.",
+                },
+                {
+                    "step": 3,
+                    "name": "Sintesis ringkasan",
+                    "agent_action": "Susun poin penting, insight praktis untuk marketing, risiko/ketidakpastian, dan rekomendasi tindakan.",
+                    "required_user_data": [],
+                    "success_criteria": "Ringkasan mudah dipakai, tidak sekadar menyalin sumber, dan menyebutkan keterbatasan informasi.",
+                },
+                {
+                    "step": 4,
+                    "name": "Simpan hasil riset",
+                    "agent_action": "Simpan topik, ringkasan, sumber, dan preferensi user ke memory agar bisa dipakai untuk pertanyaan lanjutan.",
+                    "required_user_data": [],
+                    "success_criteria": "User bisa bertanya ulang tentang riset yang sama tanpa mengulang konteks dari nol.",
+                },
+            ],
+            "knowledge_plan": {
+                "must_have": ["Preferensi domain marketing user", "Daftar sumber/URL yang pernah diriset", "Ringkasan dan insight final per topik"],
+                "nice_to_have": ["Template laporan riset favorit", "Daftar kompetitor/brand rujukan", "Kriteria sumber yang dipercaya user"],
+                "needs_upload": bool(tools_config.get("rag")),
+            },
+            "tool_plan": tool_plan,
+            "memory_plan": [
+                {"key": "research_preferences", "value_to_store": "Bahasa, format, kedalaman, dan gaya ringkasan yang user sukai"},
+                {"key": "research_summaries", "value_to_store": "Topik, ringkasan poin penting, insight, rekomendasi, dan sumber"},
+                {"key": "last_research_topic", "value_to_store": "Topik terakhir agar follow-up tetap kontekstual"},
+            ],
+            "state_plan": [
+                {
+                    "state": "intake",
+                    "entry_condition": "User memberi topik, URL, dokumen, atau meminta ringkasan",
+                    "allowed_actions": ["Klarifikasi scope hanya jika benar-benar ambigu", "Cek memory riset terkait"],
+                    "exit_condition": "Scope riset dan sumber awal cukup jelas",
+                },
+                {
+                    "state": "source_review",
+                    "entry_condition": "Topik/sumber sudah tersedia",
+                    "allowed_actions": ["Ambil sumber online", "Baca dokumen RAG", "Tandai sumber lemah atau tidak bisa diakses"],
+                    "exit_condition": "Sumber cukup atau keterbatasan sudah diketahui",
+                },
+                {
+                    "state": "synthesis",
+                    "entry_condition": "Sumber/konteks sudah terkumpul",
+                    "allowed_actions": ["Ringkas", "Bandingkan sumber", "Buat insight dan rekomendasi"],
+                    "exit_condition": "Jawaban final siap dikirim",
+                },
+                {
+                    "state": "memory_save",
+                    "entry_condition": "Riset selesai atau user memberi catatan penting",
+                    "allowed_actions": ["Simpan hasil ringkasan", "Update preferensi riset"],
+                    "exit_condition": "Memory diperbarui",
+                },
+                {
+                    "state": "follow_up",
+                    "entry_condition": "User bertanya ulang tentang topik lama",
+                    "allowed_actions": ["Ambil memory terkait", "Jawab dengan konteks sebelumnya", "Refresh riset jika diminta"],
+                    "exit_condition": "Follow-up terjawab atau riset diperbarui",
+                },
+            ],
+            "human_approval_points": [],
+            "escalation_rules": [
+                {
+                    "condition": "Sumber tidak bisa diverifikasi, kontradiktif, atau keputusan berdampak besar pada bisnis",
+                    "action": "Jelaskan ketidakpastian dan minta user menentukan apakah perlu riset lanjutan atau validasi manusia.",
+                }
+            ],
+            "conversation_examples_needed": [
+                "User kirim URL artikel lalu minta ringkasan poin penting",
+                "User minta riset topik marketing dan rekomendasi tindakan",
+                "User bertanya ulang tentang hasil riset yang pernah disimpan",
+            ],
+            "validation_checklist": [
+                "Agent menyebutkan sumber atau keterbatasan sumber",
+                "Agent menyimpan ringkasan dan preferensi riset ke memory",
+                "Agent bisa menjawab follow-up memakai memory sebelumnya",
+                "Agent tidak mengarang data saat sumber tidak tersedia",
+            ],
+            "missing_info_questions": [
+                "Kalau user belum memberi topik/URL sama sekali, tanya topik riset yang ingin dibahas.",
+            ],
+        }
+
+    return {
+        "agent_summary": f"{name} untuk {user_goal}",
+        "assumptions": ["Blueprint fallback dibuat karena output JSON generator tidak bisa dipulihkan."],
+        "workflow_steps": [
+            {
+                "step": 1,
+                "name": "Intake kebutuhan",
+                "agent_action": "Pahami intent user, konteks bisnis, dan hasil akhir yang diinginkan sebelum menjalankan workflow.",
+                "required_user_data": ["tujuan user", "konteks bisnis atau personal", "output yang diharapkan"],
+                "success_criteria": "Agent memahami konteks inti dan tidak bertanya ulang untuk hal yang sudah tersedia.",
+            }
+        ],
+        "knowledge_plan": {
+            "must_have": ["Detail layanan/produk/SOP utama", "FAQ atau contoh kasus paling sering", "Batas wewenang agent"],
+            "nice_to_have": ["Contoh percakapan nyata", "Kebijakan khusus", "Preferensi gaya komunikasi"],
+            "needs_upload": bool(tools_config.get("rag")),
+        },
+        "tool_plan": tool_plan,
+        "memory_plan": [{"key": "user_context", "value_to_store": "Kebutuhan, preferensi, dan konteks penting user"}],
+        "state_plan": [
+            {
+                "state": "intake",
+                "entry_condition": "Percakapan baru atau kebutuhan belum jelas",
+                "allowed_actions": ["Kumpulkan data wajib", "Jawab pertanyaan dasar", "Gunakan konteks percakapan yang sudah ada"],
+                "exit_condition": "Data inti cukup untuk melanjutkan workflow",
+            }
+        ],
+        "human_approval_points": [
+            {
+                "when": "Kasus membutuhkan keputusan, akses, pembayaran, atau persetujuan manusia",
+                "operator_action": "Review konteks dan beri keputusan eksplisit",
+                "agent_next_action": "Lanjutkan workflow sesuai keputusan operator tanpa mengulang proses dari awal",
+            }
+        ],
+        "escalation_rules": [{"condition": "Agent tidak yakin atau kasus sensitif", "action": "Eskalasi ke operator dengan ringkasan konteks"}],
+        "conversation_examples_needed": ["Contoh tanya jawab untuk kasus paling umum"],
+        "validation_checklist": ["Instructions mencerminkan workflow dan tidak generik", "Agent tahu kapan harus lanjut, berhenti, atau eskalasi"],
+        "missing_info_questions": ["Detail apa yang paling wajib agent pahami jika konteks saat ini belum cukup?"],
+    }
+
 
 _SOUL_TEMPLATES: dict[str, str] = {
     "cs_whatsapp_basic": """\
@@ -1128,7 +1602,14 @@ LARANGAN
 }
 
 
-async def _call_instruction_writer(prompt: str, system: str, model: str | None = None) -> str:
+async def _call_instruction_writer(
+    prompt: str,
+    system: str,
+    model: str | None = None,
+    *,
+    max_tokens: int = 1500,
+    temperature: float = 0.5,
+) -> str:
     """Call LLM via OpenRouter for instruction/soul writing."""
     settings = get_settings()
     client = AsyncOpenAI(
@@ -1141,8 +1622,8 @@ async def _call_instruction_writer(prompt: str, system: str, model: str | None =
             {"role": "system", "content": system},
             {"role": "user", "content": prompt},
         ],
-        max_tokens=1500,
-        temperature=0.5,
+        max_tokens=max_tokens,
+        temperature=temperature,
     )
     content = response.choices[0].message.content or ""
     # Strip reasoning/thinking tags
@@ -1230,6 +1711,9 @@ def build_builder_tools(
         Blueprint berisi workflow, data yang wajib dikumpulkan, knowledge yang dibutuhkan,
         aturan eskalasi, tool plan, dan checklist validasi. Gunakan ini untuk agent bisnis
         yang butuh SOP/custom workflow, terutama CS, ecommerce, HR, data, dan personal assistant.
+        Jangan tampilkan blueprint ke user untuk minta approval mikro. Setelah tool ini sukses,
+        lanjutkan langsung ke compose_agent_instructions kecuali ada data kritis yang benar-benar
+        tidak bisa diinfer dari pesan, dokumen, atau konteks percakapan.
 
         Args:
             preset_id: Preset yang dipilih dari plan_agent
@@ -1247,7 +1731,11 @@ def build_builder_tools(
         system_msg = (
             "Kamu adalah solution architect untuk AI agent bisnis. "
             "Tugasmu membuat blueprint yang operasional, spesifik, dan tidak generik. "
-            "Return HANYA JSON valid, tanpa markdown dan tanpa penjelasan di luar JSON."
+            "Rancang agent seperti pekerja manusia sungguhan: punya role, SOP, state kerja, data wajib, batas wewenang, "
+            "handoff manusia, dan kriteria selesai yang terukur. "
+            "Untuk agent bisnis/jasa, wajib pikirkan alur pembayaran, approval manusia, deliverable, dan after-sales jika relevan. "
+            "Return HANYA JSON valid, tanpa markdown dan tanpa penjelasan di luar JSON. "
+            "Pakai double quote, koma antar-field yang valid, tanpa trailing comma, dan jangan potong objek JSON."
         )
         user_msg = (
             "Buat Agent Blueprint dari data berikut.\n\n"
@@ -1269,58 +1757,60 @@ def build_builder_tools(
             '  "knowledge_plan": {"must_have": ["..."], "nice_to_have": ["..."], "needs_upload": true},\n'
             '  "tool_plan": [{"tool": "...", "why": "...", "when_to_use": "..."}],\n'
             '  "memory_plan": [{"key": "...", "value_to_store": "..."}],\n'
+            '  "state_plan": [{"state": "...", "entry_condition": "...", "allowed_actions": ["..."], "exit_condition": "..."}],\n'
+            '  "human_approval_points": [{"when": "...", "operator_action": "...", "agent_next_action": "..."}],\n'
             '  "escalation_rules": [{"condition": "...", "action": "..."}],\n'
             '  "conversation_examples_needed": ["..."],\n'
             '  "validation_checklist": ["..."],\n'
             '  "missing_info_questions": ["maks 3 pertanyaan paling penting jika data belum cukup"]\n'
             "}\n\n"
-            "Pastikan workflow berbeda untuk tiap konteks bisnis. Jangan isi generik seperti 'jawab pertanyaan user' saja."
+            "Pastikan workflow berbeda untuk tiap konteks bisnis. Jangan isi generik seperti 'jawab pertanyaan user' saja. "
+            "Jika ada pembayaran/approval/deliverable, state_plan harus memuat minimal: intake, waiting_payment, payment_review, approved, delivery, aftercare. "
+            "Jika tidak relevan, buat state_plan yang sesuai preset dan tujuan user."
         )
 
         try:
-            raw = await _call_instruction_writer(user_msg, system_msg, model=_BLUEPRINT_WRITER_MODEL)
-            match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
-            blueprint = json.loads(match.group(0) if match else raw)
-            return json.dumps({
+            raw = await _call_instruction_writer(
+                user_msg,
+                system_msg,
+                model=_BLUEPRINT_WRITER_MODEL,
+                max_tokens=2800,
+                temperature=0.2,
+            )
+            blueprint, repaired_json = _parse_llm_json_object(raw)
+            payload = {
                 "blueprint": blueprint,
                 "next_step": (
                     "Gunakan blueprint ini sebagai agent_blueprint saat compose_agent_instructions. "
-                    "Kalau missing_info_questions berisi pertanyaan kritis, tanya user dulu sebelum create."
+                    "Jangan minta user menyetujui blueprint. Tanya user hanya jika missing_info_questions "
+                    "berisi blocker kritis yang tidak bisa diinfer; selain itu lanjutkan create flow."
                 ),
-            }, ensure_ascii=False, indent=2)
+            }
+            if repaired_json:
+                logger.warning(
+                    "builder_tools.compose_agent_blueprint.json_repaired",
+                    preset_id=preset_id,
+                    agent_name=agent_name,
+                )
+                payload["parse_status"] = "json_repaired"
+            return json.dumps(payload, ensure_ascii=False, indent=2)
         except Exception as exc:
             logger.error("builder_tools.compose_agent_blueprint.error", error=str(exc))
-            fallback = {
-                "agent_summary": f"{agent_name or 'Agent'} untuk {user_goal}",
-                "assumptions": ["Blueprint fallback karena generator gagal; konfirmasi detail penting ke user."],
-                "workflow_steps": [
-                    {
-                        "step": 1,
-                        "name": "Discovery kebutuhan",
-                        "agent_action": "Tanyakan kebutuhan utama dan konteks yang belum jelas.",
-                        "required_user_data": ["nama/kebutuhan user"],
-                        "success_criteria": "Agent memahami intent sebelum menjawab.",
-                    }
-                ],
-                "knowledge_plan": {
-                    "must_have": ["Detail produk/layanan, harga, jam operasional, kebijakan penting"],
-                    "nice_to_have": ["FAQ dan contoh kasus nyata"],
-                    "needs_upload": bool(tc.get("rag")),
-                },
-                "tool_plan": [
-                    {"tool": k, "why": "Aktif dari preset", "when_to_use": "Sesuai kebutuhan workflow"}
-                    for k, v in tc.items() if v
-                ],
-                "memory_plan": [{"key": "user_profile", "value_to_store": "Nama, kebutuhan, dan preferensi user"}],
-                "escalation_rules": [{"condition": "Agent tidak yakin atau kasus sensitif", "action": "Eskalasi ke operator"}],
-                "conversation_examples_needed": ["Contoh tanya jawab untuk kasus paling umum"],
-                "validation_checklist": ["Instructions mencerminkan workflow dan tidak generik"],
-                "missing_info_questions": ["Detail bisnis apa yang paling wajib agent pahami?"],
-            }
+            fallback = _fallback_agent_blueprint(
+                preset_id=preset_id,
+                user_goal=user_goal,
+                agent_name=agent_name,
+                business_context=business_context,
+                target_users=target_users,
+                channel=channel,
+                requested_features=requested_features,
+                known_constraints=known_constraints,
+                tools_config=tc,
+            )
             return json.dumps({
                 "blueprint": fallback,
-                "warning": f"Generator blueprint gagal: {exc}",
-                "next_step": "Gunakan blueprint fallback ini atau panggil ulang dengan konteks lebih lengkap.",
+                "parse_status": "deterministic_fallback",
+                "next_step": "Gunakan blueprint fallback ini untuk compose_agent_instructions jika konteks user sudah cukup; jangan minta approval mikro.",
             }, ensure_ascii=False, indent=2)
 
     # ------------------------------------------------------------------ #
@@ -1347,6 +1837,8 @@ def build_builder_tools(
 
         WAJIB dipanggil di Fase 4 step 2, sebelum create_agent. Gunakan hasilnya
         sebagai parameter `instructions` saat memanggil create_agent.
+        Setelah hasil instructions valid, lanjutkan langsung ke create_agent. Jangan minta
+        persetujuan user untuk "lanjut buat agent" jika user sudah meminta agent dibuat.
 
         Args:
             preset_id: Preset yang digunakan (coding_deploy_agent, cs_whatsapp_basic, dll)
@@ -1379,7 +1871,13 @@ def build_builder_tools(
             "Sesuaikan seluruh konten dengan konteks bisnis, nama, dan kebutuhan spesifik user. "
             "Dua agent dengan preset sama tapi bisnis berbeda HARUS punya instructions yang berbeda.\n"
             "10. Jika ada AGENT BLUEPRINT, jadikan itu sumber utama workflow. "
-            "Instructions harus memuat workflow steps, data wajib dikumpulkan, knowledge plan, memory plan, dan escalation rules."
+            "Instructions harus memuat workflow steps, data wajib dikumpulkan, knowledge plan, memory plan, dan escalation rules.\n"
+            "11. Untuk agent bisnis/jasa, tulis seperti SOP pekerja manusia: state kerja, data wajib, kapan boleh lanjut, kapan harus berhenti, "
+            "kapan harus minta approval manusia, dan apa definisi task selesai.\n"
+            "12. Jika ada pembayaran, bukti transfer, approval admin, atau deliverable berbayar, instructions WAJIB memuat state minimal: "
+            "intake -> waiting_payment -> payment_review -> approved -> delivery -> aftercare. "
+            "Agent tidak boleh mengirim deliverable sebelum payment approved, tidak boleh eskalasi payment berulang setelah approved, "
+            "dan setelah approval harus melanjutkan workflow customer dari konteks customer."
         )
 
         # Build tool hints so the instruction writer knows which tools are available
@@ -1493,7 +1991,8 @@ def build_builder_tools(
                 ),
                 "next_step": (
                     "Gunakan 'instructions' di atas sebagai parameter create_agent. "
-                    "Jika remaining_placeholders tidak kosong, perbaiki secara manual atau panggil ulang maksimal satu kali."
+                    "Jika remaining_placeholders tidak kosong, perbaiki secara manual atau panggil ulang maksimal satu kali. "
+                    "Jika valid, langsung create_agent tanpa tanya approval lagi."
                 ),
             }, ensure_ascii=False, indent=2)
 
@@ -1624,7 +2123,7 @@ def build_builder_tools(
                 "whatsapp": "send_agent_wa_qr untuk kirim QR agent baru",
                 "coding": "sandbox + deploy + subagents sys_coder",
                 "browsing": "tavily_search/tavily_extract untuk web search dan baca URL",
-                "productivity": "scheduler untuk reminder, mcp.google_workspace untuk Google",
+                "productivity": "scheduler untuk reminder, integrasi Google Workspace untuk Docs/Sheets/Drive/Gmail/Calendar",
             },
             "input_types": [
                 "teks — pesan tulis biasa",
@@ -1637,6 +2136,12 @@ def build_builder_tools(
                 RUNTIME_LIMITATIONS["deploy_requires_docker_socket"]["user_message"],
                 RUNTIME_LIMITATIONS["deploy_ttl_4h_max"]["user_message"],
                 RUNTIME_LIMITATIONS["one_wa_number_per_agent"]["user_message"],
+            ],
+            "prohibited_agent_purposes": [
+                "buzzer",
+                "kampanye politik",
+                "propaganda politik",
+                "manipulasi opini publik",
             ],
             "platform_limitations": {k: v["description"] for k, v in RUNTIME_LIMITATIONS.items()},
             "agent_optional_params": {
@@ -1685,26 +2190,33 @@ def build_builder_tools(
             from app.models.agent import Agent
             from app.models.subscription import SubscriptionPlan
 
-            target_phone = phone or owner_phone
+            target_phone = _best_owner_identifier(phone, owner_phone, default_target)
             if not target_phone:
                 return json.dumps({"error": "phone tidak tersedia"}, ensure_ascii=False)
 
-            # Tolak LID (>15 digit) — bukan nomor HP asli, tidak bisa di-provision
-            if len(target_phone.lstrip("+")) >= 15:
-                return json.dumps({
-                    "error": "Nomor tidak dapat diidentifikasi (LID). Pastikan nomor WA kamu sudah terdaftar dengan benar.",
-                }, ensure_ascii=False)
-
             async with db_factory() as db:
-                # Auto-provision: buat user + Tier 1 jika belum ada
-                user, sub = await get_or_create_wa_user(target_phone, db)
-                await db.commit()
+                if _is_probable_lid(target_phone):
+                    details = await get_subscription_by_external_id(target_phone, db)
+                    if details is None:
+                        return json.dumps({
+                            "error": (
+                                "Nomor WhatsApp asli belum tersedia di session ini. "
+                                "Kirim pesan dari nomor WA yang sudah ter-resolve, atau pastikan profil user punya phone_number."
+                            ),
+                            "identifier": target_phone,
+                            "identifier_type": "lid",
+                        }, ensure_ascii=False)
+                    user, sub, plan = details
+                else:
+                    # Auto-provision only for real phone identifiers, never for LID.
+                    user, sub = await get_or_create_wa_user(target_phone, db)
+                    await db.commit()
 
-                plan = (
-                    await db.execute(
-                        select(SubscriptionPlan).where(SubscriptionPlan.id == sub.plan_id)
-                    )
-                ).scalar_one()
+                    plan = (
+                        await db.execute(
+                            select(SubscriptionPlan).where(SubscriptionPlan.id == sub.plan_id)
+                        )
+                    ).scalar_one()
 
                 # Hitung agent aktif
                 active_count_result = await db.execute(
@@ -1716,7 +2228,7 @@ def build_builder_tools(
                 active_agents = active_count_result.scalars().all()
                 used = len(active_agents)
                 limit = plan.max_agents
-                remaining = max(0, limit - used)
+                remaining = None if limit is None else max(0, limit - used)
 
                 return json.dumps({
                     "phone": target_phone,
@@ -1729,6 +2241,8 @@ def build_builder_tools(
                     "agents_remaining": remaining,
                     "active_agent_names": [a.name for a in active_agents],
                     "token_quota": sub.token_quota,
+                    "tokens_used": getattr(sub, "tokens_used", 0),
+                    "tokens_remaining": getattr(sub, "tokens_remaining", max(0, sub.token_quota - getattr(sub, "tokens_used", 0))),
                     "active_until": sub.expires_at.isoformat() if sub.expires_at else None,
                 }, ensure_ascii=False, indent=2)
         except Exception as exc:
@@ -1840,6 +2354,10 @@ def build_builder_tools(
         validation warnings, dan langkah selanjutnya.
 
         Gunakan ini SEBELUM create_agent untuk memastikan config sudah tepat.
+        Ini bukan approval gate. Setelah plan siap, lanjutkan ke compose_agent_blueprint,
+        compose_agent_instructions, validate_agent_config, lalu create_agent tanpa bertanya
+        "setuju/lanjut?" kecuali ada validation_errors atau data kritis yang benar-benar
+        wajib dari user.
 
         Args:
             user_goal: Deskripsi singkat apa yang user ingin agentnya lakukan
@@ -1851,6 +2369,20 @@ def build_builder_tools(
             operator_phone: Nomor operator/admin untuk eskalasi (opsional)
         """
         goal_lower = user_goal.lower()
+        policy_reason = _blocked_agent_policy_reason(
+            user_goal,
+            agent_name,
+            requested_features,
+            persona,
+            business_context,
+        )
+        if policy_reason:
+            return json.dumps({
+                "plan_status": "blocked_by_policy",
+                "validation_errors": [policy_reason],
+                "next_action": "Tolak permintaan ini dengan singkat dan tawarkan jenis agent non-politik/non-buzzer.",
+            }, ensure_ascii=False, indent=2)
+
         features = [f.strip().lower() for f in requested_features.split(",") if f.strip()]
         feature_text = f"{goal_lower} {requested_features.lower()}"
 
@@ -1880,8 +2412,9 @@ def build_builder_tools(
                 tools_config[mapped] = True
 
         wants_coding = any(k in feature_text for k in ("coding", "kode", "prototype", "website", "deploy", "sandbox"))
-        wants_files = any(k in feature_text for k in ("file", "pdf", "excel", "docx", "document", "dokumen"))
-        wants_google = any(k in feature_text for k in ("google", "gmail", "calendar", "drive", "docs", "sheets"))
+        wants_files = any(k in feature_text for k in ("file", "pdf", "excel", "docx", "document", "buat dokumen", "kirim dokumen"))
+        wants_google = any(k in feature_text for k in ("google", "gmail", "calendar", "drive", "docs", "sheets", "workspace"))
+        google_workspace_option = _google_workspace_option(feature_text, wants_google)
         if wants_coding:
             tools_config["sandbox"] = True
             tools_config["deploy"] = True
@@ -1891,15 +2424,7 @@ def build_builder_tools(
             tools_config["whatsapp_media"] = True
             tools_config["subagents"] = {"enabled": True}
         if wants_google:
-            tools_config["mcp"] = {
-                "enabled": True,
-                "servers": {
-                    "google_workspace": {
-                        "url": get_settings().workspace_mcp_url or "https://msj90wr2-8002.asse.devtunnels.ms/mcp",
-                        "transport": "streamable_http",
-                    }
-                },
-            }
+            tools_config = _enable_google_workspace_tools(tools_config)
 
         # Validate tool dependencies
         validation_errors: list[str] = []
@@ -1946,11 +2471,12 @@ def build_builder_tools(
                 ),
                 "known_business_context": business_context,
                 "requested_features": features,
-                "recommended_questions": [
-                    "Apa langkah kerja ideal agent dari awal sampai selesai?",
-                    "Data apa yang wajib dikumpulkan dari user/pelanggan?",
-                    "Pengetahuan produk/SOP apa yang wajib agent tahu?",
-                    "Kapan agent harus eskalasi ke manusia?",
+                "design_considerations": [
+                    "Langkah kerja ideal agent dari awal sampai selesai.",
+                    "Data yang wajib dikumpulkan dari user/pelanggan.",
+                    "Pengetahuan produk/SOP yang wajib agent tahu.",
+                    "Kapan agent harus eskalasi ke manusia.",
+                    "Apakah ada pembayaran, approval admin, atau deliverable yang baru boleh dikirim setelah disetujui.",
                 ],
             },
             "recommended_config": {
@@ -1968,10 +2494,17 @@ def build_builder_tools(
             "validation_errors": validation_errors,
             "validation_warnings": validation_warnings,
             "critical_limitations": critical_limitations,
+            "google_workspace_option": google_workspace_option,
             "smoke_test_guidance": preset.get("smoke_test", {}).get("steps", []),
             "next_action": (
-                "Untuk agent bisnis/custom, panggil compose_agent_blueprint lalu compose_agent_instructions. "
-                "Setelah itu validate_agent_config dan create_agent."
+                (
+                    "Tawarkan opsi integrasi Google Workspace dengan bahasa awam memakai google_workspace_option.user_facing_pitch. "
+                    "Jika user setuju, panggil plan_agent lagi dengan requested_features berisi google sebelum create. "
+                    "Jika user menolak, lanjutkan compose_agent_blueprint/compose_agent_instructions tanpa Google."
+                )
+                if google_workspace_option.get("should_offer") and not validation_errors
+                else "Untuk agent bisnis/custom, panggil compose_agent_blueprint lalu compose_agent_instructions. "
+                "Setelah itu validate_agent_config dan create_agent tanpa minta approval mikro."
                 if not validation_errors
                 else "Perbaiki validation_errors sebelum create."
             ),
@@ -1998,6 +2531,7 @@ def build_builder_tools(
         except ValueError:
             return f"[error] agent_id tidak valid: {agent_id}"
 
+        google_workspace_enabled = False
         async with db_factory() as db:
             result = await db.execute(
                 select(Agent).where(Agent.id == agent_uuid, Agent.is_deleted.is_(False))
@@ -2087,6 +2621,10 @@ def build_builder_tools(
             errors.append("Nama agent terlalu pendek (minimal 2 karakter)")
         if len(name) > 255:
             errors.append("Nama agent terlalu panjang (maksimal 255 karakter)")
+
+        policy_reason = _blocked_agent_policy_reason(name, instructions, tools_config, preset_id)
+        if policy_reason:
+            errors.append(policy_reason)
 
         # Validasi instructions
         instruction_len = len(instructions)
@@ -2248,6 +2786,17 @@ def build_builder_tools(
         """
         if not name or len(name.strip()) < 2:
             return "[error] Nama agent minimal 2 karakter"
+        policy_reason = _blocked_agent_policy_reason(
+            name,
+            description,
+            instructions,
+            tools_config,
+            escalation_config,
+            soul,
+            blueprint,
+        )
+        if policy_reason:
+            return json.dumps({"error": policy_reason}, ensure_ascii=False)
         if not owner_phone:
             return (
                 "[error] Tidak bisa membuat agent karena owner_external_id tidak tersedia. "
@@ -2262,6 +2811,8 @@ def build_builder_tools(
         if tc_error:
             return f"[error] tools_config bukan JSON/object yang valid: {tc_error}"
         tc.setdefault("tavily", True)
+        if _has_google_workspace_tools(tc):
+            instructions, _ = _append_google_workspace_instruction(instructions)
         owner_ids = _owner_variants(owner_phone)
 
         ec, ec_error = _parse_json_arg(escalation_config, {}, expected=dict)
@@ -2417,6 +2968,9 @@ def build_builder_tools(
                 "memory_keys_seeded": memory_keys_seeded,
                 "message": (
                     f"Agent '{agent.name}' berhasil dibuat dengan ID: {agent.id}. "
+                    "Simpan agent_id ini sebagai target utama untuk aksi lanjutan pada percakapan ini. "
+                    "Jika user meminta nomor trial/link coba setelah ini, panggil create_wa_dev_trial_link "
+                    "dengan agent_id ini, bukan agent lama dari history. "
                     "Jika memory_keys_seeded belum berisi 'soul', langkah selanjutnya adalah panggil compose_agent_soul "
                     "lalu simpan ke memory agent baru via set_agent_memory(agent_id, key='soul', value=soul). "
                     "Lebih efisien: untuk create berikutnya, isi parameter soul dan blueprint langsung saat create_agent."
@@ -2433,43 +2987,61 @@ def build_builder_tools(
 
     @tool
     async def create_wa_dev_trial_link(
-        agent_id: str,
+        agent_id: str = "",
         phone: str = "",
         force_new_code: bool = False,
         send_contact: bool = True,
     ) -> str:
         """
-        Generate kode 6 karakter untuk menghubungkan agent ke nomor WhatsApp shared Arthur.
+        Generate kode 6 karakter untuk mencoba agent lewat nomor demo Arthur.
 
         Gunakan setelah create_agent saat user ingin mencoba agent di WhatsApp tanpa
-        punya nomor khusus atau scan QR. Kirimkan hasilnya ke user sebagai opsi:
-        1) scan QR nomor sendiri via send_agent_wa_qr, atau
-        2) pakai nomor Arthur/shared trial dengan mengirim kode ini.
+        punya nomor khusus. Kirimkan hasilnya ke user sebagai opsi:
+        "Mau agent ini langsung dipasang ke nomor WhatsApp kamu sendiri, atau
+        dicoba dulu lewat nomor demo Arthur yang sudah siap pakai?"
 
         Args:
-            agent_id: UUID agent yang akan dicoba di nomor shared Arthur
+            agent_id: UUID agent yang akan dicoba di nomor shared Arthur. Jika kosong,
+                      tool memilih agent non-builder terbaru milik user saat ini.
             phone: Nomor/JID tujuan untuk dikirimi vCard. Kosong = user saat ini.
             force_new_code: True untuk rotate kode lama
             send_contact: True untuk kirim contact card nomor shared Arthur ke user
         """
-        try:
-            agent_uuid = uuid.UUID(agent_id)
-        except ValueError:
-            return f"[error] agent_id tidak valid: {agent_id}"
+        agent_uuid: uuid.UUID | None = None
+        if agent_id and self_agent_id and str(agent_id) == str(self_agent_id):
+            agent_id = ""
+        if agent_id:
+            try:
+                agent_uuid = uuid.UUID(agent_id)
+            except ValueError:
+                return f"[error] agent_id tidak valid: {agent_id}"
 
         target = phone or default_target or owner_phone or ""
         settings = get_settings()
         contact_name = settings.wa_dev_public_name or "Arthur AI Dev"
 
         async with db_factory() as db:
-            result = await db.execute(
-                select(Agent).where(Agent.id == agent_uuid, Agent.is_deleted.is_(False))
-            )
-            agent = result.scalar_one_or_none()
+            if agent_uuid:
+                result = await db.execute(
+                    select(Agent).where(Agent.id == agent_uuid, Agent.is_deleted.is_(False))
+                )
+                agent = result.scalar_one_or_none()
+            else:
+                agent = await _latest_owned_agent_for_trial(
+                    db,
+                    owner_phone=owner_phone,
+                    self_agent_id=self_agent_id,
+                )
             if not agent:
-                return f"[error] Agent dengan ID {agent_id} tidak ditemukan"
+                return (
+                    f"[error] Agent dengan ID {agent_id} tidak ditemukan"
+                    if agent_id
+                    else "[error] Tidak menemukan agent terbaru milik user untuk dibuatkan trial link"
+                )
             if owner_phone and not _agent_belongs_to_owner(agent, owner_phone):
                 return "[error] Kamu tidak punya akses ke agent ini"
+            resolved_agent_id = str(agent.id)
+            resolved_agent_name = agent.name
 
             from app.core.domain.wa_dev_trial_service import ensure_wa_dev_trial_code
 
@@ -2490,7 +3062,8 @@ def build_builder_tools(
         if not shared_phone:
             return json.dumps({
                 "success": True,
-                "agent_id": agent_id,
+                "agent_id": resolved_agent_id,
+                "agent_name": resolved_agent_name,
                 "code": code,
                 "contact_sent": False,
                 "warning": (
@@ -2524,7 +3097,8 @@ def build_builder_tools(
 
         return json.dumps({
             "success": True,
-            "agent_id": agent_id,
+            "agent_id": resolved_agent_id,
+            "agent_name": resolved_agent_name,
             "code": code,
             "shared_whatsapp_name": contact_name,
             "shared_whatsapp_phone": f"+{shared_phone}",
@@ -2602,10 +3176,13 @@ def build_builder_tools(
         escalation_config: str = "",
         add_operator: str = "",
         remove_operator: str = "",
+        enable_google_workspace: bool = False,
     ) -> str:
         """
         Update konfigurasi agent yang sudah ada. Hanya field yang diisi yang akan diubah.
         Hanya bisa mengupdate agent yang dimiliki oleh user ini (owner_phone).
+        Untuk mengaktifkan kemampuan Google Docs/Sheets/Drive/Gmail/Calendar, gunakan
+        enable_google_workspace=True agar tools_config dan instruksi agent diperbarui sekaligus.
 
         Args:
             agent_id: UUID agent yang akan diupdate
@@ -2619,11 +3196,15 @@ def build_builder_tools(
             escalation_config: JSON string escalation_config baru (opsional)
             add_operator: Nomor WA operator baru yang ingin ditambahkan ke operator_ids (opsional)
             remove_operator: Nomor WA operator yang ingin dihapus dari operator_ids (opsional)
+            enable_google_workspace: True untuk mengaktifkan integrasi Google Workspace
+                                     dan menambahkan instruksi operasional Google ke agent.
         """
         try:
             agent_uuid = uuid.UUID(agent_id)
         except ValueError:
             return f"[error] agent_id tidak valid: {agent_id}"
+
+        google_workspace_enabled = False
 
         async with db_factory() as db:
             result = await db.execute(
@@ -2645,6 +3226,16 @@ def build_builder_tools(
                 return f"[error] Kamu tidak punya akses ke agent ini. Hanya agent milikmu yang bisa diubah."
 
             updated_fields: list[str] = []
+
+            policy_reason = _blocked_agent_policy_reason(
+                name,
+                instructions,
+                description,
+                tools_config,
+                escalation_config,
+            )
+            if policy_reason:
+                return json.dumps({"error": policy_reason}, ensure_ascii=False)
 
             if name and name.strip():
                 dup_result = await db.execute(
@@ -2689,8 +3280,36 @@ def build_builder_tools(
                     existing.setdefault("tavily", True)
                     agent.tools_config = existing
                     updated_fields.append("tools_config")
+                    if _has_google_workspace_tools(agent.tools_config):
+                        google_workspace_enabled = True
+                        updated_instructions, changed_instructions = _append_google_workspace_instruction(
+                            agent.instructions or ""
+                        )
+                        if changed_instructions:
+                            agent.instructions = updated_instructions
+                            updated_fields.append("instructions+google_workspace")
                 except json.JSONDecodeError:
                     return "[error] tools_config bukan JSON yang valid"
+
+            if enable_google_workspace:
+                before_google = _has_google_workspace_tools(
+                    agent.tools_config if isinstance(agent.tools_config, dict) else {}
+                )
+                agent.tools_config = _enable_google_workspace_tools(
+                    agent.tools_config if isinstance(agent.tools_config, dict) else {}
+                )
+                google_workspace_enabled = True
+                if not before_google and "tools_config" not in updated_fields:
+                    updated_fields.append("tools_config")
+                if before_google:
+                    updated_fields.append("google_workspace_already_enabled")
+
+                updated_instructions, changed_instructions = _append_google_workspace_instruction(
+                    agent.instructions or ""
+                )
+                if changed_instructions:
+                    agent.instructions = updated_instructions
+                    updated_fields.append("instructions+google_workspace")
 
             if allowed_senders and allowed_senders.strip():
                 try:
@@ -2759,13 +3378,29 @@ def build_builder_tools(
             await db.commit()
 
         logger.info("builder_tools.update_agent.success", agent_id=agent_id, fields=updated_fields)
-        return json.dumps({
+        response = {
             "success": True,
             "agent_id": agent_id,
+            "agent_name": agent.name,
             "updated_fields": updated_fields,
             "new_version": agent.version,
             "message": f"Agent '{agent.name}' berhasil diupdate. Field yang diubah: {', '.join(updated_fields)}",
-        }, ensure_ascii=False, indent=2)
+        }
+        if google_workspace_enabled:
+            response["google_workspace_enabled"] = True
+            response["readback"] = {
+                "tools_config_has_google_workspace": _has_google_workspace_tools(
+                    agent.tools_config if isinstance(agent.tools_config, dict) else {}
+                ),
+                "instructions_include_google_workspace": "Google Workspace" in (agent.instructions or ""),
+            }
+            response["next_step"] = (
+                "Panggil get_agent_detail(agent_id) untuk verifikasi readback. "
+                "Setelah readback benar, panggil generate_google_auth_link(agent_id, external_user_id=nomor user saat ini) "
+                "dan kirim link otentikasi Google ke user jika tersedia. "
+                "Saat menjelaskan ke user, sebut 'integrasi Google/Google Docs', jangan sebut istilah teknis internal/protokol tool."
+            )
+        return json.dumps(response, ensure_ascii=False, indent=2)
 
     # ------------------------------------------------------------------ #
     # 6. delete_agent                                                     #
@@ -2907,6 +3542,10 @@ def build_builder_tools(
             "model": agent.model,
             "temperature": agent.temperature,
             "tools_config": agent.tools_config,
+            "google_workspace_enabled": _has_google_workspace_tools(
+                agent.tools_config if isinstance(agent.tools_config, dict) else {}
+            ),
+            "instructions_include_google_workspace": "Google Workspace" in (agent.instructions or ""),
             "escalation_config": agent.escalation_config,
             "operator_ids": agent.operator_ids,
             "allowed_senders": agent.allowed_senders,
@@ -2983,10 +3622,10 @@ def build_builder_tools(
         """
         Generate link untuk user connect akun Google mereka ke agent tertentu.
         Gunakan tool ini setiap kali user minta link auth Google, atau setelah
-        create/update agent yang punya MCP google_workspace.
+        create/update agent yang punya integrasi Google Workspace.
 
         Setelah dapat auth_url, kirimkan HANYA link-nya ke user — jangan tampilkan
-        endpoint atau parameter teknis apapun.
+        endpoint, parameter teknis, atau istilah internal/protokol tool.
 
         Args:
             agent_id: ID agent yang akan dihubungkan ke Google

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 	"unicode"
@@ -81,6 +82,27 @@ func trialCodeCandidates(text string) []string {
 	return candidates
 }
 
+func messageConnectionKeys(msg IncomingMessage) []string {
+	seen := map[string]bool{}
+	keys := []string{}
+	add := func(key string) {
+		key = strings.TrimSpace(key)
+		if key == "" || seen[key] {
+			return
+		}
+		seen[key] = true
+		keys = append(keys, key)
+	}
+
+	add(msg.From)
+	add(msg.PhoneFrom)
+	add(msg.ChatID)
+	if user, _, ok := strings.Cut(msg.ChatID, "@"); ok && user != "" {
+		add("+" + user)
+	}
+	return keys
+}
+
 func (r *Router) HandleMessage(msg IncomingMessage) {
 	// Forward raw message to optional webhook regardless of routing
 	if r.webhookURL != "" {
@@ -93,21 +115,22 @@ func (r *Router) HandleMessage(msg IncomingMessage) {
 		return
 	}
 
-	conn, connected := r.store.Get(msg.From)
+	keys := messageConnectionKeys(msg)
+	conn, connectedKey, connected := r.store.GetAny(keys...)
 
 	if connected && isDisconnect(msg.Text) {
-		_ = r.store.Delete(msg.From)
+		_ = r.store.DeleteMany(keys...)
 		_, _ = r.wa.SendText(msg.ChatID, "✅ Kamu berhasil disconnect dari agent.\n\nKirim kode baru dari Arthur kapan saja untuk connect ke agent lagi.")
-		log.Printf("[dev-router] %s disconnected from agent %s", msg.From, conn.AgentID)
+		log.Printf("[dev-router] %s disconnected from agent %s", connectedKey, conn.AgentID)
 		return
 	}
 
 	if connected {
 		for _, code := range trialCodeCandidates(msg.Text) {
-			if agentID, agentName, ok := r.claimTrialCode(code, msg.From, msg.ChatID, msg.PushName); ok {
-				r.saveConnection(msg.From, msg.ChatID, agentID)
+			if agentID, agentName, ok := r.claimTrialCode(code, msg.From, msg.PhoneFrom, msg.ChatID, msg.PushName); ok {
+				r.saveConnection(keys, msg.ChatID, agentID)
 				_, _ = r.wa.SendText(msg.ChatID, fmt.Sprintf("✅ Berhasil switch ke agent *%s*.\n\nSekarang kamu bisa chat langsung di sini.\nKirim */stop* kalau mau disconnect.", agentName))
-				log.Printf("[dev-router] %s switched from agent %s to agent %s via trial code", msg.From, conn.AgentID, agentID)
+				log.Printf("[dev-router] %s switched from agent %s to agent %s via trial code", connectedKey, conn.AgentID, agentID)
 				return
 			}
 		}
@@ -123,8 +146,8 @@ func (r *Router) HandleMessage(msg IncomingMessage) {
 		codes := trialCodeCandidates(msg.Text)
 		if len(codes) > 0 {
 			for _, code := range codes {
-				if agentID, agentName, ok := r.claimTrialCode(code, msg.From, msg.ChatID, msg.PushName); ok {
-					r.saveConnection(msg.From, msg.ChatID, agentID)
+				if agentID, agentName, ok := r.claimTrialCode(code, msg.From, msg.PhoneFrom, msg.ChatID, msg.PushName); ok {
+					r.saveConnection(keys, msg.ChatID, agentID)
 					_, _ = r.wa.SendText(msg.ChatID, fmt.Sprintf("✅ Berhasil terhubung ke agent *%s*!\n\nSekarang kamu bisa chat langsung di sini.\nKirim */stop* kalau mau disconnect.", agentName))
 					log.Printf("[dev-router] %s connected to agent %s via trial code", msg.From, agentID)
 					return
@@ -138,7 +161,7 @@ func (r *Router) HandleMessage(msg IncomingMessage) {
 			return
 		}
 		// Check if this phone is an operator for any agent — auto-route without requiring 'connect'
-		if agentID, ok := r.lookupOperatorAgent(msg.From); ok {
+		if agentID, ok := r.lookupOperatorAgent(msg.From, msg.PhoneFrom); ok {
 			log.Printf("[dev-router] operator %s auto-routed to agent %s", msg.From, agentID)
 			r.forwardToAgent(agentID, msg)
 			return
@@ -151,13 +174,13 @@ func (r *Router) HandleMessage(msg IncomingMessage) {
 	r.forwardToAgent(conn.AgentID, msg)
 }
 
-func (r *Router) saveConnection(from, chatID, agentID string) {
+func (r *Router) saveConnection(keys []string, chatID, agentID string) {
 	conn := &UserConnection{
 		AgentID:     agentID,
 		ConnectedAt: time.Now(),
 		ChatID:      chatID,
 	}
-	if err := r.store.Set(from, conn); err != nil {
+	if err := r.store.SetMany(keys, conn); err != nil {
 		log.Printf("[dev-router] store set err: %v", err)
 	}
 }
@@ -172,16 +195,20 @@ func (r *Router) handleConnect(from, chatID, agentID string) {
 		return
 	}
 
-	r.saveConnection(from, chatID, agentID)
+	r.saveConnection([]string{from, chatID}, chatID, agentID)
 
 	_, _ = r.wa.SendText(chatID, fmt.Sprintf("✅ Berhasil terhubung ke agent *%s*!\n\nSekarang kamu bisa chat langsung di sini.\nKirim *berhenti* atau */stop* untuk disconnect.", agentName))
 	log.Printf("[dev-router] %s connected to agent %s", from, agentID)
 }
 
-func (r *Router) claimTrialCode(codeText, from, chatID, pushName string) (string, string, bool) {
+func (r *Router) claimTrialCode(codeText, from, phoneFrom, chatID, pushName string) (string, string, bool) {
+	claimPhone := from
+	if strings.TrimSpace(phoneFrom) != "" {
+		claimPhone = phoneFrom
+	}
 	payload := map[string]string{
 		"code":      normalizeTrialCode(codeText),
-		"phone":     from,
+		"phone":     claimPhone,
 		"chat_id":   chatID,
 		"push_name": pushName,
 	}
@@ -229,6 +256,7 @@ func (r *Router) forwardToAgent(agentID string, msg IncomingMessage) {
 		"phone_from":         msg.PhoneFrom,
 		"chat_id":            msg.ChatID,
 		"message":            msg.Text,
+		"message_id":         msg.MessageID,
 		"timestamp":          msg.Timestamp,
 		"push_name":          msg.PushName,
 		"media_type":         msg.MediaType,
@@ -266,15 +294,40 @@ func (r *Router) forwardToAgent(agentID string, msg IncomingMessage) {
 		return
 	}
 
-	// Python already sends the reply back to the user via wa-dev-service's /send/text endpoint.
-	// Nothing more to do here.
+	var result struct {
+		Status string `json:"status"`
+		Reply  string `json:"reply"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err == nil && result.Status == "send_failed" && strings.TrimSpace(result.Reply) != "" {
+		if _, sendErr := r.wa.SendText(msg.ChatID, result.Reply); sendErr != nil {
+			log.Printf("[dev-router] fallback send failed for %s: %v", msg.From, sendErr)
+		} else {
+			log.Printf("[dev-router] fallback sent python reply to %s after send_failed", msg.From)
+		}
+	}
+
+	// Python normally sends the reply back via wa-dev-service's /send/text endpoint.
+	// The fallback above only fires when Python explicitly reports that final delivery failed.
 	log.Printf("[dev-router] forwarded msg from %s to agent %s", msg.From, agentID)
 }
 
 // lookupOperatorAgent checks whether a phone number is an operator for any agent.
 // Used to auto-route escalation replies without requiring the operator to 'connect {agentID}'.
-func (r *Router) lookupOperatorAgent(phone string) (string, bool) {
-	url := fmt.Sprintf("%s/v1/channels/wa-dev/operator-route?phone=%s", r.mainAPIURL, phone)
+func (r *Router) lookupOperatorAgent(phones ...string) (string, bool) {
+	for _, phone := range phones {
+		if strings.TrimSpace(phone) == "" {
+			continue
+		}
+		agentID, ok := r.lookupOperatorAgentOne(phone)
+		if ok {
+			return agentID, true
+		}
+	}
+	return "", false
+}
+
+func (r *Router) lookupOperatorAgentOne(phone string) (string, bool) {
+	url := fmt.Sprintf("%s/v1/channels/wa-dev/operator-route?phone=%s", r.mainAPIURL, url.QueryEscape(phone))
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return "", false
@@ -332,6 +385,7 @@ func (r *Router) forwardWebhook(msg IncomingMessage) {
 		"from":               msg.From,
 		"chat_id":            msg.ChatID,
 		"text":               msg.Text,
+		"message_id":         msg.MessageID,
 		"media_type":         msg.MediaType,
 		"media_data":         msg.MediaData,
 		"media_filename":     msg.MediaFilename,

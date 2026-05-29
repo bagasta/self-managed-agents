@@ -31,6 +31,7 @@ from app.core.engine.tool_builder import (
     build_whatsapp_media_tools,
 )
 from app.core.infra.sandbox import DockerSandbox
+from app.core.utils.phone_utils import normalize_phone
 from app.models.agent import Agent as AgentModel
 from app.models.session import Session
 
@@ -44,6 +45,32 @@ class AgentToolSetup:
     subagent_list: list
     sub_sandboxes: list[DockerSandbox]
     memory_scope: str | None
+
+
+def is_operator_turn(user_message: str) -> bool:
+    return user_message.startswith("[OPERATOR] ") or user_message.startswith("<OPERATOR>")
+
+
+def _is_probable_lid(value: str | None) -> bool:
+    normalized = normalize_phone(value or "")
+    return bool(normalized and normalized.isdigit() and len(normalized) > 15)
+
+
+def _resolve_builder_owner_phone(session: Session) -> str | None:
+    """Prefer a real phone number for Arthur ownership/subscription tools."""
+    raw_cfg = getattr(session, "channel_config", None)
+    channel_cfg = raw_cfg if isinstance(raw_cfg, dict) else {}
+    candidates = (
+        channel_cfg.get("phone_number"),
+        getattr(session, "external_user_id", None),
+        channel_cfg.get("user_phone"),
+    )
+    for candidate in candidates:
+        normalized = normalize_phone(str(candidate or ""))
+        if normalized and not _is_probable_lid(normalized):
+            return normalized
+    fallback = getattr(session, "external_user_id", None)
+    return normalize_phone(str(fallback or "")) or fallback
 
 
 async def build_agent_tool_setup(
@@ -65,6 +92,7 @@ async def build_agent_tool_setup(
     saved_custom_tools: list = []
 
     policy = build_agent_runtime_policy(agent_model, tools_config)
+    operator_turn = is_operator_turn(user_message)
     google_mcp_parent_only = should_use_google_workspace_parent_only(
         policy=policy,
         user_message=user_message,
@@ -73,7 +101,10 @@ async def build_agent_tool_setup(
     log.info("agent_run.policy_selected", policy_class=policy.policy_class)
     deploy_enabled = _is_enabled(tools_config, "deploy", default=False)
     sandbox: DockerSandbox | None = None
-    sandbox_requested = _is_enabled(tools_config, "sandbox", default=False) or deploy_enabled
+    sandbox_requested = (
+        (_is_enabled(tools_config, "sandbox", default=False) or deploy_enabled)
+        and not operator_turn
+    )
     if sandbox_requested and google_mcp_parent_only:
         log.info(
             "agent_run.google_mcp_parent_sandbox_skipped",
@@ -97,11 +128,11 @@ async def build_agent_tool_setup(
         tools.extend(build_heartbeat_tools(agent_id, session.id, AsyncSessionLocal, scope=memory_scope))
         active_groups.append("memory")
 
-    if _is_enabled(tools_config, "skills", default=True):
+    if (not operator_turn) and _is_enabled(tools_config, "skills", default=True):
         tools.extend(build_skill_tools(agent_id, AsyncSessionLocal))
         active_groups.append("skills")
 
-    if _is_enabled(tools_config, "tool_creator", default=False):
+    if (not operator_turn) and _is_enabled(tools_config, "tool_creator", default=False):
         if google_mcp_parent_only:
             log.info(
                 "agent_run.tool_creator_skipped",
@@ -115,7 +146,7 @@ async def build_agent_tool_setup(
             tools.extend(build_loaded_custom_tools(saved_custom_tools, sandbox))
             active_groups.append("tool_creator")
 
-    if _is_enabled(tools_config, "scheduler", default=False):
+    if (not operator_turn) and _is_enabled(tools_config, "scheduler", default=False):
         from app.core.tools.scheduler_tool import build_scheduler_tools
 
         tools.extend(build_scheduler_tools(session.id, agent_id, AsyncSessionLocal))
@@ -142,21 +173,21 @@ async def build_agent_tool_setup(
         )
         active_groups.append("escalation")
 
-    if user_message.startswith("[OPERATOR] ") or user_message.startswith("<OPERATOR>"):
+    if operator_turn:
         from app.core.tools.operator_tools import build_operator_tools
 
         tools.extend(build_operator_tools(agent_id=agent_id, db_factory=AsyncSessionLocal))
         active_groups.append("operator")
 
-    if _is_enabled(tools_config, "http", default=False):
+    if (not operator_turn) and _is_enabled(tools_config, "http", default=False):
         tools.extend(build_http_tools(tools_config))
         active_groups.append("http")
 
-    if _is_enabled(tools_config, "tavily", default=True) and settings.tavily_api_key:
+    if (not operator_turn) and _is_enabled(tools_config, "tavily", default=True) and settings.tavily_api_key:
         tools.extend(build_tavily_tools(tools_config))
         active_groups.append("tavily")
 
-    if getattr(session, "channel_type", None) == "whatsapp":
+    if (not operator_turn) and getattr(session, "channel_type", None) == "whatsapp":
         tools.extend(build_wa_notify_tool(session))
         active_groups.append("wa_notify")
         if _is_enabled(tools_config, "whatsapp_media", default=True):
@@ -167,12 +198,12 @@ async def build_agent_tool_setup(
             active_groups.append("wa_agent_manager")
 
     capabilities = getattr(agent_model, "capabilities", []) or []
-    if "builder" in capabilities:
+    if (not operator_turn) and "builder" in capabilities:
         channel_cfg = getattr(session, "channel_config", None)
         channel_cfg = channel_cfg if isinstance(channel_cfg, dict) else {}
         tools.extend(build_builder_tools(
             db_factory=AsyncSessionLocal,
-            owner_phone=memory_scope,
+            owner_phone=_resolve_builder_owner_phone(session),
             self_agent_id=str(agent_id),
             device_id=channel_cfg.get("device_id", "") or "",
             default_target=channel_cfg.get("user_phone", "") or "",
@@ -181,7 +212,9 @@ async def build_agent_tool_setup(
 
     subagent_list: list = []
     sub_sandboxes: list[DockerSandbox] = []
-    if _is_enabled(tools_config, "subagents", default=False) and google_mcp_parent_only:
+    if operator_turn and _is_enabled(tools_config, "subagents", default=False):
+        log.info("agent_run.operator_subagents_skipped", reason="operator_turn_must_not_run_business_workflow")
+    elif _is_enabled(tools_config, "subagents", default=False) and google_mcp_parent_only:
         log.info(
             "agent_run.google_mcp_subagents_skipped",
             reason="google_workspace_mcp_parent_only",
@@ -196,6 +229,7 @@ async def build_agent_tool_setup(
             log,
             wa_device_id=sub_channel.get("device_id", ""),
             wa_target=sub_channel.get("user_phone", ""),
+            user_message=user_message,
         )
         if subagent_list:
             active_groups.append(f"subagents({len(subagent_list)})")

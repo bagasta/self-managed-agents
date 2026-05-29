@@ -19,6 +19,8 @@ from app.models.user_api_key import UserApiKey, generate_user_key, hash_user_key
 
 logger = structlog.get_logger(__name__)
 
+TIER_3_TOKEN_QUOTA = 100_000_000
+
 
 DEFAULT_SUBSCRIPTION_PLANS: list[dict[str, Any]] = [
     {
@@ -68,7 +70,7 @@ DEFAULT_SUBSCRIPTION_PLANS: list[dict[str, Any]] = [
         "code": "tier_3",
         "label": "Enterprise",
         "max_agents": None,
-        "token_quota": 0,
+        "token_quota": TIER_3_TOKEN_QUOTA,
         "period_days": None,
         "grace_period_days": 7,
         "allowed_models": [],
@@ -82,18 +84,24 @@ DEFAULT_SUBSCRIPTION_PLANS: list[dict[str, Any]] = [
 
 async def ensure_default_subscription_plans(db: AsyncSession) -> None:
     """Idempotently seed core plans required by auto-provisioning."""
-    existing_ids = set(
-        (
+    existing_plans = {
+        plan.id: plan
+        for plan in (
             await db.execute(
-                select(SubscriptionPlan.id).where(
+                select(SubscriptionPlan).where(
                     SubscriptionPlan.id.in_([p["id"] for p in DEFAULT_SUBSCRIPTION_PLANS])
                 )
             )
         ).scalars().all()
-    )
+    }
     for data in DEFAULT_SUBSCRIPTION_PLANS:
-        if data["id"] not in existing_ids:
+        existing = existing_plans.get(data["id"])
+        if existing is None:
             db.add(SubscriptionPlan(**data))
+            continue
+        if existing.id == SubscriptionPlan.TIER_3_ID:
+            existing.max_agents = None
+            existing.token_quota = TIER_3_TOKEN_QUOTA
     await db.flush()
 
 
@@ -111,7 +119,14 @@ async def get_or_create_wa_user(
     await ensure_default_subscription_plans(db)
 
     user = (
-        await db.execute(select(User).where(User.external_id == external_id))
+        await db.execute(
+            select(User).where(
+                or_(
+                    User.external_id == external_id,
+                    User.phone_number == external_id,
+                )
+            )
+        )
     ).scalar_one_or_none()
 
     if user is None:
@@ -193,7 +208,14 @@ async def get_subscription_by_external_id(
     db: AsyncSession,
 ) -> tuple[User, UserSubscription, SubscriptionPlan] | None:
     user = (
-        await db.execute(select(User).where(User.external_id == external_id))
+        await db.execute(
+            select(User).where(
+                or_(
+                    User.external_id == external_id,
+                    User.phone_number == external_id,
+                )
+            )
+        )
     ).scalar_one_or_none()
     if user is None:
         return None

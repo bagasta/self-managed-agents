@@ -83,3 +83,34 @@ async def test_manage_event_without_event_id_returns_instruction_when_lookup_mis
 
     assert result.startswith("CALENDAR_EVENT_ID_REQUIRED")
     assert not manage_event.calls
+
+
+@pytest.mark.asyncio
+async def test_manage_event_with_calendar_id_in_event_id_auto_looks_up_real_event_id() -> None:
+    get_events = FakeTool(
+        "get_events",
+        'Successfully retrieved 1 events:\n- "Meeting proposal" ID: evt-real-123 | Link: https://example.test',
+        args_schema=GetEventsArgs,
+    )
+    manage_event = FakeTool(
+        "manage_event",
+        "Successfully modified event 'Meeting proposal' (ID: evt-real-123)",
+        args_schema=ManageEventArgs,
+    )
+
+    wrapped = sanitize_google_forms_tools([get_events, manage_event], SimpleNamespace(warning=lambda *a, **k: None))
+    guarded_manage_event = next(tool for tool in wrapped if tool.name == "manage_event")
+
+    result = await guarded_manage_event.ainvoke(
+        {
+            "action": "update",
+            "event_id": "4f1799324afb1b705e17ef0d805035b192b9ba80412c1d12f8184bdfe47027cb@group.calendar.google.com",
+            "summary": "Meeting proposal",
+            "calendar_id": "primary",
+        }
+    )
+
+    assert "Successfully modified event" in result
+    assert get_events.calls[0]["calendar_id"].endswith("@group.calendar.google.com")
+    assert manage_event.calls[0]["event_id"] == "evt-real-123"
+    assert manage_event.calls[0]["calendar_id"].endswith("@group.calendar.google.com")

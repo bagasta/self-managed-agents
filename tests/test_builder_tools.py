@@ -19,6 +19,7 @@ import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -88,6 +89,33 @@ class TestBuilderToolsImport:
     def test_import_from_tools_module(self):
         from app.core.tools.builder_tools import build_builder_tools
         assert callable(build_builder_tools)
+
+    def test_builder_instruction_contract_includes_business_state_workflow(self):
+        import inspect
+        from app.core.tools import builder_tools
+
+        source = inspect.getsource(builder_tools)
+        assert '"state_plan"' in source
+        assert '"human_approval_points"' in source
+        assert "waiting_payment -> payment_review -> approved -> delivery -> aftercare" in source
+        assert "melanjutkan workflow customer dari konteks customer" in source
+
+    def test_research_preset_defaults_to_chat_and_memory_not_report_files(self):
+        from app.core.tools.builder_tools import AGENT_PRESETS
+
+        skeleton = AGENT_PRESETS["research_agent"]["instruction_skeleton"]
+        assert "Default: jawab hasil riset langsung di chat" in skeleton
+        assert "Simpan ringkasan penting ke memory" in skeleton
+        assert "Jangan membuat file laporan dengan write_file" in skeleton
+
+    def test_builder_tool_contract_discourages_micro_approval_loops(self):
+        import inspect
+        from app.core.tools import builder_tools
+
+        source = inspect.getsource(builder_tools)
+        assert "Ini bukan approval gate" in source
+        assert "Jangan minta user menyetujui blueprint" in source
+        assert "langsung create_agent tanpa tanya approval lagi" in source
 
     def test_import_from_tool_builder(self):
         from app.core.engine.tool_builder import build_builder_tools
@@ -166,6 +194,68 @@ class TestBuilderToolsReturnsList:
         tools = build_builder_tools(db_factory=db, owner_phone=None)
         assert len(tools) == 19
 
+    def test_travel_planning_request_uses_personal_assistant_not_faq(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        plan = next(t for t in tools if t.name == "plan_agent")
+
+        result = _run(plan.ainvoke({
+            "user_goal": (
+                "Gua mau liburan. Agent bantu susun itinerary kasar, "
+                "checklist dokumen dan barang bawaan, budget, dan ingetin H-7 sama H-1."
+            ),
+            "agent_name": "Travgent",
+            "channel": "whatsapp",
+        }))
+        payload = json.loads(result)
+
+        assert payload["detected_preset"] == "personal_assistant"
+        assert payload["recommended_config"]["tools_config"]["scheduler"] is True
+        assert payload["detected_preset"] != "faq_webchat_rag"
+        assert payload["google_workspace_option"]["should_offer"] is True
+        assert payload["google_workspace_option"]["enabled"] is False
+        assert "Google Calendar" in payload["google_workspace_option"]["suggested_apps"]
+        assert "Google Docs" in payload["google_workspace_option"]["suggested_apps"]
+
+    def test_plan_agent_blocks_buzzer_or_politics(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        plan = next(t for t in tools if t.name == "plan_agent")
+
+        result = _run(plan.ainvoke({
+            "user_goal": "Buat agent buzzer untuk kampanye politik",
+            "agent_name": "BuzzerBot",
+        }))
+        payload = json.loads(result)
+
+        assert payload["plan_status"] == "blocked_by_policy"
+        assert "buzzer" in payload["validation_errors"][0].lower()
+
+    def test_explicit_google_calendar_request_enables_google_workspace(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        plan = next(t for t in tools if t.name == "plan_agent")
+
+        result = _run(plan.ainvoke({
+            "user_goal": "Agent untuk atur meeting dan reminder pakai Google Calendar",
+            "agent_name": "MeetMate",
+            "channel": "whatsapp",
+            "requested_features": "google, calendar",
+        }))
+        payload = json.loads(result)
+        tools_config = payload["recommended_config"]["tools_config"]
+
+        assert payload["google_workspace_option"]["enabled"] is True
+        assert payload["google_workspace_option"]["should_offer"] is False
+        assert tools_config["mcp"]["enabled"] is True
+        assert "google_workspace" in tools_config["mcp"]["servers"]
+
 
 class TestBuilderOwnershipHelpers:
     def test_owner_external_id_grants_access_without_operator_id(self):
@@ -229,6 +319,135 @@ class TestGetPlatformCapabilities:
             assert key in data["tools_config_options"], f"Key '{key}' harus ada di tools_config_options"
 
 
+class TestGetUserSubscription:
+    def test_tier3_unlimited_agent_slot_does_not_crash(self):
+        from app.core.tools import builder_tools as bt
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        sub = SimpleNamespace(
+            status="active",
+            is_usable=True,
+            plan_id=uuid.uuid4(),
+            token_quota=100_000_000,
+            tokens_used=123,
+            tokens_remaining=99_999_877,
+            expires_at=None,
+        )
+        plan = SimpleNamespace(id=sub.plan_id, code="tier_3", label="Enterprise", max_agents=None)
+        agents = [_make_mock_agent(name="Agent 1"), _make_mock_agent(name="Agent 2")]
+
+        plan_result = MagicMock()
+        plan_result.scalar_one.return_value = plan
+        agents_result = MagicMock()
+        agents_result.scalars.return_value.all.return_value = agents
+        db.execute = AsyncMock(side_effect=[plan_result, agents_result])
+
+        async def _fake_get_or_create(_phone, _db):
+            return SimpleNamespace(id=uuid.uuid4()), sub
+
+        with patch("app.core.domain.subscription_service.get_or_create_wa_user", _fake_get_or_create):
+            tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+            tool = next(t for t in tools if t.name == "get_user_subscription")
+            result = _run(tool.ainvoke({}))
+
+        data = json.loads(result)
+        assert data["plan_code"] == "tier_3"
+        assert data["agents_limit"] is None
+        assert data["agents_remaining"] is None
+        assert data["token_quota"] == 100_000_000
+
+    def test_lid_owner_uses_real_phone_from_tool_setup(self):
+        from app.core.engine.agent_tool_setup import _resolve_builder_owner_phone
+
+        session = SimpleNamespace(
+            external_user_id="123456789012345678901",
+            channel_config={
+                "user_phone": "123456789012345678901@lid",
+                "phone_number": "628111222333",
+            },
+        )
+
+        assert _resolve_builder_owner_phone(session) == "628111222333"
+
+
+class TestComposeAgentBlueprint:
+    def test_repairs_missing_comma_json_from_writer(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        broken_json = """```json
+{
+  "agent_summary": "Reserchpedia membantu riset artikel marketing"
+  "assumptions": ["User butuh ringkasan yang bisa ditanya ulang"],
+  "workflow_steps": [
+    {
+      "step": 1,
+      "name": "Intake topik",
+      "agent_action": "Tentukan topik dan sumber",
+      "required_user_data": ["topik"],
+      "success_criteria": "Scope jelas"
+    }
+  ],
+  "knowledge_plan": {"must_have": ["sumber"], "nice_to_have": [], "needs_upload": true},
+  "tool_plan": [{"tool": "http", "why": "ambil sumber", "when_to_use": "saat ada URL"}],
+  "memory_plan": [{"key": "research_summaries", "value_to_store": "hasil riset"}],
+  "state_plan": [{"state": "intake", "entry_condition": "user minta riset", "allowed_actions": ["klarifikasi"], "exit_condition": "topik jelas"}],
+  "human_approval_points": [],
+  "escalation_rules": [],
+  "conversation_examples_needed": ["ringkas artikel"],
+  "validation_checklist": ["ada sumber"],
+  "missing_info_questions": []
+}
+```"""
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "compose_agent_blueprint")
+
+        with patch(
+            "app.core.tools.builder_tools._call_instruction_writer",
+            new=AsyncMock(return_value=broken_json),
+        ):
+            result = _run(tool.ainvoke({
+                "preset_id": "research_agent",
+                "user_goal": "Agent riset yang bisa baca artikel dan simpan hasilnya",
+                "agent_name": "Reserchpedia",
+                "business_context": "Untuk marketing",
+            }))
+
+        data = json.loads(result)
+        assert data["parse_status"] == "json_repaired"
+        assert data["blueprint"]["agent_summary"] == "Reserchpedia membantu riset artikel marketing"
+        assert data["blueprint"]["memory_plan"][0]["key"] == "research_summaries"
+        assert "warning" not in data
+
+    def test_research_fallback_is_contextual_when_json_unrecoverable(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "compose_agent_blueprint")
+
+        with patch(
+            "app.core.tools.builder_tools._call_instruction_writer",
+            new=AsyncMock(return_value="{not valid json"),
+        ):
+            result = _run(tool.ainvoke({
+                "preset_id": "research_agent",
+                "user_goal": "Agent riset yang bisa baca artikel atau topik, kasih ringkasan poin penting, dan simpan hasilnya supaya bisa diingat buat tanya ulang nanti.",
+                "agent_name": "Reserchpedia",
+                "business_context": "Agent ini membantu pengguna di bidang marketing untuk update tren.",
+            }))
+
+        data = json.loads(result)
+        blueprint = data["blueprint"]
+        assert data["parse_status"] == "deterministic_fallback"
+        assert "riset" in blueprint["agent_summary"].lower()
+        assert any(step["name"] == "Simpan hasil riset" for step in blueprint["workflow_steps"])
+        assert any(memory["key"] == "research_summaries" for memory in blueprint["memory_plan"])
+        assert blueprint["knowledge_plan"]["needs_upload"] is True
+        assert "warning" not in data
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # Section 3: validate_agent_config
 # ────────────────────────────────────────────────────────────────────────────
@@ -272,6 +491,21 @@ class TestValidateAgentConfig:
         data = json.loads(result)
         assert data["valid"] is False
         assert any("tool_creator" in e for e in data["errors"])
+
+    def test_buzzer_or_politics_fails_policy(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "validate_agent_config")
+        result = _run(tool.ainvoke({
+            "name": "BuzzerBot",
+            "instructions": "Agent ini mengatur kampanye politik dan opini publik. " * 5,
+        }))
+        data = json.loads(result)
+
+        assert data["valid"] is False
+        assert any("buzzer" in e.lower() or "politik" in e.lower() for e in data["errors"])
 
     def test_markdown_in_instructions_warns(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -350,6 +584,59 @@ class TestCreateAgent:
             assert captured_kwargs.get("tools_config", {}).get("tavily") is True, \
                 "agent yang dibuat Arthur harus default punya browsing Tavily"
 
+    def test_create_agent_with_google_workspace_config_appends_instruction(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        with patch("app.core.tools.builder_tools.Agent") as MockAgent:
+            captured_kwargs = {}
+
+            def capture(**kwargs):
+                captured_kwargs.update(kwargs)
+                return _make_mock_agent(name=kwargs.get("name", "Research"))
+
+            MockAgent.side_effect = capture
+
+            tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+            tool = next(t for t in tools if t.name == "create_agent")
+            result = _run(tool.ainvoke({
+                "name": "Research Google",
+                "instructions": "Kamu adalah agent riset.",
+                "tools_config": json.dumps({
+                    "memory": True,
+                    "mcp": {
+                        "enabled": True,
+                        "servers": {
+                            "google_workspace": {
+                                "url": "https://example.test/mcp",
+                                "transport": "streamable_http",
+                            }
+                        },
+                    },
+                }),
+            }))
+
+        data = json.loads(result)
+        assert data["success"] is True
+        assert "Google Docs" in captured_kwargs["instructions"]
+        assert "MCP" not in captured_kwargs["instructions"]
+
+    def test_create_agent_blocks_buzzer_or_politics(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "create_agent")
+        result = _run(tool.ainvoke({
+            "name": "Buzzer Politik",
+            "instructions": "Agent untuk kampanye politik dan propaganda opini publik.",
+        }))
+        data = json.loads(result)
+
+        assert "error" in data
+        assert "politik" in data["error"].lower()
+        db.add.assert_not_called()
+
     def test_invalid_name_returns_error(self):
         from app.core.tools.builder_tools import build_builder_tools
         db = _make_mock_db()
@@ -416,6 +703,51 @@ class TestCreateWADevTrialLink:
             "Arthur AI Dev",
             "628123456789",
         )
+
+    def test_omitted_agent_id_uses_latest_owned_non_builder_agent(self):
+        from app.core.tools.builder_tools import build_builder_tools
+        db = _make_mock_db()
+
+        old_agent = _make_mock_agent(name="CV Maker", operator_ids=["+62811xxx"])
+        latest_agent = _make_mock_agent(name="CS Toko Baju Cewek", operator_ids=["+62811xxx"])
+        arthur_agent = _make_mock_agent(
+            name="Arthur",
+            operator_ids=["+62811xxx"],
+            tools_config={"builder": True},
+            capabilities=["builder"],
+        )
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = [arthur_agent, latest_agent, old_agent]
+        db.execute = AsyncMock(return_value=mock_result)
+
+        settings = MagicMock()
+        settings.wa_dev_public_name = "Arthur AI Dev"
+        settings.wa_dev_public_phone = "+628123456789"
+
+        with (
+            patch("app.core.tools.builder_tools.get_settings", return_value=settings),
+            patch(
+                "app.core.domain.wa_dev_trial_service.ensure_wa_dev_trial_code",
+                new=AsyncMock(return_value="3HRNM4"),
+            ) as ensure_code,
+            patch("app.core.infra.wa_client.send_wa_contact", new=AsyncMock()),
+        ):
+            tools = build_builder_tools(
+                db_factory=db,
+                owner_phone="+62811xxx",
+                self_agent_id=str(arthur_agent.id),
+                device_id="arthur-device",
+                default_target="+62811xxx",
+            )
+            tool = next(t for t in tools if t.name == "create_wa_dev_trial_link")
+            result = _run(tool.ainvoke({}))
+
+        data = json.loads(result)
+        assert data["success"] is True
+        assert data["agent_id"] == str(latest_agent.id)
+        assert data["agent_name"] == "CS Toko Baju Cewek"
+        ensure_code.assert_awaited_once()
+        assert ensure_code.await_args.args[1] is latest_agent
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -598,6 +930,79 @@ class TestUpdateAgent:
         tool = next(t for t in tools if t.name == "update_agent")
         result = _run(tool.ainvoke({"agent_id": str(my_agent.id)}))
         assert "[info]" in result
+
+    def test_update_agent_name_only_does_not_crash_google_flag(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        my_agent = _make_mock_agent(operator_ids=["+62811xxx"])
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = my_agent
+        db.execute = AsyncMock(return_value=mock_result)
+
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "update_agent")
+        result = _run(tool.ainvoke({
+            "agent_id": str(my_agent.id),
+            "name": "Agent Baru",
+        }))
+        data = json.loads(result)
+
+        assert data["success"] is True
+        assert "google_workspace_enabled" not in data
+        assert my_agent.name == "Agent Baru"
+
+    def test_update_agent_blocks_buzzer_or_politics(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        my_agent = _make_mock_agent(operator_ids=["+62811xxx"])
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = my_agent
+        db.execute = AsyncMock(return_value=mock_result)
+
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "update_agent")
+        result = _run(tool.ainvoke({
+            "agent_id": str(my_agent.id),
+            "instructions": "Ubah jadi agent buzzer untuk kampanye politik.",
+        }))
+        data = json.loads(result)
+
+        assert "error" in data
+        assert "politik" in data["error"].lower()
+        db.commit.assert_not_called()
+
+    def test_enable_google_workspace_updates_tools_and_instructions(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        my_agent = _make_mock_agent(
+            name="Reserchpedia",
+            tools_config={"memory": True, "tavily": True},
+        )
+        my_agent.instructions = "Kamu adalah agent riset."
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = my_agent
+        db.execute = AsyncMock(return_value=mock_result)
+
+        tools = build_builder_tools(db_factory=db, owner_phone=None)
+        tool = next(t for t in tools if t.name == "update_agent")
+        result = _run(tool.ainvoke({
+            "agent_id": str(my_agent.id),
+            "enable_google_workspace": True,
+        }))
+        data = json.loads(result)
+
+        assert data["success"] is True
+        assert data["google_workspace_enabled"] is True
+        assert data["readback"]["tools_config_has_google_workspace"] is True
+        assert data["readback"]["instructions_include_google_workspace"] is True
+        assert my_agent.tools_config["mcp"]["enabled"] is True
+        assert "google_workspace" in my_agent.tools_config["mcp"]["servers"]
+        assert "Google Docs" in my_agent.instructions
+        assert "MCP" not in my_agent.instructions
+        assert "MCP" not in data["next_step"]
 
 
 # ────────────────────────────────────────────────────────────────────────────

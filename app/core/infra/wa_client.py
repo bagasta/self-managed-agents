@@ -1,6 +1,8 @@
 """HTTP client for the wa-service (Go WhatsApp microservice)."""
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import structlog
 
@@ -8,6 +10,7 @@ logger = structlog.get_logger(__name__)
 
 _WA_TIMEOUT_CREATE = 35  # longer: waits up to 30s for first QR code
 _WA_TIMEOUT_DEFAULT = 10
+_WA_TIMEOUT_SEND = 30
 
 
 def _base_url() -> str:
@@ -18,6 +21,40 @@ def _base_url() -> str:
 def _wa_dev_base_url() -> str:
     from app.config import get_settings
     return get_settings().wa_dev_service_url.rstrip("/")
+
+
+async def _post_json_with_retry(url: str, payload: dict, *, timeout: float, operation: str) -> httpx.Response:
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(url, json=payload)
+            if resp.status_code >= 500 and attempt == 0:
+                logger.warning(
+                    "wa_client.post_retry",
+                    operation=operation,
+                    status_code=resp.status_code,
+                    attempt=attempt + 1,
+                )
+                await asyncio.sleep(0.5)
+                continue
+            resp.raise_for_status()
+            return resp
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            last_exc = exc
+            if attempt == 0:
+                logger.warning(
+                    "wa_client.post_retry",
+                    operation=operation,
+                    error=str(exc)[:200],
+                    attempt=attempt + 1,
+                )
+                await asyncio.sleep(0.5)
+                continue
+            raise
+    if last_exc:
+        raise last_exc
+    raise RuntimeError(f"{operation} failed without response")
 
 
 async def create_wa_device(device_id: str) -> dict:
@@ -58,20 +95,20 @@ async def get_wa_status(device_id: str) -> dict:
 async def send_wa_message(device_id: str, to: str, text: str) -> dict:
     """Send a WhatsApp text message via Go service."""
     if device_id.startswith("wadev_"):
-        async with httpx.AsyncClient(timeout=_WA_TIMEOUT_DEFAULT) as client:
-            resp = await client.post(
-                f"{_wa_dev_base_url()}/send/text",
-                json={"to": to, "text": text},
-            )
-            resp.raise_for_status()
-            return resp.json() if resp.content else {"status": "sent"}
-    async with httpx.AsyncClient(timeout=_WA_TIMEOUT_DEFAULT) as client:
-        resp = await client.post(
-            f"{_base_url()}/devices/{device_id}/send",
-            json={"to": to, "message": text},
+        resp = await _post_json_with_retry(
+            f"{_wa_dev_base_url()}/send/text",
+            {"to": to, "text": text},
+            timeout=_WA_TIMEOUT_SEND,
+            operation="wa_dev_send_text",
         )
-        resp.raise_for_status()
         return resp.json() if resp.content else {"status": "sent"}
+    resp = await _post_json_with_retry(
+        f"{_base_url()}/devices/{device_id}/send",
+        {"to": to, "message": text},
+        timeout=_WA_TIMEOUT_SEND,
+        operation="wa_send_text",
+    )
+    return resp.json() if resp.content else {"status": "sent"}
 
 
 async def get_wa_dev_status() -> dict:

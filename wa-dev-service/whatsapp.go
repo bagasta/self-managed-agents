@@ -35,6 +35,7 @@ type IncomingMessage struct {
 	PhoneFrom         string // resolved phone (LID → PN); falls back to From if unresolvable
 	ChatID            string
 	Text              string
+	MessageID         string
 	PushName          string // WhatsApp display name of sender
 	MediaType         string // "image" | "document" | "sticker" | ""
 	MediaData         string // base64
@@ -424,6 +425,7 @@ func (wa *WhatsAppClient) handleMessage(evt *events.Message) {
 		From:      from,
 		PhoneFrom: phoneFrom,
 		ChatID:    chatJID.String(),
+		MessageID: evt.Info.ID,
 		PushName:  evt.Info.PushName,
 		Timestamp: evt.Info.Timestamp.Unix(),
 	}

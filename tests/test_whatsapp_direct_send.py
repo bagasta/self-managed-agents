@@ -10,6 +10,7 @@ from app.core.engine.agent_runner import (
     _is_direct_whatsapp_text_send_context,
     _is_google_chat_intent,
     _is_operator_envelope,
+    _operator_escalation_reply_guard,
     _prioritize_direct_whatsapp_text_send_tools,
 )
 from app.core.engine.prompt_builder import build_system_prompt
@@ -70,6 +71,167 @@ def test_whatsapp_prompt_allows_user_direct_send_without_unlocking_reply_to_user
     assert "langsung panggil `send_to_number` memakai nomor dan draft terakhir dari history" in prompt
     assert "Tool `reply_to_user` HANYA dipakai untuk sesi operator/eskalasi" in prompt
     assert "Tool `reply_to_user` dan `send_to_number` HANYA dipakai saat menerima perintah dari OPERATOR" not in prompt
+
+
+def test_whatsapp_prompt_does_not_label_owner_operator_from_legacy_operator_ids():
+    prompt = build_system_prompt(
+        agent_model=_agent(owner_external_id="628owner", operator_ids=["628owner"]),
+        session=_session(
+            channel_config={"user_phone": "628owner@s.whatsapp.net"},
+            external_user_id="628owner",
+        ),
+        active_groups=["memory", "escalation"],
+        saved_custom_tools=[],
+        subagent_list=[],
+        sender_name="Bagas",
+        context_summary="",
+        memory_block="",
+        layered_memory=None,
+        rag_context="",
+        escalation_user_jid=None,
+        escalation_context=None,
+        is_operator_message=False,
+        user_message="tolong bikinin website untuk bisnis saya",
+    )
+
+    assert "- Current User Role: user" in prompt
+    assert "Current User Name: Operator/Admin" not in prompt
+    assert "Kamu sedang di-chat oleh OPERATOR" not in prompt
+
+
+def test_prompt_has_operator_approval_resume_mode():
+    prompt = build_system_prompt(
+        agent_model=_agent(),
+        session=_session(),
+        active_groups=["memory", "whatsapp_media"],
+        saved_custom_tools=[],
+        subagent_list=[],
+        sender_name="Wira",
+        context_summary="",
+        memory_block="",
+        layered_memory=None,
+        rag_context="",
+        escalation_user_jid=None,
+        escalation_context=None,
+        is_operator_message=False,
+        user_message="[SYSTEM_OPERATOR_APPROVAL]\nJenis approval: pembayaran customer sudah dikonfirmasi",
+    )
+
+    assert "## Operator Approval Resume Mode" in prompt
+    assert "Jangan eskalasi pembayaran lagi" in prompt
+    assert "kirim file/gambar langsung" in prompt
+
+
+def test_builder_prompt_blocks_repeated_continue_questions():
+    prompt = build_system_prompt(
+        agent_model=_agent(capabilities=["builder"], tools_config={"builder": True}),
+        session=_session(),
+        active_groups=["builder"],
+        saved_custom_tools=[],
+        subagent_list=[],
+        sender_name="Bagas",
+        context_summary="",
+        memory_block="",
+        layered_memory=None,
+        rag_context="",
+        escalation_user_jid=None,
+        escalation_context=None,
+        is_operator_message=False,
+        user_message="buatkan agentnya langsung aja gausah banyak tanya",
+    )
+
+    assert "## Arthur Builder Mode" in prompt
+    assert "plan_agent -> compose_agent_blueprint -> compose_agent_instructions -> validate_agent_config -> create_agent" in prompt
+    assert "Jangan berhenti hanya untuk menampilkan rencana" in prompt
+    assert "Jangan mengunci preset hanya dari satu kata kunci" in prompt
+    assert "jangan menyebut label preset internal" in prompt
+    assert "google_workspace_option.should_offer=true" in prompt
+    assert "Mau sekalian dihubungkan ke Google" in prompt
+    assert "user membalas nama seperti `Travgent`" in prompt
+    assert "Jangan mengulang plan_agent/compose_agent_instructions" in prompt
+    assert "jangan menyebut nama tool internal" in prompt
+    assert "Mau agent ini langsung dipasang ke nomor WhatsApp kamu sendiri" in prompt
+    assert "nomor demo Arthur" in prompt
+    assert "bukan `QR`" in prompt
+    assert "create_wa_dev_trial_link boleh dipanggil tanpa agent_id" in prompt
+    assert "langsung cari agent terkait lalu panggil create_wa_dev_trial_link" in prompt
+    assert "jangan menjawab `langsung aku betulin`" in prompt
+    assert "whatsapp_media=true, sandbox=true" in prompt
+    assert "link Google Form yang sudah ada sebagai link order pelanggan" in prompt
+    assert "Jangan minta user mengisi placeholder" in prompt
+    assert "enable_google_workspace=True" in prompt
+    assert "generate_google_auth_link" in prompt
+    assert "JANGAN menyebut istilah teknis internal" in prompt
+
+
+def test_whatsapp_prompt_explains_reply_context_block():
+    prompt = build_system_prompt(
+        agent_model=_agent(),
+        session=_session(),
+        active_groups=["memory"],
+        saved_custom_tools=[],
+        subagent_list=[],
+        sender_name="Bagas",
+        context_summary="",
+        memory_block="",
+        layered_memory=None,
+        rag_context="",
+        escalation_user_jid=None,
+        escalation_context=None,
+        is_operator_message=False,
+        user_message="[WHATSAPP_REPLY_CONTEXT]\nUser sedang membalas/reply pesan WhatsApp berikut:\nold\n[/WHATSAPP_REPLY_CONTEXT]\n\nini gimana?",
+    )
+
+    assert "### WhatsApp Reply Context" in prompt
+    assert "instruksi utama tetap pesan terbaru user" in prompt
+
+
+def test_prompt_file_rules_prevent_write_file_retry_loop_for_research():
+    prompt = build_system_prompt(
+        agent_model=_agent(instructions="Kamu adalah research agent."),
+        session=_session(channel_type="webchat"),
+        active_groups=["memory", "http", "tavily"],
+        saved_custom_tools=[],
+        subagent_list=[],
+        sender_name="Bagas",
+        context_summary="",
+        memory_block="",
+        layered_memory=None,
+        rag_context="",
+        escalation_user_jid=None,
+        escalation_context=None,
+        is_operator_message=False,
+        user_message="riset pasar pupuk hayati dan simpan hasilnya",
+    )
+
+    assert "## File Workspace Tool Rules" in prompt
+    assert "`write_file` hanya untuk membuat file baru" in prompt
+    assert "JANGAN panggil `write_file` lagi dengan path yang sama" in prompt
+    assert "default-nya balas user di chat dan simpan inti informasi ke memory" in prompt
+    assert "Jangan membuat ulang file final_v2/final_v3/final_v4" in prompt
+
+
+def test_layered_memory_tells_agent_to_use_memory_not_files():
+    prompt = build_system_prompt(
+        agent_model=_agent(instructions="Kamu adalah research agent."),
+        session=_session(channel_type="webchat"),
+        active_groups=["memory"],
+        saved_custom_tools=[],
+        subagent_list=[],
+        sender_name="Bagas",
+        context_summary="",
+        memory_block="",
+        layered_memory={"soul": "Agen riset", "today_date": "2026-05-26"},
+        rag_context="",
+        escalation_user_jid=None,
+        escalation_context=None,
+        is_operator_message=False,
+        user_message="simpan hasil riset ini",
+    )
+
+    assert "Kalau penting → simpan ke memory" in prompt
+    assert "JANGAN memakai `write_file` hanya untuk menyimpan ingatan" in prompt
+    assert "Kalau penting → tulis ke file" not in prompt
 
 
 def test_direct_text_send_context_detects_followup_confirmation_from_history():
@@ -253,6 +415,8 @@ def test_escalation_operator_prompt_keeps_reply_to_user_but_allows_other_number_
     )
 
     assert "Panggil `reply_to_user(message)`" in prompt
+    assert "JANGAN membuat ulang CV/dokumen/website" in prompt
+    assert "Jika operator hanya memberi approval pembayaran" in prompt
     assert "### KIRIM KE NOMOR LAIN DARI OPERATOR" in prompt
     assert "gunakan `send_to_number(phone_or_target, message)`, BUKAN `reply_to_user`" in prompt
 
@@ -319,3 +483,16 @@ def test_direct_send_guard_does_not_touch_escalation_reply_to_user():
     )
 
     assert guarded == reply
+
+
+def test_operator_escalation_guard_blocks_fake_cv_completion_claim():
+    guarded = _operator_escalation_reply_guard(
+        "CV ATS Anda sudah selesai dibuat dan siap dikirim.",
+        steps=[],
+        user_message="<OPERATOR>\nNo Telepon/WA/Id: 628operator\nPesan: iya pembayaran sudah masuk",
+        escalation_user_jid="628customer@s.whatsapp.net",
+    )
+
+    assert guarded != "CV ATS Anda sudah selesai dibuat dan siap dikirim."
+    assert guarded.startswith("Draft pesan untuk customer:")
+    assert "pembayaran Anda sudah kami terima" in guarded

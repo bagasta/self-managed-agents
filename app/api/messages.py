@@ -1,6 +1,5 @@
 import asyncio
 import uuid
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from slowapi import Limiter
@@ -15,6 +14,7 @@ from app.core.engine.session_lock import (
     session_run_lock,
     unregister_active_task,
 )
+from app.core.domain.agent_quota_service import check_agent_quota, record_agent_token_usage
 from app.database import get_db
 from app.models.agent import Agent
 from app.models.message import Message
@@ -55,26 +55,11 @@ async def send_message(
             detail="Invalid agent API key",
         )
 
-    now = datetime.now(timezone.utc)
-    active_until = agent.active_until
-    if active_until.tzinfo is None:
-        active_until = active_until.replace(tzinfo=timezone.utc)
-    if active_until < now:
+    quota_check = await check_agent_quota(agent, db)
+    if not quota_check.allowed:
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
-            detail=(
-                f"Agent subscription expired on {agent.active_until.isoformat()}. "
-                "Call POST /v1/agents/{agent_id}/renew to reactivate."
-            ),
-        )
-
-    if agent.tokens_used >= agent.token_quota:
-        raise HTTPException(
-            status_code=status.HTTP_402_PAYMENT_REQUIRED,
-            detail=(
-                f"Token quota exhausted ({agent.tokens_used:,} / {agent.token_quota:,}). "
-                "Call POST /v1/agents/{agent_id}/renew to reset quota."
-            ),
+            detail=quota_check.detail,
         )
 
     session = (
@@ -143,7 +128,7 @@ async def send_message(
     # update consumed tokens
     tokens_this_run: int = result.get("tokens_used", 0)
     if tokens_this_run > 0:
-        agent.tokens_used = agent.tokens_used + tokens_this_run
+        await record_agent_token_usage(agent, tokens_this_run, db)
         await db.flush()
 
     # auto-send reply via channel if session has channel_type configured

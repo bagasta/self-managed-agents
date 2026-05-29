@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import base64
 import re
+import time
 import uuid
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from sqlalchemy import desc, select
+from sqlalchemy import desc, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.phone_utils import normalize_phone
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
     from app.models.session import Session
 
 log = structlog.get_logger(__name__)
+_ACTIVE_ESCALATION_ROUTE_TTL_SECONDS = 6 * 60 * 60
 
 # Fallback in-memory cache jika Redis mati/tidak ada.
 # Menghindari db.execute (lambat) untuk deduplikasi.
@@ -140,6 +142,8 @@ async def remember_operator_escalation_route(
         "target": target,
         "case_id": case_id or _route_case_id(target_session),
         "customer_phone": normalize_phone(customer_phone) or customer_phone,
+        "created_at": int(time.time()),
+        "expires_at": int(time.time()) + _ACTIVE_ESCALATION_ROUTE_TTL_SECONDS,
     }
     meta = dict(operator_session.metadata_ or {})
     meta["active_escalation_reply"] = route
@@ -160,6 +164,13 @@ async def find_session_by_operator_active_route(
     route = meta.get("active_escalation_reply")
     if not isinstance(route, dict):
         return None, None
+    expires_at = route.get("expires_at")
+    if isinstance(expires_at, (int, float)) and expires_at < time.time():
+        meta.pop("active_escalation_reply", None)
+        operator_session.metadata_ = meta
+        db.add(operator_session)
+        await db.commit()
+        return None, route.get("case_id")
 
     target_session_id = route.get("target_session_id")
     if not target_session_id:
@@ -221,15 +232,27 @@ async def check_wa_spam_window(
     count = len(timestamps)
     return count > limit, count
 
-async def is_duplicate_message(device_id: str, from_phone: str, timestamp: int, db: AsyncSession) -> bool:
+async def is_duplicate_message(
+    device_id: str,
+    from_phone: str,
+    timestamp: int | None,
+    db: AsyncSession,
+    message_id: str | None = None,
+) -> bool:
     """
-    Cek apakah pesan WhatsApp (berdasarkan identitas pengirim dan timestamp)
-    sudah pernah diproses dalam 5 menit terakhir.
+    Cek apakah pesan WhatsApp sudah pernah diproses dalam 5 menit terakhir.
+
+    Prefer message_id asli WhatsApp. Timestamp WA hanya presisi detik, jadi tidak
+    cukup untuk membedakan beberapa pesan valid yang dikirim cepat dalam detik yang sama.
     """
     import time
     from app.core.infra.redis_client import get_redis
-    
-    key = f"wa_dedup:{device_id}:{from_phone}:{timestamp}"
+
+    clean_message_id = str(message_id or "").strip()
+    if clean_message_id:
+        key = f"wa_dedup_msg:{device_id}:{from_phone}:{clean_message_id}"
+    else:
+        key = f"wa_dedup_ts:{device_id}:{from_phone}:{timestamp}"
     r = await get_redis()
     
     if r:
@@ -308,6 +331,23 @@ async def find_or_create_wa_session(
     # Normalize agar konsisten dengan format yang dipakai operator_tools
     # (strip '+' dan '@s.whatsapp.net' / '@lid' suffix)
     normalized_lookup = normalize_phone(lookup_user_id)
+
+    # Serialize session lookup/create per agent + WhatsApp identity so spam bursts
+    # from the same sender cannot create multiple parallel sessions.
+    await db.execute(
+        text(
+            """
+            SELECT pg_advisory_xact_lock(
+                hashtext(:agent_key),
+                hashtext(:user_key)
+            )
+            """
+        ),
+        {
+            "agent_key": f"wa_session:{agent.id}",
+            "user_key": normalized_lookup,
+        },
+    )
 
     result = await db.execute(
         select(Session).where(
@@ -401,8 +441,10 @@ async def find_escalation_context(
             routed_by_quoted_case = True
             log.info("find_escalation_context.by_operator_active_route", case_id=case_id, session_id=str(esc_session.id))
 
-    # Strategy 4: fallback — ambil session eskalasi terbaru
-    if not esc_session:
+    # Strategy 4: fallback — ambil session eskalasi terbaru.
+    # Ini hanya aman untuk konteks non-operator/dev. Untuk operator WhatsApp,
+    # target harus berasal dari quoted case/message atau active_route yang masih valid.
+    if not esc_session and operator_session is None:
         esc_result = await db.execute(
             select(Session)
             .join(Message, Message.session_id == Session.id)
@@ -599,15 +641,29 @@ def is_operator_message(
     agent,
 ) -> bool:
     """
-    Cek apakah pesan berasal dari operator berdasarkan operator_ids dan operator_phone legacy.
+    Cek apakah pesan berasal dari operator escalation.
+
+    Catatan: agent buatan Arthur juga menyimpan owner di operator_ids untuk
+    ownership/ACL legacy. Nomor owner tidak boleh otomatis dianggap operator
+    escalation, karena user normal yang mengirim dokumen/gambar akan salah
+    masuk ke flow operator media forwarding.
     """
     escalation_cfg: dict = agent.escalation_config or {}
     operator_phone: str = escalation_cfg.get("operator_phone", "")
     operator_ids: list = getattr(agent, "operator_ids", None) or []
+    owner_external_id = getattr(agent, "owner_external_id", None)
+    normalized_owner = normalize_phone(owner_external_id) if owner_external_id else ""
 
-    normalized_op_ids = {normalize_phone(oid) for oid in operator_ids if oid}
+    normalized_op_ids: set[str] = set()
     if operator_phone:
         normalized_op_ids.add(normalize_phone(operator_phone))
+    for oid in operator_ids:
+        normalized = normalize_phone(oid)
+        if not normalized:
+            continue
+        if normalized_owner and normalized == normalized_owner:
+            continue
+        normalized_op_ids.add(normalized)
 
     if not normalized_op_ids:
         return False

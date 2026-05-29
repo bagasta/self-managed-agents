@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import re
+import time
 import uuid
 from pathlib import Path
 
@@ -40,10 +41,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.core.engine.session_lock import session_run_lock
+from app.core.domain.agent_quota_service import check_agent_quota, record_agent_token_usage
 from app.core.infra.channel_service import send_message
 from app.core.utils.input_sanitizer import sanitize_user_input
 from app.core.utils.phone_utils import normalize_phone
 from app.core.utils.text_utils import markdown_to_wa
+from app.core.engine.wa_reply_delivery import should_skip_whatsapp_final_reply
 from app.core.infra.wa_client import resolve_wa_phones, send_wa_message
 from app.database import get_db
 from app.models.agent import Agent
@@ -106,6 +109,21 @@ _OPERATOR_SEND_CONFIRM_WORDS = {
     "kirim", "ok", "oke", "ya", "iya", "yes", "ok kirim", "oke kirim", "ya kirim", "iya kirim", "yes kirim",
     "langsung kirim", "lanjut kirim",
 }
+_PENDING_OPERATOR_SEND_TTL_SECONDS = 60 * 60
+_PAYMENT_APPROVAL_SUBJECTS = ("bayar", "pembayaran", "payment", "transfer", "paid")
+_PAYMENT_APPROVAL_SIGNALS = (
+    "masuk",
+    "valid",
+    "approve",
+    "approved",
+    "diterima",
+    "sudah",
+    "oke",
+    "ok",
+    "confirm",
+    "confirmed",
+)
+_PAYMENT_REJECTION_SIGNALS = ("belum", "belom", "tidak", "gak", "ga", "nggak", "invalid", "ditolak", "reject", "gagal")
 
 
 def _is_operator_send_confirmation(text: str | None) -> bool:
@@ -115,6 +133,177 @@ def _is_operator_send_confirmation(text: str | None) -> bool:
     clean = re.sub(r"[^a-z0-9\s]+", " ", clean)
     clean = " ".join(clean.split())
     return clean in _OPERATOR_SEND_CONFIRM_WORDS
+
+
+def _is_operator_payment_approval(text: str | None) -> bool:
+    clean = sanitize_user_input(text or "").strip().lower()
+    clean = re.sub(r"[^a-z0-9\s]+", " ", clean)
+    clean = " ".join(clean.split())
+    if not clean:
+        return False
+    words = set(clean.split())
+    if words.intersection(_PAYMENT_REJECTION_SIGNALS):
+        return False
+    return (
+        any(subject in clean for subject in _PAYMENT_APPROVAL_SUBJECTS)
+        and any(signal in clean for signal in _PAYMENT_APPROVAL_SIGNALS)
+    )
+
+
+def _append_quoted_reply_context(message: str, quoted_text: str | None) -> str:
+    quote = sanitize_user_input(quoted_text or "").strip()
+    if not quote:
+        return message
+    if len(quote) > 1200:
+        quote = quote[:1200] + "..."
+    body = message.strip()
+    return (
+        "[WHATSAPP_REPLY_CONTEXT]\n"
+        "User sedang membalas/reply pesan WhatsApp berikut:\n"
+        f"{quote}\n"
+        "[/WHATSAPP_REPLY_CONTEXT]\n\n"
+        f"{body}"
+    ).strip()
+
+
+def _operator_pending_expires_at() -> int:
+    return int(time.time()) + _PENDING_OPERATOR_SEND_TTL_SECONDS
+
+
+def _operator_pending_is_expired(pending: dict) -> bool:
+    expires_at = pending.get("expires_at")
+    return isinstance(expires_at, (int, float)) and expires_at < time.time()
+
+
+def _operator_session_has_pending_confirmation(operator_session: Session | None) -> bool:
+    if not operator_session:
+        return False
+    meta = dict(operator_session.metadata_ or {})
+    for key in ("pending_operator_media", "pending_operator_text_reply"):
+        pending = meta.get(key)
+        if isinstance(pending, dict) and not _operator_pending_is_expired(pending):
+            return True
+    return False
+
+
+async def _find_existing_operator_session(
+    *,
+    agent: Agent,
+    from_phone: str,
+    db: AsyncSession,
+) -> Session | None:
+    escalation_cfg: dict = agent.escalation_config or {}
+    operator_lookup = escalation_cfg.get("operator_phone") or from_phone
+    normalized_lookup = normalize_phone(operator_lookup)
+    if not normalized_lookup:
+        return None
+    result = await db.execute(
+        select(Session).where(
+            Session.agent_id == agent.id,
+            Session.channel_type == "whatsapp",
+            Session.external_user_id == normalized_lookup,
+        )
+    )
+    return result.scalars().first()
+
+
+async def _has_explicit_operator_escalation_reply(
+    *,
+    agent: Agent,
+    db: AsyncSession,
+    quoted_text: str | None,
+    quoted_stanza_id: str | None,
+) -> bool:
+    target_session, _case_id = await find_session_by_quoted_message_id(agent, db, quoted_stanza_id)
+    if target_session:
+        return True
+    target_session, _case_id = await find_session_by_quoted_case(agent, db, quoted_text)
+    return target_session is not None
+
+
+async def _should_treat_as_operator_turn(
+    *,
+    agent: Agent,
+    db: AsyncSession,
+    from_phone: str,
+    reply_target: str | None,
+    message: str,
+    media_type: str | None,
+    quoted_text: str | None,
+    quoted_stanza_id: str | None,
+) -> bool:
+    if not is_operator_message(from_phone, reply_target, agent):
+        return False
+
+    if await _has_explicit_operator_escalation_reply(
+        agent=agent,
+        db=db,
+        quoted_text=quoted_text,
+        quoted_stanza_id=quoted_stanza_id,
+    ):
+        return True
+
+    # A bare "kirim/ok/ya" belongs to operator mode only when it confirms a
+    # pending draft created from a previous explicit escalation reply.
+    if not media_type and _is_operator_send_confirmation(message):
+        operator_session = await _find_existing_operator_session(
+            agent=agent,
+            from_phone=from_phone,
+            db=db,
+        )
+        return _operator_session_has_pending_confirmation(operator_session)
+
+    return False
+
+
+async def _forget_pending_operator_item(
+    operator_session: Session,
+    key: str,
+    db: AsyncSession,
+) -> None:
+    sess_meta = dict(operator_session.metadata_ or {})
+    if key not in sess_meta:
+        return
+    sess_meta.pop(key, None)
+    operator_session.metadata_ = sess_meta
+    db.add(operator_session)
+    await db.commit()
+
+
+async def _reply_no_pending_operator_confirmation(
+    *,
+    device_id: str,
+    operator_reply_target: str,
+) -> dict:
+    reply = (
+        "Belum ada draft atau lampiran yang menunggu dikirim. "
+        "Reply pesan eskalasi customer, tulis jawaban/lampirkan file, lalu ketik 'kirim' setelah draft-nya saya tampilkan."
+    )
+    await send_wa_message(device_id, operator_reply_target, reply)
+    return {"status": "ok", "reply": reply, "run_id": "", "steps": [], "messages_to_user": []}
+
+
+async def _reply_agent_quota_blocked(
+    *,
+    device_id: str,
+    reply_target: str,
+    message: str,
+    reason: str,
+    log: structlog.BoundLogger,
+) -> dict:
+    reply = message or "Maaf, agent ini sedang tidak bisa dipakai karena kuota atau subscription sudah habis."
+    try:
+        await send_wa_message(device_id, reply_target, reply)
+    except Exception as exc:
+        log.warning("wa_incoming.quota_block_reply_failed", error=str(exc), reason=reason)
+    return {
+        "status": "quota_exhausted",
+        "reason": reason,
+        "reply": reply,
+        "run_id": "",
+        "steps": [],
+        "messages_to_user": [],
+    }
 
 
 def _extract_media_draft_from_history(rows: list[Message]) -> str:
@@ -210,6 +399,8 @@ async def _remember_pending_operator_text_reply(
         "target": target,
         "case_id": case_id,
         "message": draft_message.strip(),
+        "created_at": int(time.time()),
+        "expires_at": _operator_pending_expires_at(),
     }
     operator_session.metadata_ = sess_meta
     db.add(operator_session)
@@ -353,8 +544,6 @@ async def _forward_operator_media_to_customer(
     if not target_session:
         target_session, case_id = await find_session_by_quoted_case(agent, db, quoted_text)
     if not target_session:
-        target_session, case_id = await find_session_by_operator_active_route(agent, db, operator_session)
-    if not target_session:
         reply = (
             "Reply pesan eskalasi yang benar saat mengirim gambar/dokumen, "
             "supaya saya tahu customer mana yang harus menerima lampiran ini."
@@ -387,6 +576,8 @@ async def _forward_operator_media_to_customer(
         "target": target,
         "case_id": case_id,
         "caption_hint": sanitize_user_input(caption or "").strip(),
+        "created_at": int(time.time()),
+        "expires_at": _operator_pending_expires_at(),
         **media_meta,
     }
     operator_session.metadata_ = sess_meta
@@ -421,6 +612,11 @@ async def _send_pending_operator_media(
     pending = dict(operator_session.metadata_ or {}).get("pending_operator_media")
     if not isinstance(pending, dict):
         return None
+    if _operator_pending_is_expired(pending):
+        await _forget_pending_operator_item(operator_session, "pending_operator_media", db)
+        reply = "Draft lampiran sebelumnya sudah kedaluwarsa. Reply pesan eskalasi customer lalu kirim ulang lampirannya."
+        await send_wa_message(device_id, operator_reply_target, reply)
+        return {"status": "error", "reply": reply, "run_id": "", "steps": [], "messages_to_user": []}
 
     target_session_id = pending.get("target_session_id")
     if not target_session_id:
@@ -502,6 +698,11 @@ async def _send_pending_operator_text_reply(
     pending = dict(operator_session.metadata_ or {}).get("pending_operator_text_reply")
     if not isinstance(pending, dict):
         return None
+    if _operator_pending_is_expired(pending):
+        await _forget_pending_operator_item(operator_session, "pending_operator_text_reply", db)
+        reply = "Draft pesan sebelumnya sudah kedaluwarsa. Reply pesan eskalasi customer lalu buat draft baru."
+        await send_wa_message(device_id, operator_reply_target, reply)
+        return {"status": "error", "reply": reply, "run_id": "", "steps": [], "messages_to_user": []}
 
     target_session_id = pending.get("target_session_id")
     if not target_session_id:
@@ -552,6 +753,102 @@ async def _send_pending_operator_text_reply(
         await send_wa_message(device_id, operator_reply_target, reply)
         log.warning("wa_incoming.operator_text_reply_failed", error=str(exc), case_id=pending.get("case_id"))
         return {"status": "error", "reply": reply, "run_id": "", "steps": [], "messages_to_user": []}
+
+
+async def _resume_customer_workflow_after_operator_approval(
+    *,
+    agent: Agent,
+    target_session: Session,
+    case_id: str | None,
+    approval_text: str,
+    device_id: str,
+    operator_reply_target: str,
+    db: AsyncSession,
+    log: structlog.BoundLogger,
+) -> dict:
+    """Run the approved business workflow in the customer session, not the operator session."""
+    customer_target = _wa_customer_target(target_session)
+    if not customer_target:
+        reply = "Approval pembayaran diterima, tapi target WhatsApp customer tidak ditemukan di session."
+        await send_wa_message(device_id, operator_reply_target, reply)
+        return {"status": "error", "reply": reply, "run_id": "", "steps": [], "messages_to_user": []}
+
+    meta = dict(target_session.metadata_ or {})
+    meta["last_operator_approval"] = {
+        "type": "payment",
+        "case_id": case_id,
+        "message": sanitize_user_input(approval_text or "").strip(),
+        "approved_at": int(time.time()),
+    }
+    target_session.metadata_ = meta
+    db.add(target_session)
+    await db.commit()
+
+    synthetic_message = (
+        "[SYSTEM_OPERATOR_APPROVAL]\n"
+        f"Case ID: {case_id or '-'}\n"
+        "Jenis approval: pembayaran customer sudah dikonfirmasi oleh operator/admin.\n"
+        f"Pesan operator: {sanitize_user_input(approval_text or '').strip()}\n\n"
+        "Lanjutkan workflow customer dari riwayat percakapan sesi ini. "
+        "Jika semua data customer sudah lengkap, buat dan/atau kirim deliverable berbayar sekarang memakai tool yang tersedia. "
+        "Jika deliverable berupa file/gambar dan tool WhatsApp media tersedia, kirim file/gambar langsung ke customer. "
+        "Jangan eskalasi pembayaran lagi. Jika ada data yang masih kurang, tanyakan hanya data yang kurang ke customer."
+    )
+
+    try:
+        from app.core.engine.agent_runner import run_agent
+        from app.core.engine.session_lock import session_run_lock
+
+        async with session_run_lock(target_session.id):
+            result = await run_agent(
+                agent_model=agent,
+                session=target_session,
+                user_message=synthetic_message,
+                db=db,
+                escalation_user_jid=None,
+                escalation_context=None,
+                media_image_b64=None,
+                media_image_mime=None,
+                sender_name=(target_session.channel_config or {}).get("sender_name")
+                if isinstance(target_session.channel_config, dict)
+                else None,
+                prior_run_was_interrupted=False,
+            )
+    except Exception as exc:
+        reply = f"Approval pembayaran diterima, tapi gagal melanjutkan workflow customer: {exc}"
+        await send_wa_message(device_id, operator_reply_target, reply)
+        log.warning("wa_incoming.operator_payment_resume_failed", error=str(exc), case_id=case_id)
+        return {"status": "error", "reply": reply, "run_id": "", "steps": [], "messages_to_user": []}
+
+    _tokens_this_run = int(result.get("tokens_used", 0) or 0)
+    if _tokens_this_run > 0:
+        await record_agent_token_usage(agent, _tokens_this_run, db)
+        await db.flush()
+        await db.commit()
+
+    customer_reply = str(result.get("reply") or "").strip()
+    steps = result.get("steps", [])
+    messages_to_user: list[dict] = []
+    if customer_reply and not should_skip_whatsapp_final_reply(customer_reply, steps):
+        wa_reply = markdown_to_wa(customer_reply) or customer_reply
+        if wa_reply.strip():
+            await send_wa_message(device_id, customer_target, wa_reply.strip())
+            messages_to_user.append({"type": "approval_resume_reply", "target": customer_target})
+
+    reply = "Pembayaran saya catat approved. Workflow customer sudah saya lanjutkan dari sesi customer."
+    await send_wa_message(device_id, operator_reply_target, reply)
+    log.info(
+        "wa_incoming.operator_payment_approval_resumed_customer",
+        case_id=case_id,
+        target_session_id=str(target_session.id),
+    )
+    return {
+        "status": "ok",
+        "reply": reply,
+        "run_id": str(result.get("run_id", "")),
+        "steps": steps,
+        "messages_to_user": messages_to_user,
+    }
 
 
 @router.get("/wa-dev/operator-route")
@@ -634,6 +931,7 @@ class WAIncomingMessage(BaseModel):
     phone_from: str | None = None      # resolved phone number from Go (LID → phone); fallback ke from_
     chat_id: str | None = None  # group JID (xxx@g.us) atau nomor DM; kalau None fallback ke from_
     message: str = Field(..., max_length=10_000)
+    message_id: str | None = None      # WhatsApp stanza/message ID; lebih akurat untuk dedupe dibanding timestamp
     timestamp: int | None = None
     push_name: str | None = None       # WhatsApp display name of sender
     # Media fields — diisi oleh Go service saat pesan mengandung gambar/dokumen/sticker/audio
@@ -703,6 +1001,31 @@ async def incoming_message(
         await db.commit()
         return {"status": "ok", "reply": "Percakapan direset.", "run_id": "", "steps": [], "messages_to_user": []}
 
+    quota_check = await check_agent_quota(agent, db)
+    if not quota_check.allowed:
+        log.warning(
+            "channels.incoming.quota_blocked",
+            reason=quota_check.reason,
+            detail=quota_check.detail,
+        )
+        if session.channel_type:
+            try:
+                await send_message(
+                    channel_type=session.channel_type,
+                    channel_config=session.channel_config if isinstance(session.channel_config, dict) else {},
+                    text=quota_check.user_message,
+                )
+            except Exception as exc:
+                log.warning("channels.incoming.quota_block_reply_failed", error=str(exc))
+        return {
+            "status": "quota_exhausted",
+            "reason": quota_check.reason,
+            "reply": quota_check.user_message,
+            "run_id": "",
+            "steps": [],
+            "messages_to_user": [],
+        }
+
     # --- Jalankan agent ---
     from app.core.engine.session_lock import (
         cancel_active_run,
@@ -713,14 +1036,20 @@ async def incoming_message(
     from app.core.engine.agent_runner import run_agent  # deferred to avoid circular import
 
     _prior_interrupted = False
+    session_id = session.id
     if not is_operator:
-        _prior_interrupted = await cancel_active_run(session.id)
+        _prior_interrupted = await cancel_active_run(session_id)
 
     try:
-        async with session_run_lock(session.id):
+        async with session_run_lock(session_id):
+            if not is_operator:
+                await db.refresh(session, attribute_names=["ai_disabled"])
+                if getattr(session, "ai_disabled", False):
+                    log.info("channels.incoming.ai_disabled_after_wait", session_id=str(session_id))
+                    return {"status": "ai_disabled", "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
             current_task = asyncio.current_task()
             if current_task and not is_operator:
-                await register_active_task(session.id, current_task)
+                await register_active_task(session_id, current_task)
             result = await run_agent(
                 agent_model=agent,
                 session=session,
@@ -729,18 +1058,26 @@ async def incoming_message(
                 prior_run_was_interrupted=_prior_interrupted,
             )
     except asyncio.CancelledError:
-        await unregister_active_task(session.id, asyncio.current_task())
+        await unregister_active_task(session_id, asyncio.current_task())
+        await db.rollback()
         return {"status": "cancelled", "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
     except (TimeoutError, asyncio.TimeoutError):
-        await unregister_active_task(session.id, asyncio.current_task())
-        log.warning("channels.incoming.session_lock_timeout", session_id=str(session.id))
+        await unregister_active_task(session_id, asyncio.current_task())
+        await db.rollback()
+        log.warning("channels.incoming.session_lock_timeout", session_id=str(session_id))
         return {"status": "timeout", "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
     except Exception as exc:
-        await unregister_active_task(session.id, asyncio.current_task())
+        await unregister_active_task(session_id, asyncio.current_task())
         log.error("channels.incoming.agent_error", error=str(exc))
         raise HTTPException(status_code=500, detail=f"Agent error: {exc}")
     finally:
-        await unregister_active_task(session.id, asyncio.current_task())
+        await unregister_active_task(session_id, asyncio.current_task())
+
+    _tokens_this_run = int(result.get("tokens_used", 0) or 0)
+    if _tokens_this_run > 0:
+        await record_agent_token_usage(agent, _tokens_this_run, db)
+        await db.flush()
+        await db.commit()
 
     reply = result.get("reply", "")
 
@@ -806,18 +1143,35 @@ async def wa_incoming(
     # phone_from is empty string when Go couldn't resolve LID→PN — treat as unknown.
     # Guard: jika from_ > 15 digit (LID) dan phone_from kosong, jangan pakai LID sebagai identifier.
     _raw_from = body.phone_from or body.from_
-    _is_lid = len(_raw_from.lstrip("+")) >= 15
+    _is_lid = len(_raw_from.lstrip("+")) > 15
     from_phone = body.phone_from if (_is_lid and body.phone_from) else _raw_from
     reply_target = body.chat_id or body.from_
 
     # 1.5. Cek deduplikasi WA (handling multiple webhook calls for the same message)
-    if body.timestamp:
-        if await is_duplicate_message(body.device_id, from_phone, body.timestamp, db):
+    if body.message_id or body.timestamp:
+        if await is_duplicate_message(body.device_id, from_phone, body.timestamp, db, body.message_id):
             log.info("wa_incoming.duplicate_ignored")
             return {"status": "ignored", "reason": "duplicate message"}
 
-    # 2. Cek apakah pesan dari operator
-    _is_operator = is_operator_message(from_phone, reply_target, agent)
+    # 2. Cek apakah pesan ini benar-benar turn operator eskalasi.
+    # Identitas admin/operator saja tidak cukup: admin sering mengetes agent
+    # dari nomor yang sama. Operator mode hanya aktif saat reply ke pesan
+    # eskalasi, atau saat mengonfirmasi draft pending dari reply eskalasi itu.
+    _operator_identity = is_operator_message(from_phone, reply_target, agent)
+    _is_operator = False
+    if _operator_identity:
+        _is_operator = await _should_treat_as_operator_turn(
+            agent=agent,
+            db=db,
+            from_phone=from_phone,
+            reply_target=reply_target,
+            message=body.message,
+            media_type=body.media_type,
+            quoted_text=body.quoted_text,
+            quoted_stanza_id=body.quoted_stanza_id,
+        )
+        if not _is_operator:
+            log.info("wa_incoming.operator_identity_treated_as_customer")
 
     # 2.5. Fitur 1 — cek allowlist (hanya untuk non-operator)
     if not _is_operator:
@@ -907,6 +1261,36 @@ async def wa_incoming(
             quoted_stanza_id=body.quoted_stanza_id,
         )
 
+    quota_check = await check_agent_quota(agent, db)
+    if not quota_check.allowed:
+        log.warning(
+            "wa_incoming.quota_blocked",
+            reason=quota_check.reason,
+            detail=quota_check.detail,
+            session_id=str(session.id),
+        )
+        return await _reply_agent_quota_blocked(
+            device_id=body.device_id,
+            reply_target=reply_target,
+            message=quota_check.user_message,
+            reason=quota_check.reason,
+            log=log,
+        )
+
+    if _is_operator and not body.media_type and escalation_user_jid and _is_operator_payment_approval(body.message):
+        target_session, case_id = await find_session_by_operator_active_route(agent, db, session)
+        if target_session:
+            return await _resume_customer_workflow_after_operator_approval(
+                agent=agent,
+                target_session=target_session,
+                case_id=case_id,
+                approval_text=body.message,
+                device_id=body.device_id,
+                operator_reply_target=reply_target,
+                db=db,
+                log=log,
+            )
+
     if _is_operator and not body.media_type and _is_operator_send_confirmation(body.message):
         sent = await _send_pending_operator_media(
             operator_session=session,
@@ -926,6 +1310,10 @@ async def wa_incoming(
         )
         if sent is not None:
             return sent
+        return await _reply_no_pending_operator_confirmation(
+            device_id=body.device_id,
+            operator_reply_target=reply_target,
+        )
 
     if _is_operator and body.media_type and body.media_data:
         forwarded = await _forward_operator_media_to_customer(
@@ -1026,6 +1414,8 @@ async def wa_incoming(
         user_message = media_context.strip()
     else:
         user_message = sanitize_user_input(body.message) + media_context
+    if not _is_operator:
+        user_message = _append_quoted_reply_context(user_message, body.quoted_text)
     if _is_operator:
         op_display_name = body.push_name or ""
         user_message = (
@@ -1072,25 +1462,22 @@ async def wa_incoming(
     # Cancel any in-progress run for this session (human interrupt).
     # Operator messages are never interrupted — they're short command turns.
     _prior_interrupted = False
+    session_id = session.id
     if not _is_operator:
-        _prior_interrupted = await cancel_active_run(session.id)
-        if _prior_interrupted:
-            try:
-                await send_wa_message(
-                    body.device_id,
-                    effective_reply_target,
-                    "Oke, saya stop proses sebelumnya. Saya ikuti pesan terbaru kamu sekarang.",
-                )
-            except Exception as _interrupt_ack_exc:
-                log.warning("wa_incoming.interrupt_ack_failed", error=str(_interrupt_ack_exc))
+        _prior_interrupted = await cancel_active_run(session_id)
 
     try:
-        async with session_run_lock(session.id):
+        async with session_run_lock(session_id):
+            if not _is_operator:
+                await db.refresh(session, attribute_names=["ai_disabled"])
+                if getattr(session, "ai_disabled", False):
+                    log.info("wa_incoming.ai_disabled_after_wait", session_id=str(session_id))
+                    return {"status": "ai_disabled", "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
             # Register task INSIDE the lock — ensures cancel_active_run always
             # targets the task that actually holds the lock and is running.
             _current_task = _asyncio.current_task()
             if _current_task and not _is_operator:
-                await register_active_task(session.id, _current_task)
+                await register_active_task(session_id, _current_task)
             result = await run_agent(
                 agent_model=agent,
                 session=session,
@@ -1104,12 +1491,14 @@ async def wa_incoming(
                 prior_run_was_interrupted=_prior_interrupted,
             )
     except _asyncio.CancelledError:
-        log.info("wa_incoming.cancelled_by_interrupt", session_id=str(session.id))
-        await unregister_active_task(session.id, _asyncio.current_task())
+        log.info("wa_incoming.cancelled_by_interrupt", session_id=str(session_id))
+        await unregister_active_task(session_id, _asyncio.current_task())
+        await db.rollback()
         return {"status": "cancelled", "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
     except (TimeoutError, _asyncio.TimeoutError):
-        await unregister_active_task(session.id, _asyncio.current_task())
-        log.warning("wa_incoming.session_lock_timeout", session_id=str(session.id))
+        await unregister_active_task(session_id, _asyncio.current_task())
+        await db.rollback()
+        log.warning("wa_incoming.session_lock_timeout", session_id=str(session_id))
         try:
             await send_wa_message(body.device_id, effective_reply_target,
                 "⏳ Sedang memproses pesan sebelumnya, mohon tunggu sebentar lalu kirim ulang.")
@@ -1117,7 +1506,7 @@ async def wa_incoming(
             pass
         return {"status": "timeout", "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
     except Exception as exc:
-        await unregister_active_task(session.id, _asyncio.current_task())
+        await unregister_active_task(session_id, _asyncio.current_task())
         log.error("wa_incoming.agent_error", error=str(exc), exc_info=True)
         import traceback as _tb
         err_detail = _tb.format_exc()
@@ -1136,10 +1525,14 @@ async def wa_incoming(
             log.warning("wa_incoming.error_reply_failed", error=str(_send_exc))
         return {"status": "error", "reply": _GENERIC_ERROR_MSG, "run_id": "", "steps": [], "messages_to_user": []}
     finally:
-        await unregister_active_task(session.id, _asyncio.current_task())
+        await unregister_active_task(session_id, _asyncio.current_task())
 
     reply = result.get("reply", "")
     steps = result.get("steps", [])
+    messages_to_user = extract_messages_to_user(steps)
+    final_reply_sent = False
+    final_reply_suppressed = False
+    final_reply_send_error = ""
 
     if _is_operator and escalation_user_jid and reply:
         draft_message = _extract_operator_text_draft(reply)
@@ -1162,32 +1555,32 @@ async def wa_incoming(
     # 7a. Update token usage on agent + user subscription
     _tokens_this_run: int = result.get("tokens_used", 0)
     if _tokens_this_run > 0:
-        agent.tokens_used = (agent.tokens_used or 0) + _tokens_this_run
-        # Update shared user_subscription.tokens_used if owner exists
-        if agent.owner_external_id:
-            try:
-                from sqlalchemy import select as _sel
-                from app.models.subscription import User as _User, UserSubscription as _UserSub
-                _u = (await db.execute(
-                    _sel(_User).where(_User.external_id == agent.owner_external_id)
-                )).scalar_one_or_none()
-                if _u:
-                    _sub = (await db.execute(
-                        _sel(_UserSub).where(_UserSub.user_id == _u.id)
-                    )).scalar_one_or_none()
-                    if _sub:
-                        _sub.tokens_used = (_sub.tokens_used or 0) + _tokens_this_run
-            except Exception as _te:
-                log.warning("wa_incoming.token_update_failed", error=str(_te))
+        await record_agent_token_usage(agent, _tokens_this_run, db)
         await db.flush()
         await db.commit()
 
     # 7. Kirim reply ke channel
     if reply:
         try:
+            if not _is_operator and should_skip_whatsapp_final_reply(reply, steps):
+                log.info("wa_incoming.final_reply_suppressed_duplicate_outbound")
+                final_reply_suppressed = True
+                return {
+                    "status": "ok",
+                    "reply": "",
+                    "run_id": str(result.get("run_id", "")),
+                    "steps": steps,
+                    "messages_to_user": messages_to_user,
+                    "reply_delivery": {
+                        "final_reply_sent": False,
+                        "final_reply_suppressed": True,
+                        "error": "",
+                    },
+                }
             wa_reply = markdown_to_wa(reply) or reply.strip()
             if not wa_reply:
                 log.warning("wa_incoming.empty_reply_after_conversion", reply_len=len(reply))
+                final_reply_suppressed = True
             else:
                 escalation_cfg: dict = agent.escalation_config or {}
                 operator_phone: str = escalation_cfg.get("operator_phone", "")
@@ -1195,21 +1588,34 @@ async def wa_incoming(
                 if _is_operator:
                     # Kirim final reply ke operator
                     await send_wa_message(body.device_id, reply_target, wa_reply)
+                    final_reply_sent = True
+                    messages_to_user.append({"type": "final_reply", "target": reply_target})
                 else:
-                    # Guard: jangan kirim ke nomor operator
+                    # Guard customer replies from accidental escalation/operator
+                    # targets, but allow the operator to test the agent as a
+                    # normal customer when no escalation context is active.
                     normalized_target = normalize_phone(reply_target)
                     normalized_operator = normalize_phone(operator_phone) if operator_phone else ""
-                    if normalized_operator and normalized_target == normalized_operator:
+                    if normalized_operator and normalized_target == normalized_operator and not _operator_identity:
                         log.warning("wa_incoming.reply_target_is_operator_suppressed", reply_target=reply_target)
+                        final_reply_suppressed = True
                     else:
                         await send_wa_message(body.device_id, reply_target, wa_reply)
+                        final_reply_sent = True
+                        messages_to_user.append({"type": "final_reply", "target": reply_target})
         except Exception as exc:
-            log.error("wa_incoming.send_reply_failed", target=reply_target, error=str(exc))
+            final_reply_send_error = str(exc)
+            log.error("wa_incoming.send_reply_failed", target=reply_target, error=final_reply_send_error)
 
     return {
-        "status": "ok",
+        "status": "send_failed" if reply and not final_reply_sent and not final_reply_suppressed else "ok",
         "reply": reply,
         "run_id": str(result.get("run_id", "")),
         "steps": steps,
-        "messages_to_user": extract_messages_to_user(steps),
+        "messages_to_user": messages_to_user,
+        "reply_delivery": {
+            "final_reply_sent": final_reply_sent,
+            "final_reply_suppressed": final_reply_suppressed,
+            "error": final_reply_send_error,
+        },
     }

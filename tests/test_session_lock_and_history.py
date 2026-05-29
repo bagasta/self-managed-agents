@@ -12,6 +12,7 @@ Run with: pytest tests/test_session_lock_and_history.py -v
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 import uuid
 from typing import Any
@@ -179,6 +180,16 @@ class TestCancelActiveRun:
 
 
 class TestGraphResultExtraction:
+    def test_agent_runner_initializes_graph_output_before_recoverable_retries(self):
+        from app.core.engine import agent_runner
+
+        src = inspect.getsource(agent_runner.run_agent)
+        init_pos = src.index("_graph_output: Any | None = None")
+        first_ainvoke_pos = src.index("_graph_output = await graph.ainvoke")
+        interrupt_pos = src.index("handle_graph_interrupt(")
+
+        assert init_pos < first_ainvoke_pos < interrupt_pos
+
     @pytest.mark.asyncio
     async def test_falls_back_to_ainvoke_output_without_checkpointer(self):
         from app.core.engine.agent_runner import _graph_result_from_output

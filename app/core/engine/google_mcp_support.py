@@ -82,6 +82,8 @@ def _is_google_mcp_intent(message: str) -> bool:
     if not message:
         return False
     m = message.lower()
+    if _is_plain_google_form_link_reference(m):
+        return False
     keywords = (
         "google sheet", "spreadsheet", "gmail", "calendar", "drive", "docs", "sheets",
         "slide", "slides", "presentasi", "presentation", "google slides", "forms",
@@ -93,6 +95,63 @@ def _is_google_mcp_intent(message: str) -> bool:
         "otentikasi google", "login google",
     )
     return any(k in m for k in keywords)
+
+
+def _is_plain_google_form_link_reference(message: str) -> bool:
+    """A shared Google Form URL can be business info, not a request to run Google tools."""
+    if not message:
+        return False
+    m = message.lower()
+    has_form_link = bool(
+        re.search(r"https?://(?:forms\.gle|docs\.google\.com/forms)/\S+", m)
+    )
+    has_plain_form_context = (
+        "google form" in m
+        and any(
+            marker in m
+            for marker in (
+                "cara order",
+                "pelanggan isi",
+                "customer isi",
+                "link yang pelanggan",
+                "link order",
+                "sumber data order",
+                "form yang udah aku buat",
+                "form yang sudah aku buat",
+            )
+        )
+    )
+    if not has_form_link and not has_plain_form_context:
+        return False
+
+    action_markers = (
+        "buatkan",
+        "bikinin",
+        "tolong buat",
+        "minta buat",
+        "bikin google form",
+        "buat google form",
+        "create",
+        "generate",
+        "edit",
+        "ubah",
+        "update",
+        "hapus",
+        "delete",
+        "isi form",
+        "submit",
+        "jawab form",
+        "ambil response",
+        "lihat response",
+        "cek response",
+        "pantau response",
+        "sinkron",
+        "integrasi",
+        "connect",
+        "login",
+        "auth",
+    )
+    return not any(marker in m for marker in action_markers)
 
 
 def is_google_workspace_mcp_configured(tools_config: dict[str, Any]) -> bool:
@@ -374,18 +433,40 @@ def _ensure_google_auth_link_in_reply(reply_text: str, auth_url: str | None) -> 
     return f"{reply_text.rstrip()}\n\nLink otentikasi Google:\n{auth_url}"
 
 
+def _sanitize_user_facing_google_terms(reply_text: str) -> str:
+    """Avoid leaking internal integration protocol terms in user-facing replies."""
+    if not reply_text:
+        return reply_text
+    replacements = (
+        (r"\bMCP\s+Google\s+Workspace\b", "Google Workspace"),
+        (r"\bGoogle\s+Workspace\s+MCP\b", "Google Workspace"),
+        (r"\bGoogle\s+MCP\b", "Google Workspace"),
+        (r"\bMCP\s+Google\b", "Google Workspace"),
+        (r"\bMCP\s+tools?\b", "integrasi Google"),
+        (r"\btools?\s+MCP\b", "integrasi Google"),
+        (r"\bmelalui\s+MCP\b", "melalui integrasi Google"),
+        (r"\blewat\s+MCP\b", "lewat integrasi Google"),
+        (r"\bvia\s+MCP\b", "via integrasi Google"),
+        (r"\bMCP\b", "integrasi Google"),
+    )
+    sanitized = reply_text
+    for pattern, replacement in replacements:
+        sanitized = re.sub(pattern, replacement, sanitized, flags=re.IGNORECASE)
+    return sanitized
+
+
 def _build_google_mcp_not_executed_reply(user_message: str) -> str:
     lower = (user_message or "").lower()
     if "link" in lower or "url" in lower:
         return (
             "Belum ada link Google Workspace yang valid untuk saya kirim. "
-            "Run sebelumnya tidak menunjukkan tool Google MCP benar-benar terpanggil, jadi saya tidak mau mengarang link. "
-            "Tolong minta saya jalankan ulang pembuatan file-nya, nanti saya akan pakai MCP Google langsung."
+            "Run sebelumnya tidak menunjukkan integrasi Google benar-benar terpanggil, jadi saya tidak mau mengarang link. "
+            "Tolong minta saya jalankan ulang pembuatan file-nya, nanti saya akan pakai integrasi Google langsung."
         )
     return (
-        "Belum berhasil saya eksekusi lewat MCP Google Workspace. "
-        "Run ini tidak memanggil tool Google MCP apa pun, jadi saya tidak akan mengklaim file sudah dibuat. "
-        "Silakan coba ulang, dan saya akan menjalankan tool Google MCP langsung."
+        "Belum berhasil saya eksekusi lewat Google Workspace. "
+        "Run ini tidak memanggil tool Google apa pun, jadi saya tidak akan mengklaim file sudah dibuat. "
+        "Silakan coba ulang, dan saya akan menjalankan integrasi Google langsung."
     )
 
 
@@ -679,6 +760,13 @@ def _is_missing_calendar_event_id(value: Any) -> bool:
         return True
     text = str(value).strip()
     return text == "" or text.lower() in {"none", "null", "undefined", "no id"}
+
+
+def _looks_like_calendar_id_not_event_id(value: Any) -> bool:
+    if _is_missing_calendar_event_id(value):
+        return False
+    text = str(value).strip().lower()
+    return text == "primary" or "@" in text
 
 
 def _extract_calendar_event_ids(text: str) -> list[str]:
@@ -1264,16 +1352,17 @@ def _build_google_mcp_validation_reply(error_text: str) -> str:
 
 
 def build_google_mcp_usage_notice(user_message: str) -> str:
-    notice = "\n\n[SYSTEM NOTICE - GOOGLE WORKSPACE MCP USAGE]\n"
+    notice = "\n\n[SYSTEM NOTICE - GOOGLE WORKSPACE TOOL USAGE]\n"
     notice += (
-        "GOOGLE WORKSPACE MCP ADALAH PARENT-ONLY EXECUTION. "
+        "GOOGLE WORKSPACE TOOLING ADALAH PARENT-ONLY EXECUTION. "
         "Jika user meminta Gmail, Calendar, Drive, Docs, Sheets, Slides, Forms, Contacts, Chat, atau Apps Script, "
-        "main agent WAJIB memanggil tool Google MCP langsung. "
+        "main agent WAJIB memanggil tool Google Workspace langsung. "
         "JANGAN delegasikan aksi Google Workspace ke subagent/task(), jangan meminta subagent membuat link, "
         "dan jangan menganggap output task() sebagai bukti file Google sudah dibuat. "
-        "Jika perlu bantuan konten, pikirkan outline sendiri lalu tetap eksekusi file/link final dengan tool MCP di parent. "
-        "Task selesai hanya setelah tool Google MCP yang relevan berhasil dan URL/hasilnya berasal dari output tool tersebut. "
-        "Saat memakai tool Google Workspace MCP, WAJIB ikuti schema tool secara persis. "
+        "Jika perlu bantuan konten, pikirkan outline sendiri lalu tetap eksekusi file/link final dengan tool Google Workspace di parent. "
+        "Task selesai hanya setelah tool Google Workspace yang relevan berhasil dan URL/hasilnya berasal dari output tool tersebut. "
+        "Saat memakai tool Google Workspace, WAJIB ikuti schema tool secara persis. "
+        "Jangan menyebut istilah teknis internal/protokol tool kepada user. "
         "Jangan mengira-ngira nama argumen. Contoh penting: "
         "modify_sheet_values memakai argumen range_name (bukan range); "
         "draft_gmail_message.to/cc/bcc berupa string tunggal; "
@@ -1306,10 +1395,12 @@ def build_google_mcp_usage_notice(user_message: str) -> str:
     )
     notice += "[/SYSTEM NOTICE]\n"
 
-    if _is_google_sheets_authoring_intent(user_message):
+    sheets_intent = _is_google_sheets_authoring_intent(user_message)
+    if sheets_intent:
         notice += "\n\n[SYSTEM NOTICE - SHEETS WORKFLOW MODE]\n"
         notice += (
             "User meminta pembuatan atau pengeditan Google Sheets. create_spreadsheet hanya membuat file kosong; "
+            "Untuk request Google Sheets/spreadsheet, JANGAN panggil manage_event karena manage_event hanya untuk Google Calendar. "
             "JANGAN berhenti setelah create_spreadsheet jika user meminta tabel, data, laporan, tracker, edit, rumus, atau formula. "
             "Workflow wajib untuk spreadsheet baru: "
             "(1) create_spreadsheet dengan title dan sheet_names bila perlu; "
@@ -1327,10 +1418,16 @@ def build_google_mcp_usage_notice(user_message: str) -> str:
         )
         notice += "\n[/SYSTEM NOTICE]\n"
 
-    if "calendar" in (user_message or "").lower() or any(
+    message_lower = (user_message or "").lower()
+    explicit_calendar_intent = any(
+        marker in message_lower
+        for marker in ("google calendar", "calendar", "kalender")
+    )
+    calendar_like_non_sheet_intent = any(
         marker in (user_message or "").lower()
         for marker in ("jadwal", "event", "reminder", "meeting", "rapat", "edit juga")
-    ):
+    )
+    if explicit_calendar_intent or (calendar_like_non_sheet_intent and not sheets_intent):
         notice += "\n\n[SYSTEM NOTICE - CALENDAR EDIT WORKFLOW]\n"
         notice += (
             "Untuk edit/hapus kalender, urutan wajib adalah: "
@@ -1390,9 +1487,9 @@ def build_google_mcp_usage_notice(user_message: str) -> str:
 
 
 def build_mcp_unavailable_notice(mcp_errors: dict[str, str], google_mcp_auth_url: str | None) -> str:
-    notice = "\n\n[SYSTEM NOTICE - MCP TOOL UNAVAILABLE]\n"
+    notice = "\n\n[SYSTEM NOTICE - CONNECTED TOOL UNAVAILABLE]\n"
     notice += (
-        "HARD RULE: Jika tool MCP yang dibutuhkan user sedang unavailable, "
+        "HARD RULE: Jika tool integrasi yang dibutuhkan user sedang unavailable, "
         "JANGAN pernah mengklaim pekerjaan sudah diproses, diupdate, sedang berjalan, atau selesai. "
         "JANGAN membuat janji seperti 'lagi diproses', 'sebentar lagi selesai', atau 'nanti saya kirim link'. "
         "Jawab secara jujur bahwa aksi belum dieksekusi.\n"
@@ -1744,11 +1841,11 @@ def sanitize_google_forms_tools(mcp_tools: list, log: Any) -> list:
                         if "." not in file_name:
                             return (
                                 "DRIVE_FOLDER_OR_CONTENT_REQUIRED: Jika user meminta folder, panggil create_drive_folder(folder_name=..., parent_folder_id=...). "
-                                "Jika user meminta file, create_drive_file wajib diberi content teks atau fileUrl/file_url yang bisa diakses MCP server."
+                                "Jika user meminta file, create_drive_file wajib diberi content teks atau fileUrl/file_url yang bisa diakses server integrasi."
                             )
                         return (
                             "DRIVE_FILE_SOURCE_REQUIRED: create_drive_file wajib diberi salah satu dari content atau fileUrl/file_url. "
-                            "MCP server tidak bisa mengupload file kosong atau file lokal sandbox yang tidak diberikan sebagai URL. "
+                            "Server integrasi tidak bisa mengupload file kosong atau file lokal sandbox yang tidak diberikan sebagai URL. "
                             "Buat/ambil konten file dulu, atau gunakan tool Google native yang sesuai seperti create_spreadsheet/create_presentation/create_doc."
                         )
 
@@ -1771,15 +1868,27 @@ def sanitize_google_forms_tools(mcp_tools: list, log: Any) -> list:
             def _build_manage_event_guarded(tool_to_call: Any):
                 async def _manage_event_guarded(**kwargs):
                     action = str(kwargs.get("action") or "").lower().strip()
-                    if action in {"update", "delete", "rsvp"} and _is_missing_calendar_event_id(kwargs.get("event_id")):
+                    event_id_value = kwargs.get("event_id")
+                    event_id_missing_or_invalid = (
+                        _is_missing_calendar_event_id(event_id_value)
+                        or _looks_like_calendar_id_not_event_id(event_id_value)
+                    )
+                    if action in {"update", "delete", "rsvp"} and event_id_missing_or_invalid:
                         if get_events_tool is None:
                             return (
                                 "CALENDAR_EVENT_ID_REQUIRED: manage_event action "
-                                f"'{action}' membutuhkan event_id asli. Panggil get_events dulu untuk mencari event, "
-                                "ambil nilai ID/Event ID dari hasilnya, lalu ulangi manage_event dengan event_id tersebut."
+                                f"'{action}' membutuhkan event_id asli dari output get_events. "
+                                "Jangan memakai calendar_id/email kalender sebagai event_id. "
+                                "Panggil get_events dulu untuk mencari event, ambil nilai ID/Event ID dari hasilnya, "
+                                "lalu ulangi manage_event dengan event_id tersebut."
                             )
 
                         calendar_id = str(kwargs.get("calendar_id") or "primary")
+                        if (
+                            _looks_like_calendar_id_not_event_id(event_id_value)
+                            and calendar_id == "primary"
+                        ):
+                            calendar_id = str(event_id_value).strip()
                         summary = str(kwargs.get("summary") or "").strip() or None
                         start_time = str(kwargs.get("start_time") or "").strip() or None
                         end_time = str(kwargs.get("end_time") or "").strip() or None
@@ -1801,6 +1910,7 @@ def sanitize_google_forms_tools(mcp_tools: list, log: Any) -> list:
                         if len(ids) == 1:
                             retry_kwargs = dict(kwargs)
                             retry_kwargs["event_id"] = ids[0]
+                            retry_kwargs["calendar_id"] = calendar_id
                             log.warning(
                                 "agent_run.calendar_manage_event_auto_event_id",
                                 action=action,
@@ -2431,7 +2541,7 @@ async def apply_google_mcp_reply_overrides(
             log.warning("agent_run.google_mcp_auth_link_appended_to_recovery_reply")
             final_reply = updated_reply
 
-    return final_reply, steps, auth_url
+    return _sanitize_user_facing_google_terms(final_reply), steps, auth_url
 
 
 async def _build_google_mcp_auth_failure_reply(

@@ -74,6 +74,15 @@ def _make_agent(owner_external_id=None, operator_ids=None):
 # Tests: get_or_create_wa_user
 # ---------------------------------------------------------------------------
 
+def test_default_tier3_plan_has_unlimited_agents_and_100m_tokens():
+    from app.core.domain.subscription_service import DEFAULT_SUBSCRIPTION_PLANS
+
+    tier3 = next(plan for plan in DEFAULT_SUBSCRIPTION_PLANS if plan["code"] == "tier_3")
+
+    assert tier3["max_agents"] is None
+    assert tier3["token_quota"] == 100_000_000
+
+
 class TestGetOrCreateWaUser:
     @pytest.mark.asyncio
     async def test_creates_new_user_and_tier1_sub(self):
