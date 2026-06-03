@@ -2736,3 +2736,8 @@ def test_parent_delivery_contract_missing_markers():
 
 def test_no_file_delivery_means_no_issue():
     assert file_delivery_contract_issues("CS biasa tanpa file.", file_delivery=False) == []
+
+
+def test_parent_delivery_contract_image_only():
+    instr = "/workspace/shared/result.png SIAP_DIKIRIM_PARENT send_whatsapp_image"
+    assert file_delivery_contract_issues(instr, file_delivery=True) == []

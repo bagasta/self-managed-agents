@@ -3756,7 +3756,7 @@ def build_builder_tools(
                     or "bukti transfer" in instructions.lower()
                     or "payment_review" in instructions.lower()
                     or "waiting_payment" in instructions.lower()
-                    or "send_whatsapp_document" in instructions
+                    or "send_whatsapp_document" in instructions.lower()
                     or "file final" in instructions.lower()
                 )
             )
