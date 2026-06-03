@@ -11,19 +11,86 @@ Fungsi yang diekspor:
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 import uuid
 from typing import Any
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.domain.agent_sop_service import (
+    format_operating_manual_for_prompt,
+    get_agent_operating_manual,
+    summarize_operating_manual,
+)
 from app.core.engine.context_service import count_user_messages, load_history
+from app.core.engine.tool_capability_registry import build_runtime_tool_contract_text
 from app.core.utils.phone_utils import normalize_phone
+from app.core.utils.wa_identity import is_probable_whatsapp_lid
 
 
 # ---------------------------------------------------------------------------
 # Tool priority hints
 # ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class PlatformRuntimeContract:
+    owner_id: str
+    created_by_type: str
+    created_by_agent_id: str
+    created_by_agent_name: str
+    current_user_role: str
+    is_operator: bool
+    runtime_tool_contract: str
+
+
+def _build_runtime_tool_contract(agent_model: Any, active_groups: list[str]) -> str:
+    tools_config = getattr(agent_model, "tools_config", None)
+    tools_config = tools_config if isinstance(tools_config, dict) else {}
+    return build_runtime_tool_contract_text(tools_config=tools_config, active_groups=active_groups)
+
+
+def _normalize_created_by_type(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {"arthur_builder", "dashboard", "api", "system"}:
+        return raw
+    return "unknown"
+
+
+def build_platform_runtime_contract(
+    *,
+    agent_model: Any,
+    active_groups: list[str],
+    user_phone: str,
+    is_operator_message: bool = False,
+) -> PlatformRuntimeContract:
+    owner_id = normalize_phone(getattr(agent_model, "owner_external_id", "") or "")
+    normalized_ops: set[str] = set()
+    if owner_id:
+        normalized_ops.add(owner_id)
+
+    escalation_cfg: dict = getattr(agent_model, "escalation_config", None) or {}
+    operator_phone_cfg: str = escalation_cfg.get("operator_phone", "")
+    if operator_phone_cfg:
+        normalized_ops.add(normalize_phone(operator_phone_cfg))
+    for oid in getattr(agent_model, "operator_ids", None) or []:
+        normalized = normalize_phone(oid)
+        if normalized:
+            normalized_ops.add(normalized)
+
+    is_operator = bool(is_operator_message)
+    if not is_operator and user_phone:
+        is_operator = normalize_phone(user_phone) in normalized_ops
+
+    return PlatformRuntimeContract(
+        owner_id=owner_id,
+        created_by_type=_normalize_created_by_type(getattr(agent_model, "created_by_type", None)),
+        created_by_agent_id=str(getattr(agent_model, "created_by_agent_id", "") or ""),
+        created_by_agent_name=str(getattr(agent_model, "created_by_agent_name", "") or ""),
+        current_user_role="OPERATOR" if is_operator else "user",
+        is_operator=is_operator,
+        runtime_tool_contract=_build_runtime_tool_contract(agent_model, active_groups),
+    )
 
 def build_mcp_tool_priority_notice(
     *,
@@ -71,31 +138,30 @@ def build_agent_context_block(
     agent_id = session.agent_id
     _raw_cfg = session.channel_config
     _ch_cfg = _raw_cfg if isinstance(_raw_cfg, dict) else {}
-    _raw_user_phone = _ch_cfg.get("user_phone") or getattr(session, "external_user_id", None) or ""
-    # Strip @lid / @s.whatsapp.net — always expose clean phone number to LLM
-    user_phone = normalize_phone(_raw_user_phone) if _raw_user_phone else ""
+    _raw_user_jid = _ch_cfg.get("user_phone") or getattr(session, "external_user_id", None) or ""
+    _raw_real_phone = _ch_cfg.get("phone_number") or ""
+    _phone_candidate = _raw_real_phone or _raw_user_jid
+    # Expose real phone only. Never present a WhatsApp LID as "phone".
+    user_phone = (
+        normalize_phone(_phone_candidate)
+        if _phone_candidate and not is_probable_whatsapp_lid(str(_phone_candidate))
+        else ""
+    )
+    user_wa_id = str(_raw_user_jid or "").strip()
     channel_type = getattr(session, "channel_type", None) or "api"
 
     escalation_cfg: dict = getattr(agent_model, "escalation_config", None) or {}
     operator_name: str = escalation_cfg.get("operator_name", "")
     operator_phone_cfg: str = escalation_cfg.get("operator_phone", "")
 
-    is_operator = bool(is_operator_message)
-    if not is_operator and user_phone:
-        norm_user = normalize_phone(user_phone)
-        normalized_owner = normalize_phone(getattr(agent_model, "owner_external_id", "") or "")
-        normalized_ops: set[str] = set()
-        if operator_phone_cfg:
-            normalized_ops.add(normalize_phone(operator_phone_cfg))
-        for oid in getattr(agent_model, "operator_ids", None) or []:
-            normalized = normalize_phone(oid)
-            if not normalized:
-                continue
-            if normalized_owner and normalized == normalized_owner:
-                continue
-            normalized_ops.add(normalized)
-        is_operator = norm_user in normalized_ops
-    user_role = "OPERATOR" if is_operator else "user"
+    platform_contract = build_platform_runtime_contract(
+        agent_model=agent_model,
+        active_groups=active_groups,
+        user_phone=user_phone,
+        is_operator_message=is_operator_message,
+    )
+    is_operator = platform_contract.is_operator
+    user_role = platform_contract.current_user_role
 
     lines = [
         "## Platform Context",
@@ -109,10 +175,71 @@ def build_agent_context_block(
         ct_lines = [f"  - {ct.name}: {ct.description}" for ct in custom_tools_db]
         lines.append("- Custom Tools:\n" + "\n".join(ct_lines))
 
+    lines.append(platform_contract.runtime_tool_contract)
+
+    operating_manual = getattr(agent_model, "_runtime_operating_manual", None)
+    if not isinstance(operating_manual, dict):
+        operating_manual = get_agent_operating_manual(
+            getattr(agent_model, "tools_config", None)
+            if isinstance(getattr(agent_model, "tools_config", None), dict)
+            else {}
+        )
+    manual_summary = summarize_operating_manual(operating_manual)
+    lines.append("\n## Agent Operating Manual")
+    if manual_summary["present"]:
+        lines.append("- SOP Manual: available")
+        lines.append(f"- SOP Domain: {manual_summary['domain'] or 'unknown'}")
+        lines.append(f"- SOP Source: {manual_summary['source'] or 'unknown'}")
+        lines.append(f"- SOP Maturity: {manual_summary['maturity']}")
+        lines.append(f"- SOP Workflow Count: {manual_summary['workflow_count']}")
+        if manual_summary["workflow_ids"]:
+            lines.append(f"- SOP Workflows: {', '.join(manual_summary['workflow_ids'])}")
+        if manual_summary["owner_review_required"]:
+            lines.append("- SOP perlu review Owner sebelum keputusan bisnis final.")
+        if manual_summary["maturity"] in {"draft", "needs_review"}:
+            lines.append(
+                "- Karena SOP masih draft/needs_review, kamu hanya boleh melakukan intake, klarifikasi, ringkasan, dan eskalasi. "
+                "Jangan mengarang harga, stok, jadwal, refund, approval, atau keputusan final."
+            )
+        else:
+            lines.append(
+                "- Untuk workflow penting seperti order, booking, refund, pembayaran, atau approval, ikuti SOP workflow yang relevan sebelum mengambil tindakan."
+            )
+        manual_detail = format_operating_manual_for_prompt(operating_manual)
+        if manual_detail:
+            lines.append(manual_detail)
+    else:
+        lines.append("- SOP Manual: missing")
+        lines.append(
+            "- Belum ada SOP terpisah. Kamu hanya boleh melakukan intake, klarifikasi, ringkasan, dan eskalasi sampai Owner/Arthur membuat SOP kerja agent."
+        )
+
     lines.append(f"- Channel: {channel_type}")
+
+    if platform_contract.owner_id:
+        lines.append(f"- Agent Owner/Superadmin: {platform_contract.owner_id}")
+        lines.append(
+            "- Owner adalah bos/superadmin agent ini. Jika butuh keputusan manusia, akses akun, "
+            "izin Google, atau bantuan untuk masalah yang tidak bisa diselesaikan sendiri, minta Owner/operator membantu."
+        )
+
+    if platform_contract.created_by_type == "arthur_builder":
+        creator_name = platform_contract.created_by_agent_name or "Arthur"
+        lines.append(f"- Created By: {creator_name} (Agent Builder platform ini)")
+        if platform_contract.created_by_agent_id:
+            lines.append(f"- Created By Agent ID: {platform_contract.created_by_agent_id}")
+        lines.append(
+            "- Kamu dibuat/dikonfigurasi lewat Arthur. Untuk perubahan konfigurasi besar, "
+            "arahkan Owner bicara ke Arthur."
+        )
+    elif platform_contract.created_by_type != "unknown":
+        lines.append(f"- Created By Source: {platform_contract.created_by_type}")
 
     if user_phone:
         lines.append(f"- Current User Phone: {user_phone}")
+    elif user_wa_id:
+        lines.append(f"- Current User WhatsApp ID: {user_wa_id} (LID/JID, bukan nomor telepon)")
+        lines.append("- Current User Phone: unknown; jangan gunakan LID/JID ini sebagai nomor telepon customer.")
     if is_operator:
         # Operator session — show operator identity, NOT customer sender_name
         _op_label = operator_name or "Operator/Admin"
@@ -121,14 +248,20 @@ def build_agent_context_block(
         if operator_phone_cfg:
             lines.append(f"- Operator Phone: {operator_phone_cfg}")
         lines.append("- PENTING: Kamu sedang di-chat oleh OPERATOR. Jangan gunakan nama atau sapaan yang ditujukan ke customer.")
+        lines.append("- Jika OPERATOR ini adalah Owner, perlakukan arahannya sebagai arahan bos/superadmin selama tetap aman dan sesuai kebijakan.")
     else:
         if sender_name:
             lines.append(f"- Current User Name: {sender_name}")
         lines.append(f"- Current User Role: {user_role}")
         if operator_phone_cfg:
-            lines.append(f"- Operator Phone (pemilik agent): {operator_phone_cfg}")
+            lines.append("- Operator contact is configured internally; never reveal the operator/admin phone to this customer.")
         if operator_name:
             lines.append(f"- Operator Name: {operator_name}")
+        lines.append(
+            "- Jika terjadi masalah akses akun, izin Google, Calendar, penjadwalan, atau integrasi internal, "
+            "minta bantuan Owner/operator lewat mekanisme eskalasi/notifikasi internal. Jangan memberi nomor admin, "
+            "nomor Owner, link auth, atau detail teknis internal ke customer kecuali Owner eksplisit menginstruksikan itu."
+        )
     lines.append(f"- Session ID: {session.id}")
 
 
@@ -147,11 +280,11 @@ def build_agent_context_block(
             "- DILARANG bilang 'saya sudah dapat CV', 'nanti saya kirim', 'sedang saya buat', atau klaim sukses jika task() tidak mengembalikan URL/file terkirim.\n"
             "- Untuk pertanyaan status ('mana?', 'belum jadi?', 'udah jadi?'), jawab dari hasil task terakhir; jangan delegasikan ulang kecuali user eksplisit minta coba ulang.\n\n"
             "TASK CONTEXT — WAJIB disertakan di setiap `task=` string:\n"
-            f"- Bahasa user: {'Bahasa Indonesia' if sender_name or user_phone else 'ikuti bahasa user'} — subagent HARUS balas dalam bahasa yang sama\n"
+            "- Bahasa user: ikuti bahasa percakapan user saat ini — subagent HARUS balas dalam bahasa yang sama\n"
             + (f"- Nama user: {sender_name}\n" if sender_name else "")
             + (f"- User phone: {user_phone}\n" if user_phone else "")
             + "- Sertakan konteks singkat dari request user agar subagent tidak buta\n"
-            "- Contoh BENAR: task('sys_coder', task='Buatkan landing page untuk user bernama Bagas (bahasa Indonesia). Request: buat portfolio sederhana dengan section About dan Projects.')\n"
+            "- Contoh BENAR: task('sys_coder', task='Buatkan landing page untuk user bernama Bagas. Jawab dengan bahasa yang sama seperti request user. Request: buat portfolio sederhana dengan section About dan Projects.')\n"
             "- Contoh SALAH: task('sys_coder', task='buat portfolio')\n\n"
             "🚨 ATURAN PALING KRITIS — BACA BAIK-BAIK:\n"
             "Sistem ini bekerja seperti ini: OUTPUT TEKS PERTAMA = REPLY FINAL = TASK SELESAI.\n"
@@ -190,18 +323,19 @@ def build_agent_context_block(
             "  - Web/app baru yang beda total ('buatin landing page lain')\n"
             "  - User bilang URL lama mati / gak bisa diakses\n"
             "Untuk edit, instruksikan sub-agent MODIFY file yang ada, bukan rebuild from scratch.\n\n"
-            "📦 PERCAYA LAPORAN PENGIRIMAN FILE DARI SUB-AGENT (HARD RULE):\n"
-            "Sub-agent bisa kirim file (PDF, gambar, Excel, dll) LANGSUNG ke user tanpa routing ke kamu.\n"
-            "Kalau output task() menyebut file sudah dikirim (misal: '✅ TERKIRIM', 'send_whatsapp_document berhasil',\n"
-            "'[DOCUMENT_SENT]', '[IMAGE_SENT]') → FILE SUDAH SAMPAI KE USER. Jangan ragukan ini.\n\n"
-            "DILARANG KERAS setelah sub-agent lapor file terkirim:\n"
+            "📦 DELIVERY FILE DARI SUB-AGENT HARUS LEWAT PARENT (HARD RULE):\n"
+            "Sub-agent TIDAK boleh mengirim file WhatsApp langsung. Sub-agent harus membuat file di /workspace/shared/.\n"
+            "Kalau output task() menyebut path /workspace/shared/<filename> atau SIAP_DIKIRIM_PARENT, kamu sebagai parent\n"
+            "WAJIB langsung panggil send_whatsapp_document/send_whatsapp_image dari workspace parent. Jangan cek folder output sub-agent.\n\n"
+            "DILARANG KERAS setelah sub-agent lapor file siap:\n"
             "  ❌ Tanya user 'udah nyampe?', 'bisa dibuka?', 'file-nya udah ada?'\n"
-            "  ❌ Coba kirim ulang file yang sama\n"
-            "  ❌ Bilang 'mungkin belum terkirim' atau 'sepertinya ada masalah pengiriman'\n\n"
+            "  ❌ Bilang 'mungkin belum terkirim' atau 'sepertinya ada masalah pengiriman' sebelum tool parent dicoba\n"
+            "  ❌ Balas final sebelum tool parent send_whatsapp_document/send_whatsapp_image sukses atau error nyata\n\n"
             "YANG HARUS DILAKUKAN:\n"
-            "  ✅ Langsung recap konten file ke user (apa isinya, apa yang bisa dilakukan selanjutnya)\n"
+            "  ✅ Kirim file dari path /workspace/shared/<filename> memakai tool WhatsApp parent\n"
+            "  ✅ Setelah tool sukses, recap singkat konten file ke user\n"
             "  ✅ Simpan ke memory: remember(key='last_file_sent', value='<nama_file> TERKIRIM')\n"
-            "  ✅ Kalau output task() TIDAK menyebut pengiriman → BARU tanya atau kirim sendiri"
+            "  ✅ Kalau output task() tidak menyebut path /workspace/shared atau URL valid, sampaikan blocker apa adanya"
         )
         for sa in subagent_list:
             lines.append(f"- **{sa.get('name', '?')}**: {sa.get('description', '')}")
@@ -533,6 +667,9 @@ def build_system_prompt(
             "Aturan kerja wajib:\n"
             "- Tolak pembuatan atau update agent untuk buzzer, kampanye politik, propaganda politik, atau manipulasi opini publik. Jangan bantu menyusun blueprint, instruksi, soul, atau strategi untuk tujuan itu.\n"
             "- Jika user sudah meminta dibuatkan agent dan konteksnya cukup, langsung jalankan tool berurutan: plan_agent -> compose_agent_blueprint -> compose_agent_instructions -> validate_agent_config -> create_agent.\n"
+            "- Kamu bertindak sebagai builder yang menyiapkan agent sampai user tahu langkah berikutnya. Jangan membuat user menebak cara pakai, cara test, cara connect Google, cara pasang WhatsApp, atau apa yang masih kurang.\n"
+            "- Untuk setiap agent bisnis, tentukan dan masukkan workflow nyata: data yang dikumpulkan, kapan minta pembayaran, bukti apa yang diminta, siapa admin/operatornya, kapan eskalasi, dan kapan hasil boleh dikirim. Jangan hanya membuat persona umum.\n"
+            "- Setiap agent yang kamu buat harus sadar bahwa dia dibuat oleh Arthur, punya Owner, dan Owner adalah bos/superadmin. Masukkan pemahaman ini ke instructions/soul agent, termasuk aturan minta bantuan Owner saat butuh keputusan manusia, izin Google, akses akun, atau menghadapi masalah yang tidak bisa diselesaikan sendiri.\n"
             "- Jangan mengunci preset hanya dari satu kata kunci kalau kebutuhan user masih berupa keluhan, ide kasar, atau workflow custom. Gali satu hal paling menentukan dulu: hasil akhir yang diharapkan, siapa pemakainya, channel, data yang perlu dikumpulkan, atau aksi otomatis yang wajib dilakukan.\n"
             "- Saat menjelaskan rencana ke user, jangan menyebut label preset internal seperti `personal_assistant` atau `faq_webchat_rag`. Jelaskan dalam bahasa fungsi: `agent persiapan liburan`, `agent CS WhatsApp`, `agent riset`, dan sejenisnya.\n"
             "- Jika hasil plan_agent memuat google_workspace_option.should_offer=true, jelaskan manfaatnya dalam bahasa awam dan tawarkan pilihan: `Mau sekalian dihubungkan ke Google, atau dibuat tanpa Google dulu?` Jangan langsung mengaktifkan Google tanpa persetujuan user kecuali user sudah eksplisit meminta Google/Gmail/Calendar/Docs/Sheets/Drive.\n"
@@ -546,20 +683,33 @@ def build_system_prompt(
             "- Jika user berkata `langsung`, `gausah banyak tanya`, `buatkan agentnya`, `lanjut`, `ok`, atau `iya`, itu adalah izin eksekusi. Jangan membalas dengan pertanyaan lanjutan yang sama.\n"
             "- Jangan berhenti setelah compose_agent_soul atau membalas `soul sudah siap`; setelah soul tersusun, tool berikutnya harus validate_agent_config lalu create_agent/update_agent sesuai konteks.\n"
             "- Jika user meminta `kode baru`, `nomor trial`, `link coba`, atau ingin mencoba lagi agent yang sudah ada, langsung cari agent terkait lalu panggil create_wa_dev_trial_link. Jangan menjawab kuota/topup untuk Arthur; Arthur adalah builder dan tetap harus bisa membuat kode trial.\n"
-            "- Jika user meminta edit/perbaiki agent yang sudah ada, jangan menjawab `langsung aku betulin`, `aku hidupkan sekarang`, `saya proses`, atau janji progres sebagai final. Cari agent dengan list_my_agents/get_agent_detail, lalu panggil update_agent di giliran yang sama.\n"
+            "- Jika user meminta edit/perbaiki agent yang sudah ada, targetnya adalah UPDATE, bukan membuat agent baru. Jangan menjawab `langsung aku betulin`, `aku hidupkan sekarang`, `saya proses`, atau janji progres sebagai final. Cari agent dengan list_my_agents/get_agent_detail, lalu panggil update_agent di giliran yang sama.\n"
+            "- Untuk update agent existing, jangan menjawab `langsung aku betulin`; langsung eksekusi tool update yang diperlukan sampai tersimpan.\n"
+            "- Untuk edit/perbaiki/update agent yang sudah ada: DILARANG memakai task, subagent, sandbox, read_file, edit_file, atau write_file. Gunakan hanya builder tools langsung: list_my_agents -> get_agent_detail(include_instructions=true) -> compose_agent_blueprint jika workflow bisnis berubah -> compose_agent_instructions -> validate_agent_config -> update_agent -> get_agent_detail untuk verifikasi.\n"
+            "- Dalam flow update agent existing, JANGAN memanggil create_agent dan JANGAN berhenti setelah compose_agent_blueprint, compose_agent_instructions, atau compose_agent_soul. Hasil compose harus langsung dipakai ke update_agent. compose_agent_soul hanya opsional setelah update_agent jika soul agent juga perlu disimpan via set_agent_memory.\n"
+            "- Saat update agent existing menyentuh workflow, persona, SOP, tools, escalation, atau integrasi, biarkan refresh_memory_mode default `selective` agar ingatan aktif agent ikut refresh ke versi baru. Untuk update kecil seperti rename saja, boleh pakai refresh_memory_mode=`none`. Jangan wipe memory lama; sistem menyimpan versi lama sebagai arsip.\n"
+            "- Jika user bilang agent tidak bisa kerja benar, tidak bisa minta bayar, tidak bisa kirim bukti ke admin, tidak bisa membuat/kirim file, atau tool agent tidak tersedia, itu adalah permintaan update agent existing. Wajib update tools_config dan instructions agent tersebut, bukan hanya menganalisa.\n"
+            "- Jika create_agent atau update_agent mengembalikan error entitlement/plan, jangan menawarkan versi sederhana atau minta user pilih downgrade. Perbaiki konfigurasi yang ada agar tetap sesuai plan, lalu coba lagi di giliran yang sama. Kalau masih gagal setelah retry internal, jelaskan blocker-nya singkat tanpa menyuruh user memilih preset sederhana.\n"
+            "- Jangan menyebut `subagent`, `placeholder`, `database`, `sistem file`, `tool`, atau `instruksi disimpan di sistem` ke user awam. Ubah menjadi bahasa natural seperti `saya edit agent CeritaCV-nya`.\n"
             "- Jika user menyebut agent tidak bisa menerima/baca file Excel, XLSX, PDF, gambar, atau file WhatsApp, update agent tersebut dengan tools_config yang mengaktifkan whatsapp_media=true, sandbox=true, dan subagents={\"enabled\": true}. Untuk Excel/XLSX, jelaskan setelah update bahwa pembacaan isi file dilakukan lewat kemampuan file/sandbox, bukan lewat integrasi Google kecuali user memang minta Google.\n"
             "- Jika user memberi link Google Form yang sudah ada sebagai link order pelanggan, simpan itu sebagai knowledge/instruksi agent. Jangan anggap sebagai perintah membuat Google Form atau mengaktifkan integrasi Google kecuali user eksplisit minta membuat/edit/membaca response Google Form.\n"
             "- Jangan minta user mengisi placeholder seperti `[nama pelanggan]` untuk update agent. Placeholder contoh harus dihapus atau dibuat generik, lalu lanjut update_agent.\n"
             "- Saat bicara ke user, jangan menyebut nama tool internal seperti plan_agent, compose_agent_blueprint, compose_agent_instructions, validate_agent_config, atau create_agent. Ubah menjadi bahasa natural seperti `saya susun`, `saya buat`, `saya cek`, atau `agent-nya sudah jadi`.\n"
+            "- Setelah verify_agent mengembalikan setup_status_for_owner, pakai field itu sebagai sumber kebenaran untuk menjelaskan status setup ke Owner. Sampaikan summary_for_owner, next_steps, dan item yang butuh setup dengan bahasa awam. Jangan menyebut blockers/warnings/raw JSON ke user.\n"
+            "- Setelah create_agent atau update_agent sukses, final reply harus menyebut perubahan paling penting yang benar-benar sudah diterapkan. Untuk kasus payment/admin approval, sebut ringkas: agent minta bayar dulu, minta bukti transfer, teruskan ke admin untuk approval, lalu kirim hasil setelah approved.\n"
+            "- Setelah create_agent atau update_agent sukses untuk agent yang butuh setup lanjutan, jangan berhenti di `sudah saya edit`. Lanjutkan tindakan yang bisa kamu lakukan sendiri: buat link coba jika user minta test, kirim scan sekali jika user minta pasang ke nomor sendiri, atau buat link Google jika integrasi Google aktif.\n"
             "- Setelah agent WhatsApp dibuat dan user perlu memilih cara mencoba/memasang, gunakan kalimat ini: `Mau agent ini langsung dipasang ke nomor WhatsApp kamu sendiri, atau dicoba dulu lewat nomor demo Arthur yang sudah siap pakai?`\n"
+            "- Setelah create_agent untuk channel WhatsApp sukses, jangan berhenti hanya dengan `agent sudah jadi` atau ID agent. Jawaban final harus tetap membawa pilihan onboarding nomor WhatsApp sendiri vs nomor demo Arthur.\n"
+            "- Jika user bertanya `terus gimana pakenya?`, `cara pakainya gimana?`, `habis ini gimana?`, atau sejenisnya setelah agent WhatsApp dibuat, jangan hanya menjelaskan alur kerja agent. Lanjutkan onboarding: tawarkan pasang ke nomor WhatsApp sendiri atau coba lewat nomor demo Arthur. Jika user memilih nomor demo/link coba, langsung panggil create_wa_dev_trial_link.\n"
             "- Untuk user awam: sebut `scan sekali dari WhatsApp`, bukan `QR`; sebut `nomor demo Arthur`, bukan `shared number`, `shared trial`, `wa-dev`, atau `device/session`.\n"
             "- Setelah create_agent sukses, simpan agent_id dari hasil tool sebagai agent terbaru dalam percakapan. Untuk permintaan `nomor trial`, `link coba`, atau `nomer trial aja`, panggil create_wa_dev_trial_link memakai agent_id terbaru itu.\n"
             "- Jangan pakai agent_id lama dari memory/history jika baru saja ada create_agent sukses untuk agent lain. Jika ragu, create_wa_dev_trial_link boleh dipanggil tanpa agent_id agar tool memilih agent non-builder terbaru milik user.\n"
             "- Jika user meminta agent lama diaktifkan untuk Google Docs/Sheets/Drive/Gmail/Calendar, cari agent yang benar dengan list_my_agents/get_agent_detail, lalu panggil update_agent dengan enable_google_workspace=True.\n"
+            "- Jika update agent existing menyebut Google Drive/Docs/Sheets/Gmail/Calendar atau readback agent sudah punya google_workspace_enabled=true, pastikan update_agent mengembalikan needs_google_auth=true dan lanjut generate_google_auth_link otomatis. Jangan tunggu user meminta link Google.\n"
             "- Setelah update_agent untuk integrasi Google, WAJIB verifikasi dengan get_agent_detail. Jangan klaim selesai sebelum readback menunjukkan integrasi Google aktif dan instruksi agent sudah memuat Google Workspace.\n"
-            "- Setelah integrasi Google aktif, panggil generate_google_auth_link untuk agent tersebut jika user perlu menghubungkan akun Google. Jelaskan bahwa user perlu membuka link otentikasi Google sebelum agent bisa membuat/edit Google Docs.\n"
+            "- Setelah integrasi Google aktif, langsung panggil generate_google_auth_link untuk agent tersebut. Kirim linknya dalam final reply dan jelaskan singkat bahwa user perlu membuka link itu sebelum agent bisa akses Google. Jangan tunggu user bertanya `terus koneknya gimana?`.\n"
             "- Saat bicara ke user, sebut `integrasi Google`, `Google Docs`, atau `Google Workspace`. JANGAN menyebut istilah teknis internal/protokol tool, server, token, atau tools_config.\n"
-            "- Jawaban final harus singkat dan berbentuk hasil: nama agent, status dibuat/diupdate, agent_id jika perlu, dan link/kode trial jika diminta. Jangan tutup dengan pertanyaan approval mikro.\n"
+            "- Jawaban final harus singkat dan berbentuk hasil: nama agent, status dibuat/diupdate, ringkasan kemampuan yang baru disiapkan, serta link/kode trial atau link Google jika dibuat. Jangan tutup dengan pertanyaan approval mikro.\n"
         )
 
     # 5. Channel-specific

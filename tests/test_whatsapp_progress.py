@@ -39,9 +39,11 @@ def test_task_done_message_fallback_to_output_preview():
     assert done.startswith("✅ sys_coder selesai:")
 
 
-def test_link_only_request_does_not_expose_wa_media_tools_to_subagents():
+def test_wa_media_tools_are_not_exposed_to_subagents():
     assert should_expose_wa_media_tools("loh berikan ke saya dalam bentuk link aja") is False
-    assert should_expose_wa_media_tools("kirim hasilnya dalam bentuk PDF") is True
+    assert should_expose_wa_media_tools("kirim hasilnya dalam bentuk PDF") is False
+    assert should_expose_wa_media_tools("kirim filenya aja") is False
+    assert should_expose_wa_media_tools("kirim langsung ke saya") is False
 
 
 def test_duplicate_notify_user_final_reply_is_suppressed():
@@ -93,3 +95,70 @@ def test_task_guard_still_blocks_unfinished_deploy_promises():
     guarded = _task_result_guard_reply(reply, steps, "buat website toko dan kasih link")
 
     assert guarded.startswith("Belum selesai.")
+
+
+def test_parent_delivery_followup_needed_for_subagent_shared_pdf():
+    from app.core.engine.agent_runner import _needs_whatsapp_file_delivery_followup
+
+    steps = [
+        {
+            "tool": "task",
+            "args": {"name": "sys_coder"},
+            "result": (
+                "CV ATS-friendly selesai dibuat di "
+                "/workspace/shared/CV_Bagas_Automation_Specialist.pdf — SIAP_DIKIRIM_PARENT."
+            ),
+        }
+    ]
+
+    needed, path = _needs_whatsapp_file_delivery_followup(
+        "kirim file pdf nya",
+        {"whatsapp_media": True},
+        steps,
+        "File sudah siap.",
+    )
+
+    assert needed is True
+    assert path == "/workspace/shared/CV_Bagas_Automation_Specialist.pdf"
+
+
+def test_parent_delivery_followup_not_needed_after_parent_document_send():
+    from app.core.engine.agent_runner import (
+        _needs_whatsapp_file_delivery_followup,
+        _task_result_guard_reply,
+    )
+
+    steps = [
+        {
+            "tool": "task",
+            "args": {"name": "sys_coder"},
+            "result": (
+                "Sebelumnya file CV belum tersedia, lalu final dibuat di "
+                "/workspace/shared/CV_Bagas_Automation_Specialist.pdf — SIAP_DIKIRIM_PARENT."
+            ),
+        },
+        {
+            "tool": "send_whatsapp_document",
+            "args": {
+                "file_path_or_base64": "/workspace/shared/CV_Bagas_Automation_Specialist.pdf",
+                "filename": "CV_Bagas_Automation_Specialist.pdf",
+            },
+            "result": "[DOCUMENT_SENT] Dokumen 'CV_Bagas_Automation_Specialist.pdf' dikirim ke 628123",
+        },
+    ]
+
+    needed, path = _needs_whatsapp_file_delivery_followup(
+        "kirim file pdf nya",
+        {"whatsapp_media": True},
+        steps,
+        "File sudah saya kirim.",
+    )
+    guarded = _task_result_guard_reply(
+        "File sudah saya kirim.",
+        steps,
+        "kirim file pdf nya",
+    )
+
+    assert needed is False
+    assert path is None
+    assert guarded == "File sudah saya kirim."

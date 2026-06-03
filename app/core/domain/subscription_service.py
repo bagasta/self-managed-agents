@@ -111,8 +111,8 @@ async def get_or_create_wa_user(
 ) -> tuple[User, UserSubscription]:
     """
     Cari user berdasarkan external_id (nomor WA / JID).
-    Kalau belum ada → buat User + Tier 1 subscription + UserApiKey otomatis.
-    Kalau sudah ada tapi belum punya subscription → buat Tier 1.
+    Kalau belum ada → buat User + Trial subscription + UserApiKey otomatis.
+    Kalau sudah ada tapi belum punya subscription → buat Trial.
 
     Returns (user, subscription).
     """
@@ -149,9 +149,9 @@ async def get_or_create_wa_user(
     ).scalar_one_or_none()
 
     if sub is None:
-        sub = await _create_tier1_subscription(user.id, db)
+        sub = await _create_trial_subscription(user.id, db)
         user.has_used_trial = True
-        logger.info("subscription_service.subscription_created", user_id=str(user.id), plan="tier_1")
+        logger.info("subscription_service.subscription_created", user_id=str(user.id), plan="trial")
 
     # UserApiKey — buat satu kalau belum punya
     existing_key = (
@@ -172,6 +172,32 @@ async def get_or_create_wa_user(
 
     await db.flush()
     return user, sub
+
+
+async def _create_trial_subscription(
+    user_id: uuid.UUID,
+    db: AsyncSession,
+) -> UserSubscription:
+    plan = (
+        await db.execute(
+            select(SubscriptionPlan).where(SubscriptionPlan.id == SubscriptionPlan.TRIAL_ID)
+        )
+    ).scalar_one()
+
+    now = datetime.now(timezone.utc)
+    sub = UserSubscription(
+        user_id=user_id,
+        plan_id=plan.id,
+        status="trial",
+        token_quota=plan.token_quota,
+        tokens_used=0,
+        started_at=now,
+        expires_at=None,
+        grace_until=None,
+    )
+    db.add(sub)
+    await db.flush()
+    return sub
 
 
 async def _create_tier1_subscription(

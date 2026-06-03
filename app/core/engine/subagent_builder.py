@@ -43,12 +43,22 @@ from app.core.engine.tool_builder import (
     build_sandbox_binary_tool,
     build_skill_tools,
     build_tavily_tools,
-    build_whatsapp_media_tools,
 )
 
 
 def should_expose_wa_media_tools(user_message: str) -> bool:
-    """Only expose direct WA media tools when the user's requested deliverable is media/file."""
+    """Deprecated compatibility hook.
+
+    WhatsApp media delivery is a parent-agent responsibility. Subagents write
+    deliverables to /workspace/shared and report the path; the parent sends the
+    file with a top-level tool call so the final reply has the same source of
+    truth as the outbound media event.
+    """
+    return False
+
+
+def _user_requested_file_delivery(user_message: str) -> bool:
+    """Detect file/media requests so subagent prompts can emphasize handoff."""
     text = (user_message or "").lower()
     link_only_markers = (
         "link aja",
@@ -69,6 +79,12 @@ def should_expose_wa_media_tools(user_message: str) -> bool:
 
     file_markers = (
         "kirim file",
+        "kirim filenya",
+        "file nya",
+        "file-nya",
+        "filenya",
+        "kirim langsung",
+        "kirim ke saya",
         "kirim dokumen",
         "kirim gambar",
         "kirim foto",
@@ -174,7 +190,7 @@ _SYSTEM_SUBAGENTS: list[dict] = [
             "  /workspace/src/       → source code (HTML, Python, JS, dll)\n"
             "  /workspace/assets/    → gambar, font, file statis\n"
             "  /workspace/data/      → file input / dataset\n"
-            "  /workspace/output/    → hasil akhir yang akan dikirim ke user (PNG, PDF, ZIP, dll)\n"
+            "  /workspace/output/    → hasil internal sub-agent sebelum handoff (PNG, PDF, ZIP, dll)\n"
             "  /workspace/tmp/       → file sementara yang tidak perlu disimpan\n"
             "  /workspace/shared/    → file kolaborasi LINTAS sub-agent + HANDOFF ke parent agent\n"
             "                          (parent agent HANYA bisa baca file di sini, BUKAN di src/output/dll)\n\n"
@@ -194,30 +210,29 @@ _SYSTEM_SUBAGENTS: list[dict] = [
             "4. Setelah deploy_app() selesai, verifikasi: panggil get_deployment_status() — pastikan status 'running' dan URL ada\n"
             "5. Jika URL kosong atau status bukan 'running', panggil get_deployment_logs() untuk debug, lalu perbaiki\n"
             "6. Output akhir WAJIB sertakan URL public dari deploy_app — itu bukti task selesai.\n\n"
-            "MENGIRIM FILE/GAMBAR KE WHATSAPP:\n"
+            "HANDOFF FILE/GAMBAR KE PARENT UNTUK WHATSAPP:\n"
             "Jika tugasmu menghasilkan gambar, PDF, atau file lain yang harus dikirim ke user:\n"
-            "1. Simpan hasil ke /workspace/output/<filename>\n"
-            "2. Panggil send_whatsapp_image('/workspace/output/<filename>', caption='...') untuk gambar\n"
-            "3. Panggil send_whatsapp_document('/workspace/output/<filename>', filename='...', caption='...') untuk dokumen/ZIP\n"
-            "4. Setelah tool berhasil (hasil '[IMAGE_SENT]' atau '[DOCUMENT_SENT]'), BARU tulis output akhir\n\n"
+            "1. Simpan hasil final ke /workspace/shared/<filename>\n"
+            "2. JANGAN kirim WhatsApp dari sub-agent. Parent agent yang wajib mengirim file.\n"
+            "3. Output akhir WAJIB menyebut path lengkap /workspace/shared/<filename>, nama file, dan status: SIAP_DIKIRIM_PARENT.\n\n"
             "ATURAN OUTPUT — WAJIB diikuti tanpa pengecualian:\n"
             "- JANGAN tulis teks apapun sebelum semua tool selesai dipanggil\n"
             "- Teks output pertama yang kamu tulis = FINAL REPLY = task selesai\n"
-            "- Jadi: tulis semua file → deploy/send → verifikasi → BARU tulis output\n"
+            "- Jadi: tulis semua file → deploy atau simpan ke /workspace/shared → verifikasi → BARU tulis output\n"
             "- Output akhir: maks 5 baris, sertakan URL jika ada\n"
             "- JANGAN dump source code HTML/CSS/JS di output akhir kecuali user EKSPLISIT minta kodenya\n"
             "- JANGAN jelaskan cara kerja kode — langsung eksekusi\n"
-            "- Task BELUM selesai sampai deploy_app() sukses atau file sudah dikirim ke user\n\n"
+            "- Task BELUM selesai sampai deploy_app() sukses atau file final sudah ada di /workspace/shared/\n\n"
             "LAPORAN WAJIB KE PARENT AGENT — HARUS ADA DI OUTPUT AKHIR:\n"
             "Final reply-mu adalah satu-satunya cara parent agent tahu apa yang sudah kamu lakukan.\n"
             "WAJIB cantumkan di output akhir:\n"
             "- File apa yang dibuat (nama file lengkap)\n"
-            "- Apakah sudah dikirim ke WhatsApp (✅ TERKIRIM atau ❌ BELUM)\n"
+            "- Untuk file WhatsApp: path /workspace/shared/<filename> dan status SIAP_DIKIRIM_PARENT\n"
             "- URL deployment jika ada\n"
             "Contoh output akhir yang benar:\n"
-            "✅ content_plan_minggu1.pdf dibuat dan TERKIRIM ke WhatsApp via send_whatsapp_document.\n"
-            "✅ chart_penjualan.png TERKIRIM via send_whatsapp_image.\n"
-            "Tanpa info ini, parent agent tidak tahu file sudah terkirim dan akan mencoba kirim ulang.\n\n"
+            "✅ content_plan_minggu1.pdf dibuat di /workspace/shared/content_plan_minggu1.pdf — SIAP_DIKIRIM_PARENT.\n"
+            "✅ chart_penjualan.png dibuat di /workspace/shared/chart_penjualan.png — SIAP_DIKIRIM_PARENT.\n"
+            "Tanpa path /workspace/shared, parent agent tidak bisa mengirim file ke user.\n\n"
             "Install dependency hanya untuk backend/API non-web jika benar-benar perlu: execute('pip install <package>') atau execute('npm install <package>'). "
             "Untuk website/frontend, jangan install dependency."
         ),
@@ -238,9 +253,9 @@ _SYSTEM_SUBAGENTS: list[dict] = [
             "- Menerjemahkan antara Bahasa Indonesia dan Inggris\n\n"
             "Selalu hasilkan tulisan yang jelas, terstruktur, dan sesuai tone yang diminta.\n\n"
             "LAPORAN WAJIB KE PARENT AGENT:\n"
-            "Jika kamu mengirim file ke WhatsApp (send_whatsapp_image / send_whatsapp_document), "
-            "WAJIB sebutkan di output akhir: nama file dan status pengiriman (✅ TERKIRIM atau ❌ GAGAL). "
-            "Tanpa info ini, parent agent tidak tahu file sudah terkirim dan akan mencoba kirim ulang."
+            "Jika kamu membuat file yang perlu dikirim ke WhatsApp, simpan file final ke /workspace/shared/<filename>. "
+            "JANGAN kirim WhatsApp dari sub-agent. WAJIB sebutkan path /workspace/shared/<filename> "
+            "dan status SIAP_DIKIRIM_PARENT agar parent agent yang mengirim."
         ),
         "model": "openai/gpt-4o-mini",
         "tools_config": {"sandbox": False, "http": False},
@@ -311,7 +326,7 @@ _SYSTEM_SUBAGENTS: list[dict] = [
             "STRUKTUR WORKSPACE:\n"
             "  /workspace/data/      → file input / dataset\n"
             "  /workspace/src/       → script analisis Python\n"
-            "  /workspace/output/    → grafik, laporan, CSV hasil yang akan dikirim ke user\n"
+            "  /workspace/output/    → grafik, laporan, CSV hasil internal sub-agent\n"
             "  /workspace/tmp/       → file sementara\n"
             "  /workspace/shared/    → file kolaborasi lintas sub-agent (taruh chart/dataset di sini\n"
             "                          jika sub-agent lain perlu memakainya dalam session yang sama)\n\n"
@@ -319,10 +334,10 @@ _SYSTEM_SUBAGENTS: list[dict] = [
             "1. Terima data dalam bentuk teks, CSV, JSON, atau format lain\n"
             "2. Tulis kode Python dengan pandas/numpy/matplotlib ke /workspace/src/ menggunakan write_file\n"
             "3. Jalankan analisis di sandbox menggunakan execute\n"
-            "4. Simpan output (grafik PNG, CSV hasil) ke /workspace/output/\n"
+            "4. Simpan output internal ke /workspace/output/\n"
             "5. Jika task meminta kirim grafik atau laporan ke user:\n"
-            "   - send_whatsapp_image('/workspace/output/<chart>.png', caption='...') untuk grafik\n"
-            "   - send_whatsapp_document('/workspace/output/<report>.csv', filename='...') untuk data\n"
+            "   - salin file final ke /workspace/shared/<filename>\n"
+            "   - output akhir wajib menyebut path /workspace/shared/<filename> dan SIAP_DIKIRIM_PARENT\n"
             "6. Buat ringkasan temuan dan insight yang actionable\n\n"
             "Install library: execute('pip install pandas numpy matplotlib seaborn')"
         ),
@@ -364,8 +379,7 @@ def _build_system_subagent(
     For non-sandbox subagents:
       Returns a plain SubAgent dict; FilesystemMiddleware from parent backend is sufficient.
 
-    expose_wa_media_tools: when true and WA context exists, sandbox subagents get
-      send_whatsapp_image/send_whatsapp_document for direct file delivery.
+    expose_wa_media_tools: deprecated; WA media delivery is kept in the parent run.
     """
     sub_cfg = spec.get("tools_config", {})
     extra_tools: list = []
@@ -384,18 +398,8 @@ def _build_system_subagent(
             # These MUST use sub_sandbox so workspace matches write_file's workspace.
             extra_tools.extend(build_deployment_tools(sub_sandbox))
 
-        # Give sandbox subagents WA media tools when parent session is on WhatsApp.
-        # Subagents write output to /workspace/output/ and call send_whatsapp_image /
-        # send_whatsapp_document to deliver results without routing through main agent.
-        if expose_wa_media_tools and wa_device_id and wa_target:
-            extra_tools.extend(
-                build_whatsapp_media_tools(
-                    None,
-                    sub_sandbox,
-                    device_id=wa_device_id,
-                    default_target=wa_target,
-                )
-            )
+        # WhatsApp delivery stays in the parent run so internal subagent tool
+        # calls cannot conflict with the parent final reply.
 
     if _is_enabled(sub_cfg, "http", default=False):
         extra_tools.extend(build_http_tools(sub_cfg))
@@ -457,6 +461,7 @@ async def build_subagents(
     wa_device_id: str = "",
     wa_target: str = "",
     user_message: str = "",
+    expose_wa_media_tools_override: bool | None = None,
 ) -> tuple[list, list[DockerSandbox]]:
     """
     Build SubAgent / CompiledSubAgent list untuk Deep Agents SDK.
@@ -472,7 +477,11 @@ async def build_subagents(
     """
     subagents: list = []
     sub_sandboxes: list[DockerSandbox] = []
-    expose_wa_media_tools = should_expose_wa_media_tools(user_message)
+    expose_wa_media_tools = (
+        bool(expose_wa_media_tools_override)
+        if expose_wa_media_tools_override is not None
+        else should_expose_wa_media_tools(user_message)
+    )
 
     if not agent_ids:
         # Try loading system agents from DB first (seeded via scripts/seed_system_agents.py)
@@ -559,15 +568,8 @@ async def build_subagents(
             if _is_enabled(sub_cfg, "deploy", default=False):
                 extra_tools.extend(build_deployment_tools(sub_sandbox))
 
-            if expose_wa_media_tools and wa_device_id and wa_target:
-                extra_tools.extend(
-                    build_whatsapp_media_tools(
-                        None,
-                        sub_sandbox,
-                        device_id=wa_device_id,
-                        default_target=wa_target,
-                    )
-                )
+            # WhatsApp delivery stays in the parent run so internal subagent
+            # tool calls cannot conflict with the parent final reply.
 
         if _is_enabled(sub_cfg, "memory", default=True):
             extra_tools.extend(build_memory_tools(agent_row.id, AsyncSessionLocal, scope=None))

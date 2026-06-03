@@ -318,6 +318,7 @@ async def find_or_create_wa_session(
     db: AsyncSession,
     is_operator: bool,
     phone_number: str | None = None,
+    sender_name: str | None = None,
 ) -> tuple:
     """
     Cari session WhatsApp yang sudah ada; buat baru jika belum ada.
@@ -368,11 +369,15 @@ async def find_or_create_wa_session(
         )
         if phone_number and new_config.get("phone_number") != phone_number:
             changed = True
+        if sender_name and new_config.get("sender_name") != sender_name:
+            changed = True
         if changed:
             new_config["device_id"] = device_id
             new_config["user_phone"] = effective_reply_target
             if phone_number:
                 new_config["phone_number"] = phone_number
+            if sender_name:
+                new_config["sender_name"] = sender_name
             session.channel_config = new_config
             await db.flush()
         return session, False
@@ -381,6 +386,8 @@ async def find_or_create_wa_session(
     cfg: dict = {"user_phone": effective_reply_target, "device_id": device_id}
     if phone_number:
         cfg["phone_number"] = phone_number
+    if sender_name:
+        cfg["sender_name"] = sender_name
     session = Session(
         agent_id=agent.id,
         external_user_id=normalized_lookup,
@@ -643,10 +650,10 @@ def is_operator_message(
     """
     Cek apakah pesan berasal dari operator escalation.
 
-    Catatan: agent buatan Arthur juga menyimpan owner di operator_ids untuk
-    ownership/ACL legacy. Nomor owner tidak boleh otomatis dianggap operator
-    escalation, karena user normal yang mengirim dokumen/gambar akan salah
-    masuk ke flow operator media forwarding.
+    Catatan: owner_external_id adalah pemilik agent dan diperlakukan sebagai
+    operator identity. Operator turn tetap hanya aktif jika _should_treat_as_operator_turn
+    melihat reply eskalasi/pending draft, jadi owner masih bisa mengetes agent
+    tanpa otomatis masuk flow forwarding.
     """
     escalation_cfg: dict = agent.escalation_config or {}
     operator_phone: str = escalation_cfg.get("operator_phone", "")
@@ -655,13 +662,13 @@ def is_operator_message(
     normalized_owner = normalize_phone(owner_external_id) if owner_external_id else ""
 
     normalized_op_ids: set[str] = set()
+    if normalized_owner:
+        normalized_op_ids.add(normalized_owner)
     if operator_phone:
         normalized_op_ids.add(normalize_phone(operator_phone))
     for oid in operator_ids:
         normalized = normalize_phone(oid)
         if not normalized:
-            continue
-        if normalized_owner and normalized == normalized_owner:
             continue
         normalized_op_ids.add(normalized)
 

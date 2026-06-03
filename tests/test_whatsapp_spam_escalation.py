@@ -65,7 +65,7 @@ def _session(**overrides):
     return SimpleNamespace(**values)
 
 
-def test_owner_in_operator_ids_is_not_escalation_operator():
+def test_owner_is_operator_identity():
     from app.api.wa_helpers import is_operator_message
 
     agent = SimpleNamespace(
@@ -74,7 +74,7 @@ def test_owner_in_operator_ids_is_not_escalation_operator():
         operator_ids=["628owner"],
     )
 
-    assert is_operator_message("628owner", "628owner@s.whatsapp.net", agent) is False
+    assert is_operator_message("628owner", "628owner@s.whatsapp.net", agent) is True
 
 
 def test_configured_operator_phone_is_escalation_operator_even_if_owner_differs():

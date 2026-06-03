@@ -19,6 +19,7 @@ from app.database import get_db
 from app.models.agent import Agent
 from app.models.message import Message
 from app.models.session import Session
+from app.core.utils.wa_identity import resolve_auto_provision_external_id
 from app.schemas.message import MessageCreate, MessageResponse, StepSummary
 
 router = APIRouter(prefix="/v1/agents", tags=["messages"])
@@ -76,10 +77,14 @@ async def send_message(
         )
 
     # Auto-provision user ke DB saat pertama kali chat Arthur (builder agent).
-    # Skip jika external_user_id adalah LID (>15 digit) — bukan nomor HP asli.
-    _ext_uid = payload.external_user_id or session.external_user_id
-    _is_lid = bool(_ext_uid and len(_ext_uid.lstrip("+")) >= 15)
-    if _ext_uid and not _is_lid and agent.tools_config and agent.tools_config.get("builder"):
+    # Untuk WA, hanya pakai phone_number yang sudah ter-resolve; jangan simpan LID/JID.
+    _ext_uid = resolve_auto_provision_external_id(
+        channel_type=session.channel_type,
+        channel_config=session.channel_config if isinstance(session.channel_config, dict) else {},
+        payload_external_user_id=payload.external_user_id,
+        session_external_user_id=session.external_user_id,
+    )
+    if _ext_uid and agent.tools_config and agent.tools_config.get("builder"):
         try:
             from app.core.domain.subscription_service import get_or_create_wa_user
             await get_or_create_wa_user(_ext_uid, db)

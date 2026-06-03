@@ -9,6 +9,7 @@ summaries into persistent memories.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -161,7 +162,41 @@ async def delete_memory(
     return result.rowcount > 0
 
 
-_LAYERED_KEYS = {"soul", "user_profile", "longterm"}
+_LAYERED_KEYS = {"soul", "user_profile", "longterm", "agent_context_version"}
+
+
+def _parse_active_context_version(value: str | None) -> int | None:
+    try:
+        parsed = int(str(value or "").strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+async def get_active_context_version(
+    agent_id: uuid.UUID,
+    db: AsyncSession,
+) -> int | None:
+    version_mem = await get_memory(agent_id, "agent_context_version", db, scope=None)
+    return _parse_active_context_version(version_mem.value_data if version_mem else None)
+
+
+async def get_versioned_memory(
+    agent_id: uuid.UUID,
+    base_key: str,
+    db: AsyncSession,
+    *,
+    active_version: int | None = None,
+    scope: str | None = None,
+) -> Memory | None:
+    """Prefer base_key:vN when an active context version exists; fallback to base_key."""
+    if active_version is None and scope is None:
+        active_version = await get_active_context_version(agent_id, db)
+    if active_version:
+        versioned = await get_memory(agent_id, f"{base_key}:v{active_version}", db, scope=scope)
+        if versioned:
+            return versioned
+    return await get_memory(agent_id, base_key, db, scope=scope)
 
 
 async def build_memory_context(
@@ -177,7 +212,12 @@ async def build_memory_context(
     memories = await list_memories(agent_id, db, scope=scope)
     filtered = [
         m for m in memories
-        if m.key not in _LAYERED_KEYS and not m.key.startswith("daily:") and not m.key.startswith("heartbeat:")
+        if (
+            m.key not in _LAYERED_KEYS
+            and not m.key.startswith("daily:")
+            and not m.key.startswith("heartbeat:")
+            and not re.match(r"^(soul|agent_blueprint|setup_summary):v\d+$", m.key)
+        )
     ]
     if not filtered:
         return ""
@@ -201,13 +241,15 @@ async def load_layered_memory(
     today = _dt.date.today().isoformat()
     yesterday = (_dt.date.today() - _dt.timedelta(days=1)).isoformat()
 
-    soul_mem = await get_memory(agent_id, "soul", db, scope=None)
+    active_version = await get_active_context_version(agent_id, db)
+    soul_mem = await get_versioned_memory(agent_id, "soul", db, active_version=active_version, scope=None)
     user_profile_mem = await get_memory(agent_id, "user_profile", db, scope=scope)
     daily_today_mem = await get_memory(agent_id, f"daily:{today}", db, scope=scope)
     daily_yesterday_mem = await get_memory(agent_id, f"daily:{yesterday}", db, scope=scope)
 
     return {
         "soul": soul_mem.value_data if soul_mem else "",
+        "agent_context_version": str(active_version or ""),
         "user_profile": user_profile_mem.value_data if user_profile_mem else "",
         "daily_today": daily_today_mem.value_data if daily_today_mem else "",
         "daily_yesterday": daily_yesterday_mem.value_data if daily_yesterday_mem else "",

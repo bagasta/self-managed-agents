@@ -62,6 +62,7 @@ async def create_agent(
         active_until=active_until,
         channel_type=payload.channel_type,
         wa_device_id=device_id,
+        created_by_type="api",
     )
     db.add(agent)
     await db.flush()

@@ -92,6 +92,7 @@ async def build_agent_tool_setup(
     saved_custom_tools: list = []
 
     policy = build_agent_runtime_policy(agent_model, tools_config)
+    builder_agent = policy.is_builder
     operator_turn = is_operator_turn(user_message)
     google_mcp_parent_only = should_use_google_workspace_parent_only(
         policy=policy,
@@ -104,7 +105,14 @@ async def build_agent_tool_setup(
     sandbox_requested = (
         (_is_enabled(tools_config, "sandbox", default=False) or deploy_enabled)
         and not operator_turn
+        and not builder_agent
     )
+    if builder_agent and (_is_enabled(tools_config, "sandbox", default=False) or deploy_enabled):
+        log.info(
+            "agent_run.builder_sandbox_skipped",
+            reason="builder_must_use_internal_tools_not_filesystem",
+            deploy_enabled=deploy_enabled,
+        )
     if sandbox_requested and google_mcp_parent_only:
         log.info(
             "agent_run.google_mcp_parent_sandbox_skipped",
@@ -132,7 +140,7 @@ async def build_agent_tool_setup(
         tools.extend(build_skill_tools(agent_id, AsyncSessionLocal))
         active_groups.append("skills")
 
-    if (not operator_turn) and _is_enabled(tools_config, "tool_creator", default=False):
+    if (not operator_turn) and (not builder_agent) and _is_enabled(tools_config, "tool_creator", default=False):
         if google_mcp_parent_only:
             log.info(
                 "agent_run.tool_creator_skipped",
@@ -197,8 +205,7 @@ async def build_agent_tool_setup(
             tools.extend(build_wa_agent_manager_tools(session, db_factory=AsyncSessionLocal))
             active_groups.append("wa_agent_manager")
 
-    capabilities = getattr(agent_model, "capabilities", []) or []
-    if (not operator_turn) and "builder" in capabilities:
+    if (not operator_turn) and builder_agent:
         channel_cfg = getattr(session, "channel_config", None)
         channel_cfg = channel_cfg if isinstance(channel_cfg, dict) else {}
         tools.extend(build_builder_tools(
@@ -214,6 +221,11 @@ async def build_agent_tool_setup(
     sub_sandboxes: list[DockerSandbox] = []
     if operator_turn and _is_enabled(tools_config, "subagents", default=False):
         log.info("agent_run.operator_subagents_skipped", reason="operator_turn_must_not_run_business_workflow")
+    elif builder_agent and _is_enabled(tools_config, "subagents", default=False):
+        log.info(
+            "agent_run.builder_subagents_skipped",
+            reason="builder_must_update_platform_records_directly",
+        )
     elif _is_enabled(tools_config, "subagents", default=False) and google_mcp_parent_only:
         log.info(
             "agent_run.google_mcp_subagents_skipped",
@@ -230,6 +242,7 @@ async def build_agent_tool_setup(
             wa_device_id=sub_channel.get("device_id", ""),
             wa_target=sub_channel.get("user_phone", ""),
             user_message=user_message,
+            expose_wa_media_tools_override=False,
         )
         if subagent_list:
             active_groups.append(f"subagents({len(subagent_list)})")

@@ -45,6 +45,7 @@ from app.core.domain.agent_quota_service import check_agent_quota, record_agent_
 from app.core.infra.channel_service import send_message
 from app.core.utils.input_sanitizer import sanitize_user_input
 from app.core.utils.phone_utils import normalize_phone
+from app.core.utils.wa_identity import resolve_incoming_wa_phone
 from app.core.utils.text_utils import markdown_to_wa
 from app.core.engine.wa_reply_delivery import should_skip_whatsapp_final_reply
 from app.core.infra.wa_client import resolve_wa_phones, send_wa_message
@@ -87,6 +88,43 @@ def _wa_real_customer_phone(session: Session) -> str:
     cfg = session.channel_config if isinstance(session.channel_config, dict) else {}
     phone = cfg.get("phone_number") or session.external_user_id or ""
     return normalize_phone(phone) or phone or "(tidak diketahui)"
+
+
+def _is_wa_owner_sender(agent: Agent, *sender_ids: str | None) -> bool:
+    owner_id = normalize_phone(getattr(agent, "owner_external_id", "") or "")
+    if not owner_id:
+        return False
+    for sender_id in sender_ids:
+        normalized = normalize_phone(str(sender_id or "").strip())
+        if normalized and normalized == owner_id:
+            return True
+    return False
+
+
+def _label_owner_wa_message(
+    *,
+    message: str,
+    from_phone: str,
+    sender_name: str | None,
+    is_operator_turn: bool,
+) -> str:
+    role_line = "Role: OWNER/SUPERADMIN"
+    name_line = f"Name WA: {sender_name}\n" if sender_name else ""
+    if is_operator_turn:
+        return (
+            "<OPERATOR>\n"
+            f"{role_line}\n"
+            f"{name_line}"
+            f"No Telepon/WA/Id: {from_phone or '(tidak diketahui)'}\n"
+            f"Pesan: {message}"
+        )
+    return (
+        "<OWNER>\n"
+        f"{role_line}\n"
+        f"{name_line}"
+        f"No Telepon/WA/Id: {from_phone or '(tidak diketahui)'}\n"
+        f"Pesan: {message}"
+    )
 
 
 def _looks_like_operator_media_request(text: str | None) -> bool:
@@ -930,6 +968,8 @@ class WAIncomingMessage(BaseModel):
     from_: str = Field(..., alias="from")
     phone_from: str | None = None      # resolved phone number from Go (LID → phone); fallback ke from_
     chat_id: str | None = None  # group JID (xxx@g.us) atau nomor DM; kalau None fallback ke from_
+    sender_alt: str | None = None      # alternate sender JID from whatsmeow; often phone@s.whatsapp.net for LID DMs
+    addressing_mode: str | None = None
     message: str = Field(..., max_length=10_000)
     message_id: str | None = None      # WhatsApp stanza/message ID; lebih akurat untuk dedupe dibanding timestamp
     timestamp: int | None = None
@@ -1138,14 +1178,24 @@ async def wa_incoming(
         raise HTTPException(status_code=404, detail="No agent found for this WhatsApp device")
 
     # phone_from: phone number yang sudah di-resolve dari LID oleh Go wa-service.
-    # Untuk akun LID: body.from_ berisi LID number, body.phone_from berisi phone number asli.
-    # Gunakan phone_from sebagai identifier utama untuk allowlist & operator check.
-    # phone_from is empty string when Go couldn't resolve LID→PN — treat as unknown.
-    # Guard: jika from_ > 15 digit (LID) dan phone_from kosong, jangan pakai LID sebagai identifier.
-    _raw_from = body.phone_from or body.from_
-    _is_lid = len(_raw_from.lstrip("+")) > 15
-    from_phone = body.phone_from if (_is_lid and body.phone_from) else _raw_from
+    # Untuk akun LID: body.from_ bisa berisi LID/JID, body.phone_from berisi phone number asli.
+    # Kalau phone_from tersedia, itu yang dipakai. Kalau tidak, hanya pakai from_
+    # jika memang bukan identifier LID.
+    real_from_phone = (
+        resolve_incoming_wa_phone(body.from_, body.phone_from)
+        or resolve_incoming_wa_phone(body.sender_alt, None)
+        or resolve_incoming_wa_phone(body.chat_id, body.phone_from)
+    )
+    from_phone = real_from_phone or body.from_
     reply_target = body.chat_id or body.from_
+    _is_owner_sender = _is_wa_owner_sender(
+        agent,
+        from_phone,
+        real_from_phone,
+        body.phone_from,
+        body.sender_alt,
+        reply_target,
+    )
 
     # 1.5. Cek deduplikasi WA (handling multiple webhook calls for the same message)
     if body.message_id or body.timestamp:
@@ -1230,15 +1280,24 @@ async def wa_incoming(
         device_id=body.device_id,
         db=db,
         is_operator=_is_operator,
-        # Only store phone_number if it's a real phone (not a LID number).
-        # LID accounts send empty phone_from when unresolved; non-empty phone_from is the real phone.
-        # Guard: real WA phone numbers are max 15 digits (ITU-T E.164).
-        phone_number=from_phone if (not _is_operator and from_phone and len(from_phone.lstrip("+")) <= 15) else None,
+        # Only store the resolved phone number; never persist LID/JID as phone_number.
+        phone_number=real_from_phone if not _is_operator else None,
+        sender_name=body.push_name or None,
     )
     if was_created:
         log.info("wa_incoming.session_created", session_id=str(session.id), is_operator=_is_operator)
         # Commit agar session_id visible ke koneksi DB terpisah (e.g. scheduler_tool)
         await db.commit()
+
+    provision_external_id = real_from_phone
+    if provision_external_id and not _is_operator:
+        try:
+            from app.core.domain.subscription_service import get_or_create_wa_user
+
+            await get_or_create_wa_user(provision_external_id, db)
+            await db.commit()
+        except Exception:
+            pass
 
     if _is_operator:
         escalation_user_jid, escalation_context = await find_escalation_context(
@@ -1417,15 +1476,26 @@ async def wa_incoming(
     if not _is_operator:
         user_message = _append_quoted_reply_context(user_message, body.quoted_text)
     if _is_operator:
-        op_display_name = body.push_name or ""
-        user_message = (
+        user_message = _label_owner_wa_message(
+            message=user_message,
+            from_phone=from_phone,
+            sender_name=body.push_name or None,
+            is_operator_turn=True,
+        ) if _is_owner_sender else (
             f"<OPERATOR>\n"
-            + (f"Name WA: {op_display_name}\n" if op_display_name else "")
+            + (f"Name WA: {body.push_name}\n" if body.push_name else "")
             + f"No Telepon/WA/Id: {from_phone}\n"
             f"Pesan: {user_message}"
         )
         log.info("wa_incoming.operator_command")
     else:
+        if _is_owner_sender:
+            user_message = _label_owner_wa_message(
+                message=user_message,
+                from_phone=from_phone,
+                sender_name=body.push_name or None,
+                is_operator_turn=False,
+            )
         log.info("wa_incoming.normal")
 
     sender_name: str | None = body.push_name or None
@@ -1533,6 +1603,7 @@ async def wa_incoming(
     final_reply_sent = False
     final_reply_suppressed = False
     final_reply_send_error = ""
+    delivered_reply = ""
 
     if _is_operator and escalation_user_jid and reply:
         draft_message = _extract_operator_text_draft(reply)
@@ -1588,8 +1659,15 @@ async def wa_incoming(
                 if _is_operator:
                     # Kirim final reply ke operator
                     await send_wa_message(body.device_id, reply_target, wa_reply)
+                    delivered_reply = wa_reply
                     final_reply_sent = True
                     messages_to_user.append({"type": "final_reply", "target": reply_target})
+                    log.info(
+                        "wa_incoming.final_reply_sent",
+                        target=reply_target,
+                        reply_len=len(wa_reply),
+                        reply_preview=wa_reply[:220],
+                    )
                 else:
                     # Guard customer replies from accidental escalation/operator
                     # targets, but allow the operator to test the agent as a
@@ -1601,15 +1679,22 @@ async def wa_incoming(
                         final_reply_suppressed = True
                     else:
                         await send_wa_message(body.device_id, reply_target, wa_reply)
+                        delivered_reply = wa_reply
                         final_reply_sent = True
                         messages_to_user.append({"type": "final_reply", "target": reply_target})
+                        log.info(
+                            "wa_incoming.final_reply_sent",
+                            target=reply_target,
+                            reply_len=len(wa_reply),
+                            reply_preview=wa_reply[:220],
+                        )
         except Exception as exc:
             final_reply_send_error = str(exc)
             log.error("wa_incoming.send_reply_failed", target=reply_target, error=final_reply_send_error)
 
     return {
         "status": "send_failed" if reply and not final_reply_sent and not final_reply_suppressed else "ok",
-        "reply": reply,
+        "reply": delivered_reply or reply,
         "run_id": str(result.get("run_id", "")),
         "steps": steps,
         "messages_to_user": messages_to_user,
@@ -1617,5 +1702,7 @@ async def wa_incoming(
             "final_reply_sent": final_reply_sent,
             "final_reply_suppressed": final_reply_suppressed,
             "error": final_reply_send_error,
+            "raw_reply": reply,
+            "sent_reply": delivered_reply,
         },
     }

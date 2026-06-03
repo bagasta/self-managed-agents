@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.core.engine.context_service import count_user_messages, db_messages_to_lc, load_history
+from app.core.domain.agent_sop_service import get_latest_agent_operating_manual
 from app.core.domain.memory_service import build_memory_context, extract_long_term_memory, load_layered_memory
 from app.core.engine.prompt_builder import (
     build_mcp_tool_priority_notice,
@@ -55,15 +56,18 @@ from app.core.engine.result_parser import (
     parse_agent_result,
 )
 from app.core.engine.reply_guard import ensure_non_empty_reply
+from app.core.utils.phone_utils import normalize_phone
 from app.core.engine.google_mcp_support import (
     _build_google_mcp_auth_failure_reply,
     _build_google_mcp_unavailable_reply,
     _build_google_mcp_validation_reply,
     _candidate_external_user_ids,
+    _contains_google_workspace_artifact,
     _extract_google_mcp_step_error,
     _extract_requested_slide_count,
     _fetch_google_auth_link,
     _has_google_mcp_step,
+    _has_google_workspace_artifact_step,
     _is_google_auth_or_scope_error,
     _is_google_forms_authoring_intent,
     _is_google_mcp_intent,
@@ -94,6 +98,119 @@ settings = get_settings()
 
 
 _URL_RE = re.compile(r"https://[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}(?:/[^\s\"']*)?")
+_SHARED_WORKSPACE_FILE_RE = re.compile(r"(/workspace/shared/[^\s`'\"),]+)")
+
+
+def _parse_step_result_json(result: Any) -> dict[str, Any] | None:
+    if isinstance(result, dict):
+        return result
+    if not isinstance(result, str):
+        return None
+    try:
+        parsed = json.loads(result)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _extract_auth_url_from_builder_steps(steps: list[dict[str, Any]]) -> str | None:
+    for step in reversed(steps or []):
+        if step.get("tool") != "generate_google_auth_link":
+            continue
+        data = _parse_step_result_json(step.get("result"))
+        if data:
+            auth_url = data.get("auth_url") or data.get("authorization_url")
+            if auth_url:
+                return str(auth_url)
+        result_text = str(step.get("result") or "")
+        match = re.search(r"https?://[^\s\"'<>]+", result_text)
+        if match:
+            return match.group(0).rstrip(".,)")
+    return None
+
+
+def _builder_google_auth_agent_id(steps: list[dict[str, Any]]) -> str | None:
+    if any((step or {}).get("tool") == "generate_google_auth_link" for step in steps or []):
+        return None
+    for step in reversed(steps or []):
+        if step.get("tool") not in {"create_agent", "update_agent"}:
+            continue
+        data = _parse_step_result_json(step.get("result"))
+        if not data or data.get("success") is not True:
+            continue
+        readback = data.get("readback") if isinstance(data.get("readback"), dict) else {}
+        needs_auth = (
+            data.get("needs_google_auth") is True
+            or data.get("google_workspace_enabled") is True
+            or readback.get("tools_config_has_google_workspace") is True
+        )
+        if needs_auth:
+            agent_id = str(data.get("agent_id") or "").strip()
+            if agent_id:
+                return agent_id
+    return None
+
+
+def _session_real_phone(session: Session) -> str:
+    cfg = session.channel_config if isinstance(session.channel_config, dict) else {}
+    phone = str(cfg.get("phone_number") or "").strip()
+    if phone:
+        return phone
+    user_phone = str(cfg.get("user_phone") or "").strip()
+    if "@lid" not in user_phone.lower():
+        return user_phone
+    return ""
+
+
+async def _append_builder_google_auth_link_if_needed(
+    final_reply: str,
+    *,
+    steps: list[dict[str, Any]],
+    session: Session,
+    settings_obj: Any,
+    log: Any,
+) -> str:
+    auth_url = _extract_auth_url_from_builder_steps(steps)
+    agent_id = _builder_google_auth_agent_id(steps)
+    if not auth_url and not agent_id:
+        return final_reply
+
+    if not auth_url and agent_id:
+        try:
+            auth_url = await _fetch_google_auth_link(
+                integration_url=str(settings_obj.google_integration_service_url).rstrip("/"),
+                api_key=settings_obj.api_key,
+                agent_id=uuid.UUID(agent_id),
+                candidate_user_ids=_candidate_external_user_ids(
+                    session.external_user_id,
+                    _session_real_phone(session),
+                ),
+            )
+        except Exception as exc:
+            log.warning("agent_run.builder_google_auth_link_fetch_failed", agent_id=agent_id, error=str(exc))
+            auth_url = None
+
+    if not auth_url:
+        if "link login google" in (final_reply or "").lower():
+            return final_reply
+        return (
+            (final_reply or "").strip()
+            + "\n\nIntegrasi Google sudah aktif, tapi link login Google belum berhasil dibuat otomatis. "
+            "Kirim 'buatkan link Google' dan saya akan coba generate ulang."
+        ).strip()
+
+    if auth_url in (final_reply or ""):
+        return final_reply
+
+    log.info(
+        "agent_run.builder_google_auth_link_appended",
+        agent_id=agent_id or "",
+        auth_url_host=auth_url.split("/", 3)[2] if "://" in auth_url else "",
+    )
+    return (
+        (final_reply or "").strip()
+        + f"\n\nLink login Google: {auth_url}\nBuka link ini dulu supaya agent bisa akses Google Workspace."
+    ).strip()
 
 
 def _google_workspace_server_has_auth(runtime: Any) -> bool:
@@ -129,6 +246,152 @@ def _remove_google_workspace_mcp_server(tools_config: dict[str, Any]) -> dict[st
 
     mcp_cfg.pop("google_workspace", None)
     return copied
+
+
+def _normalized_agent_operator_ids(agent_model: Any) -> set[str]:
+    ids: set[str] = set()
+    owner = normalize_phone(str(getattr(agent_model, "owner_external_id", "") or ""))
+    if owner:
+        ids.add(owner)
+
+    escalation_cfg = getattr(agent_model, "escalation_config", None)
+    if isinstance(escalation_cfg, dict):
+        op_phone = normalize_phone(str(escalation_cfg.get("operator_phone") or ""))
+        if op_phone:
+            ids.add(op_phone)
+
+    raw_operator_ids = getattr(agent_model, "operator_ids", None)
+    if isinstance(raw_operator_ids, list):
+        for raw in raw_operator_ids:
+            normalized = normalize_phone(str(raw or ""))
+            if normalized:
+                ids.add(normalized)
+    return ids
+
+
+def _session_sender_phone(session: Session) -> str:
+    cfg = session.channel_config if isinstance(session.channel_config, dict) else {}
+    for key in ("phone_number", "sender_phone", "sender_alt", "user_phone"):
+        raw = str(cfg.get(key) or "").strip()
+        if raw and "@lid" not in raw.lower():
+            normalized = normalize_phone(raw)
+            if normalized:
+                return normalized
+    raw_external = str(getattr(session, "external_user_id", "") or "").strip()
+    if raw_external and "@lid" not in raw_external.lower():
+        return normalize_phone(raw_external)
+    return ""
+
+
+def _is_customer_whatsapp_session(session: Session, agent_model: Any) -> bool:
+    if getattr(session, "channel_type", None) != "whatsapp":
+        return False
+    sender = _session_sender_phone(session)
+    if not sender:
+        return False
+    return sender not in _normalized_agent_operator_ids(agent_model)
+
+
+def _owner_notification_target(agent_model: Any) -> str:
+    owner = str(getattr(agent_model, "owner_external_id", "") or "").strip()
+    if owner:
+        return owner
+
+    raw_operator_ids = getattr(agent_model, "operator_ids", None)
+    if isinstance(raw_operator_ids, list):
+        for raw in raw_operator_ids:
+            candidate = str(raw or "").strip()
+            if candidate:
+                return candidate
+
+    escalation_cfg = getattr(agent_model, "escalation_config", None)
+    if isinstance(escalation_cfg, dict):
+        return str(escalation_cfg.get("operator_phone") or "").strip()
+    return ""
+
+
+def _google_workspace_customer_blocker_reply(*, notified_owner: bool) -> str:
+    if notified_owner:
+        return (
+            "Maaf, jadwalnya belum bisa saya finalkan otomatis sekarang. "
+            "Data pesanan Anda sudah saya catat dan sudah saya teruskan ke Owner untuk dicek. "
+            "Nanti akan dikonfirmasi kembali."
+        )
+    return (
+        "Maaf, jadwalnya belum bisa saya finalkan otomatis sekarang. "
+        "Data pesanan Anda sudah saya catat, tapi saya perlu Owner mengecek sistem penjadwalan dulu. "
+        "Nanti akan dikonfirmasi kembali."
+    )
+
+
+async def _route_google_workspace_blocker_to_owner_if_customer(
+    *,
+    reply: str,
+    session: Session,
+    agent_model: Any,
+    user_message: str,
+    error_text: str,
+    auth_url: str | None,
+    log: Any,
+) -> str:
+    """For operational WA customers, Google blockers are internal owner incidents."""
+    if not _is_customer_whatsapp_session(session, agent_model):
+        return reply
+
+    cfg = session.channel_config if isinstance(session.channel_config, dict) else {}
+    device_id = str(cfg.get("device_id") or getattr(agent_model, "wa_device_id", "") or "").strip()
+    owner_target = _owner_notification_target(agent_model)
+    notified_owner = False
+
+    if device_id and owner_target:
+        agent_name = str(getattr(agent_model, "name", "") or "agent").strip()
+        sender = _session_sender_phone(session)
+        owner_text = (
+            f"Perlu tindakan Owner untuk {agent_name}.\n\n"
+            "Ada customer yang sedang dibantu, tapi aksi Google/Calendar belum bisa dijalankan karena koneksi akun perlu dicek.\n\n"
+            f"Customer: {sender or '-'}\n"
+            f"Pesan terakhir: {user_message.strip()[:500] or '-'}\n"
+            f"Error ringkas: {str(error_text or '').strip()[:500] or '-'}"
+        )
+        if auth_url:
+            owner_text += (
+                "\n\nBuka link ini untuk hubungkan ulang Google:\n"
+                f"{auth_url}\n\n"
+                "Setelah selesai, balas customer atau minta agent melanjutkan jadwalnya."
+            )
+        else:
+            owner_text += (
+                "\n\nLink reconnect belum berhasil dibuat otomatis. "
+                "Cek pengaturan integrasi Google agent ini, lalu lanjutkan konfirmasi ke customer."
+            )
+        try:
+            from app.core.infra.channel_service import send_message
+
+            await send_message(
+                channel_type="whatsapp",
+                channel_config={**cfg, "user_phone": owner_target, "device_id": device_id},
+                text=owner_text,
+            )
+            notified_owner = True
+            log.info(
+                "agent_run.google_workspace_blocker_notified_owner",
+                owner=normalize_phone(owner_target),
+                auth_url_present=bool(auth_url),
+            )
+        except Exception as exc:
+            log.warning(
+                "agent_run.google_workspace_blocker_owner_notify_failed",
+                owner=normalize_phone(owner_target),
+                error=str(exc)[:200],
+            )
+    else:
+        log.warning(
+            "agent_run.google_workspace_blocker_owner_notify_missing_target",
+            device_id_present=bool(device_id),
+            owner_target_present=bool(owner_target),
+        )
+
+    return _google_workspace_customer_blocker_reply(notified_owner=notified_owner)
 
 
 async def _graph_result_from_output(
@@ -212,6 +475,7 @@ def _task_result_guard_reply(final_reply: str, steps: list[dict[str, Any]], user
         _URL_RE.search(combined)
         or "[document_sent]" in combined_lower
         or "[image_sent]" in combined_lower
+        or _has_whatsapp_media_send_step(steps)
         or " terkirim" in combined_lower
         or "deployment berhasil" in combined_lower
     )
@@ -702,6 +966,108 @@ def _has_public_url_in_steps(steps: list[dict[str, Any]]) -> bool:
     return any(_has_public_url_in_text(_step_text(step)) for step in steps or [])
 
 
+def _extract_shared_workspace_file_path(*values: Any) -> str | None:
+    for value in values:
+        text = str(value or "")
+        for match in _SHARED_WORKSPACE_FILE_RE.findall(text):
+            path = match.rstrip(".,;:)")
+            name = path.rsplit("/", 1)[-1]
+            if name and "." in name:
+                return path
+    return None
+
+
+def _extract_shared_workspace_file_from_steps(
+    steps: list[dict[str, Any]],
+    final_reply: str = "",
+) -> str | None:
+    values: list[Any] = [final_reply]
+    values.extend(_step_text(step) for step in reversed(steps or []))
+    return _extract_shared_workspace_file_path(*values)
+
+
+def _has_whatsapp_media_send_step(steps: list[dict[str, Any]]) -> bool:
+    for step in steps or []:
+        tool_name = str((step or {}).get("tool") or "")
+        if tool_name not in {"send_whatsapp_document", "send_whatsapp_image"}:
+            continue
+        result = str((step or {}).get("result") or "")
+        lower = result.lower()
+        if "[error]" in lower or "gagal" in lower:
+            continue
+        if "[document_sent]" in lower or "[image_sent]" in lower or "terkirim" in lower or " dikirim " in lower:
+            return True
+    return False
+
+
+def _is_whatsapp_file_delivery_request(user_message: str, steps: list[dict[str, Any]], final_reply: str) -> bool:
+    text = "\n".join([user_message or "", final_reply or ""] + [_step_text(step) for step in steps or []]).lower()
+    markers = (
+        "siap_dikirim_parent",
+        "kirim file",
+        "kirim filenya",
+        "file-nya",
+        "filenya",
+        "kirim dokumen",
+        "kirim gambar",
+        "kirim foto",
+        "pdf",
+        "docx",
+        "xlsx",
+        "csv",
+        "zip",
+        "dokumen",
+        "attachment",
+        "lampiran",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _needs_whatsapp_file_delivery_followup(
+    user_message: str,
+    tools_config: dict[str, Any],
+    steps: list[dict[str, Any]],
+    final_reply: str,
+) -> tuple[bool, str | None]:
+    """Detect subagent-created shared files that still need parent WA delivery."""
+    if not _is_enabled(tools_config, "whatsapp_media", default=True):
+        return False, None
+    if _has_whatsapp_media_send_step(steps):
+        return False, None
+    path = _extract_shared_workspace_file_from_steps(steps, final_reply)
+    if not path:
+        return False, None
+    if not _is_whatsapp_file_delivery_request(user_message, steps, final_reply):
+        return False, None
+    return True, path
+
+
+def _whatsapp_file_delivery_followup_message(
+    final_reply: str,
+    steps: list[dict[str, Any]],
+    shared_path: str,
+) -> str:
+    filename = shared_path.rsplit("/", 1)[-1] or "file"
+    tool_names = ", ".join(
+        str(step.get("tool") or "?")
+        for step in (steps or [])[-8:]
+        if step.get("tool")
+    )
+    return (
+        "LANJUTKAN TASK SEBELUMNYA: subagent sudah membuat file final di shared workspace, "
+        "tetapi parent belum mengirim file ke WhatsApp.\n\n"
+        f"Path file final: {shared_path}\n"
+        f"Filename: {filename}\n"
+        f"Ringkasan jawaban sebelumnya: {(final_reply or '').strip()[:1200]}\n"
+        f"Tool terakhir: {tool_names or '-'}\n\n"
+        "Wajib sekarang panggil tool WhatsApp parent, bukan task/subagent. "
+        "Untuk PDF/DOCX/XLSX/CSV/ZIP gunakan send_whatsapp_document(file_path_or_base64=path, filename=filename, caption=...). "
+        "Untuk PNG/JPG/JPEG/WEBP gunakan send_whatsapp_image(image_path_or_base64=path, caption=...). "
+        "Setelah tool mengembalikan sukses, jawab final singkat bahwa file sudah dikirim. "
+        "Jika tool error, sampaikan error nyatanya tanpa mengklaim terkirim."
+    )
+
+
 def _is_website_or_app_request(user_message: str) -> bool:
     text = (user_message or "").lower()
     markers = (
@@ -1051,6 +1417,12 @@ async def run_agent(
 
     memory_block = await build_memory_context(agent_id, db, scope=_memory_scope)
     layered_memory = await load_layered_memory(agent_id, db, scope=_memory_scope)
+    operating_manual = await get_latest_agent_operating_manual(
+        agent_id,
+        db,
+        fallback_tools_config=tools_config,
+    )
+    setattr(agent_model, "_runtime_operating_manual", operating_manual)
 
     # When a context summary is already injected into the system prompt (triggered
     # after context_summary_trigger messages), loading the full short_term_memory_turns
@@ -1302,6 +1674,15 @@ async def run_agent(
                     )
                 else:
                     final_reply = _build_google_mcp_unavailable_reply(google_mcp_err)
+                final_reply = await _route_google_workspace_blocker_to_owner_if_customer(
+                    reply=final_reply,
+                    session=session,
+                    agent_model=agent_model,
+                    user_message=execution_user_message,
+                    error_text=google_mcp_err,
+                    auth_url=_google_mcp_auth_url,
+                    log=log,
+                )
                 log.warning(
                     "agent_run.google_mcp_blocked_before_graph",
                     error=google_mcp_err[:200],
@@ -1364,44 +1745,61 @@ async def run_agent(
                 _interrupt_on = {name: True for name in _raw_interrupt_on}
             else:
                 _interrupt_on = {}
-            from deepagents import create_deep_agent
+            if runtime_policy.is_builder:
+                # Arthur is a control-plane agent. DeepAgents adds a generic
+                # task tool even without explicit subagents, which lets Arthur
+                # invent "updates" instead of calling builder tools.
+                from langgraph.prebuilt import create_react_agent
 
-            # PENTING: gunakan llm_raw (bukan llm yang sudah .bind()) —
-            # DeepAgents SDK memanggil .count() pada model untuk parse nama provider,
-            # yang gagal pada RunnableBinding dan menyebabkan AttributeError ditangkap
-            # sebagai TypeError → fallback ke create_react_agent tanpa backend.
-            _dag_kwargs: dict[str, Any] = dict(
-                model=llm_raw,
-                tools=tools,
-                system_prompt=system_prompt,
-                backend=backend,
-                subagents=subagent_list or None,
-                checkpointer=_checkpointer,
-            )
-            _middleware: list[AgentMiddleware] = []
-            if (
-                runtime_policy.policy_class == "operational"
-                and google_mcp.enabled
-                and google_mcp.workspace_server
-            ):
-                _middleware.append(
-                    ExternalServiceFallbackGuardMiddleware(
-                        policy=runtime_policy,
-                        google_workspace_mcp_available=True,
-                        user_message=execution_user_message,
-                    )
-                )
-            if google_mcp_parent_only:
-                _middleware.append(BlockTaskToolMiddleware())
                 log.info(
-                    "agent_run.google_mcp_deepagent_parent_only_mode",
-                    reason="block_task_tool_keep_deepagents_runtime",
+                    "agent_run.builder_react_agent_mode",
+                    reason="builder_must_not_receive_task_or_filesystem_tools",
                 )
-            if _middleware:
-                _dag_kwargs["middleware"] = _middleware
-            if _interrupt_on:
-                _dag_kwargs["interrupt_on"] = _interrupt_on
-            graph = create_deep_agent(**_dag_kwargs)
+                graph = create_react_agent(
+                    llm,
+                    tools=tools,
+                    prompt=system_prompt,
+                    checkpointer=_checkpointer,
+                )
+            else:
+                from deepagents import create_deep_agent
+
+                # PENTING: gunakan llm_raw (bukan llm yang sudah .bind()) —
+                # DeepAgents SDK memanggil .count() pada model untuk parse nama provider,
+                # yang gagal pada RunnableBinding dan menyebabkan AttributeError ditangkap
+                # sebagai TypeError → fallback ke create_react_agent tanpa backend.
+                _dag_kwargs: dict[str, Any] = dict(
+                    model=llm_raw,
+                    tools=tools,
+                    system_prompt=system_prompt,
+                    backend=backend,
+                    subagents=subagent_list or None,
+                    checkpointer=_checkpointer,
+                )
+                _middleware: list[AgentMiddleware] = []
+                if (
+                    runtime_policy.policy_class == "operational"
+                    and google_mcp.enabled
+                    and google_mcp.workspace_server
+                ):
+                    _middleware.append(
+                        ExternalServiceFallbackGuardMiddleware(
+                            policy=runtime_policy,
+                            google_workspace_mcp_available=True,
+                            user_message=execution_user_message,
+                        )
+                    )
+                if google_mcp_parent_only:
+                    _middleware.append(BlockTaskToolMiddleware())
+                    log.info(
+                        "agent_run.google_mcp_deepagent_parent_only_mode",
+                        reason="block_task_tool_keep_deepagents_runtime",
+                    )
+                if _middleware:
+                    _dag_kwargs["middleware"] = _middleware
+                if _interrupt_on:
+                    _dag_kwargs["interrupt_on"] = _interrupt_on
+                graph = create_deep_agent(**_dag_kwargs)
         except (ImportError, TypeError, AttributeError) as _dag_err:
             if sandbox is not None or backend is not None or subagent_list:
                 log.error(
@@ -1643,14 +2041,19 @@ async def run_agent(
             and tools_config.get("subagents", {})
             and tools_config["subagents"].get("enabled")
         )
+        _is_builder_or_system_agent = "builder" in _agent_caps or "system" in _agent_caps
+        if _is_builder_or_system_agent and not _has_subagents:
+            _graph_config["recursion_limit"] = max(settings.agent_max_steps * 3, 24)
         # Agents that delegate to sys_coder may build framework projects (npm install,
         # next build, pip install) — these can take 5-10 min on cold sandboxes.
-        # Multiplier 8x → ~40 min ceiling for builder/system/subagent-enabled flows.
-        _timeout = (
-            settings.agent_timeout_seconds * 8
-            if "builder" in _agent_caps or "system" in _agent_caps or _has_subagents
-            else settings.agent_timeout_seconds
-        )
+        # Keep that extended ceiling for subagent-enabled flows only. Arthur
+        # builder runs without subagents should fail fast enough for WhatsApp.
+        if _has_subagents:
+            _timeout = settings.agent_timeout_seconds * 8
+        elif _is_builder_or_system_agent:
+            _timeout = min(settings.agent_timeout_seconds * 4, 540)
+        else:
+            _timeout = settings.agent_timeout_seconds
         try:
             async with asyncio.timeout(_timeout):
                 _graph_output = await graph.ainvoke(
@@ -2056,6 +2459,15 @@ async def run_agent(
                         error_text=err_str,
                         auth_url=_google_mcp_auth_url,
                     )
+                    _reply = await _route_google_workspace_blocker_to_owner_if_customer(
+                        reply=_reply,
+                        session=session,
+                        agent_model=agent_model,
+                        user_message=execution_user_message,
+                        error_text=err_str,
+                        auth_url=_google_mcp_auth_url,
+                        log=log,
+                    )
                     run_record.status = "completed"
                     run_record.completed_at = datetime.now(timezone.utc)
                     _apply_run_usage(_agent_logger.total_tokens_from_callbacks)
@@ -2209,6 +2621,58 @@ async def run_agent(
                 log.warning(
                     "agent_run.deploy_followup_continue_failed",
                     error=str(_deploy_followup_exc)[:300],
+                )
+
+        _needs_wa_file_followup, _wa_shared_file_path = _needs_whatsapp_file_delivery_followup(
+            execution_user_message,
+            tools_config,
+            steps,
+            final_reply,
+        )
+        if _needs_wa_file_followup and _wa_shared_file_path:
+            log.info("agent_run.whatsapp_file_delivery_followup", path=_wa_shared_file_path)
+            _wa_file_followup_directive = _whatsapp_file_delivery_followup_message(
+                final_reply,
+                steps,
+                _wa_shared_file_path,
+            )
+            _wa_file_previous_db_messages = list(parsed["db_messages"])
+            try:
+                from langgraph.prebuilt import create_react_agent as _cra
+
+                _wa_file_prompt = (
+                    (system_prompt + "\n\n" + _wa_file_followup_directive)
+                    if isinstance(system_prompt, str)
+                    else system_prompt
+                )
+                _wa_file_graph = _cra(llm, tools=tools, prompt=_wa_file_prompt)
+                _wa_file_input = _sanitize_input_messages(input_messages)
+                async with asyncio.timeout(settings.agent_timeout_seconds):
+                    result = await _wa_file_graph.ainvoke(
+                        {"messages": _wa_file_input}, config=_graph_config
+                    )
+                parsed = parse_agent_result(
+                    result=result,
+                    input_messages=input_messages,
+                    session_id=session.id,
+                    run_id=run_id,
+                    step_start=step_counter,
+                    log=log,
+                )
+                final_reply = parsed["final_reply"]
+                steps = parsed["steps"]
+                total_tokens_used = _agent_logger.total_tokens_from_callbacks or parsed["total_tokens_used"]
+                for _msg_record in _wa_file_previous_db_messages:
+                    db.add(_msg_record)
+                log.info(
+                    "agent_run.whatsapp_file_delivery_followup_ok",
+                    sent=_has_whatsapp_media_send_step(steps),
+                )
+            except Exception as _wa_file_followup_exc:
+                log.warning(
+                    "agent_run.whatsapp_file_delivery_followup_failed",
+                    path=_wa_shared_file_path,
+                    error=str(_wa_file_followup_exc)[:300],
                 )
         for _msg_record in parsed["db_messages"]:
             db.add(_msg_record)
@@ -2411,6 +2875,10 @@ async def run_agent(
                 run_id=str(run_id),
             )
 
+    _google_mcp_auth_err_before_override = (
+        (mcp_errors.get("google_workspace") if isinstance(mcp_errors, dict) else None)
+        or _extract_google_mcp_step_error(steps)
+    )
     final_reply, steps, _google_mcp_auth_url = await apply_google_mcp_reply_overrides(
         final_reply=final_reply,
         steps=steps,
@@ -2423,6 +2891,25 @@ async def run_agent(
         api_key=settings.api_key,
         log=log,
     )
+    _google_mcp_auth_err = _google_mcp_auth_err_before_override or _extract_google_mcp_step_error(steps)
+    _google_mcp_has_artifact = (
+        _contains_google_workspace_artifact(final_reply)
+        or _has_google_workspace_artifact_step(steps)
+    )
+    if (
+        _google_mcp_auth_err
+        and _is_google_auth_or_scope_error(str(_google_mcp_auth_err))
+        and not _google_mcp_has_artifact
+    ):
+        final_reply = await _route_google_workspace_blocker_to_owner_if_customer(
+            reply=final_reply,
+            session=session,
+            agent_model=agent_model,
+            user_message=execution_user_message,
+            error_text=str(_google_mcp_auth_err),
+            auth_url=_google_mcp_auth_url,
+            log=log,
+        )
     guarded_reply = _task_result_guard_reply(final_reply, steps, execution_user_message)
     if guarded_reply != final_reply:
         log.warning("agent_run.final_reply_overridden_by_task_guard")
@@ -2436,7 +2923,38 @@ async def run_agent(
         log.warning("agent_run.final_reply_overridden_by_operator_escalation_guard")
         final_reply = guarded_reply
 
-    final_reply = ensure_non_empty_reply(final_reply, steps)
+    _reply_before_non_empty_guard = final_reply
+    final_reply = ensure_non_empty_reply(
+        final_reply,
+        steps,
+        tools_config=tools_config,
+        active_groups=active_groups,
+    )
+    if final_reply != _reply_before_non_empty_guard:
+        log.warning(
+            "agent_run.final_reply_overridden_by_non_empty_guard",
+            before_len=len(_reply_before_non_empty_guard or ""),
+            after_len=len(final_reply or ""),
+            before_preview=(_reply_before_non_empty_guard or "")[:220],
+            after_preview=(final_reply or "")[:220],
+        )
+
+    _reply_before_google_auth_guard = final_reply
+    final_reply = await _append_builder_google_auth_link_if_needed(
+        final_reply,
+        steps=steps,
+        session=session,
+        settings_obj=settings,
+        log=log,
+    )
+    if final_reply != _reply_before_google_auth_guard:
+        log.warning(
+            "agent_run.final_reply_appended_google_auth_link",
+            before_len=len(_reply_before_google_auth_guard or ""),
+            after_len=len(final_reply or ""),
+            before_preview=(_reply_before_google_auth_guard or "")[:220],
+            after_preview=(final_reply or "")[:220],
+        )
 
     log.info(
         "agent_run.complete",

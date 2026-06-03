@@ -255,6 +255,8 @@ func (r *Router) forwardToAgent(agentID string, msg IncomingMessage) {
 		"from":               msg.From,
 		"phone_from":         msg.PhoneFrom,
 		"chat_id":            msg.ChatID,
+		"sender_alt":         msg.SenderAlt,
+		"addressing_mode":    msg.AddressingMode,
 		"message":            msg.Text,
 		"message_id":         msg.MessageID,
 		"timestamp":          msg.Timestamp,

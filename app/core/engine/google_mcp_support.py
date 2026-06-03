@@ -111,6 +111,9 @@ def _is_plain_google_form_link_reference(message: str) -> bool:
             marker in m
             for marker in (
                 "cara order",
+                "order via",
+                "order lewat",
+                "isi google form",
                 "pelanggan isi",
                 "customer isi",
                 "link yang pelanggan",
@@ -1516,6 +1519,48 @@ def build_mcp_unavailable_notice(mcp_errors: dict[str, str], google_mcp_auth_url
     return notice
 
 
+def build_google_mcp_runtime_state_notice(runtime: GoogleMcpRuntime) -> str:
+    if not runtime.enabled or not runtime.workspace_server:
+        state = "disabled"
+        action = "Google Workspace tidak aktif untuk agent ini. Jangan klaim bisa mengakses Google."
+    elif runtime.connected_user_id and not runtime.preflight_error:
+        state = "connected"
+        action = (
+            "Google Workspace sudah terhubung untuk Owner/user yang sesuai. "
+            "Gunakan tool Google Workspace sebagai sumber kebenaran sebelum mengklaim aksi berhasil."
+        )
+    elif runtime.auth_url:
+        state = "enabled_needs_auth"
+        action = (
+            "Google Workspace aktif tapi belum bisa dipakai sampai Owner membuka link otentikasi. "
+            "Jika user meminta aksi Google, minta Owner login lewat link yang tersedia dan jangan mengarang hasil."
+        )
+    elif runtime.preflight_error:
+        state = "auth_error"
+        action = (
+            "Google Workspace aktif tapi koneksi/auth sedang bermasalah. "
+            "Jelaskan bahwa Owner perlu menghubungkan ulang atau admin platform perlu mengecek integrasi."
+        )
+    else:
+        state = "enabled_unknown_auth"
+        action = (
+            "Google Workspace aktif, tetapi status auth belum terkonfirmasi. "
+            "Panggil tool Google/reauth yang tersedia dulu; jangan klaim sukses sebelum tool Google berhasil."
+        )
+
+    lines = [
+        "\n\n## Google Workspace Runtime State",
+        f"- State: {state}",
+        f"- Connected User: {runtime.connected_user_id or 'none'}",
+        f"- Auth Link Available: {'yes' if runtime.auth_url else 'no'}",
+        f"- Preflight Error: {runtime.preflight_error or 'none'}",
+        f"- Rule: {action}",
+    ]
+    if runtime.auth_url:
+        lines.append(f"- Link otentikasi untuk Owner: {runtime.auth_url}")
+    return "\n".join(lines)
+
+
 def google_slides_dimension_retry_directive() -> str:
     return (
         "[SYSTEM RETRY DIRECTIVE - GOOGLE SLIDES DIMENSION]\n"
@@ -2394,10 +2439,7 @@ async def prepare_google_mcp_runtime(
         )
         active_groups.append("google_reauth")
 
-    if mcp_enabled and workspace_server and isinstance(system_prompt, str):
-        system_prompt += build_google_mcp_usage_notice(user_message)
-
-    return GoogleMcpRuntime(
+    runtime = GoogleMcpRuntime(
         enabled=mcp_enabled,
         workspace_server=workspace_server,
         connected_user_id=connected_user_id,
@@ -2407,6 +2449,13 @@ async def prepare_google_mcp_runtime(
         candidate_user_ids=candidate_ids,
         system_prompt=system_prompt,
     )
+    if mcp_enabled and workspace_server and isinstance(system_prompt, str):
+        runtime.system_prompt = (
+            system_prompt
+            + build_google_mcp_usage_notice(user_message)
+            + build_google_mcp_runtime_state_notice(runtime)
+        )
+    return runtime
 
 
 async def apply_mcp_error_notice(

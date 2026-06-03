@@ -17,6 +17,7 @@ import json
 import pathlib
 import uuid
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
@@ -110,6 +111,17 @@ class TestArthurConfig:
         assert "wa_agent_manager" in src, \
             "Arthur butuh wa_agent_manager untuk kirim QR ke user"
 
+    def test_arthur_seed_has_unlimited_quota(self):
+        p = pathlib.Path(__file__).parent.parent / "scripts/seed_arthur.py"
+        src = p.read_text()
+        assert '"token_quota": 0' in src, "Arthur harus unlimited quota; 0 berarti tidak dibatasi"
+
+    def test_rulebook_uses_current_arthur_model(self):
+        p = pathlib.Path(__file__).parent.parent / "system-message-builder.md"
+        src = p.read_text()
+        assert "Model Arthur sendiri: openai/gpt-4.1-mini" in src
+        assert "Model Arthur sendiri: deepseek/deepseek-v4-flash" not in src
+
     def test_arthur_has_system_capabilities(self):
         p = pathlib.Path(__file__).parent.parent / "scripts/seed_arthur.py"
         src = p.read_text()
@@ -199,10 +211,14 @@ class TestBuilderPipelineFlow:
         from app.core.tools.builder_tools import build_builder_tools
         tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
         get_detail = next(t for t in tools if t.name == "get_agent_detail")
-        result = _run(get_detail.ainvoke({"agent_id": str(my_agent.id)}))
+        result = _run(get_detail.ainvoke({
+            "agent_id": str(my_agent.id),
+            "include_instructions": True,
+        }))
         data = json.loads(result)
         assert "tools_config" in data
         assert "instructions_preview" in data
+        assert data["instructions"] == my_agent.instructions
         assert data["name"] == "CS Toko Baju Indah"
 
     def test_step5_update_instructions(self):
@@ -225,6 +241,91 @@ class TestBuilderPipelineFlow:
         assert data["success"] is True
         assert "instructions" in data["updated_fields"]
         assert "name" in data["updated_fields"]
+
+    def test_update_rejects_summary_overwrite_of_long_instructions(self):
+        db = _make_mock_db()
+        my_agent = _make_agent(operator_ids=["+62811xxx"])
+        my_agent.instructions = "Instruksi operasional lengkap. " * 120
+
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = my_agent
+        db.execute = AsyncMock(return_value=mock_result)
+
+        from app.core.tools.builder_tools import build_builder_tools
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        update = next(t for t in tools if t.name == "update_agent")
+        result = _run(update.ainvoke({
+            "agent_id": str(my_agent.id),
+            "instructions": "Agent sudah diperbarui agar bisa eskalasi jika ada bukti transfer.",
+        }))
+        data = json.loads(result)
+
+        assert data["error"].startswith("Instruksi baru terlalu pendek")
+        assert "include_instructions=true" in data["hint"]
+
+
+class TestArthurRuntimeToolGating:
+    def test_builder_runtime_skips_sandbox_and_subagents_even_if_config_drifted(self):
+        from app.core.engine import agent_tool_setup as setup_mod
+
+        agent_id = uuid.uuid4()
+        agent = SimpleNamespace(
+            id=agent_id,
+            capabilities=["system", "builder"],
+            tools_config={
+                "builder": True,
+                "memory": True,
+                "skills": True,
+                "escalation": True,
+                "sandbox": True,
+                "deploy": True,
+                "tool_creator": True,
+                "subagents": {"enabled": True},
+                "wa_agent_manager": True,
+            },
+            name="Arthur",
+        )
+        session = SimpleNamespace(
+            id=uuid.uuid4(),
+            agent_id=agent_id,
+            channel_type="whatsapp",
+            channel_config={
+                "device_id": "arthur-device",
+                "user_phone": "628111111111",
+                "phone_number": "+628111111111",
+            },
+            external_user_id="628111111111",
+        )
+        log = SimpleNamespace(
+            info=MagicMock(),
+            warning=MagicMock(),
+            debug=MagicMock(),
+        )
+
+        with patch.object(setup_mod, "DockerSandbox") as sandbox_cls, patch.object(
+            setup_mod,
+            "build_subagents",
+            new=AsyncMock(return_value=([{"name": "should_not_exist"}], [])),
+        ) as build_subagents:
+            result = _run(setup_mod.build_agent_tool_setup(
+                agent_model=agent,
+                session=session,
+                tools_config=agent.tools_config,
+                raw_tools_config=agent.tools_config,
+                db=MagicMock(),
+                log=log,
+                escalation_user_jid=None,
+                sender_name="Alsa",
+                user_message="edit agent saya bisa eskalasi kalau ada yang kirim bukti tf",
+            ))
+
+        sandbox_cls.assert_not_called()
+        build_subagents.assert_not_awaited()
+        assert "builder" in result.active_groups
+        assert "sandbox" not in result.active_groups
+        assert "deploy" not in result.active_groups
+        assert not any(str(group).startswith("subagents(") for group in result.active_groups)
+        assert not any(getattr(tool, "name", "") == "sandbox_write_binary_file" for tool in result.tools)
 
 
 # ── Section 4: Tenant Isolation ─────────────────────────────────────────────

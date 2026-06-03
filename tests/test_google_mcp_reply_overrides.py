@@ -5,6 +5,7 @@ from app.core.engine.agent_runner import (
     _build_google_mcp_unavailable_reply,
     _extract_google_mcp_step_error,
     _is_google_auth_or_scope_error,
+    _route_google_workspace_blocker_to_owner_if_customer,
 )
 from app.core.engine.google_mcp_support import (
     GoogleMcpRuntime,
@@ -14,6 +15,7 @@ from app.core.engine.google_mcp_support import (
     _is_google_mcp_intent,
     _looks_like_google_auth_recovery_reply,
     apply_google_mcp_reply_overrides,
+    build_google_mcp_runtime_state_notice,
     find_last_google_workspace_user_request,
     is_google_auth_recovery_followup,
     prepare_google_mcp_runtime,
@@ -23,6 +25,124 @@ from app.core.engine.google_mcp_support import (
 def test_google_scope_error_markers_include_google_api_scope_messages() -> None:
     err = "Request had insufficient authentication scopes. Required scope: https://www.googleapis.com/auth/presentations"
     assert _is_google_auth_or_scope_error(err) is True
+
+
+@pytest.mark.asyncio
+async def test_customer_google_auth_blocker_notifies_owner_and_hides_admin_phone(monkeypatch) -> None:
+    sent = []
+
+    async def fake_send_message(*, channel_type, channel_config, text, to_override=None):
+        sent.append(
+            {
+                "channel_type": channel_type,
+                "channel_config": channel_config,
+                "text": text,
+                "to_override": to_override,
+            }
+        )
+        return {"message_id": "m1"}
+
+    monkeypatch.setattr("app.core.infra.channel_service.send_message", fake_send_message)
+
+    agent = type(
+        "Agent",
+        (),
+        {
+            "name": "LaundryJemput",
+            "owner_external_id": "62895619356936",
+            "operator_ids": ["62895619356936"],
+            "escalation_config": {"operator_phone": "62895619356936"},
+            "wa_device_id": "dev-1",
+        },
+    )()
+    session = type(
+        "Session",
+        (),
+        {
+            "channel_type": "whatsapp",
+            "external_user_id": "6283890930647",
+            "channel_config": {
+                "device_id": "dev-1",
+                "user_phone": "6283890930647@s.whatsapp.net",
+                "phone_number": "6283890930647",
+            },
+        },
+    )()
+    log = type(
+        "Log",
+        (),
+        {
+            "info": lambda *args, **kwargs: None,
+            "warning": lambda *args, **kwargs: None,
+        },
+    )()
+
+    reply = await _route_google_workspace_blocker_to_owner_if_customer(
+        reply="Google Workspace expired. Hubungi admin 62895619356936.",
+        session=session,
+        agent_model=agent,
+        user_message="Sipp sudah okk",
+        error_text="Google Workspace belum terhubung atau token sudah expired",
+        auth_url="https://auth.example/start?t=abc",
+        log=log,
+    )
+
+    assert sent
+    assert sent[0]["channel_type"] == "whatsapp"
+    assert sent[0]["channel_config"]["user_phone"] == "62895619356936"
+    assert "https://auth.example/start?t=abc" in sent[0]["text"]
+    assert "Sipp sudah okk" in sent[0]["text"]
+    assert "62895619356936" not in reply
+    assert "https://auth.example/start?t=abc" not in reply
+    assert "Google Workspace" not in reply
+    assert "Owner" in reply
+
+
+@pytest.mark.asyncio
+async def test_owner_google_auth_blocker_keeps_auth_reply(monkeypatch) -> None:
+    async def fail_send_message(*args, **kwargs):
+        raise AssertionError("owner chat should not be rerouted to owner notification")
+
+    monkeypatch.setattr("app.core.infra.channel_service.send_message", fail_send_message)
+
+    agent = type(
+        "Agent",
+        (),
+        {
+            "name": "LaundryJemput",
+            "owner_external_id": "62895619356936",
+            "operator_ids": ["62895619356936"],
+            "escalation_config": {"operator_phone": "62895619356936"},
+            "wa_device_id": "dev-1",
+        },
+    )()
+    session = type(
+        "Session",
+        (),
+        {
+            "channel_type": "whatsapp",
+            "external_user_id": "62895619356936",
+            "channel_config": {
+                "device_id": "dev-1",
+                "user_phone": "62895619356936@s.whatsapp.net",
+                "phone_number": "62895619356936",
+            },
+        },
+    )()
+    log = type("Log", (), {"info": lambda *args, **kwargs: None, "warning": lambda *args, **kwargs: None})()
+
+    original = "Klik link reconnect Google: https://auth.example/start?t=abc"
+    reply = await _route_google_workspace_blocker_to_owner_if_customer(
+        reply=original,
+        session=session,
+        agent_model=agent,
+        user_message="sambungkan google",
+        error_text="Google Workspace belum terhubung atau token sudah expired",
+        auth_url="https://auth.example/start?t=abc",
+        log=log,
+    )
+
+    assert reply == original
 
 
 def test_google_auth_error_markers_include_preflight_not_connected_message() -> None:
@@ -243,6 +363,9 @@ async def test_prepare_google_mcp_runtime_uses_agent_owner_fallback_for_auth(mon
 
     assert runtime.auth_url == "https://devtunnel.example/v1/integrations/google/start?t=abc"
     assert runtime.candidate_user_ids[0] == "62895619356936"
+    assert "## Google Workspace Runtime State" in runtime.system_prompt
+    assert "State: enabled_needs_auth" in runtime.system_prompt
+    assert "Owner membuka link otentikasi" in runtime.system_prompt
     assert any(call[0] == "POST" and call[2]["json"]["external_user_id"] == "62895619356936" for call in calls)
 
 
@@ -315,6 +438,65 @@ async def test_prepare_google_mcp_runtime_clears_stale_preflight_when_fallback_t
     assert runtime.preflight_error is None
     assert runtime.auth_url is None
     assert workspace_server["headers"]["Authorization"] == "Bearer owner-token"
+    assert "State: connected" in runtime.system_prompt
+    assert "jangan klaim sukses sebelum tool Google berhasil" not in runtime.system_prompt
+
+
+def test_google_mcp_runtime_state_notice_disabled() -> None:
+    notice = build_google_mcp_runtime_state_notice(
+        GoogleMcpRuntime(
+            enabled=False,
+            workspace_server=None,
+            connected_user_id=None,
+            auth_url=None,
+            preflight_error=None,
+            integration_url="",
+            candidate_user_ids=[],
+            system_prompt="",
+        )
+    )
+
+    assert "State: disabled" in notice
+    assert "Jangan klaim bisa mengakses Google" in notice
+
+
+def test_google_enabled_without_auth_asks_owner_for_auth() -> None:
+    notice = build_google_mcp_runtime_state_notice(
+        GoogleMcpRuntime(
+            enabled=True,
+            workspace_server={"url": "http://localhost:8002/mcp"},
+            connected_user_id=None,
+            auth_url="https://devtunnel.example/v1/integrations/google/start?t=abc",
+            preflight_error=None,
+            integration_url="https://devtunnel.example",
+            candidate_user_ids=["62895619356936"],
+            system_prompt="",
+        )
+    )
+
+    assert "State: enabled_needs_auth" in notice
+    assert "Owner membuka link otentikasi" in notice
+    assert "jangan mengarang hasil" in notice
+    assert "https://devtunnel.example/v1/integrations/google/start?t=abc" in notice
+
+
+def test_google_auth_expired_asks_owner_to_reconnect() -> None:
+    notice = build_google_mcp_runtime_state_notice(
+        GoogleMcpRuntime(
+            enabled=True,
+            workspace_server={"url": "http://localhost:8002/mcp"},
+            connected_user_id=None,
+            auth_url=None,
+            preflight_error="Google Workspace belum terhubung atau token sudah expired",
+            integration_url="https://devtunnel.example",
+            candidate_user_ids=["62895619356936"],
+            system_prompt="",
+        )
+    )
+
+    assert "State: auth_error" in notice
+    assert "Owner perlu menghubungkan ulang" in notice
+    assert "Preflight Error: Google Workspace belum terhubung atau token sudah expired" in notice
 
 
 @pytest.mark.asyncio

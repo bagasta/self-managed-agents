@@ -32,8 +32,10 @@ const (
 
 type IncomingMessage struct {
 	From              string
-	PhoneFrom         string // resolved phone (LID → PN); falls back to From if unresolvable
+	PhoneFrom         string // resolved phone (LID → PN); empty if LID cannot be resolved
 	ChatID            string
+	SenderAlt         string
+	AddressingMode    string
 	Text              string
 	MessageID         string
 	PushName          string // WhatsApp display name of sender
@@ -414,20 +416,28 @@ func (wa *WhatsAppClient) handleMessage(evt *events.Message) {
 
 	from := "+" + evt.Info.Sender.User
 	phoneFrom := from
-	if wa.client.Store != nil {
-		if pnJID, err := wa.client.Store.LIDs.GetPNForLID(context.Background(), evt.Info.Sender); err == nil && pnJID.User != "" {
+	if wa.client.Store != nil && evt.Info.Sender.Server == types.HiddenUserServer {
+		if evt.Info.SenderAlt.Server == types.DefaultUserServer && evt.Info.SenderAlt.User != "" {
+			phoneFrom = "+" + evt.Info.SenderAlt.User
+			log.Printf("wa-dev resolved LID %s -> phone %s via SenderAlt", from, phoneFrom)
+		} else if pnJID, err := wa.client.Store.LIDs.GetPNForLID(context.Background(), evt.Info.Sender.ToNonAD()); err == nil && pnJID.User != "" {
 			phoneFrom = "+" + pnJID.User
 			log.Printf("wa-dev resolved LID %s -> phone %s", from, phoneFrom)
+		} else {
+			phoneFrom = ""
+			log.Printf("wa-dev LID %s unresolved (no PN mapping yet): %v", from, err)
 		}
 	}
 
 	msg := IncomingMessage{
-		From:      from,
-		PhoneFrom: phoneFrom,
-		ChatID:    chatJID.String(),
-		MessageID: evt.Info.ID,
-		PushName:  evt.Info.PushName,
-		Timestamp: evt.Info.Timestamp.Unix(),
+		From:           from,
+		PhoneFrom:      phoneFrom,
+		ChatID:         chatJID.String(),
+		SenderAlt:      evt.Info.SenderAlt.String(),
+		AddressingMode: string(evt.Info.AddressingMode),
+		MessageID:      evt.Info.ID,
+		PushName:       evt.Info.PushName,
+		Timestamp:      evt.Info.Timestamp.Unix(),
 	}
 
 	var mentionedJIDs []string

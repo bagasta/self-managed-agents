@@ -50,7 +50,7 @@ ARTHUR_CONFIG = {
     "max_tokens": 2048,         # Arthur butuh ruang lebih untuk nulis instructions agent
     "capabilities": ["system", "builder"],
     "allowed_senders": None,  # terbuka untuk siapapun
-    "token_quota": 10_000_000,
+    "token_quota": 0,            # 0 = unlimited; Arthur adalah control-plane agent
     "quota_period_days": 30,
     "tools_config": {
         "memory": True,
@@ -119,6 +119,10 @@ async def seed(dry_run: bool = False) -> None:
             existing.capabilities = ARTHUR_CONFIG["capabilities"]
             existing.tools_config = ARTHUR_CONFIG["tools_config"]
             existing.token_quota = ARTHUR_CONFIG["token_quota"]
+            existing.tokens_used = 0
+            if not existing.created_by_type:
+                existing.created_by_type = "system"
+                existing.created_by_agent_name = "System"
             # Merge operator_ids — tambahkan yang baru dari env, jangan hapus yang sudah ada
             new_ops = ARTHUR_CONFIG["operator_ids"]
             if new_ops:
@@ -151,6 +155,8 @@ async def seed(dry_run: bool = False) -> None:
                 operator_ids=ARTHUR_CONFIG["operator_ids"],
                 sandbox_config=ARTHUR_CONFIG["sandbox_config"],
                 safety_policy=ARTHUR_CONFIG["safety_policy"],
+                created_by_type="system",
+                created_by_agent_name="System",
             )
             db.add(arthur)
             await db.commit()

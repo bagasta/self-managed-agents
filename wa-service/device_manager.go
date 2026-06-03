@@ -908,14 +908,17 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 	// For LID accounts, Sender.User contains a LID number (not the phone number).
 	// We attempt to resolve it using the local LID→PN map. If the map has the entry
 	// (populated when WA sends contact data), phoneFrom will be the real phone number.
-	// Falls back to `from` if resolution fails or is unavailable.
+	// Leaves phoneFrom empty if resolution fails so Python will not persist a LID as a phone.
 	phoneFrom := from
 	dm.mu.RLock()
 	resolveInfo, resolveOk := dm.devices[deviceID]
 	dm.mu.RUnlock()
 	if resolveOk && resolveInfo.Client.Store != nil && evt.Info.Sender.Server == types.HiddenUserServer {
-		// Use ToNonAD() to strip device suffix — LID store lookup requires non-AD JID.
-		if pnJID, err := resolveInfo.Client.Store.LIDs.GetPNForLID(context.Background(), evt.Info.Sender.ToNonAD()); err == nil && pnJID.User != "" {
+		if evt.Info.SenderAlt.Server == types.DefaultUserServer && evt.Info.SenderAlt.User != "" {
+			phoneFrom = "+" + evt.Info.SenderAlt.User
+			log.Printf("[%s] resolved LID %s -> phone %s via SenderAlt", deviceID, from, phoneFrom)
+		} else if pnJID, err := resolveInfo.Client.Store.LIDs.GetPNForLID(context.Background(), evt.Info.Sender.ToNonAD()); err == nil && pnJID.User != "" {
+			// Use ToNonAD() to strip device suffix — LID store lookup requires non-AD JID.
 			phoneFrom = "+" + pnJID.User
 			log.Printf("[%s] resolved LID %s -> phone %s", deviceID, from, phoneFrom)
 		} else {
@@ -935,6 +938,8 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 		"from":               from,
 		"phone_from":         phoneFrom, // resolved phone number (same as from for non-LID accounts)
 		"chat_id":            chatID,
+		"sender_alt":         evt.Info.SenderAlt.String(),
+		"addressing_mode":    string(evt.Info.AddressingMode),
 		"message":            text,
 		"message_id":         evt.Info.ID,
 		"timestamp":          evt.Info.Timestamp.Unix(),

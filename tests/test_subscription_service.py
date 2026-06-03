@@ -1,7 +1,7 @@
 """TDD tests for subscription_service.py
 
 Tests:
-- get_or_create_wa_user: buat user baru, idempotent, subscription Tier 1 otomatis
+- get_or_create_wa_user: buat user baru, idempotent, subscription Trial otomatis
 - check_can_create_agent: deteksi agent via owner_external_id DAN operator_ids (legacy)
 - slot enforcement: Tier 1 max 1 agent
 - WA user dapat UserApiKey otomatis
@@ -85,17 +85,17 @@ def test_default_tier3_plan_has_unlimited_agents_and_100m_tokens():
 
 class TestGetOrCreateWaUser:
     @pytest.mark.asyncio
-    async def test_creates_new_user_and_tier1_sub(self):
-        """Nomor baru → user baru + Tier 1 subscription + UserApiKey."""
+    async def test_creates_new_user_and_trial_sub(self):
+        """Nomor baru → user baru + Trial subscription + UserApiKey."""
         from app.core.domain import subscription_service
         from app.core.domain.subscription_service import get_or_create_wa_user
 
         plan = _make_plan()
         created_types = []
 
-        # Patch _create_tier1_subscription supaya tidak perlu query plan ke DB
+        # Patch _create_trial_subscription supaya tidak perlu query plan ke DB
         async def _fake_create_sub(user_id, db):
-            sub = _make_sub()
+            sub = _make_sub(status="trial")
             sub.user_id = user_id
             db.add(SimpleNamespace(__class__=type("UserSubscription", (), {})))
             return sub
@@ -113,12 +113,12 @@ class TestGetOrCreateWaUser:
 
         with (
             patch.object(subscription_service, "ensure_default_subscription_plans", AsyncMock()),
-            patch.object(subscription_service, "_create_tier1_subscription", _fake_create_sub),
+            patch.object(subscription_service, "_create_trial_subscription", _fake_create_sub),
         ):
             user, sub = await get_or_create_wa_user("628111", mock_db)
 
         assert user.external_id == "628111"
-        assert sub.status == "active"
+        assert sub.status == "trial"
         assert "User" in created_types
         assert "UserApiKey" in created_types
 

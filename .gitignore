@@ -83,12 +83,3 @@ test_out.txt
 # System message drafts (large markdown, managed via scripts/seed_*.py)
 
 
-
-# Dashboard
-dashboard/.env
-dashboard/node_modules/
-dashboard/dist/
-dashboard/build/
-dashboard/.cache/
-dashboard/.next/
-dashboard/

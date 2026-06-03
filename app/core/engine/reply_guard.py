@@ -4,6 +4,8 @@ import json
 import re
 from typing import Any
 
+from app.core.engine.tool_capability_registry import disabled_capability_claims
+
 
 _BUILDER_TOOLS = {
     "plan_agent",
@@ -16,6 +18,10 @@ _BUILDER_TOOLS = {
     "create_wa_dev_trial_link",
     "set_agent_memory",
     "update_agent",
+    "delete_agent",
+    "get_agent_detail",
+    "list_my_agents",
+    "generate_google_auth_link",
 }
 
 _INCOMPLETE_BUILDER_REPLY_MARKERS = (
@@ -42,6 +48,13 @@ _INCOMPLETE_BUILDER_REPLY_MARKERS = (
     "lanjutkan buat",
 )
 
+_UPDATE_INTENT_TOOLS = {
+    "update_agent",
+    "get_agent_detail",
+    "list_my_agents",
+    "set_agent_memory",
+}
+
 
 def _step_tool_names(steps: list[dict[str, Any]]) -> list[str]:
     names: list[str] = []
@@ -64,9 +77,50 @@ def _parse_step_result(result: Any) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def _builder_entitlement_retry_reply(steps: list[dict[str, Any]]) -> str | None:
+    for step in reversed(steps or []):
+        if step.get("tool") not in {"create_agent", "update_agent"}:
+            continue
+        data = _parse_step_result(step.get("result"))
+        if not data:
+            continue
+        error = str(data.get("error") or "").lower()
+        if "entitlement" in error or "melebihi entitlement plan" in error:
+            return (
+                "Ada batas plan untuk beberapa fitur, jadi saya sesuaikan konfigurasi yang sesuai dulu "
+                "dan coba ulang sekarang."
+            )
+    return None
+
+
 def _builder_success_reply_is_clear(reply: str) -> bool:
     normalized = reply.lower()
-    return any(marker in normalized for marker in ("sudah jadi", "berhasil dibuat", "berhasil diupdate", "sudah diupdate"))
+    return any(
+        marker in normalized
+        for marker in (
+            "sudah jadi",
+            "berhasil dibuat",
+            "berhasil diupdate",
+            "sudah diupdate",
+            "sudah saya edit",
+            "sudah saya perbarui",
+            "sudah diperbarui",
+            "berhasil diperbarui",
+            "sudah saya update",
+            "paket trial",
+            "tidak mengizinkan",
+            "perlu upgrade",
+            "entitlement",
+        )
+    )
+
+
+def _has_whatsapp_onboarding(reply: str) -> bool:
+    normalized = reply.lower()
+    return (
+        "nomor demo arthur" in normalized
+        and "nomor whatsapp kamu sendiri" in normalized
+    )
 
 
 def _looks_like_incomplete_builder_reply(reply: str) -> bool:
@@ -74,7 +128,43 @@ def _looks_like_incomplete_builder_reply(reply: str) -> bool:
     return any(marker in normalized for marker in _INCOMPLETE_BUILDER_REPLY_MARKERS)
 
 
+def _looks_like_technical_builder_reply(reply: str) -> bool:
+    normalized = reply.lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "field yang diubah",
+            "updated_fields",
+            "tools_config",
+            "escalation_config",
+            "allowed_senders",
+            "operator_ids",
+            "include_instructions",
+        )
+    )
+
+
+def _create_agent_success_reply(data: dict[str, Any]) -> str:
+    name = str(data.get("name") or "agent").strip()
+    agent_id = str(data.get("agent_id") or "").strip()
+    channel = str(data.get("channel_type") or data.get("channel") or "").strip().lower()
+
+    if channel == "whatsapp":
+        return (
+            f"{name} sudah jadi. "
+            "Sekarang mau agent ini langsung dipasang ke nomor WhatsApp kamu sendiri, "
+            "atau dicoba dulu lewat nomor demo Arthur yang sudah siap pakai?"
+        )
+    if agent_id:
+        return f"{name} sudah jadi. ID agent: {agent_id}."
+    return f"{name} sudah jadi."
+
+
 def _builder_fallback_reply(steps: list[dict[str, Any]]) -> str | None:
+    entitlement_retry = _builder_entitlement_retry_reply(steps)
+    if entitlement_retry:
+        return entitlement_retry
+
     tool_names = _step_tool_names(steps)
     if not any(name in _BUILDER_TOOLS for name in tool_names):
         return None
@@ -99,11 +189,7 @@ def _builder_fallback_reply(steps: list[dict[str, Any]]) -> str | None:
         if not data:
             continue
         if data.get("success") is True:
-            name = str(data.get("name") or "agent").strip()
-            agent_id = str(data.get("agent_id") or "").strip()
-            if agent_id:
-                return f"{name} sudah jadi. ID agent: {agent_id}."
-            return f"{name} sudah jadi."
+            return _create_agent_success_reply(data)
         error = str(data.get("error") or "").strip()
         if error:
             return f"Belum berhasil dibuat: {error}"
@@ -116,12 +202,16 @@ def _builder_fallback_reply(steps: list[dict[str, Any]]) -> str | None:
             continue
         if data.get("success") is True:
             name = str(data.get("agent_name") or data.get("name") or "Agent").strip()
-            fields = data.get("updated_fields") if isinstance(data.get("updated_fields"), list) else []
-            field_text = f" Field yang diubah: {', '.join(map(str, fields))}." if fields else ""
-            return f"{name} berhasil diupdate.{field_text}"
+            return f"{name} sudah saya edit."
         error = str(data.get("error") or "").strip()
         if error:
             return f"Belum berhasil diupdate: {error}"
+
+    if any(name in _UPDATE_INTENT_TOOLS for name in tool_names) and "update_agent" not in tool_names:
+        return (
+            "Agent belum berhasil diupdate di giliran ini karena proses berhenti sebelum tahap penyimpanan. "
+            "Kirim lanjut, saya akan teruskan langsung tanpa tanya ulang."
+        )
 
     if "create_agent" not in tool_names:
         return (
@@ -132,15 +222,66 @@ def _builder_fallback_reply(steps: list[dict[str, Any]]) -> str | None:
     return "Proses pembuatan agent belum selesai dengan jelas. Kirim lanjut, saya akan cek dan teruskan langsung."
 
 
-def ensure_non_empty_reply(reply: str, steps: list[dict[str, Any]]) -> str:
+def _disabled_capability_guard_reply(
+    reply: str,
+    *,
+    tools_config: dict[str, Any] | None = None,
+    active_groups: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> str | None:
+    blocked = disabled_capability_claims(reply, tools_config=tools_config, active_groups=active_groups)
+    if not blocked:
+        return None
+    primary = blocked[0]
+    if len(blocked) == 1:
+        return primary.fallback_sentence
+    labels = ", ".join(cap.label for cap in blocked[:3])
+    return (
+        f"Saya belum bisa menjalankan beberapa kemampuan yang disebut tadi ({labels}) pada run ini. "
+        "Owner perlu mengaktifkan/setup kemampuan itu dulu sebelum saya bisa mengerjakannya."
+    )
+
+
+def ensure_non_empty_reply(
+    reply: str,
+    steps: list[dict[str, Any]],
+    *,
+    tools_config: dict[str, Any] | None = None,
+    active_groups: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> str:
     text = (reply or "").strip()
+    entitlement_retry = _builder_entitlement_retry_reply(steps)
+    if entitlement_retry:
+        normalized = text.lower()
+        retry_markers = ("coba ulang", "coba lagi", "retry", "sesuaikan konfigurasi")
+        if not text or not any(marker in normalized for marker in retry_markers):
+            return entitlement_retry
+
     if text:
         builder_reply = _builder_fallback_reply(steps)
-        if builder_reply and not _builder_success_reply_is_clear(text):
+        missing_whatsapp_onboarding = (
+            builder_reply
+            and "nomor demo Arthur" in builder_reply
+            and not _has_whatsapp_onboarding(text)
+        )
+        if builder_reply and (
+            not _builder_success_reply_is_clear(text)
+            or _looks_like_technical_builder_reply(text)
+            or missing_whatsapp_onboarding
+        ):
             tool_names = _step_tool_names(steps)
-            if "create_agent" in tool_names or "update_agent" in tool_names or _looks_like_incomplete_builder_reply(text):
+            if (
+                "create_agent" in tool_names
+                or "update_agent" in tool_names
+                or _looks_like_incomplete_builder_reply(text)
+                or _looks_like_technical_builder_reply(text)
+            ):
                 return builder_reply
-        return text
+        disabled_guard_reply = _disabled_capability_guard_reply(
+            text,
+            tools_config=tools_config,
+            active_groups=active_groups,
+        )
+        return disabled_guard_reply or text
 
     url_pat = re.compile(r"https://[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}(?:/[^\s\"']*)?")
     for step in steps or []:

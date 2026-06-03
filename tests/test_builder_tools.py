@@ -48,6 +48,9 @@ def _make_mock_agent(
     is_deleted: bool = False,
     tools_config: dict | None = None,
     channel_type: str | None = None,
+    created_by_type: str | None = None,
+    created_by_agent_id: str | None = None,
+    created_by_agent_name: str | None = None,
 ):
     agent = MagicMock()
     agent.id = agent_id or uuid.uuid4()
@@ -55,12 +58,16 @@ def _make_mock_agent(
     agent.description = "Test"
     agent.model = "openai/gpt-4.1"
     agent.temperature = 0.7
+    agent.max_tokens = 4096
     agent.tools_config = tools_config or {"memory": True}
     agent.sandbox_config = {}
     agent.safety_policy = {}
     agent.escalation_config = {}
     agent.operator_ids = operator_ids or []
     agent.owner_external_id = owner_external_id
+    agent.created_by_type = created_by_type
+    agent.created_by_agent_id = created_by_agent_id
+    agent.created_by_agent_name = created_by_agent_name
     agent.allowed_senders = None
     agent.capabilities = capabilities or []
     agent.is_deleted = is_deleted
@@ -74,6 +81,36 @@ def _make_mock_agent(
     agent.version = 1
     agent.instructions = "You are a helpful agent."
     return agent
+
+
+def _usable_operating_manual(domain: str = "ecommerce") -> dict:
+    return {
+        "manual_id": "agent_operating_manual",
+        "version": 1,
+        "source": "arthur_template",
+        "domain": domain,
+        "domain_confidence": "high",
+        "maturity": "usable",
+        "owner_review_required": False,
+        "missing_context": [],
+        "assumptions": [],
+        "workflows": [
+            {
+                "workflow_id": "customer_intake",
+                "name": "Terima kebutuhan customer",
+                "trigger": "Customer bertanya.",
+                "goal": "Mengumpulkan kebutuhan customer.",
+                "required_inputs": ["nama", "kebutuhan"],
+                "steps": ["Sapa customer.", "Tanyakan kebutuhan.", "Ringkas kebutuhan."],
+                "decision_points": ["Jika butuh keputusan final, eskalasi."],
+                "allowed_tools": [],
+                "escalation_rules": ["Eskalasi jika data bisnis belum pasti."],
+                "prohibited_actions": ["Jangan mengarang harga/stok/kebijakan."],
+                "final_output": "Ringkasan kebutuhan customer.",
+                "examples": [],
+            }
+        ],
+    }
 
 
 def _run(coro):
@@ -144,7 +181,7 @@ class TestBuilderToolsReturnsList:
         from app.core.tools.builder_tools import build_builder_tools
         db = _make_mock_db()
         tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
-        assert len(tools) == 19, f"Harus ada 19 tools, dapat {len(tools)}"
+        assert len(tools) == 20, f"Harus ada 20 tools, dapat {len(tools)}"
 
     def test_all_tools_have_name(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -172,6 +209,7 @@ class TestBuilderToolsReturnsList:
             "get_presets",
             "plan_agent",
             "compose_agent_blueprint",
+            "compose_agent_operating_manual",
             "compose_agent_instructions",
             "compose_agent_soul",
             "verify_agent",
@@ -192,7 +230,7 @@ class TestBuilderToolsReturnsList:
         from app.core.tools.builder_tools import build_builder_tools
         db = _make_mock_db()
         tools = build_builder_tools(db_factory=db, owner_phone=None)
-        assert len(tools) == 19
+        assert len(tools) == 20
 
     def test_travel_planning_request_uses_personal_assistant_not_faq(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -255,6 +293,201 @@ class TestBuilderToolsReturnsList:
         assert payload["google_workspace_option"]["should_offer"] is False
         assert tools_config["mcp"]["enabled"] is True
         assert "google_workspace" in tools_config["mcp"]["servers"]
+
+    def test_existing_google_form_order_link_does_not_enable_workspace(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        plan = next(t for t in tools if t.name == "plan_agent")
+
+        result = _run(plan.ainvoke({
+            "user_goal": "Agent WhatsApp untuk CeritaCV, cara order pelanggan isi Google Form yang sudah ada.",
+            "agent_name": "CeritaCV",
+            "channel": "whatsapp",
+            "business_context": (
+                "Pelanggan pilih jasa CV lalu isi Google Form ini "
+                "https://forms.gle/pe5C1XncFhu56E7M9 sebagai link order."
+            ),
+            "requested_features": "customer service, escalation, whatsapp_media",
+        }))
+        payload = json.loads(result)
+        tools_config = payload["recommended_config"]["tools_config"]
+
+        assert payload["google_workspace_option"]["enabled"] is False
+        assert payload["google_workspace_option"]["should_offer"] is False
+        assert tools_config.get("mcp") in (None, False)
+
+    def test_approval_gated_service_agent_enables_handoff_and_file_generation_for_cv_case(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        plan = next(t for t in tools if t.name == "plan_agent")
+
+        result = _run(plan.ainvoke({
+            "user_goal": (
+                "Agent WhatsApp jasa bikin CV ATS. Customer diwawancara, bayar dulu, "
+                "kirim bukti transfer ke admin, lalu CV dikirim setelah admin approve."
+            ),
+            "agent_name": "CVin aja",
+            "channel": "whatsapp",
+            "requested_features": "bikin CV ATS, dokumen PDF, bukti transfer, approval admin",
+        }))
+        payload = json.loads(result)
+        tools_config = payload["recommended_config"]["tools_config"]
+
+        assert payload["detected_preset"] == "approval_gated_service_agent"
+        assert tools_config["sandbox"] is True
+        assert tools_config["escalation"] is True
+        assert tools_config["whatsapp_media"] is True
+        assert tools_config["subagents"]["enabled"] is True
+
+    def test_approval_gated_service_without_file_does_not_force_sandbox(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        plan = next(t for t in tools if t.name == "plan_agent")
+
+        result = _run(plan.ainvoke({
+            "user_goal": (
+                "Agent WhatsApp untuk jasa konsultasi. Customer cerita kebutuhan, bayar dulu, "
+                "kirim bukti transfer ke admin, lalu sesi konsultasi dijadwalkan setelah admin approve."
+            ),
+            "agent_name": "KonsulPro",
+            "channel": "whatsapp",
+            "requested_features": "jasa konsultasi, bukti transfer, approval admin, escalation",
+        }))
+        payload = json.loads(result)
+        tools_config = payload["recommended_config"]["tools_config"]
+
+        assert payload["detected_preset"] == "approval_gated_service_agent"
+        assert tools_config["escalation"] is True
+        assert tools_config["whatsapp_media"] is True
+        assert tools_config.get("sandbox") is False
+        assert tools_config.get("subagents", {}).get("enabled") is False
+
+    def test_event_customer_data_does_not_trigger_data_analyst_preset(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        plan = next(t for t in tools if t.name == "plan_agent")
+
+        result = _run(plan.ainvoke({
+            "user_goal": (
+                "Agent WhatsApp bantu chat pelanggan untuk usaha persiapan acara, cek data acara, "
+                "stok barang, dan harga final, tanpa Google dulu."
+            ),
+            "agent_name": "Event Helper",
+            "channel": "whatsapp",
+            "requested_features": "escalation",
+            "business_context": (
+                "Pelanggan memberi tanggal acara, tempat, jumlah tamu, barang yang dibutuhkan, "
+                "dan minta kepastian biaya serta barang tersedia. Kepastian harus dicek pemilik dulu."
+            ),
+            "operator_phone": "6287700600616",
+        }))
+        payload = json.loads(result)
+        tools_config = payload["recommended_config"]["tools_config"]
+
+        assert payload["detected_preset"] == "cs_whatsapp_basic"
+        assert tools_config["escalation"] is True
+        assert tools_config.get("sandbox") is False
+        assert tools_config.get("subagents", {}).get("enabled") is False
+        assert tools_config["whatsapp_media"] is False
+        assert "mcp" not in tools_config
+        assert payload["google_workspace_option"]["should_offer"] is False
+        assert payload["google_workspace_option"]["enabled"] is False
+
+    def test_plan_agent_checks_subscription_slot_before_create(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+
+        async def _fake_get_or_create(_phone, _db):
+            return SimpleNamespace(id=uuid.uuid4()), SimpleNamespace(status="trial")
+
+        async def _fake_check_can_create(_phone, _db):
+            return {
+                "allowed": False,
+                "reason": "Plan Trial maksimal 1 agent.",
+                "plan": "Trial",
+                "agents_used": 1,
+                "max_agents": 1,
+            }
+
+        with patch("app.core.domain.subscription_service.get_or_create_wa_user", _fake_get_or_create), patch(
+            "app.core.domain.subscription_service.check_can_create_agent",
+            _fake_check_can_create,
+        ):
+            tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+            plan = next(t for t in tools if t.name == "plan_agent")
+            result = _run(plan.ainvoke({
+                "user_goal": "Buat agent customer service WhatsApp",
+                "agent_name": "CS Baru",
+                "channel": "whatsapp",
+            }))
+
+        payload = json.loads(result)
+
+        assert payload["plan_status"] == "blocked_by_subscription"
+        assert payload["creation_entitlement_check"]["allowed"] is False
+        assert payload["creation_entitlement_check"]["agents_used"] == 1
+        assert "maksimal 1 agent" in payload["validation_errors"][0]
+        assert "upgrade" in payload["next_action"].lower()
+
+    def test_plan_agent_blocks_subagent_feature_before_create_for_trial_plan(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        sub = SimpleNamespace(status="trial", tokens_remaining=2_000_000)
+        plan_obj = SimpleNamespace(
+            code="trial",
+            label="Trial",
+            allowed_models=["openai/gpt-4.1-mini"],
+            subagents_allowed=False,
+            wa_connect=True,
+        )
+
+        async def _fake_get_or_create(_phone, _db):
+            return SimpleNamespace(id=uuid.uuid4()), sub
+
+        async def _fake_check_can_create(_phone, _db):
+            return {
+                "allowed": True,
+                "plan": "Trial",
+                "agents_used": 0,
+                "max_agents": 1,
+                "tokens_remaining": sub.tokens_remaining,
+                "expires_at": None,
+            }
+
+        async def _fake_get_subscription(_phone, _db):
+            return SimpleNamespace(id=uuid.uuid4()), sub, plan_obj
+
+        with patch("app.core.domain.subscription_service.get_or_create_wa_user", _fake_get_or_create), patch(
+            "app.core.domain.subscription_service.check_can_create_agent",
+            _fake_check_can_create,
+        ), patch(
+            "app.core.domain.subscription_service.get_subscription_by_external_id",
+            _fake_get_subscription,
+        ):
+            tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+            plan = next(t for t in tools if t.name == "plan_agent")
+            result = _run(plan.ainvoke({
+                "user_goal": "Buat agent coding yang bisa bikin website dan deploy",
+                "agent_name": "Codey",
+                "requested_features": "coding, deploy",
+            }))
+
+        payload = json.loads(result)
+
+        assert payload["plan_status"] == "blocked_by_subscription"
+        assert payload["creation_entitlement_check"]["plan_code"] == "trial"
+        assert any("sub-agent" in error for error in payload["validation_errors"])
+        assert payload["recommended_config"]["tools_config"]["subagents"]["enabled"] is True
 
 
 class TestBuilderOwnershipHelpers:
@@ -447,6 +680,325 @@ class TestComposeAgentBlueprint:
         assert blueprint["knowledge_plan"]["needs_upload"] is True
         assert "warning" not in data
 
+    def test_plain_text_blueprint_writer_output_falls_back_without_error_log(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "compose_agent_blueprint")
+
+        with patch(
+            "app.core.tools.builder_tools._call_instruction_writer",
+            new=AsyncMock(return_value="Saya akan susun blueprint agent ini dulu."),
+        ), patch("app.core.tools.builder_tools.logger") as logger:
+            result = _run(tool.ainvoke({
+                "preset_id": "research_agent",
+                "user_goal": "Agent riset marketing yang menyimpan hasil ringkasan.",
+                "agent_name": "Reserchpedia",
+                "business_context": "Untuk tim marketing.",
+            }))
+
+        data = json.loads(result)
+        assert data["parse_status"] == "deterministic_fallback"
+        assert "riset" in data["blueprint"]["agent_summary"].lower()
+        logger.warning.assert_called_once()
+        assert logger.warning.call_args.args[0] == "builder_tools.compose_agent_blueprint.parse_failed"
+        logger.error.assert_not_called()
+
+    def test_approval_gated_blueprint_fallback_preserves_payment_approval_workflow(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "compose_agent_blueprint")
+
+        with patch(
+            "app.core.tools.builder_tools._call_instruction_writer",
+            new=AsyncMock(return_value="bukan json"),
+        ):
+            result = _run(tool.ainvoke({
+                "preset_id": "approval_gated_service_agent",
+                "user_goal": "Agent jasa bikin CV ATS, minta pembayaran, bukti transfer ke admin, admin approve, lalu CV dikirim.",
+                "agent_name": "CVin aja",
+                "business_context": "Customer diwawancara dulu, bayar, bukti transfer dicek admin.",
+                "requested_features": "bikin CV ATS, bukti transfer, approval admin, kirim PDF",
+            }))
+
+        data = json.loads(result)
+        blueprint = data["blueprint"]
+        states = [state["state"] for state in blueprint["state_plan"]]
+
+        assert data["parse_status"] == "deterministic_fallback"
+        assert states == ["intake", "waiting_payment", "payment_review", "approved", "delivery", "aftercare"]
+        assert any("escalate_to_human" in rule["action"] for rule in blueprint["escalation_rules"])
+        assert any("send_whatsapp_document" in item for item in blueprint["validation_checklist"])
+
+    def test_compose_agent_operating_manual_uses_blueprint_for_specific_sop(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "compose_agent_operating_manual")
+
+        writer_output = {
+            "manual_id": "agent_operating_manual",
+            "version": 1,
+            "source": "arthur_operating_manual_writer",
+            "domain": "rental_alat_pesta",
+            "domain_confidence": "high",
+            "maturity": "usable",
+            "owner_review_required": False,
+            "missing_context": [],
+            "assumptions": ["Harga final harus dicek owner."],
+            "workflows": [
+                {
+                    "workflow_id": "rental_inquiry",
+                    "name": "Kualifikasi rental alat pesta",
+                    "trigger": "Customer tanya sewa alat pesta.",
+                    "goal": "Mengumpulkan kebutuhan rental sampai siap dicek owner.",
+                    "required_inputs": ["tanggal acara", "lokasi", "item yang disewa", "jumlah tamu"],
+                    "steps": ["Tanyakan tanggal dan lokasi.", "Kumpulkan item dan jumlah.", "Eskalasi ketersediaan dan harga final."],
+                    "decision_points": ["Jika tanggal atau item belum jelas, tanya dulu."],
+                    "allowed_tools": ["memory", "escalation"],
+                    "escalation_rules": ["Eskalasi harga final dan ketersediaan item."],
+                    "prohibited_actions": ["Jangan menjanjikan stok tersedia tanpa owner."],
+                    "final_output": "Ringkasan kebutuhan rental untuk owner.",
+                    "examples": [],
+                }
+            ],
+            "knowledge_plan": {"must_have": ["Daftar item rental"], "nice_to_have": [], "needs_upload": False},
+            "memory_plan": [{"key": "rental_lead", "value_to_store": "Tanggal, lokasi, item, jumlah tamu"}],
+            "validation_checklist": ["Tidak mengarang harga final."],
+        }
+
+        with patch(
+            "app.core.tools.builder_tools._call_instruction_writer",
+            new=AsyncMock(return_value=json.dumps(writer_output)),
+        ):
+            result = _run(tool.ainvoke({
+                "preset_id": "ecommerce_cs",
+                "user_goal": "Agent WhatsApp rental alat pesta",
+                "agent_name": "RentalPro",
+                "business_context": (
+                    "Rental alat pesta: kursi, tenda, sound system. Customer perlu sebut tanggal acara, "
+                    "lokasi, item, jumlah tamu, pengiriman, DP, dan pelunasan."
+                ),
+                "agent_blueprint": json.dumps({
+                    "agent_summary": "RentalPro mengumpulkan lead rental alat pesta.",
+                    "workflow_steps": [{"name": "Kualifikasi rental", "agent_action": "Tanya tanggal, lokasi, item, dan jumlah tamu."}],
+                    "state_plan": [{"state": "intake", "entry_condition": "Customer tanya rental", "allowed_actions": ["tanya kebutuhan"], "exit_condition": "lead lengkap"}],
+                }),
+                "channel": "whatsapp",
+                "domain": "rental_alat_pesta",
+            }))
+
+        data = json.loads(result)
+        manual = data["operating_manual"]
+
+        assert data["summary"]["present"] is True
+        assert manual["source"] == "arthur_operating_manual_writer"
+        assert manual["domain"] == "rental_alat_pesta"
+        assert manual["maturity"] == "usable"
+        assert manual["workflows"][0]["required_inputs"] == ["tanggal acara", "lokasi", "item yang disewa", "jumlah tamu"]
+        assert "SOP Workflow Detail" in data["prompt_preview"]
+
+
+class TestComposeAgentInstructions:
+    def test_event_cs_fallback_does_not_invent_payment_or_file_delivery(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "compose_agent_instructions")
+
+        with patch(
+            "app.core.tools.builder_tools._call_instruction_writer",
+            new=AsyncMock(side_effect=RuntimeError("writer down")),
+        ):
+            result = _run(tool.ainvoke({
+                "preset_id": "cs_whatsapp_basic",
+                "agent_name": "Event Helper",
+                "channel": "whatsapp",
+                "business_context": (
+                    "Usaha bantu orang nyiapin acara. Pelanggan tanya tanggal acara, tempat, jumlah tamu, "
+                    "barang yang dibutuhkan, antar pasang, kepastian biaya dan ketersediaan barang harus dicek owner dulu. "
+                    "Ada aturan uang muka dan pelunasan yang dijelaskan pelan-pelan."
+                ),
+                "escalation_info": "Eskalasi biaya dan ketersediaan ke Owner 6287700600616.",
+                "agent_blueprint": json.dumps({
+                    "assumptions": ["Blueprint fallback dibuat karena output JSON generator tidak bisa dipulihkan."],
+                    "workflow_steps": [{"required_user_data": ["tujuan user", "konteks bisnis atau personal", "output yang diharapkan"]}],
+                }),
+            }))
+
+        data = json.loads(result)
+        fallback = data["fallback_skeleton"]
+        assert "waiting_payment" not in fallback
+        assert "payment_review" not in fallback
+        assert "send_whatsapp_document" not in fallback
+        assert "file final" not in fallback.lower()
+
+    def test_event_cs_writer_payment_hallucination_is_replaced(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "compose_agent_instructions")
+        bad_writer_output = (
+            "Kamu adalah Event Helper.\n"
+            "STATE WAJIB: intake, waiting_payment, payment_review, approved, delivery, aftercare.\n"
+            "Saat user kirim bukti transfer, tunggu admin approve. Jangan kirim file final sebelum approved."
+        )
+
+        with patch(
+            "app.core.tools.builder_tools._call_instruction_writer",
+            new=AsyncMock(return_value=bad_writer_output),
+        ):
+            result = _run(tool.ainvoke({
+                "preset_id": "cs_whatsapp_basic",
+                "agent_name": "Event Helper",
+                "channel": "whatsapp",
+                "business_context": (
+                    "Usaha bantu orang nyiapin acara. Pelanggan tanya tanggal acara, tempat, jumlah tamu, "
+                    "barang yang dibutuhkan, antar pasang, kepastian biaya dan ketersediaan barang harus dicek owner dulu. "
+                    "Ada aturan uang muka dan pelunasan yang dijelaskan pelan-pelan."
+                ),
+                "escalation_info": "Eskalasi biaya dan ketersediaan ke Owner 6287700600616.",
+                "agent_blueprint": json.dumps({
+                    "human_approval_points": [
+                        {"when": "Kasus membutuhkan keputusan, akses, pembayaran, atau persetujuan manusia"}
+                    ]
+                }),
+            }))
+
+        data = json.loads(result)
+        instructions = data["instructions"]
+        assert data["fallback_status"] == "deterministic_fallback_removed_hallucinated_payment"
+        assert "waiting_payment" not in instructions
+        assert "payment_review" not in instructions
+        assert "bukti transfer" not in instructions.lower()
+        assert "file final" not in instructions.lower()
+
+    def test_writer_invented_business_name_is_sanitized_when_owner_did_not_provide_brand(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "compose_agent_instructions")
+        writer_output = (
+            "Kamu adalah Event Helper, asisten virtual dari FixEvent, jasa persiapan acara. "
+            "Kumpulkan tanggal acara, lokasi, jumlah tamu, barang, dan kebutuhan antar pasang. "
+            "Jika customer minta harga atau stok, panggil escalate_to_human dengan ringkasan lengkap. "
+            "Jangan menjanjikan harga final atau stok tersedia sebelum owner mengecek. "
+        ) * 4
+
+        with patch(
+            "app.core.tools.builder_tools._call_instruction_writer",
+            new=AsyncMock(return_value=writer_output),
+        ):
+            result = _run(tool.ainvoke({
+                "preset_id": "cs_whatsapp_basic",
+                "agent_name": "Event Helper",
+                "channel": "whatsapp",
+                "business_context": (
+                    "Usaha bantu orang nyiapin acara. Pelanggan tanya tanggal, lokasi, jumlah tamu, "
+                    "barang yang dibutuhkan, serta antar pasang. Harga dan stok dicek owner dulu."
+                ),
+                "escalation_info": "Eskalasi harga dan stok ke owner.",
+            }))
+
+        data = json.loads(result)
+        assert data["business_name_sanitized"] is True
+        assert "FixEvent" not in data["instructions"]
+        assert "dari bisnis ini" in data["instructions"]
+
+    def test_empty_writer_output_uses_deterministic_fallback(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "compose_agent_instructions")
+
+        with patch(
+            "app.core.tools.builder_tools._call_instruction_writer",
+            new=AsyncMock(return_value=""),
+        ):
+            result = _run(tool.ainvoke({
+                "preset_id": "cs_whatsapp_basic",
+                "agent_name": "Event Helper",
+                "channel": "whatsapp",
+                "business_context": (
+                    "Usaha bantu orang nyiapin acara. Pelanggan tanya tanggal, lokasi, jumlah tamu, "
+                    "barang yang dibutuhkan, serta antar pasang. Harga dan stok dicek owner dulu."
+                ),
+                "escalation_info": "Eskalasi harga dan stok ke owner.",
+            }))
+
+        data = json.loads(result)
+        assert data["fallback_status"] == "deterministic_fallback_empty_writer_output"
+        assert data["char_count"] > 300
+        assert "Event Helper" in data["instructions"]
+
+    def test_explicit_owner_business_name_is_preserved(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "compose_agent_instructions")
+        writer_output = (
+            "Kamu adalah Event Helper, asisten virtual dari FixEvent, jasa persiapan acara. "
+            "Kumpulkan tanggal acara, lokasi, jumlah tamu, barang, dan kebutuhan antar pasang. "
+            "Jika customer minta harga atau stok, panggil escalate_to_human dengan ringkasan lengkap. "
+            "Jangan menjanjikan harga final atau stok tersedia sebelum owner mengecek. "
+        ) * 4
+
+        with patch(
+            "app.core.tools.builder_tools._call_instruction_writer",
+            new=AsyncMock(return_value=writer_output),
+        ):
+            result = _run(tool.ainvoke({
+                "preset_id": "cs_whatsapp_basic",
+                "agent_name": "Event Helper",
+                "channel": "whatsapp",
+                "business_context": (
+                    "Nama bisnis saya adalah FixEvent. Usaha ini bantu orang nyiapin acara. "
+                    "Harga dan stok dicek owner dulu."
+                ),
+                "escalation_info": "Eskalasi harga dan stok ke owner.",
+            }))
+
+        data = json.loads(result)
+        assert data.get("business_name_sanitized") is None
+        assert "FixEvent" in data["instructions"]
+
+    def test_approval_gated_short_writer_output_uses_deterministic_fallback(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "compose_agent_instructions")
+
+        with patch(
+            "app.core.tools.builder_tools._call_instruction_writer",
+            new=AsyncMock(return_value="Kamu adalah CVin aja, asisten riset CV."),
+        ):
+            result = _run(tool.ainvoke({
+                "preset_id": "approval_gated_service_agent",
+                "agent_name": "CVin aja",
+                "channel": "whatsapp",
+                "business_context": "Jasa CV ATS. Customer bayar, kirim bukti transfer, admin approve, lalu CV dikirim.",
+                "extra_rules": "Bukti transfer wajib ke admin. Jangan kirim CV sebelum approved.",
+            }))
+
+        data = json.loads(result)
+        instructions = data["instructions"]
+
+        assert data["fallback_status"] == "deterministic_fallback"
+        assert "waiting_payment" in instructions
+        assert "payment_review" in instructions
+        assert "escalate_to_human" in instructions
+        assert "send_whatsapp_document" in instructions
+
 
 # ────────────────────────────────────────────────────────────────────────────
 # Section 3: validate_agent_config
@@ -530,12 +1082,128 @@ class TestValidateAgentConfig:
         assert "quality_score" in data
         assert 0 <= data["quality_score"] <= 100
 
+    def test_payment_approval_workflow_blocks_weak_research_prompt(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "validate_agent_config")
+
+        result = _run(tool.ainvoke({
+            "name": "CVin aja",
+            "preset_id": "approval_gated_service_agent",
+            "channel_type": "whatsapp",
+            "instructions": "Kamu adalah CVin aja, asisten riset CV. Customer bayar dan admin approve.",
+            "tools_config": json.dumps({
+                "memory": True,
+                "skills": True,
+                "escalation": False,
+                "sandbox": True,
+                "subagents": {"enabled": True},
+                "whatsapp_media": True,
+            }),
+        }))
+        data = json.loads(result)
+
+        assert data["valid"] is False
+        assert any("waiting_payment" in error for error in data["errors"])
+        assert any("escalation: true" in error for error in data["errors"])
+
+    def test_event_payment_policy_does_not_force_approval_state_contract(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "validate_agent_config")
+
+        instructions = (
+            "Kamu adalah Event Helper, CS WhatsApp untuk usaha persiapan acara. "
+            "Kumpulkan tanggal acara, lokasi, jumlah tamu, barang yang dibutuhkan, dan kebutuhan antar pasang. "
+            "Jika customer minta kepastian biaya atau ketersediaan barang, panggil escalate_to_human dengan ringkasan kebutuhan. "
+            "Jangan menjanjikan harga final atau stok tersedia sebelum owner memberi keputusan. "
+            "Ada aturan uang muka dan pelunasan, tetapi detailnya akan dijelaskan owner pelan-pelan. "
+            "Ikuti bahasa user; default Indonesia jika user tidak menentukan. "
+        ) * 4
+
+        result = _run(tool.ainvoke({
+            "name": "Event Helper",
+            "preset_id": "cs_whatsapp_basic",
+            "channel_type": "whatsapp",
+            "instructions": instructions,
+            "tools_config": json.dumps({
+                "memory": True,
+                "skills": True,
+                "escalation": True,
+                "sandbox": False,
+                "subagents": {"enabled": False},
+                "whatsapp_media": False,
+            }),
+        }))
+        data = json.loads(result)
+
+        assert data["valid"] is True
+        assert not any("waiting_payment" in error for error in data["errors"])
+
+    def test_generic_fallback_blueprint_does_not_force_payment_contract(self):
+        from app.core.tools.builder_tools import _critical_workflow_config_errors
+
+        instructions = (
+            "Kamu adalah Event Helper, CS WhatsApp untuk usaha persiapan acara. "
+            "Kumpulkan tanggal acara, lokasi, jumlah tamu, barang yang dibutuhkan, dan kebutuhan antar pasang. "
+            "Jika customer minta kepastian biaya atau ketersediaan barang, panggil escalate_to_human dengan ringkasan kebutuhan. "
+            "Jangan menjanjikan harga final atau stok tersedia sebelum owner memberi keputusan. "
+            "Ada aturan uang muka dan pelunasan, tetapi detailnya akan dijelaskan owner pelan-pelan. "
+        ) * 4
+        blueprint = json.dumps({
+            "assumptions": ["Blueprint fallback dibuat karena output JSON generator tidak bisa dipulihkan."],
+            "human_approval_points": [
+                {"when": "Kasus membutuhkan keputusan, akses, pembayaran, atau persetujuan manusia"}
+            ],
+        })
+
+        errors = _critical_workflow_config_errors(
+            name="Event Helper",
+            description="Agent WhatsApp untuk bantu pelanggan usaha persiapan acara.",
+            instructions=instructions,
+            tools_config={"memory": True, "skills": True, "escalation": True, "subagents": {"enabled": False}},
+            blueprint=blueprint,
+            preset_id="cs_whatsapp_basic",
+        )
+
+        assert errors == []
+
 
 # ────────────────────────────────────────────────────────────────────────────
 # Section 4: create_agent
 # ────────────────────────────────────────────────────────────────────────────
 
 class TestCreateAgent:
+    def test_create_agent_blocks_unsafe_payment_workflow_even_if_called_directly(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "create_agent")
+
+        result = _run(tool.ainvoke({
+            "name": "CVin aja",
+            "instructions": "Kamu adalah CVin aja, asisten riset CV. Customer bayar dan admin approve.",
+            "channel_type": "whatsapp",
+            "tools_config": {
+                "memory": True,
+                "skills": True,
+                "escalation": False,
+                "sandbox": True,
+                "subagents": {"enabled": True},
+                "whatsapp_media": True,
+            },
+        }))
+        data = json.loads(result)
+
+        assert data["error"] == "Konfigurasi agent belum aman untuk dibuat."
+        assert any("waiting_payment" in error for error in data["validation_errors"])
+        assert any("escalation=true" in error for error in data["validation_errors"])
+
     def test_creates_agent_in_db(self):
         from app.core.tools.builder_tools import build_builder_tools
         db = _make_mock_db()
@@ -558,6 +1226,425 @@ class TestCreateAgent:
             assert "api_key" in data
             db.add.assert_called_once()
             db.flush.assert_called_once()
+
+    def test_create_agent_creates_operating_manual_separate_from_instructions(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        writer_manual = {
+            "manual_id": "agent_operating_manual",
+            "version": 1,
+            "source": "arthur_operating_manual_writer_auto",
+            "domain": "ecommerce",
+            "domain_confidence": "high",
+            "maturity": "usable",
+            "owner_review_required": False,
+            "missing_context": [],
+            "assumptions": ["Stok dan refund perlu dicek owner jika belum pasti."],
+            "workflows": [
+                {
+                    "workflow_id": "order_intake",
+                    "name": "Intake order toko online",
+                    "trigger": "Customer bertanya produk atau ingin checkout.",
+                    "goal": "Mengumpulkan data order sebelum diteruskan ke owner jika perlu.",
+                    "required_inputs": ["nama", "produk", "varian", "jumlah", "alamat", "kontak"],
+                    "steps": ["Tanya produk dan varian.", "Kumpulkan jumlah, alamat, dan kontak.", "Eskalasi stok/harga/refund jika belum pasti."],
+                    "decision_points": ["Jika stok atau refund belum pasti, eskalasi."],
+                    "allowed_tools": ["memory", "escalation"],
+                    "escalation_rules": ["Eskalasi stok, harga final, ongkir, refund, dan pembayaran manual jika belum pasti."],
+                    "prohibited_actions": ["Jangan mengarang stok, ongkir, atau refund."],
+                    "final_output": "Order/customer issue siap diproses owner.",
+                    "examples": [],
+                }
+            ],
+            "knowledge_plan": {"must_have": ["Katalog", "Stok", "Aturan refund"], "nice_to_have": [], "needs_upload": False},
+            "memory_plan": [{"key": "order_lead", "value_to_store": "Produk, varian, jumlah, alamat, kontak"}],
+            "validation_checklist": ["Tidak mengarang stok/refund."],
+        }
+        with patch("app.core.tools.builder_tools.Agent") as MockAgent:
+            captured_kwargs = {}
+
+            def capture(**kwargs):
+                captured_kwargs.update(kwargs)
+                return _make_mock_agent(
+                    name=kwargs.get("name", "Toko Agent"),
+                    tools_config=kwargs.get("tools_config"),
+                    created_by_type=kwargs.get("created_by_type"),
+                    created_by_agent_id=kwargs.get("created_by_agent_id"),
+                    created_by_agent_name=kwargs.get("created_by_agent_name"),
+                )
+
+            MockAgent.side_effect = capture
+
+            with patch(
+                "app.core.tools.builder_tools._call_instruction_writer",
+                new=AsyncMock(return_value=json.dumps(writer_manual)),
+            ):
+                tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+                tool = next(t for t in tools if t.name == "create_agent")
+                result = _run(tool.ainvoke({
+                    "name": "Toko Sari Agent",
+                    "description": "Agent CS untuk toko online yang menjawab produk, stok, checkout, dan refund.",
+                    "instructions": "Kamu adalah CS Toko Sari. Bicara singkat, ramah, dan bantu customer belanja.",
+                    "business_context": (
+                        "Toko Sari menjual produk fashion online. Customer biasanya bertanya katalog, stok, ukuran, "
+                        "alamat pengiriman, checkout, pembayaran manual, dan refund. Agent harus mengumpulkan nama, "
+                        "produk, varian, jumlah, alamat, dan kontak. Untuk stok, harga final, ongkir, refund, dan "
+                        "pembayaran manual, agent harus eskalasi ke owner jika data belum pasti."
+                    ),
+                    "domain": "ecommerce",
+                    "tools_config": '{"memory": true, "escalation": true}',
+                }))
+            data = json.loads(result)
+
+        manual = captured_kwargs["tools_config"]["operating_manual"]
+        assert data["success"] is True
+        assert data["operating_manual"]["present"] is True
+        assert manual["source"] == "arthur_operating_manual_writer_auto"
+        assert manual["domain"] == "ecommerce"
+        assert manual["maturity"] == "usable"
+        assert "operating_manual" not in captured_kwargs["instructions"]
+
+    def test_create_agent_derives_operating_manual_from_blueprint_when_not_provided(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        blueprint = {
+            "agent_summary": "RentalPro mengelola lead rental alat pesta dari intake sampai follow-up owner.",
+            "assumptions": ["Harga final dan ketersediaan item harus dicek owner."],
+            "workflow_steps": [
+                {
+                    "step": 1,
+                    "name": "Intake rental",
+                    "agent_action": "Tanyakan tanggal acara, lokasi, item yang dibutuhkan, jumlah tamu, dan kebutuhan pengiriman.",
+                    "required_user_data": ["tanggal acara", "lokasi", "item rental", "jumlah tamu", "pengiriman"],
+                    "success_criteria": "Lead rental lengkap untuk dicek owner.",
+                }
+            ],
+            "state_plan": [
+                {
+                    "state": "intake",
+                    "entry_condition": "Customer bertanya rental alat pesta.",
+                    "allowed_actions": ["Kumpulkan tanggal, lokasi, item, dan jumlah tamu", "Simpan lead ke memory"],
+                    "exit_condition": "Data lead cukup untuk eskalasi ke owner.",
+                },
+                {
+                    "state": "owner_review",
+                    "entry_condition": "Lead rental sudah lengkap.",
+                    "allowed_actions": ["Eskalasi ketersediaan dan harga final ke owner"],
+                    "exit_condition": "Owner memberi keputusan harga/ketersediaan.",
+                },
+            ],
+            "escalation_rules": [
+                {"condition": "Customer minta harga final atau ketersediaan item", "action": "Eskalasi ke owner dengan ringkasan lead."}
+            ],
+            "validation_checklist": ["Jangan menjanjikan stok atau harga final sebelum owner review."],
+        }
+
+        sub = SimpleNamespace(token_quota=10_000_000, expires_at=None, grace_until=None)
+        plan_obj = SimpleNamespace(
+            label="Starter",
+            allowed_models=["openai/gpt-4.1-mini"],
+            subagents_allowed=True,
+            wa_connect=True,
+        )
+
+        async def _fake_get_or_create(_phone, _db):
+            return SimpleNamespace(id=uuid.uuid4()), sub
+
+        async def _fake_check_can_create(_phone, _db):
+            return {"allowed": True, "plan": "Starter", "agents_used": 0, "max_agents": 1}
+
+        async def _fake_get_subscription(_phone, _db):
+            return SimpleNamespace(id=uuid.uuid4()), sub, plan_obj
+
+        with patch("app.core.tools.builder_tools.Agent") as MockAgent:
+            captured_kwargs = {}
+
+            def capture(**kwargs):
+                captured_kwargs.update(kwargs)
+                return _make_mock_agent(
+                    name=kwargs.get("name", "RentalPro"),
+                    tools_config=kwargs.get("tools_config"),
+                    created_by_type=kwargs.get("created_by_type"),
+                    created_by_agent_name=kwargs.get("created_by_agent_name"),
+                )
+
+            MockAgent.side_effect = capture
+
+            with patch("app.core.domain.subscription_service.get_or_create_wa_user", _fake_get_or_create), patch(
+                "app.core.domain.subscription_service.check_can_create_agent",
+                _fake_check_can_create,
+            ), patch(
+                "app.core.domain.subscription_service.get_subscription_by_external_id",
+                _fake_get_subscription,
+            ), patch(
+                "app.core.tools.builder_tools.upsert_agent_operating_manual",
+                new=AsyncMock(),
+            ), patch(
+                "app.core.domain.memory_service.upsert_memory",
+                new=AsyncMock(),
+            ):
+                tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+                tool = next(t for t in tools if t.name == "create_agent")
+                result = _run(tool.ainvoke({
+                    "name": "RentalPro",
+                    "description": "Agent WhatsApp rental alat pesta.",
+                    "instructions": "Kamu adalah RentalPro, bantu customer rental alat pesta dengan ramah.",
+                    "business_context": (
+                        "Bisnis menyewakan tenda, kursi, meja, sound system, dan dekorasi untuk acara. "
+                        "Customer perlu memberi tanggal, lokasi, item, jumlah tamu, pengiriman, DP, dan pelunasan."
+                    ),
+                    "domain": "rental_alat_pesta",
+                    "tools_config": '{"memory": true, "escalation": true}',
+                    "blueprint": json.dumps(blueprint),
+                }))
+            data = json.loads(result)
+
+        manual = captured_kwargs["tools_config"]["operating_manual"]
+        assert data["success"] is True
+        assert manual["source"] == "arthur_blueprint"
+        assert manual["domain"] == "rental_alat_pesta"
+        assert manual["maturity"] == "usable"
+        assert [workflow["workflow_id"] for workflow in manual["workflows"]] == ["intake", "owner_review"]
+        assert "tanggal acara" in manual["workflows"][0]["required_inputs"]
+        assert any("harga final" in item for item in manual["workflows"][1]["escalation_rules"])
+
+    def test_missing_business_context_creates_draft_intake_safe_sop(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        with patch("app.core.tools.builder_tools.Agent") as MockAgent:
+            captured_kwargs = {}
+
+            def capture(**kwargs):
+                captured_kwargs.update(kwargs)
+                return _make_mock_agent(
+                    name=kwargs.get("name", "Agent Minim"),
+                    tools_config=kwargs.get("tools_config"),
+                    created_by_type=kwargs.get("created_by_type"),
+                    created_by_agent_name=kwargs.get("created_by_agent_name"),
+                )
+
+            MockAgent.side_effect = capture
+
+            tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+            tool = next(t for t in tools if t.name == "create_agent")
+            result = _run(tool.ainvoke({
+                "name": "Agent Minim",
+                "instructions": "Bantu customer.",
+                "tools_config": '{"memory": true}',
+            }))
+            data = json.loads(result)
+
+        manual = captured_kwargs["tools_config"]["operating_manual"]
+        assert data["operating_manual"]["maturity"] == "draft"
+        assert manual["owner_review_required"] is True
+        assert manual["workflows"][0]["workflow_id"] == "customer_intake"
+        assert any("detail bisnis belum lengkap" in item for item in manual["missing_context"])
+
+    def test_create_agent_auto_sop_uses_semantic_context_not_domain_keywords(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        writer_manual = {
+            "manual_id": "agent_operating_manual",
+            "version": 1,
+            "source": "arthur_operating_manual_writer_auto",
+            "domain": "event_equipment_operations",
+            "domain_confidence": "medium",
+            "maturity": "usable",
+            "owner_review_required": False,
+            "missing_context": [],
+            "assumptions": ["Biaya dan ketersediaan akhir diputuskan pemilik."],
+            "workflows": [
+                {
+                    "workflow_id": "event_need_intake",
+                    "name": "Kumpulkan kebutuhan acara",
+                    "trigger": "Calon pelanggan ingin dibantu menyiapkan perlengkapan acara.",
+                    "goal": "Mengumpulkan detail acara agar pemilik bisa cek biaya dan ketersediaan.",
+                    "required_inputs": ["tanggal acara", "lokasi", "jenis acara", "jumlah tamu", "perlengkapan yang dibutuhkan"],
+                    "steps": ["Tanya tanggal dan lokasi.", "Tanya jenis acara dan jumlah tamu.", "Ringkas kebutuhan perlengkapan."],
+                    "decision_points": ["Jika detail belum lengkap, tanya dulu sebelum eskalasi."],
+                    "allowed_tools": ["memory", "escalation"],
+                    "escalation_rules": ["Eskalasi saat pelanggan minta kepastian biaya, jadwal, atau ketersediaan."],
+                    "prohibited_actions": ["Jangan memastikan biaya atau ketersediaan sebelum pemilik mengecek."],
+                    "final_output": "Ringkasan kebutuhan acara siap dicek pemilik.",
+                    "examples": [],
+                },
+                {
+                    "workflow_id": "owner_review",
+                    "name": "Review pemilik",
+                    "trigger": "Data acara lengkap atau pelanggan minta kepastian.",
+                    "goal": "Meminta keputusan pemilik untuk biaya, jadwal, dan ketersediaan.",
+                    "required_inputs": ["ringkasan kebutuhan acara"],
+                    "steps": ["Kirim ringkasan ke pemilik.", "Tunggu keputusan.", "Sampaikan hasil keputusan tanpa menambah janji."],
+                    "decision_points": ["Jika pemilik belum jawab, sampaikan sedang dicek."],
+                    "allowed_tools": ["escalation"],
+                    "escalation_rules": ["Gunakan eskalasi untuk kepastian biaya, jadwal, dan ketersediaan."],
+                    "prohibited_actions": ["Jangan membuat keputusan menggantikan pemilik."],
+                    "final_output": "Pelanggan mendapat keputusan atau next step dari pemilik.",
+                    "examples": [],
+                },
+            ],
+            "knowledge_plan": {"must_have": ["Daftar perlengkapan", "Aturan uang muka", "Kontak pemilik"], "nice_to_have": [], "needs_upload": False},
+            "memory_plan": [{"key": "event_lead", "value_to_store": "Tanggal, lokasi, jenis acara, jumlah tamu, kebutuhan perlengkapan"}],
+            "validation_checklist": ["Agent mengumpulkan data acara.", "Agent eskalasi kepastian biaya/ketersediaan."],
+        }
+        with patch("app.core.tools.builder_tools.Agent") as MockAgent:
+            captured_kwargs = {}
+
+            def capture(**kwargs):
+                captured_kwargs.update(kwargs)
+                return _make_mock_agent(
+                    name=kwargs.get("name", "Rental Agent"),
+                    tools_config=kwargs.get("tools_config"),
+                    created_by_type=kwargs.get("created_by_type"),
+                    created_by_agent_name=kwargs.get("created_by_agent_name"),
+                )
+
+            MockAgent.side_effect = capture
+
+            with patch(
+                "app.core.tools.builder_tools._call_instruction_writer",
+                new=AsyncMock(return_value=json.dumps(writer_manual)),
+            ) as writer:
+                tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+                tool = next(t for t in tools if t.name == "create_agent")
+                _run(tool.ainvoke({
+                    "name": "Event Helper",
+                    "description": "Agent WhatsApp untuk bantu orang menyiapkan acara.",
+                    "instructions": "Kamu membantu calon pelanggan dengan ramah dan mengumpulkan kebutuhan mereka.",
+                    "business_context": (
+                        "Kami membantu orang menyiapkan acara. Pelanggan biasanya memberi tanggal, tempat, jenis acara, "
+                        "perkiraan jumlah tamu, barang yang dibutuhkan, kebutuhan antar-pasang, aturan uang muka, "
+                        "dan perubahan pesanan. Keputusan biaya akhir, jadwal tim, serta barang yang tersedia harus "
+                        "dicek pemilik dulu sebelum disampaikan sebagai kepastian."
+                    ),
+                    "tools_config": '{"memory": true, "escalation": true}',
+                    "channel_type": "whatsapp",
+                }))
+
+        manual = captured_kwargs["tools_config"]["operating_manual"]
+        assert writer.await_count == 1
+        assert manual["source"] == "arthur_operating_manual_writer_auto"
+        assert manual["domain"] == "event_equipment_operations"
+        assert manual["maturity"] == "usable"
+        assert manual["owner_review_required"] is False
+        assert [workflow["workflow_id"] for workflow in manual["workflows"]] == ["event_need_intake", "owner_review"]
+        assert "tanggal acara" in manual["workflows"][0]["required_inputs"]
+        assert any("kepastian biaya" in rule for rule in manual["workflows"][1]["escalation_rules"])
+
+    def test_create_agent_rewrites_generic_fallback_blueprint_with_semantic_sop(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        generic_blueprint = {
+            "agent_summary": "Event Helper dibuat untuk bantu pelanggan.",
+            "assumptions": ["Blueprint fallback dibuat karena output JSON generator tidak bisa dipulihkan."],
+            "workflow_steps": [
+                {
+                    "step": 1,
+                    "name": "Intake kebutuhan",
+                    "agent_action": "Pahami intent user, konteks bisnis, dan hasil akhir yang diinginkan sebelum menjalankan workflow.",
+                    "required_user_data": ["tujuan user", "konteks bisnis atau personal", "output yang diharapkan"],
+                    "success_criteria": "Agent memahami konteks inti.",
+                }
+            ],
+            "state_plan": [{"state": "intake", "entry_condition": "Percakapan baru", "allowed_actions": ["Kumpulkan data wajib"], "exit_condition": "Data inti cukup"}],
+            "escalation_rules": [{"condition": "Agent tidak yakin atau kasus sensitif", "action": "Eskalasi ke operator dengan ringkasan konteks"}],
+        }
+        writer_manual = {
+            "manual_id": "agent_operating_manual",
+            "version": 1,
+            "source": "arthur_operating_manual_writer_auto",
+            "domain": "event_equipment_operations",
+            "domain_confidence": "medium",
+            "maturity": "usable",
+            "owner_review_required": False,
+            "missing_context": [],
+            "assumptions": ["Biaya akhir dicek pemilik."],
+            "workflows": [
+                {
+                    "workflow_id": "event_need_intake",
+                    "name": "Kumpulkan kebutuhan acara",
+                    "trigger": "Pelanggan ingin menyiapkan acara.",
+                    "goal": "Data acara lengkap untuk dicek pemilik.",
+                    "required_inputs": ["tanggal acara", "lokasi", "jumlah tamu", "barang yang dibutuhkan"],
+                    "steps": ["Tanya tanggal/lokasi.", "Tanya jumlah tamu dan barang.", "Eskalasi kepastian biaya."],
+                    "decision_points": ["Jika minta kepastian biaya, eskalasi."],
+                    "allowed_tools": ["memory", "escalation"],
+                    "escalation_rules": ["Eskalasi biaya dan ketersediaan."],
+                    "prohibited_actions": ["Jangan memastikan biaya sendiri."],
+                    "final_output": "Ringkasan kebutuhan acara.",
+                    "examples": [],
+                }
+            ],
+            "knowledge_plan": {"must_have": ["Daftar barang", "Aturan uang muka"], "nice_to_have": [], "needs_upload": False},
+            "memory_plan": [{"key": "event_lead", "value_to_store": "Tanggal, lokasi, jumlah tamu, barang"}],
+            "validation_checklist": ["Tidak mengarang biaya."],
+        }
+
+        with patch("app.core.tools.builder_tools.Agent") as MockAgent:
+            captured_kwargs = {}
+
+            def capture(**kwargs):
+                captured_kwargs.update(kwargs)
+                return _make_mock_agent(
+                    name=kwargs.get("name", "Event Helper"),
+                    tools_config=kwargs.get("tools_config"),
+                    created_by_type=kwargs.get("created_by_type"),
+                    created_by_agent_name=kwargs.get("created_by_agent_name"),
+                )
+
+            MockAgent.side_effect = capture
+
+            with patch(
+                "app.core.tools.builder_tools._call_instruction_writer",
+                new=AsyncMock(return_value=json.dumps(writer_manual)),
+            ):
+                tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+                tool = next(t for t in tools if t.name == "create_agent")
+                _run(tool.ainvoke({
+                    "name": "Event Helper",
+                    "description": "Agent WhatsApp untuk bantu pelanggan persiapan acara.",
+                    "instructions": "Kamu membantu pelanggan mengumpulkan kebutuhan acara dan eskalasi kepastian biaya ke pemilik.",
+                    "business_context": "Pelanggan memberi tanggal acara, lokasi, jumlah tamu, dan barang. Biaya akhir dicek pemilik.",
+                    "tools_config": '{"memory": true, "escalation": true}',
+                    "channel_type": "whatsapp",
+                    "blueprint": json.dumps(generic_blueprint),
+                }))
+
+        manual = captured_kwargs["tools_config"]["operating_manual"]
+        assert manual["source"] == "arthur_operating_manual_writer_auto"
+        assert manual["domain"] == "event_equipment_operations"
+        assert manual["workflows"][0]["workflow_id"] == "event_need_intake"
+        assert "tanggal acara" in manual["workflows"][0]["required_inputs"]
+
+    def test_event_context_does_not_fallback_to_food_or_ecommerce_sop_domain(self):
+        from app.core.domain.agent_sop_service import build_agent_operating_manual
+
+        manual = build_agent_operating_manual(
+            name="Event Helper",
+            description="Agent WhatsApp untuk bantu pelanggan persiapan acara.",
+            instructions=(
+                "Kumpulkan tanggal acara, lokasi, jumlah tamu, barang yang dibutuhkan, "
+                "antar pasang, kepastian biaya, dan ketersediaan barang. Jangan mutusin biaya sendiri."
+            ),
+            business_context=(
+                "Usaha bantu orang nyiapin acara. Pelanggan tanya tanggal acara, tempat, jumlah tamu, "
+                "barang yang dibutuhkan, perlu antar pasang atau tidak. Kepastian biaya dan ketersediaan "
+                "barang harus dicek pemilik dulu."
+            ),
+            tools_config={"memory": True, "escalation": True},
+        )
+
+        assert manual["domain"] == "event_service"
+        assert manual["source"] == "arthur_template"
+        assert [workflow["workflow_id"] for workflow in manual["workflows"]] == [
+            "event_need_intake",
+            "owner_review_follow_up",
+        ]
 
     def test_owner_phone_added_to_operator_ids(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -583,6 +1670,45 @@ class TestCreateAgent:
                 "owner_phone harus masuk ke operator_ids saat create_agent"
             assert captured_kwargs.get("tools_config", {}).get("tavily") is True, \
                 "agent yang dibuat Arthur harus default punya browsing Tavily"
+            assert captured_kwargs.get("created_by_type") == "arthur_builder"
+            assert captured_kwargs.get("created_by_agent_name") == "Arthur"
+            assert "dibuat dan dikonfigurasi oleh Arthur" in captured_kwargs.get("instructions", "")
+            assert "Owner adalah bos dan superadmin" in captured_kwargs.get("instructions", "")
+            assert "Google" in captured_kwargs.get("instructions", "")
+
+    def test_create_agent_sets_arthur_created_by_metadata(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        arthur_id = str(uuid.uuid4())
+        with patch("app.core.tools.builder_tools.Agent") as MockAgent:
+            captured_kwargs = {}
+
+            def capture(**kwargs):
+                captured_kwargs.update(kwargs)
+                return _make_mock_agent(
+                    name=kwargs.get("name", "CS Agent"),
+                    created_by_type=kwargs.get("created_by_type"),
+                    created_by_agent_id=kwargs.get("created_by_agent_id"),
+                    created_by_agent_name=kwargs.get("created_by_agent_name"),
+                )
+
+            MockAgent.side_effect = capture
+
+            tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx", self_agent_id=arthur_id)
+            tool = next(t for t in tools if t.name == "create_agent")
+            result = _run(tool.ainvoke({
+                "name": "CS Agent",
+                "instructions": "Kamu adalah CS yang membantu pelanggan.",
+            }))
+            data = json.loads(result)
+
+        assert captured_kwargs["created_by_type"] == "arthur_builder"
+        assert captured_kwargs["created_by_agent_id"] == arthur_id
+        assert captured_kwargs["created_by_agent_name"] == "Arthur"
+        assert data["created_by_type"] == "arthur_builder"
+        assert data["created_by_agent_id"] == arthur_id
+        assert data["created_by_agent_name"] == "Arthur"
 
     def test_create_agent_with_google_workspace_config_appends_instruction(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -821,7 +1947,12 @@ class TestListMyAgents:
         from app.core.tools.builder_tools import build_builder_tools
         db = _make_mock_db()
 
-        my_agent = _make_mock_agent(name="My Agent", operator_ids=["+62811xxx"])
+        my_agent = _make_mock_agent(
+            name="My Agent",
+            operator_ids=["+62811xxx"],
+            created_by_type="arthur_builder",
+            created_by_agent_name="Arthur",
+        )
         other_agent = _make_mock_agent(name="Other Agent", operator_ids=["+62999yyy"])
 
         mock_result = MagicMock()
@@ -835,6 +1966,8 @@ class TestListMyAgents:
 
         assert data["count"] == 1
         assert data["agents"][0]["name"] == "My Agent"
+        assert data["agents"][0]["created_by_type"] == "arthur_builder"
+        assert data["agents"][0]["launch_metadata"]["created_by_arthur"] is True
 
     def test_returns_agents_owned_by_owner_external_id_even_without_operator_id(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -950,7 +2083,73 @@ class TestUpdateAgent:
 
         assert data["success"] is True
         assert "google_workspace_enabled" not in data
+        assert data["memory_refresh"]["updated"] is False
         assert my_agent.name == "Agent Baru"
+
+    def test_update_agent_selective_refresh_writes_versioned_memory(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        my_agent = _make_mock_agent(
+            operator_ids=["+62811xxx"],
+            owner_external_id="62811xxx",
+        )
+        my_agent.description = "Agent lama"
+        my_agent.instructions = "Instruksi lama yang masih cukup pendek."
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = my_agent
+        db.execute = AsyncMock(return_value=mock_result)
+
+        upsert_calls: list[tuple[str, str]] = []
+
+        async def fake_upsert_memory(agent_id, key, value, db_arg, scope=None):
+            upsert_calls.append((key, value))
+            return SimpleNamespace(agent_id=agent_id, key=key, value_data=value, scope=scope)
+
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "update_agent")
+        with patch("app.core.domain.memory_service.upsert_memory", fake_upsert_memory):
+            result = _run(tool.ainvoke({
+                "agent_id": str(my_agent.id),
+                "instructions": "Instruksi baru lengkap untuk workflow agent yang sudah diperbarui dan lebih jelas.",
+            }))
+        data = json.loads(result)
+
+        assert data["success"] is True
+        assert data["memory_refresh"]["updated"] is True
+        assert data["memory_refresh"]["mode"] == "selective"
+        assert data["memory_refresh"]["context_version"] == my_agent.version
+        keys = {key for key, _value in upsert_calls}
+        assert f"soul:v{my_agent.version}" in keys
+        assert f"agent_blueprint:v{my_agent.version}" in keys
+        assert f"setup_summary:v{my_agent.version}" in keys
+        assert "agent_context_version" in keys
+
+    def test_update_agent_refresh_memory_mode_none_skips_memory_write(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        my_agent = _make_mock_agent(operator_ids=["+62811xxx"], owner_external_id="62811xxx")
+        my_agent.instructions = "Instruksi lama yang masih cukup pendek."
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = my_agent
+        db.execute = AsyncMock(return_value=mock_result)
+
+        upsert_mock = AsyncMock()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "update_agent")
+        with patch("app.core.domain.memory_service.upsert_memory", upsert_mock):
+            result = _run(tool.ainvoke({
+                "agent_id": str(my_agent.id),
+                "instructions": "Instruksi baru lengkap untuk workflow agent yang sudah diperbarui dan lebih jelas.",
+                "refresh_memory_mode": "none",
+            }))
+        data = json.loads(result)
+
+        assert data["success"] is True
+        assert data["memory_refresh"]["mode"] == "none"
+        assert data["memory_refresh"]["updated"] is False
+        upsert_mock.assert_not_called()
 
     def test_update_agent_blocks_buzzer_or_politics(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -971,6 +2170,40 @@ class TestUpdateAgent:
 
         assert "error" in data
         assert "politik" in data["error"].lower()
+        db.commit.assert_not_called()
+
+    def test_update_agent_blocks_unsafe_payment_workflow(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        my_agent = _make_mock_agent(
+            name="CVin aja",
+            operator_ids=["+62811xxx"],
+            tools_config={
+                "memory": True,
+                "skills": True,
+                "escalation": False,
+                "sandbox": True,
+                "subagents": {"enabled": True},
+                "whatsapp_media": True,
+            },
+            channel_type="whatsapp",
+        )
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = my_agent
+        db.execute = AsyncMock(return_value=mock_result)
+
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "update_agent")
+        result = _run(tool.ainvoke({
+            "agent_id": str(my_agent.id),
+            "instructions": "Kamu adalah CVin aja, asisten riset CV. Customer bayar dan admin approve.",
+        }))
+        data = json.loads(result)
+
+        assert data["error"] == "Konfigurasi agent belum aman untuk diupdate."
+        assert any("waiting_payment" in error for error in data["validation_errors"])
+        assert any("escalation=true" in error for error in data["validation_errors"])
         db.commit.assert_not_called()
 
     def test_enable_google_workspace_updates_tools_and_instructions(self):
@@ -1004,9 +2237,377 @@ class TestUpdateAgent:
         assert "MCP" not in my_agent.instructions
         assert "MCP" not in data["next_step"]
 
+    def test_update_existing_google_workspace_agent_returns_auth_next_step(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        my_agent = _make_mock_agent(
+            name="CVin aja",
+            tools_config={
+                "memory": True,
+                "mcp": {"enabled": True, "servers": {"google_workspace": {"transport": "streamable_http"}}},
+            },
+        )
+        my_agent.instructions = "Kamu adalah agent jasa CV."
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = my_agent
+        db.execute = AsyncMock(return_value=mock_result)
+
+        tools = build_builder_tools(db_factory=db, owner_phone=None)
+        tool = next(t for t in tools if t.name == "update_agent")
+        result = _run(tool.ainvoke({
+            "agent_id": str(my_agent.id),
+            "instructions": "Kamu adalah CVin aja, agent jasa CV yang memakai Google Drive untuk menyimpan dokumen referensi customer.",
+        }))
+        data = json.loads(result)
+
+        assert data["success"] is True
+        assert data["google_workspace_enabled"] is True
+        assert data["needs_google_auth"] is True
+        assert data["readback"]["tools_config_has_google_workspace"] is True
+        assert data["readback"]["instructions_include_google_workspace"] is True
+        assert "generate_google_auth_link" in data["next_step"]
+
+    def test_generate_google_auth_link_reports_timeout_with_public_tunnel_context(self):
+        import httpx
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "generate_google_auth_link")
+
+        class TimeoutClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            async def post(self, *args, **kwargs):
+                raise httpx.TimeoutException("connect timeout")
+
+        settings = SimpleNamespace(
+            google_integration_service_url="https://abc.devtunnels.ms",
+            workspace_mcp_prefer_local="true",
+            api_key="test-key",
+        )
+        with patch("app.core.tools.builder_tools.get_settings", return_value=settings), patch(
+            "httpx.AsyncClient", TimeoutClient
+        ):
+            result = _run(tool.ainvoke({
+                "agent_id": str(uuid.uuid4()),
+                "external_user_id": "+628111111111",
+            }))
+
+        assert "Timeout" in result
+        assert "https://abc.devtunnels.ms" in result
+        assert "localhost:8003" not in result
+        assert result.strip() != "[error]"
+
+    def test_generate_google_auth_link_rejects_lid_identity(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "generate_google_auth_link")
+
+        settings = SimpleNamespace(
+            google_integration_service_url="http://localhost:8003",
+            workspace_mcp_prefer_local="false",
+            api_key="test-key",
+        )
+        with patch("app.core.tools.builder_tools.get_settings", return_value=settings):
+            result = _run(tool.ainvoke({
+                "agent_id": str(uuid.uuid4()),
+                "external_user_id": "151414827434073@lid",
+            }))
+
+        assert "nomor whatsapp asli" in result.lower()
+        assert "lid" in result.lower()
+
 
 # ────────────────────────────────────────────────────────────────────────────
-# Section 7: get_agent_detail ownership check
+# Section 7: verify_agent launch readiness
+# ────────────────────────────────────────────────────────────────────────────
+
+class TestVerifyAgentReadiness:
+    def test_verify_agent_blocks_launch_without_owner(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        agent = _make_mock_agent(operator_ids=[], owner_external_id=None)
+        agent.instructions = (
+            "IDENTITAS PLATFORM DAN OWNER\n"
+            "Kamu adalah staff AI yang dibuat dan dikonfigurasi oleh Arthur."
+        )
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = agent
+        db.execute = AsyncMock(return_value=mock_result)
+
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "verify_agent")
+        result = _run(tool.ainvoke({"agent_id": str(agent.id)}))
+        data = json.loads(result)
+
+        assert data["status"] == "launch_blocked"
+        assert data["launch_readiness"]["owner_present"] is False
+        assert any("owner_missing" in blocker for blocker in data["launch_readiness"]["blockers"])
+
+    def test_verify_agent_blocks_google_agent_without_auth(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        agent = _make_mock_agent(
+            operator_ids=["+62811xxx"],
+            owner_external_id="62811xxx",
+            tools_config={
+                "memory": True,
+                "mcp": {
+                    "enabled": True,
+                    "servers": {
+                        "google_workspace": {
+                            "transport": "streamable_http",
+                            "url": "http://localhost:8002/mcp",
+                        }
+                    },
+                },
+            },
+        )
+        agent.instructions = (
+            "IDENTITAS PLATFORM DAN OWNER\n"
+            "Kamu adalah staff AI yang dibuat dan dikonfigurasi oleh Arthur."
+        )
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = agent
+        db.execute = AsyncMock(return_value=mock_result)
+
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "verify_agent")
+        result = _run(tool.ainvoke({"agent_id": str(agent.id)}))
+        data = json.loads(result)
+
+        assert data["status"] == "launch_blocked"
+        assert data["google_workspace_enabled"] is True
+        assert data["needs_google_auth"] is True
+        assert any("google_auth_required" in blocker for blocker in data["launch_readiness"]["blockers"])
+
+    def test_verify_agent_warns_when_platform_identity_missing(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        agent = _make_mock_agent(operator_ids=["+62811xxx"], owner_external_id="62811xxx")
+        agent.instructions = "Kamu adalah agent CS yang membantu pelanggan."
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = agent
+        db.execute = AsyncMock(return_value=mock_result)
+
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "verify_agent")
+        result = _run(tool.ainvoke({"agent_id": str(agent.id)}))
+        data = json.loads(result)
+
+        assert data["launch_readiness"]["owner_present"] is True
+        assert data["launch_readiness"]["platform_identity_present"] is False
+        assert data["launch_readiness"]["created_by_present"] is False
+        assert any("created_by_metadata_missing" in warning for warning in data["launch_readiness"]["warnings"])
+        assert any("platform_identity_missing" in warning for warning in data["launch_readiness"]["warnings"])
+
+    def test_verify_agent_accepts_created_by_metadata_as_platform_identity(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        agent = _make_mock_agent(
+            operator_ids=["+62811xxx"],
+            owner_external_id="62811xxx",
+            created_by_type="arthur_builder",
+            created_by_agent_id=str(uuid.uuid4()),
+            created_by_agent_name="Arthur",
+            tools_config={"memory": True, "operating_manual": _usable_operating_manual()},
+        )
+        agent.instructions = "Kamu adalah agent CS yang membantu pelanggan."
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = agent
+        db.execute = AsyncMock(return_value=mock_result)
+
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "verify_agent")
+        result = _run(tool.ainvoke({"agent_id": str(agent.id)}))
+        data = json.loads(result)
+
+        assert data["status"] == "launch_ready"
+        assert data["created_by_type"] == "arthur_builder"
+        assert data["launch_readiness"]["created_by_present"] is True
+        assert data["launch_readiness"]["platform_identity_present"] is True
+        assert not any("created_by_metadata_missing" in warning for warning in data["launch_readiness"]["warnings"])
+
+    def test_verify_agent_blocks_full_launch_without_operating_manual(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        agent = _make_mock_agent(
+            operator_ids=["+62811xxx"],
+            owner_external_id="62811xxx",
+            created_by_type="arthur_builder",
+            created_by_agent_id=str(uuid.uuid4()),
+            created_by_agent_name="Arthur",
+            tools_config={"memory": True},
+        )
+        agent.instructions = "Kamu adalah agent CS yang membantu pelanggan."
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = agent
+        db.execute = AsyncMock(return_value=mock_result)
+
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "verify_agent")
+        result = _run(tool.ainvoke({"agent_id": str(agent.id)}))
+        data = json.loads(result)
+
+        assert data["status"] == "launch_blocked"
+        assert data["launch_readiness"]["operating_manual"]["present"] is False
+        assert any("operating_manual_missing" in blocker for blocker in data["launch_readiness"]["blockers"])
+        setup = data["setup_status_for_owner"]
+        assert any(item["key"] == "operating_manual" and item["status"] == "needs_setup" for item in setup["items"])
+
+    def test_verify_agent_blocks_draft_sop_as_intake_safe_only(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        draft_manual = _usable_operating_manual()
+        draft_manual["maturity"] = "draft"
+        draft_manual["owner_review_required"] = True
+        draft_manual["missing_context"] = ["detail bisnis belum lengkap"]
+        agent = _make_mock_agent(
+            operator_ids=["+62811xxx"],
+            owner_external_id="62811xxx",
+            created_by_type="arthur_builder",
+            created_by_agent_id=str(uuid.uuid4()),
+            created_by_agent_name="Arthur",
+            tools_config={"memory": True, "operating_manual": draft_manual},
+        )
+        agent.instructions = "Kamu adalah agent CS yang membantu pelanggan."
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = agent
+        db.execute = AsyncMock(return_value=mock_result)
+
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "verify_agent")
+        result = _run(tool.ainvoke({"agent_id": str(agent.id)}))
+        data = json.loads(result)
+
+        assert data["status"] == "launch_blocked"
+        assert data["launch_readiness"]["operating_manual"]["maturity"] == "draft"
+        assert any("operating_manual_draft" in blocker for blocker in data["launch_readiness"]["blockers"])
+        assert any(item["key"] == "operating_manual" and item["status"] == "needs_review" for item in data["setup_status_for_owner"]["items"])
+
+    def test_verify_agent_blocks_payment_workflow_without_escalation(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        agent = _make_mock_agent(
+            name="CVin aja",
+            operator_ids=["+62811xxx"],
+            owner_external_id="62811xxx",
+            tools_config={
+                "memory": True,
+                "escalation": False,
+                "sandbox": True,
+                "subagents": {"enabled": True},
+                "whatsapp_media": True,
+            },
+            channel_type="whatsapp",
+        )
+        agent.wa_device_id = "wa-device-1"
+        agent.instructions = (
+            "IDENTITAS PLATFORM DAN OWNER\n"
+            "Kamu adalah staff AI yang dibuat dan dikonfigurasi oleh Arthur.\n"
+            "Kamu mengurus jasa CV ATS. Customer bayar, kirim bukti transfer, "
+            "dan admin harus approve sebelum CV dikirim."
+        )
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = agent
+        db.execute = AsyncMock(return_value=mock_result)
+
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "verify_agent")
+        result = _run(tool.ainvoke({"agent_id": str(agent.id)}))
+        data = json.loads(result)
+
+        assert data["status"] == "launch_blocked"
+        assert any(
+            "Workflow pembayaran/admin approval wajib escalation=true" in blocker
+            for blocker in data["launch_readiness"]["blockers"]
+        )
+
+    def test_rag_enabled_without_documents_asks_for_documents(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        agent = _make_mock_agent(
+            operator_ids=["+62811xxx"],
+            owner_external_id="62811xxx",
+            created_by_type="arthur_builder",
+            created_by_agent_name="Arthur",
+            tools_config={"memory": True, "rag": True, "operating_manual": _usable_operating_manual()},
+        )
+        agent.instructions = "Kamu adalah agent FAQ yang menjawab berdasarkan dokumen."
+        agent_result = MagicMock()
+        agent_result.scalar_one_or_none.return_value = agent
+        document_count_result = MagicMock()
+        document_count_result.scalar_one.return_value = 0
+        db.execute = AsyncMock(side_effect=[agent_result, document_count_result])
+
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "verify_agent")
+        result = _run(tool.ainvoke({"agent_id": str(agent.id)}))
+        data = json.loads(result)
+
+        assert data["status"] == "launch_blocked"
+        assert data["rag_enabled"] is True
+        assert data["document_count"] == 0
+        assert any("rag_documents_required" in blocker for blocker in data["launch_readiness"]["blockers"])
+        setup = data["setup_status_for_owner"]
+        assert setup["summary_for_owner"] == "Agent belum siap launch. Ada setup yang perlu dibereskan dulu."
+        assert any(item["key"] == "knowledge_base" and item["status"] == "needs_setup" for item in setup["items"])
+        assert any("Upload dokumen" in step for step in setup["next_steps"])
+
+    def test_verify_agent_reports_plain_language_setup_status(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        agent = _make_mock_agent(
+            operator_ids=["+62811xxx"],
+            owner_external_id="62811xxx",
+            created_by_type="arthur_builder",
+            created_by_agent_name="Arthur",
+            tools_config={"memory": True, "rag": True, "escalation": True, "operating_manual": _usable_operating_manual()},
+            channel_type="whatsapp",
+        )
+        agent.wa_device_id = "wa-device-1"
+        agent.instructions = "Kamu adalah agent CS yang menjawab berdasarkan dokumen."
+        agent_result = MagicMock()
+        agent_result.scalar_one_or_none.return_value = agent
+        document_count_result = MagicMock()
+        document_count_result.scalar_one.return_value = 2
+        db.execute = AsyncMock(side_effect=[agent_result, document_count_result])
+
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "verify_agent")
+        result = _run(tool.ainvoke({"agent_id": str(agent.id)}))
+        data = json.loads(result)
+
+        assert data["status"] == "launch_ready"
+        setup = data["setup_status_for_owner"]
+        assert setup["summary_for_owner"] == "Agent siap dites atau digunakan."
+        assert any(item["key"] == "knowledge_base" and "2 dokumen" in item["message"] for item in setup["items"])
+        assert any(item["key"] == "whatsapp" and item["status"] == "ready" for item in setup["items"])
+        assert any(item["key"] == "human_handoff" and item["status"] == "ready" for item in setup["items"])
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Section 8: get_agent_detail ownership check
 # ────────────────────────────────────────────────────────────────────────────
 
 class TestGetAgentDetail:
@@ -1014,7 +2615,12 @@ class TestGetAgentDetail:
         from app.core.tools.builder_tools import build_builder_tools
         db = _make_mock_db()
 
-        my_agent = _make_mock_agent(operator_ids=["+62811xxx"])
+        my_agent = _make_mock_agent(
+            operator_ids=["+62811xxx"],
+            created_by_type="arthur_builder",
+            created_by_agent_id="arthur-agent-id",
+            created_by_agent_name="Arthur",
+        )
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = my_agent
         db.execute = AsyncMock(return_value=mock_result)
@@ -1026,6 +2632,9 @@ class TestGetAgentDetail:
         assert data["name"] == my_agent.name
         assert "tools_config" in data
         assert "instructions_preview" in data
+        assert data["created_by_type"] == "arthur_builder"
+        assert data["created_by_agent_name"] == "Arthur"
+        assert data["launch_metadata"]["created_by_arthur"] is True
 
     def test_rejects_access_to_others_agent(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -1053,3 +2662,55 @@ class TestGetAgentDetail:
         tool = next(t for t in tools if t.name == "get_agent_detail")
         result = _run(tool.ainvoke({"agent_id": str(uuid.uuid4())}))
         assert "[error]" in result
+
+
+class TestLlmJsonRecovery:
+    """Regression tests untuk parsing JSON blueprint yang ke-truncate / dibungkus prosa."""
+
+    def test_valid_json_unchanged(self):
+        from app.core.tools.builder_tools import _parse_llm_json_object
+        parsed, repaired = _parse_llm_json_object('{"a":1,"b":[1,2],"c":{"d":true}}')
+        assert parsed == {"a": 1, "b": [1, 2], "c": {"d": True}}
+        assert repaired is False
+
+    def test_prose_wrapped_json(self):
+        from app.core.tools.builder_tools import _parse_llm_json_object
+        parsed, _ = _parse_llm_json_object('Here is the blueprint:\n{"a":"ok","b":2}\nDone.')
+        assert parsed == {"a": "ok", "b": 2}
+
+    def test_truncated_string_value(self):
+        from app.core.tools.builder_tools import _parse_llm_json_object
+        parsed, repaired = _parse_llm_json_object('{"a":"ok","b":"cut off mid')
+        assert parsed["a"] == "ok"
+        assert parsed["b"].startswith("cut off")
+        assert repaired is True
+
+    def test_truncated_nested_array(self):
+        from app.core.tools.builder_tools import _parse_llm_json_object
+        raw = ('{"agent_summary":"CS bot","workflow_steps":[{"step":1,'
+               '"name":"intake","required_user_data":["nama","keluhan"')
+        parsed, _ = _parse_llm_json_object(raw)
+        assert parsed["agent_summary"] == "CS bot"
+        assert parsed["workflow_steps"][0]["step"] == 1
+        assert "nama" in parsed["workflow_steps"][0]["required_user_data"]
+
+    def test_dangling_key_dropped(self):
+        from app.core.tools.builder_tools import _parse_llm_json_object
+        parsed, _ = _parse_llm_json_object('{"a":"ok","validation_che')
+        assert parsed == {"a": "ok"}
+
+    def test_dangling_colon_filled_null(self):
+        from app.core.tools.builder_tools import _parse_llm_json_object
+        parsed, _ = _parse_llm_json_object('{"a":"ok","needs_upload":')
+        assert parsed == {"a": "ok", "needs_upload": None}
+
+    def test_trailing_comma(self):
+        from app.core.tools.builder_tools import _parse_llm_json_object
+        assert _parse_llm_json_object('{"a":"ok","b":"two",')[0] == {"a": "ok", "b": "two"}
+        assert _parse_llm_json_object('{"x":[1,2,3,')[0] == {"x": [1, 2, 3]}
+
+    def test_truncated_literal_completed(self):
+        from app.core.tools.builder_tools import _parse_llm_json_object
+        assert _parse_llm_json_object('{"needs_upload":tru')[0] == {"needs_upload": True}
+        assert _parse_llm_json_object('{"flag":fal')[0] == {"flag": False}
+        assert _parse_llm_json_object('{"x":[1,nul')[0] == {"x": [1, None]}

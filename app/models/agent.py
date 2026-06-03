@@ -65,6 +65,13 @@ class Agent(Base):
     # --- subscription ownership ---
     owner_external_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
+    # --- platform creation source ---
+    # Immutable-ish source metadata injected by runtime so agents do not rely on
+    # LLM-written instructions/soul to know who created/configured them.
+    created_by_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_by_agent_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_by_agent_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
     # --- output token limit (per-agent override) ---
     # null = pakai settings.llm_max_tokens (global default)
     # Isi untuk override per-agent: WA CS agent ~512, builder ~2048

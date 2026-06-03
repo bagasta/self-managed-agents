@@ -52,6 +52,9 @@ async def seed() -> None:
                     existing.capabilities = ["system", "subagent"]
                 elif "subagent" not in existing.capabilities:
                     existing.capabilities = list(existing.capabilities) + ["subagent"]
+                if not existing.created_by_type:
+                    existing.created_by_type = "system"
+                    existing.created_by_agent_name = "System"
                 print(f"  ✅ Updated: {name}")
             else:
                 agent = Agent(
@@ -61,6 +64,8 @@ async def seed() -> None:
                     tools_config=spec.get("tools_config", {}),
                     description=spec.get("description", ""),
                     capabilities=["system", "subagent"],
+                    created_by_type="system",
+                    created_by_agent_name="System",
                 )
                 db.add(agent)
                 print(f"  ✅ Created: {name}")

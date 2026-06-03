@@ -98,6 +98,9 @@ class AgentResponse(BaseModel):
     version: int
     is_deleted: bool
     owner_external_id: str | None = None
+    created_by_type: str | None = None
+    created_by_agent_id: str | None = None
+    created_by_agent_name: str | None = None
 
     # output token limit
     max_tokens: int | None

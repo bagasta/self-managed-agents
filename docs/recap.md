@@ -1,5 +1,158 @@
 # Recap: Deep Agent SaaS Hardening — MCP, Subagent, Sandbox, Builder Entitlements
 
+## 2026-06-03 — Arthur Builder SOP Semantic, Bahasa Fleksibel, dan Tier Check Awal
+
+### Masalah yang Ditemukan
+- Arthur masih bisa mengecek tier/quota terlambat, yaitu baru saat `create_agent`, sehingga user menunggu proses blueprint/instructions dulu sebelum tahu paketnya tidak cukup.
+- Bahasa agent buatan Arthur terlalu diasumsikan Bahasa Indonesia, padahal user bisa memakai bahasa lain atau campur bahasa.
+- SOP agent buatan Arthur terlalu mudah jatuh ke template yang salah karena sinyal keyword generik seperti `data`, `barang`, `stok`, `harga`, `delivery`, atau `pembayaran`.
+- Untuk real case usaha persiapan acara, Arthur sempat salah mendeteksi sebagai data analyst/ecommerce/F&B atau payment-delivery workflow, padahal kebutuhan user adalah intake event, cek harga/stok ke owner, lalu follow-up.
+- Instruction writer bisa mengembalikan output kosong atau mengarang nama brand bisnis seperti `FixEvent`; keduanya berisiko membuat agent tidak sesuai kebutuhan user.
+
+### Perubahan Utama
+- `plan_agent` sekarang melakukan preview entitlement di awal lewat subscription user: slot agent, limit paket, model, fitur Google, subagent, dan WhatsApp dicek sebelum Arthur lanjut compose/create.
+- Prompt Arthur di `system-message-builder.md` diarahkan memanggil `get_user_subscription()` sebelum `plan_agent`, lalu berhenti jika `plan_status=blocked_by_subscription`.
+- Preset dan runtime prompt sekarang memakai aturan bahasa fleksibel: ikuti bahasa user, default Indonesia hanya jika bahasa user tidak jelas.
+- Ditambahkan `compose_agent_operating_manual()` dan SOP/Agent Operating Manual terpisah dari instructions; runtime agent menerima `## SOP Workflow Detail` dari operating manual.
+- `create_agent` otomatis membuat/menyimpan operating manual dari blueprint atau semantic context jika Arthur tidak mengirim manual eksplisit.
+- Domain SOP sekarang punya jalur semantic untuk konteks event/local service, termasuk template `event_service`; konteks acara tidak lagi jatuh ke ecommerce hanya karena ada kata barang/harga/stok.
+- Deteksi payment approval diperketat: DP/pelunasan sebagai policy bisnis biasa tidak lagi memaksa state `waiting_payment -> payment_review -> approved -> delivery`.
+- Writer output kosong sekarang fallback ke deterministic instructions, bukan dianggap valid.
+- Guard brand hallucination ditambahkan di instructions/soul/create: jika user tidak menyebut nama bisnis eksplisit, agent memakai "bisnis ini/usaha ini" dan tidak mengarang brand.
+- Arthur builder tanpa subagent tetap memakai timeout yang cukup untuk flow create, tetapi tidak sepanjang flow subagent/deploy.
+
+### Validasi
+- `PYTHONPATH=. .venv/bin/python -m pytest tests/test_builder_tools.py tests/test_session_lock_and_history.py -q` -> 148 passed.
+- E2E Arthur dengan user awam membuat agent `Event Helper Final`:
+  - step pertama `get_user_subscription`;
+  - preset `cs_whatsapp_basic`;
+  - Google/MCP off karena user bilang "tanpa Google";
+  - sandbox/deploy/subagents off;
+  - operating manual source `arthur_operating_manual_writer_auto`;
+  - domain SOP event-specific, bukan ecommerce/F&B;
+  - tidak ada brand karangan.
+- E2E agent buatan Arthur:
+  - customer minta harga dan kepastian barang untuk acara ulang tahun;
+  - agent menyimpan konteks ke memory;
+  - agent memanggil `escalate_to_human` sebelum reply;
+  - agent tidak mengarang harga, stok, atau keputusan final.
+
+## 2026-06-02 — Customer Google Blocker Notify Owner dan Arthur Builder Timeout
+
+### Masalah yang Ditemukan
+- Agent operasional WhatsApp bisa membalas customer dengan detail internal saat Google Calendar/Workspace gagal, termasuk menyebut koneksi akun dan nomor admin/operator.
+- Nomor operator dari `escalation_config.operator_phone` masih diinjeksi ke prompt customer biasa, sehingga model punya bahan untuk membocorkan nomor itu.
+- Arthur builder tanpa subagent masih mendapat timeout/recursion ceiling 8x agent normal; dengan default 300 detik, flow create agent bisa menunggu jauh di atas 10 menit sebelum timeout.
+- `create_agent` masih menyarankan `compose_agent_soul` setelah create jika soul belum tersimpan, yang bisa menambah roundtrip LLM pasca-create dan membuat WhatsApp terasa menggantung.
+
+### Perubahan Utama
+- `run_agent` sekarang merutekan blocker Google/Calendar pada sesi WhatsApp customer sebagai insiden internal: kirim notifikasi ke Owner lewat WhatsApp device agent, sertakan error ringkas dan link reconnect Google jika ada.
+- Reply ke customer untuk blocker Google/Calendar diganti menjadi aman: data dicatat, Owner sudah/perlu mengecek sistem penjadwalan, tanpa nomor admin, link auth, atau istilah Google Workspace.
+- Prompt runtime customer tidak lagi mengekspos nomor operator/admin; operator/Owner tetap mendapat konteks identitas saat mereka sendiri yang chat agent.
+- Arthur builder tanpa subagent dibatasi ke recursion limit lebih kecil dan timeout maksimal 540 detik; flow subagent/deploy tetap mendapat ceiling panjang.
+- `_call_instruction_writer` untuk blueprint/instructions/soul sekarang punya timeout 45 detik per panggilan dan tidak retry jika timeout.
+- `create_agent` tidak lagi mendorong `compose_agent_soul` sebagai langkah wajib setelah create; soul pasca-create dibuat opsional agar flow create bisa selesai lebih cepat.
+
+### Validasi
+- `PYTHONPATH=. .venv/bin/python -m pytest -q tests/test_google_mcp_reply_overrides.py tests/test_whatsapp_direct_send.py tests/test_builder_tools.py::TestUpdateAgent tests/test_memory_service.py` -> 85 passed.
+- `git diff --check -- app/core/engine/agent_runner.py app/core/engine/prompt_builder.py app/core/tools/builder_tools.py tests/test_google_mcp_reply_overrides.py tests/test_whatsapp_direct_send.py docs/recap.md` -> clean.
+- `git diff --check` global masih melaporkan `.gitignore:84: new blank line at EOF` dari working tree yang tidak terkait bugfix ini.
+
+## 2026-06-02 — Versioned Selective Memory Refresh untuk Update Agent Arthur
+
+### Masalah yang Ditemukan
+- Update agent lewat Arthur langsung mengubah `instructions`/`tools_config`, tetapi memory lama seperti `soul` dan `agent_blueprint` masih bisa ikut masuk prompt.
+- Wipe total memory terlalu destruktif karena bisa menghapus konteks lama yang masih berguna dan menyulitkan debugging.
+
+### Perubahan Utama
+- Ditambahkan plan `Versioned Selective Memory Refresh` di `Dokumentasi Arsitektur/arthur-owner-runtime-injection-plan.md`.
+- Runtime memory sekarang membaca `agent_context_version` dan memprioritaskan `soul:vN` jika tersedia; fallback legacy `soul` tetap dipakai kalau versi aktif belum ada.
+- `build_memory_context` tidak lagi memasukkan arsip versi seperti `soul:vN`, `agent_blueprint:vN`, dan `setup_summary:vN` ke prompt long-term memory biasa.
+- `update_agent` mendapat `refresh_memory_mode = "none" | "selective" | "major"` dengan default `selective`.
+- Untuk update workflow/persona/SOP/tools/escalation/integrasi, `update_agent` menulis `soul:vN`, `agent_blueprint:vN`, `setup_summary:vN`, dan `agent_context_version`.
+- Arthur Builder Mode diarahkan memakai default selective untuk update besar, `none` untuk update kecil seperti rename, dan tidak melakukan wipe memory lama.
+
+### Validasi
+- `PYTHONPATH=. .venv/bin/python -m pytest -q tests/test_memory_service.py tests/test_builder_tools.py::TestUpdateAgent tests/test_whatsapp_direct_send.py::test_builder_prompt_blocks_repeated_continue_questions` -> 16 passed.
+- `PYTHONPATH=. .venv/bin/python -m pytest -q tests/test_tool_capability_registry.py tests/test_reply_guard.py tests/test_whatsapp_direct_send.py tests/test_google_mcp_reply_overrides.py tests/test_builder_tools.py tests/test_agent_builder_phase4.py tests/test_agent_created_by_audit.py tests/test_wa_identity.py tests/test_memory_service.py` -> 230 passed.
+
+## 2026-06-02 — Arthur Setup Status, RAG Readiness, dan Audit Launch Categories
+
+### Masalah yang Ditemukan
+- `verify_agent` belum mengecek kondisi knowledge base/RAG: agent bisa punya RAG aktif tapi dokumen kosong, sehingga berisiko mengklaim menjawab berdasarkan dokumen yang belum ada.
+- Arthur belum punya field status setup yang siap dibacakan ke Owner dengan bahasa non-teknis; output readiness masih lebih cocok untuk engineer.
+- Script audit existing agents masih fokus ke `created_by_*`, belum menghasilkan kategori launch readiness seperti ready, needs fix, dan needs manual review.
+
+### Perubahan Utama
+- `verify_agent` sekarang menghitung dokumen agent saat RAG aktif dan memblokir launch dengan `rag_documents_required` kalau dokumen masih kosong.
+- Output `verify_agent` mendapat `setup_status_for_owner`: ringkasan awam, item status setup, dan next steps untuk Owner.
+- Arthur Builder Mode diarahkan memakai `setup_status_for_owner` sebagai sumber kebenaran saat menjelaskan status setup, bukan raw blockers/warnings.
+- `scripts/audit_agent_created_by_metadata.py` sekarang menambahkan readiness category per agent: `ready`, `needs_fix`, atau `needs_manual_review`, termasuk blocker owner, Google auth, RAG docs, WhatsApp setup, dan escalation.
+- System/builder agent dikecualikan dari kewajiban owner di audit existing agents.
+
+### Validasi
+- `PYTHONPATH=. .venv/bin/python -m pytest -q tests/test_builder_tools.py::TestVerifyAgentReadiness tests/test_agent_created_by_audit.py tests/test_whatsapp_direct_send.py::test_builder_prompt_blocks_repeated_continue_questions` -> 17 passed.
+- `PYTHONPATH=. .venv/bin/python scripts/audit_agent_created_by_metadata.py --json` -> total 12 agent; readiness: 1 ready, 8 needs_fix, 3 needs_manual_review.
+
+## 2026-05-29 — Arthur Owner Runtime Contract, Created-by Metadata, dan Tool Truth Registry
+
+### Masalah yang Ditemukan
+- Arthur dan agent hasil buatannya masih terlalu bergantung pada `instructions`/`soul` buatan LLM untuk fakta platform seperti Owner, superadmin, created-by, dan tools aktif.
+- Agent bisa berisiko mengklaim kemampuan yang tidak aktif, misalnya mengirim file WhatsApp, menjalankan kode, deploy, atau membuat Google Docs, hanya karena teks instructions menyebut kemampuan itu.
+- Agent lama belum punya metadata `created_by_*`, sehingga runtime tidak punya sumber DB yang jelas untuk menyatakan agent dibuat oleh Arthur/platform/API.
+- `verify_agent` belum cukup kuat sebagai launch readiness gate untuk owner, Google auth, workflow payment/admin approval, channel WhatsApp, dan metadata platform.
+- Audit existing agent belum bisa membedakan agent yang metadata source-nya aman dibackfill dari agent yang perlu manual review.
+
+### Perubahan Utama
+- Ditambahkan `PlatformRuntimeContract` di prompt runtime untuk inject Owner/superadmin, current user role, created-by metadata, dan runtime tool contract setiap run.
+- Runtime prompt sekarang tetap menyatakan Owner sebagai bos/superadmin walaupun `soul` kosong atau generated instructions salah.
+- Google Workspace runtime sekarang inject state eksplisit: disabled, enabled-needs-auth, connected, auth/error, dan unknown-auth, sehingga agent diarahkan minta Owner login/re-auth saat belum valid.
+- Model `Agent` mendapat metadata DB baru:
+  - `created_by_type`
+  - `created_by_agent_id`
+  - `created_by_agent_name`
+- Alembic migration `017_agent_created_by_metadata.py` ditambahkan sebagai merge head dari `015` dan `016`; setelah `alembic upgrade head`, head Alembic menjadi `017`.
+- Arthur `create_agent` sekarang menyimpan `created_by_type="arthur_builder"`, `created_by_agent_name="Arthur"`, dan `created_by_agent_id` jika tersedia.
+- Agent manual/API diberi `created_by_type="api"` saat dibuat lewat endpoint API; seed Arthur/system agents mengisi `created_by_type="system"`.
+- `get_agent_detail`, `list_my_agents`, dan `verify_agent` sekarang expose metadata/readiness agar Arthur bisa melihat kondisi launch agent tanpa menebak.
+- Ditambahkan script `scripts/audit_agent_created_by_metadata.py`:
+  - default read-only audit;
+  - `--apply` hanya backfill high-confidence;
+  - `--json` untuk output machine-readable.
+- Audit DB aktual menemukan 12 agent: Arthur dibackfill high-confidence sebagai `system`, 11 agent lain ditandai manual review karena tidak ada bukti reliable untuk menebak source.
+- Ditambahkan `tool_capability_registry.py` sebagai source of truth capability: label user-facing, enabled condition, disabled reason, fallback sentence, dan claim patterns.
+- `prompt_builder` sekarang memakai tool truth registry untuk Runtime Tool Contract, bukan daftar capability ad hoc.
+- `reply_guard` sekarang menerima `tools_config` dan `active_groups`, lalu rewrite klaim palsu untuk high-risk capability yang disabled, seperti WhatsApp Media, Sandbox, Deploy, Scheduler, RAG, Escalation, dan Google Workspace.
+
+### Validasi
+- `PYTHONPATH=. .venv/bin/python -m pytest -q tests/test_tool_capability_registry.py tests/test_reply_guard.py tests/test_whatsapp_direct_send.py tests/test_google_mcp_reply_overrides.py tests/test_builder_tools.py tests/test_agent_builder_phase4.py tests/test_agent_created_by_audit.py` -> 210 passed.
+- `PYTHONPATH=. .venv/bin/python -m pytest -q tests/test_wa_identity.py` -> 6 passed.
+- `PYTHONPATH=. .venv/bin/alembic heads` -> `017 (head)`.
+- `PYTHONPATH=. .venv/bin/python scripts/audit_agent_created_by_metadata.py --apply` -> updated 1 high-confidence agent (`Arthur -> system`), 11 manual review.
+- `git diff --check` clean untuk file yang disentuh.
+
+### Sisa Berikutnya
+- Tambah RAG/doc readiness state: RAG aktif tapi belum ada dokumen harus meminta Owner upload dokumen, bukan mengklaim "berdasarkan dokumen".
+- Perluas launch readiness/audit existing agents agar mencakup owner, created-by, tools, Google auth, WhatsApp device, RAG docs, dan escalation workflow dalam satu laporan.
+
+## 2026-05-29 — Arthur Builder Proactive Setup dan Final Reply Delivery Trace
+
+### Masalah yang Ditemukan
+- Arthur bisa membuat atau mengedit agent dengan benar, tetapi jawaban WhatsApp tetap membuat user bingung karena hanya menyebut "sudah jadi/sudah diedit" tanpa langkah berikutnya.
+- Untuk agent jasa CV, Arthur belum cukup tegas memasukkan alur bayar dulu, bukti transfer ke admin, approval admin, lalu delivery CV.
+- Log `agent_step.llm_response` bisa menunjukkan jawaban final yang lengkap, tetapi `agent_run.complete reply_len` lebih pendek karena `ensure_non_empty_reply()` mengganti final reply substantif menjadi fallback pendek setelah `update_agent`.
+- Jalur WA belum punya log eksplisit untuk teks final yang benar-benar dikirim, sehingga sulit membandingkan LLM final, guard result, dan delivery WhatsApp.
+
+### Perubahan Utama
+- Prompt runtime Arthur dan `system-message-builder.md` sekarang menekankan builder proaktif: siapkan cara test, pasang WhatsApp, login Google, dan next step setelah create/update.
+- Rule workflow bisnis diperjelas supaya payment, bukti transfer, admin approval, eskalasi, dan delivery tidak hilang dari instruksi agent.
+- Planner CV service sekarang mengaktifkan kemampuan file generation/media (`sandbox`, `whatsapp_media`, `subagents`) untuk kebutuhan membuat dan mengirim CV/dokumen.
+- Reply guard sekarang menganggap frasa seperti "sudah saya perbarui" sebagai final reply sukses yang jelas, sehingga tidak mengganti jawaban lengkap Arthur dengan fallback pendek.
+- `agent_runner` mencatat `agent_run.final_reply_overridden_by_non_empty_guard` jika guard mengubah final reply, dan `/v1/channels/wa/incoming` mencatat `wa_incoming.final_reply_sent` berisi panjang serta preview teks yang benar-benar dikirim ke WA.
+
+### Validasi
+- `PYTHONPATH=. .venv/bin/python -m pytest tests/test_reply_guard.py tests/test_whatsapp_direct_send.py::test_builder_prompt_blocks_repeated_continue_questions tests/test_builder_tools.py::TestBuilderToolsReturnsList::test_cv_service_agent_enables_file_generation_and_media_tools tests/test_builder_tools.py::TestBuilderToolsReturnsList::test_travel_planning_request_uses_personal_assistant_not_faq tests/test_builder_tools.py::TestBuilderToolsReturnsList::test_explicit_google_calendar_request_enables_google_workspace tests/test_builder_tools.py::TestBuilderToolsReturnsList::test_existing_google_form_order_link_does_not_enable_workspace` -> 19 passed, 1 warning.
+
 ## 2026-05-28 — Arthur Builder Quota Exemption
 
 ### Masalah yang Ditemukan

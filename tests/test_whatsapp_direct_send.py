@@ -14,6 +14,7 @@ from app.core.engine.agent_runner import (
     _prioritize_direct_whatsapp_text_send_tools,
 )
 from app.core.engine.prompt_builder import build_system_prompt
+from app.api.channels import _is_wa_owner_sender, _label_owner_wa_message
 
 
 def _agent(**overrides):
@@ -49,6 +50,40 @@ def _tool(name: str):
     return SimpleNamespace(name=name)
 
 
+def test_wa_owner_sender_detects_resolved_phone_and_jid():
+    agent = _agent(owner_external_id="628owner")
+
+    assert _is_wa_owner_sender(agent, "+628owner", "628owner@s.whatsapp.net") is True
+    assert _is_wa_owner_sender(agent, "+628customer", "628customer@s.whatsapp.net") is False
+
+
+def test_wa_owner_message_gets_explicit_owner_label():
+    labeled = _label_owner_wa_message(
+        message="tolong cek setting agent saya",
+        from_phone="628owner",
+        sender_name="Bagas",
+        is_operator_turn=False,
+    )
+
+    assert labeled.startswith("<OWNER>\n")
+    assert "Role: OWNER/SUPERADMIN" in labeled
+    assert "Name WA: Bagas" in labeled
+    assert "Pesan: tolong cek setting agent saya" in labeled
+
+
+def test_wa_owner_operator_turn_keeps_operator_envelope_with_owner_role():
+    labeled = _label_owner_wa_message(
+        message="approve kirim ke customer",
+        from_phone="628owner",
+        sender_name="Bagas",
+        is_operator_turn=True,
+    )
+
+    assert labeled.startswith("<OPERATOR>\n")
+    assert "Role: OWNER/SUPERADMIN" in labeled
+    assert "Pesan: approve kirim ke customer" in labeled
+
+
 def test_whatsapp_prompt_allows_user_direct_send_without_unlocking_reply_to_user():
     prompt = build_system_prompt(
         agent_model=_agent(),
@@ -73,7 +108,7 @@ def test_whatsapp_prompt_allows_user_direct_send_without_unlocking_reply_to_user
     assert "Tool `reply_to_user` dan `send_to_number` HANYA dipakai saat menerima perintah dari OPERATOR" not in prompt
 
 
-def test_whatsapp_prompt_does_not_label_owner_operator_from_legacy_operator_ids():
+def test_whatsapp_prompt_labels_owner_as_operator():
     prompt = build_system_prompt(
         agent_model=_agent(owner_external_id="628owner", operator_ids=["628owner"]),
         session=_session(
@@ -94,9 +129,181 @@ def test_whatsapp_prompt_does_not_label_owner_operator_from_legacy_operator_ids(
         user_message="tolong bikinin website untuk bisnis saya",
     )
 
+    assert "- Current User Role: OPERATOR" in prompt
+    assert "Current User Name: Operator/Admin" in prompt
+    assert "Kamu sedang di-chat oleh OPERATOR" in prompt
+    assert "- Agent Owner/Superadmin: 628owner" in prompt
+    assert "Owner adalah bos/superadmin agent ini" in prompt
+    assert "izin Google" in prompt
+
+
+def test_runtime_injects_owner_superadmin_even_without_soul():
+    prompt = build_system_prompt(
+        agent_model=_agent(owner_external_id="628owner", operator_ids=["628owner"]),
+        session=_session(
+            channel_config={"user_phone": "628customer@s.whatsapp.net"},
+            external_user_id="628customer",
+        ),
+        active_groups=["memory"],
+        saved_custom_tools=[],
+        subagent_list=[],
+        sender_name="Customer",
+        context_summary="",
+        memory_block="",
+        layered_memory=None,
+        rag_context="",
+        escalation_user_jid=None,
+        escalation_context=None,
+        is_operator_message=False,
+        user_message="halo",
+    )
+
+    assert "- Agent Owner/Superadmin: 628owner" in prompt
+    assert "Owner adalah bos/superadmin agent ini" in prompt
+    assert "## Identitasmu" not in prompt
+
+
+def test_runtime_injects_created_by_arthur_from_metadata():
+    arthur_id = "00000000-0000-0000-0000-000000000001"
+    prompt = build_system_prompt(
+        agent_model=_agent(
+            owner_external_id="628owner",
+            operator_ids=["628owner"],
+            created_by_type="arthur_builder",
+            created_by_agent_id=arthur_id,
+            created_by_agent_name="Arthur",
+        ),
+        session=_session(
+            channel_config={"user_phone": "628customer@s.whatsapp.net"},
+            external_user_id="628customer",
+        ),
+        active_groups=["memory"],
+        saved_custom_tools=[],
+        subagent_list=[],
+        sender_name="Customer",
+        context_summary="",
+        memory_block="",
+        layered_memory=None,
+        rag_context="",
+        escalation_user_jid=None,
+        escalation_context=None,
+        is_operator_message=False,
+        user_message="halo",
+    )
+
+    assert "Created By: Arthur (Agent Builder platform ini)" in prompt
+    assert f"Created By Agent ID: {arthur_id}" in prompt
+    assert "Kamu dibuat/dikonfigurasi lewat Arthur" in prompt
+    assert "arahkan Owner bicara ke Arthur" in prompt
+
+
+def test_customer_session_does_not_become_owner():
+    prompt = build_system_prompt(
+        agent_model=_agent(owner_external_id="628owner", operator_ids=["628owner"]),
+        session=_session(
+            channel_config={"user_phone": "628customer@s.whatsapp.net"},
+            external_user_id="628customer",
+        ),
+        active_groups=["memory", "escalation"],
+        saved_custom_tools=[],
+        subagent_list=[],
+        sender_name="Customer",
+        context_summary="",
+        memory_block="",
+        layered_memory=None,
+        rag_context="",
+        escalation_user_jid=None,
+        escalation_context=None,
+        is_operator_message=False,
+        user_message="halo",
+    )
+
     assert "- Current User Role: user" in prompt
-    assert "Current User Name: Operator/Admin" not in prompt
+    assert "- Current User Role: OPERATOR" not in prompt
     assert "Kamu sedang di-chat oleh OPERATOR" not in prompt
+
+
+def test_customer_prompt_does_not_expose_operator_phone():
+    prompt = build_system_prompt(
+        agent_model=_agent(
+            owner_external_id="628owner",
+            operator_ids=["628owner", "628admin"],
+            escalation_config={"operator_phone": "628admin", "operator_name": "Admin Laundry"},
+        ),
+        session=_session(
+            channel_config={"user_phone": "628customer@s.whatsapp.net"},
+            external_user_id="628customer",
+        ),
+        active_groups=["memory", "escalation"],
+        saved_custom_tools=[],
+        subagent_list=[],
+        sender_name="Customer",
+        context_summary="",
+        memory_block="",
+        layered_memory=None,
+        rag_context="",
+        escalation_user_jid=None,
+        escalation_context=None,
+        is_operator_message=False,
+        user_message="halo",
+    )
+
+    assert "628admin" not in prompt
+    assert "never reveal the operator/admin phone" in prompt
+    assert "Jangan memberi nomor admin" in prompt
+    assert "link auth" in prompt
+
+
+def test_owner_session_gets_superadmin_role():
+    prompt = build_system_prompt(
+        agent_model=_agent(owner_external_id="628owner", operator_ids=["628owner"]),
+        session=_session(
+            channel_config={"user_phone": "628owner@s.whatsapp.net"},
+            external_user_id="628owner",
+        ),
+        active_groups=["memory", "escalation"],
+        saved_custom_tools=[],
+        subagent_list=[],
+        sender_name="Bagas",
+        context_summary="",
+        memory_block="",
+        layered_memory=None,
+        rag_context="",
+        escalation_user_jid=None,
+        escalation_context=None,
+        is_operator_message=False,
+        user_message="tolong cek agent saya",
+    )
+
+    assert "- Current User Role: OPERATOR" in prompt
+    assert "- Agent Owner/Superadmin: 628owner" in prompt
+    assert "perlakukan arahannya sebagai arahan bos/superadmin" in prompt
+
+
+def test_whatsapp_prompt_does_not_expose_lid_as_phone():
+    prompt = build_system_prompt(
+        agent_model=_agent(),
+        session=_session(
+            channel_config={"user_phone": "151414827434073@lid"},
+            external_user_id="151414827434073",
+        ),
+        active_groups=["memory"],
+        saved_custom_tools=[],
+        subagent_list=[],
+        sender_name="Bagas",
+        context_summary="",
+        memory_block="",
+        layered_memory=None,
+        rag_context="",
+        escalation_user_jid=None,
+        escalation_context=None,
+        is_operator_message=False,
+        user_message="halo",
+    )
+
+    assert "Current User WhatsApp ID: 151414827434073@lid" in prompt
+    assert "Current User Phone: unknown" in prompt
+    assert "Current User Phone: 151414827434073" not in prompt
 
 
 def test_prompt_has_operator_approval_resume_mode():
@@ -142,6 +349,9 @@ def test_builder_prompt_blocks_repeated_continue_questions():
 
     assert "## Arthur Builder Mode" in prompt
     assert "plan_agent -> compose_agent_blueprint -> compose_agent_instructions -> validate_agent_config -> create_agent" in prompt
+    assert "sampai user tahu langkah berikutnya" in prompt
+    assert "cara test, cara connect Google, cara pasang WhatsApp" in prompt
+    assert "minta pembayaran, bukti apa yang diminta" in prompt
     assert "Jangan berhenti hanya untuk menampilkan rencana" in prompt
     assert "Jangan mengunci preset hanya dari satu kata kunci" in prompt
     assert "jangan menyebut label preset internal" in prompt
@@ -152,16 +362,52 @@ def test_builder_prompt_blocks_repeated_continue_questions():
     assert "jangan menyebut nama tool internal" in prompt
     assert "Mau agent ini langsung dipasang ke nomor WhatsApp kamu sendiri" in prompt
     assert "nomor demo Arthur" in prompt
+    assert "jangan berhenti hanya dengan `agent sudah jadi` atau ID agent" in prompt
+    assert "terus gimana pakenya?" in prompt
     assert "bukan `QR`" in prompt
     assert "create_wa_dev_trial_link boleh dipanggil tanpa agent_id" in prompt
     assert "langsung cari agent terkait lalu panggil create_wa_dev_trial_link" in prompt
     assert "jangan menjawab `langsung aku betulin`" in prompt
+    assert "DILARANG memakai task, subagent, sandbox, read_file, edit_file, atau write_file" in prompt
+    assert "get_agent_detail(include_instructions=true)" in prompt
+    assert "refresh_memory_mode" in prompt
+    assert "sistem menyimpan versi lama sebagai arsip" in prompt
+    assert "Jangan menyebut `subagent`, `placeholder`, `database`, `sistem file`" in prompt
+    assert "setup_status_for_owner" in prompt
+    assert "summary_for_owner" in prompt
+    assert "Jangan menyebut blockers/warnings/raw JSON ke user" in prompt
     assert "whatsapp_media=true, sandbox=true" in prompt
     assert "link Google Form yang sudah ada sebagai link order pelanggan" in prompt
     assert "Jangan minta user mengisi placeholder" in prompt
+    assert "jangan menawarkan versi sederhana atau minta user pilih downgrade" in prompt
     assert "enable_google_workspace=True" in prompt
     assert "generate_google_auth_link" in prompt
+    assert "Jangan tunggu user bertanya `terus koneknya gimana?`" in prompt
     assert "JANGAN menyebut istilah teknis internal" in prompt
+
+
+def test_arthur_builder_mode_knows_crud_is_primary_job():
+    prompt = build_system_prompt(
+        agent_model=_agent(capabilities=["builder"], tools_config={"builder": True}),
+        session=_session(),
+        active_groups=["builder"],
+        saved_custom_tools=[],
+        subagent_list=[],
+        sender_name="Bagas",
+        context_summary="",
+        memory_block="",
+        layered_memory=None,
+        rag_context="",
+        escalation_user_jid=None,
+        escalation_context=None,
+        is_operator_message=False,
+        user_message="hapus agent lama saya",
+    )
+
+    assert "## Arthur Builder Mode" in prompt
+    assert "membuat, mengubah, mengecek, dan menyiapkan agent user" in prompt
+    assert "Arthur Builder: aktif" in prompt
+    assert "membuat, membaca, mengubah, dan menghapus agent platform milik Owner" in prompt
 
 
 def test_whatsapp_prompt_explains_reply_context_block():
@@ -232,6 +478,127 @@ def test_layered_memory_tells_agent_to_use_memory_not_files():
     assert "Kalau penting → simpan ke memory" in prompt
     assert "JANGAN memakai `write_file` hanya untuk menyimpan ingatan" in prompt
     assert "Kalau penting → tulis ke file" not in prompt
+
+
+def test_runtime_tool_contract_lists_only_actual_tools_and_disabled_risks():
+    prompt = build_system_prompt(
+        agent_model=_agent(
+            instructions=(
+                "Kamu bisa pakai Google Drive, kirim file WhatsApp, menjalankan kode, "
+                "dan deploy app kapan saja."
+            ),
+            tools_config={"memory": True, "tavily": True},
+        ),
+        session=_session(channel_type="webchat"),
+        active_groups=["memory", "tavily"],
+        saved_custom_tools=[],
+        subagent_list=[],
+        sender_name="Bagas",
+        context_summary="",
+        memory_block="",
+        layered_memory=None,
+        rag_context="",
+        escalation_user_jid=None,
+        escalation_context=None,
+        is_operator_message=False,
+        user_message="bisa apa aja?",
+    )
+
+    assert "## Runtime Tool Contract" in prompt
+    assert "Sumber kebenaran tools adalah runtime platform" in prompt
+    assert "Memory: aktif" in prompt
+    assert "Web Search: aktif" in prompt
+    assert "Google Workspace: tidak aktif/tersedia pada run ini" in prompt
+    assert "WhatsApp Media: tidak aktif/tersedia pada run ini" in prompt
+    assert "Sandbox: tidak aktif/tersedia pada run ini" in prompt
+    assert "Deploy: tidak aktif/tersedia pada run ini" in prompt
+    assert "jangan klaim bisa memakainya" in prompt
+
+
+def test_runtime_tool_contract_detects_google_workspace_from_tools_config():
+    prompt = build_system_prompt(
+        agent_model=_agent(
+            tools_config={
+                "memory": True,
+                "mcp": {
+                    "enabled": True,
+                    "servers": {
+                        "google_workspace": {
+                            "transport": "streamable_http",
+                            "url": "http://localhost:8002/mcp",
+                        }
+                    },
+                },
+            },
+        ),
+        session=_session(channel_type="webchat"),
+        active_groups=["memory", "mcp"],
+        saved_custom_tools=[],
+        subagent_list=[],
+        sender_name="Bagas",
+        context_summary="",
+        memory_block="",
+        layered_memory=None,
+        rag_context="",
+        escalation_user_jid=None,
+        escalation_context=None,
+        is_operator_message=False,
+        user_message="buatkan google docs",
+    )
+
+    assert "Integrasi Eksternal: aktif" in prompt
+    assert "Google Workspace: tidak aktif/tersedia pada run ini" not in prompt
+    assert "Sandbox: tidak aktif/tersedia pada run ini" in prompt
+
+
+def test_disabled_whatsapp_media_prevents_file_delivery_claim():
+    prompt = build_system_prompt(
+        agent_model=_agent(
+            instructions="Kamu bisa kirim file PDF final lewat WhatsApp kapan saja.",
+            tools_config={"memory": True, "whatsapp_media": False},
+        ),
+        session=_session(channel_type="whatsapp"),
+        active_groups=["memory"],
+        saved_custom_tools=[],
+        subagent_list=[],
+        sender_name="Bagas",
+        context_summary="",
+        memory_block="",
+        layered_memory=None,
+        rag_context="",
+        escalation_user_jid=None,
+        escalation_context=None,
+        is_operator_message=False,
+        user_message="kirim file pdf",
+    )
+
+    assert "WhatsApp Media: tidak aktif/tersedia pada run ini" in prompt
+    assert "jangan klaim bisa memakainya" in prompt
+
+
+def test_disabled_sandbox_prevents_code_execution_claim():
+    prompt = build_system_prompt(
+        agent_model=_agent(
+            instructions="Kamu bisa menjalankan kode Python untuk membaca Excel.",
+            tools_config={"memory": True, "sandbox": False},
+        ),
+        session=_session(channel_type="webchat"),
+        active_groups=["memory"],
+        saved_custom_tools=[],
+        subagent_list=[],
+        sender_name="Bagas",
+        context_summary="",
+        memory_block="",
+        layered_memory=None,
+        rag_context="",
+        escalation_user_jid=None,
+        escalation_context=None,
+        is_operator_message=False,
+        user_message="baca file excel",
+    )
+
+    assert "Sandbox: tidak aktif/tersedia pada run ini" in prompt
+    assert "jangan klaim bisa memakainya" in prompt
 
 
 def test_direct_text_send_context_detects_followup_confirmation_from_history():
