@@ -32,6 +32,7 @@ def upgrade() -> None:
                                   'domain_confidence', m.domain_confidence,
                                   'maturity', m.maturity,
                                   'owner_review_required', m.owner_review_required,
+                                  'version', m.version,
                                   'missing_context', to_jsonb(m.missing_context),
                                   'assumptions', to_jsonb(m.assumptions),
                                   'workflows', to_jsonb(m.workflows)))

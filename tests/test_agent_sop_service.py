@@ -32,3 +32,19 @@ def test_row_to_artifact_falls_back_to_narrow_when_artifact_empty():
     out = operating_manual_row_to_artifact(row)
     assert out["maturity"] == "usable"
     assert out["workflows"] == [{"workflow_id": "wf1"}]
+
+
+def test_normalize_artifact_contains_required_fields():
+    """Backfill guard: normalized manual must carry maturity/version/owner_review_required."""
+    manual = normalize_agent_operating_manual(
+        {
+            "maturity": "usable",
+            "owner_review_required": False,
+            "workflows": [{"workflow_id": "wf1", "name": "Order"}],
+        }
+    )
+    for key in ("maturity", "version", "owner_review_required", "source", "domain", "domain_confidence"):
+        assert key in manual, f"normalized manual missing key: {key}"
+    assert manual["maturity"] == "usable"
+    assert manual["version"] == 1
+    assert manual["owner_review_required"] is False
