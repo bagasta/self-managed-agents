@@ -2132,6 +2132,16 @@ def _enabled_tool_plan(tools_config: dict[str, Any]) -> list[dict[str, str]]:
     return plans
 
 
+def mark_manual_needs_review_if_fallback(manual: dict, *, used_fallback: bool) -> dict:
+    """Saat SOP dibuat lewat jalur fallback generik (writer LLM gagal),
+    paksa maturity=needs_review + owner_review_required=True agar tidak go-live diam-diam."""
+    if used_fallback and isinstance(manual, dict):
+        manual = dict(manual)
+        manual["maturity"] = "needs_review"
+        manual["owner_review_required"] = True
+    return manual
+
+
 def _fallback_agent_blueprint(
     *,
     preset_id: str,
@@ -4955,6 +4965,7 @@ def build_builder_tools(
         if operator_phone:
             tc["escalation"] = True
         operating_manual_input = operating_manual
+        used_fallback = False
         if operating_manual_input in (None, "", {}) and str(blueprint or "").strip():
             if _blueprint_needs_semantic_operating_manual(blueprint):
                 operating_manual_input = await _compose_semantic_operating_manual_from_context(
@@ -5006,6 +5017,10 @@ def build_builder_tools(
                 domain=domain,
                 tools_config=tc,
             )
+            used_fallback = True
+        operating_manual_input = mark_manual_needs_review_if_fallback(
+            operating_manual_input, used_fallback=used_fallback
+        )
         tc, generated_operating_manual = ensure_operating_manual_in_tools_config(
             tc,
             name=name,

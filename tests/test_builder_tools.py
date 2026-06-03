@@ -2741,3 +2741,21 @@ def test_no_file_delivery_means_no_issue():
 def test_parent_delivery_contract_image_only():
     instr = "/workspace/shared/result.png SIAP_DIKIRIM_PARENT send_whatsapp_image"
     assert file_delivery_contract_issues(instr, file_delivery=True) == []
+
+
+# ---------------------------------------------------------------------------
+# A5: mark_manual_needs_review_if_fallback
+# ---------------------------------------------------------------------------
+from app.core.tools.builder_tools import mark_manual_needs_review_if_fallback
+
+
+def test_fallback_manual_forced_needs_review():
+    m = mark_manual_needs_review_if_fallback({"maturity": "usable"}, used_fallback=True)
+    assert m["maturity"] == "needs_review"
+    assert m["owner_review_required"] is True
+
+
+def test_non_fallback_unchanged():
+    m = mark_manual_needs_review_if_fallback({"maturity": "usable", "owner_review_required": False}, used_fallback=False)
+    assert m["maturity"] == "usable"
+    assert m["owner_review_required"] is False
