@@ -21,7 +21,8 @@ def is_sop_locked(sop: dict[str, Any] | None) -> bool:
         return True
     if bool(sop.get("owner_review_required")):
         return True
-    return str(sop.get("maturity") or "").lower() in {"draft", "needs_review", "missing"}
+    maturity = str(sop.get("maturity") or "").lower()
+    return not maturity or maturity in {"draft", "needs_review", "missing"}
 
 
 def gated_tool_names(tool_names: Iterable[str], *, sop: dict[str, Any] | None) -> set[str]:

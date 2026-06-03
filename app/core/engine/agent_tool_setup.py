@@ -276,6 +276,7 @@ async def build_agent_tool_setup(
             "agent_tool_setup.sop_locked_tools_removed",
             removed=_removed_sop,
             maturity=_maturity,
+            agent_id=str(agent_id),
         )
 
     return AgentToolSetup(

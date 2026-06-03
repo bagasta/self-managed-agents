@@ -1,6 +1,12 @@
 from app.core.engine.sop_runtime_gate import gated_tool_names, is_sop_locked
 
 
+def test_locked_when_maturity_empty_or_none():
+    assert is_sop_locked({"maturity": None}) is True
+    assert is_sop_locked({"maturity": ""}) is True
+    assert is_sop_locked({}) is True
+
+
 def test_locked_when_draft():
     assert is_sop_locked({"maturity": "draft"}) is True
     assert is_sop_locked({"maturity": "needs_review"}) is True
