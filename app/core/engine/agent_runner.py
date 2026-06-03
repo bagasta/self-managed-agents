@@ -1364,6 +1364,34 @@ async def run_agent(
     if resumed_result is not None:
         return AgentRunResult(**resumed_result)
 
+    # --- Token quota pre-run gate ---
+    # Block before LLM is built or invoked when subscription quota is exhausted.
+    # Builder/system agents are exempt (platform infrastructure).
+    from app.core.domain.agent_quota_service import get_owner_subscription, is_quota_exempt_builder_agent
+    from app.core.domain.subscription_service import QuotaExceeded, assert_token_quota_available
+    if not is_quota_exempt_builder_agent(agent_model):
+        _, _owner_sub = await get_owner_subscription(agent_model, db)
+        if _owner_sub is not None:
+            try:
+                assert_token_quota_available(_owner_sub)
+            except QuotaExceeded as _qe:
+                log.warning("agent_run.quota_exceeded_pre_run", detail=str(_qe))
+                run_record.status = "completed"
+                run_record.completed_at = datetime.now(timezone.utc)
+                run_record.tokens_used = 0
+                await db.flush()
+                _quota_reply = (
+                    "Maaf, kuota token subscription pemilik agent ini sudah habis. "
+                    "Silakan upgrade plan atau tunggu reset kuota berikutnya."
+                )
+                return AgentRunResult(
+                    reply=_quota_reply,
+                    steps=[],
+                    run_id=run_id,
+                    tokens_used=0,
+                    usage={},
+                )
+
     llm_raw, llm = build_agent_llms(agent_model, settings, temperature)
 
     # Tool setup lives in agent_tool_setup.py; it still gates builder tools via

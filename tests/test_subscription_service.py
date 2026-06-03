@@ -351,3 +351,140 @@ class TestAgentEntitlements:
         )
 
         assert violations == []
+
+
+# ---------------------------------------------------------------------------
+# B1: assert_token_quota_available / QuotaExceeded
+# ---------------------------------------------------------------------------
+
+class _Sub:
+    def __init__(self, used, quota, grace_until=None, status="active"):
+        self.tokens_used = used
+        self.token_quota = quota
+        self.grace_until = grace_until
+        self.status = status
+
+
+def test_quota_allows_when_under_limit():
+    from app.core.domain.subscription_service import assert_token_quota_available
+    assert_token_quota_available(_Sub(used=10, quota=100))  # no raise
+
+
+def test_quota_blocks_when_at_or_over_limit():
+    from app.core.domain.subscription_service import assert_token_quota_available, QuotaExceeded
+    with pytest.raises(QuotaExceeded):
+        assert_token_quota_available(_Sub(used=100, quota=100))
+
+
+def test_quota_none_quota_is_unlimited():
+    from app.core.domain.subscription_service import assert_token_quota_available
+    assert_token_quota_available(_Sub(used=10**12, quota=None))  # tier_3 unlimited
+
+
+def test_quota_grace_until_in_future_allows():
+    from app.core.domain.subscription_service import assert_token_quota_available
+    future = datetime.now(timezone.utc) + timedelta(days=7)
+    assert_token_quota_available(_Sub(used=100, quota=100, grace_until=future))  # no raise
+
+
+def test_quota_grace_until_in_past_blocks():
+    from app.core.domain.subscription_service import assert_token_quota_available, QuotaExceeded
+    past = datetime.now(timezone.utc) - timedelta(days=1)
+    with pytest.raises(QuotaExceeded):
+        assert_token_quota_available(_Sub(used=100, quota=100, grace_until=past))
+
+
+# ---------------------------------------------------------------------------
+# B1 integration: over-quota path returns blocked reply WITHOUT LLM call
+# ---------------------------------------------------------------------------
+
+class TestTokenQuotaPreRunGate:
+    """Integration-style test: over-quota subscription blocks run before LLM."""
+
+    def _make_agent(self):
+        import uuid
+        from unittest.mock import MagicMock
+        a = MagicMock()
+        a.id = uuid.uuid4()
+        a.name = "TestAgent"
+        a.model = "openai/gpt-4.1-mini"
+        a.temperature = 0.7
+        a.tools_config = {}
+        a.sandbox_config = {}
+        a.safety_policy = {}
+        a.escalation_config = {}
+        a.operator_ids = []
+        a.capabilities = []
+        a.is_deleted = False
+        a.api_key = "ak-test"
+        a.token_quota = 1000
+        a.tokens_used = 0
+        a.active_until = None
+        a.owner_external_id = "owner-123"
+        a.wa_device_id = None
+        a.allowed_senders = None
+        a.created_by = None
+        return a
+
+    def _make_session(self, agent_id):
+        import uuid
+        from unittest.mock import MagicMock
+        s = MagicMock()
+        s.id = uuid.uuid4()
+        s.agent_id = agent_id
+        s.external_user_id = "user-456"
+        s.channel_type = None
+        s.channel_config = {}
+        s.metadata_ = {}
+        return s
+
+    def _make_db(self):
+        from unittest.mock import AsyncMock, MagicMock
+        db = MagicMock()
+        db.execute = AsyncMock()
+        db.add = MagicMock()
+        db.flush = AsyncMock()
+        db.commit = AsyncMock()
+        db.refresh = AsyncMock()
+        return db
+
+    @pytest.mark.asyncio
+    async def test_over_quota_subscription_blocks_without_llm(self):
+        """Over-quota owner subscription must return blocked reply; LLM must NOT be called."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from types import SimpleNamespace
+
+        agent = self._make_agent()
+        session = self._make_session(agent.id)
+        db = self._make_db()
+
+        # Subscription that is over quota
+        over_quota_sub = _Sub(used=5_000_000, quota=5_000_000)
+
+        mock_scalar = MagicMock()
+        mock_scalar.scalar_one_or_none = MagicMock(return_value=None)
+        db.execute.return_value = mock_scalar
+
+        with (
+            patch(
+                "app.core.domain.agent_quota_service.get_owner_subscription",
+                new=AsyncMock(return_value=(MagicMock(), over_quota_sub)),
+            ),
+            patch("app.core.domain.agent_quota_service.is_quota_exempt_builder_agent", return_value=False),
+            patch("app.core.engine.agent_runner.build_agent_llms") as mock_llm,
+            patch("app.core.engine.agent_runner.handle_pending_interrupt", new=AsyncMock(return_value=None)),
+        ):
+            from app.core.engine.agent_runner import run_agent
+            result = await run_agent(
+                agent_model=agent,
+                session=session,
+                user_message="Halo",
+                db=db,
+            )
+
+        # LLM must NOT be called
+        mock_llm.assert_not_called()
+
+        # Reply must indicate quota exhausted
+        assert "kuota" in result["reply"].lower() or "quota" in result["reply"].lower()
+        assert result["tokens_used"] == 0

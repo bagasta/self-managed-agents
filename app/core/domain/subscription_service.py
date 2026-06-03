@@ -22,6 +22,31 @@ logger = structlog.get_logger(__name__)
 TIER_3_TOKEN_QUOTA = 100_000_000
 
 
+class QuotaExceeded(Exception):
+    """Token quota habis untuk subscription ini."""
+
+
+def assert_token_quota_available(subscription: Any) -> None:
+    """Read-only. Raise QuotaExceeded kalau tokens_used >= token_quota.
+    token_quota None = unlimited (tier_3).
+    Respects grace_until: jika dalam grace period, allow the run."""
+    quota = getattr(subscription, "token_quota", None)
+    if quota is None:
+        return
+    used = int(getattr(subscription, "tokens_used", 0) or 0)
+    if used >= int(quota):
+        # Check grace period
+        grace_until = getattr(subscription, "grace_until", None)
+        if grace_until is not None:
+            if isinstance(grace_until, datetime):
+                _grace = grace_until if grace_until.tzinfo else grace_until.replace(tzinfo=timezone.utc)
+                if _grace > datetime.now(timezone.utc):
+                    return
+        raise QuotaExceeded(
+            f"Token quota habis ({used}/{quota}). Owner perlu upgrade plan atau tunggu reset."
+        )
+
+
 DEFAULT_SUBSCRIPTION_PLANS: list[dict[str, Any]] = [
     {
         "id": SubscriptionPlan.TRIAL_ID,
