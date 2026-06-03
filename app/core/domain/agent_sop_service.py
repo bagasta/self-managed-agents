@@ -859,8 +859,12 @@ def operating_manual_readiness_issues(manual: dict[str, Any] | None) -> tuple[li
 
 
 def operating_manual_row_to_artifact(row: AgentOperatingManual) -> dict[str, Any]:
+    artifact = getattr(row, "artifact", None)
+    if isinstance(artifact, dict) and artifact:
+        return dict(artifact)
+    # Fallback: narrow projection for pre-migration rows (artifact empty/missing)
     return {
-        "manual_id": str(row.id),
+        "manual_id": str(row.id) if row.id else None,
         "version": row.version,
         "source": row.source,
         "domain": row.domain,
@@ -930,5 +934,6 @@ async def upsert_agent_operating_manual(
     row.assumptions = normalized.get("assumptions") if isinstance(normalized.get("assumptions"), list) else []
     row.workflows = normalized.get("workflows") if isinstance(normalized.get("workflows"), list) else []
     row.created_by_agent_id = created_by_agent_id or normalized.get("created_by_agent_id")
+    row.artifact = normalized
     await db.flush()
     return row

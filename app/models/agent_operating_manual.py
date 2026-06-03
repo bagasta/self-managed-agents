@@ -29,6 +29,7 @@ class AgentOperatingManual(Base):
     missing_context: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     assumptions: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     workflows: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    artifact: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     created_by_agent_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     reviewed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

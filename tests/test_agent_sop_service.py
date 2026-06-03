@@ -1,0 +1,34 @@
+import uuid
+from app.core.domain.agent_sop_service import (
+    normalize_agent_operating_manual,
+    operating_manual_row_to_artifact,
+)
+from app.models.agent_operating_manual import AgentOperatingManual
+
+
+def test_artifact_roundtrip_preserves_full_fields():
+    manual = normalize_agent_operating_manual(
+        {
+            "maturity": "usable",
+            "workflows": [{"workflow_id": "wf1", "name": "Order"}],
+            "validation_checklist": ["cek pembayaran"],
+            "human_approval_points": [{"step": 3, "who": "operator"}],
+            "state_plan": {"keys": ["order_status"]},
+        }
+    )
+    row = AgentOperatingManual(agent_id=uuid.uuid4())
+    row.artifact = manual
+    out = operating_manual_row_to_artifact(row)
+    assert out["validation_checklist"] == ["cek pembayaran"]
+    assert out["human_approval_points"][0]["who"] == "operator"
+    assert out["state_plan"]["keys"] == ["order_status"]
+
+
+def test_row_to_artifact_falls_back_to_narrow_when_artifact_empty():
+    row = AgentOperatingManual(agent_id=uuid.uuid4())
+    row.artifact = {}
+    row.maturity = "usable"
+    row.workflows = [{"workflow_id": "wf1"}]
+    out = operating_manual_row_to_artifact(row)
+    assert out["maturity"] == "usable"
+    assert out["workflows"] == [{"workflow_id": "wf1"}]
