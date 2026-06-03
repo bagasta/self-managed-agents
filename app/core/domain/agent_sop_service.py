@@ -6,10 +6,13 @@ import re
 import uuid
 from typing import Any
 
+import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.agent_operating_manual import AgentOperatingManual
+
+logger = structlog.get_logger(__name__)
 
 OPERATING_MANUAL_KEY = "operating_manual"
 
@@ -896,8 +899,12 @@ async def get_latest_agent_operating_manual(
         row = result.scalar_one_or_none()
         if isinstance(row, AgentOperatingManual):
             return operating_manual_row_to_artifact(row)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.error(
+            "agent_sop_service.operating_manual_read_failed",
+            agent_id=str(agent_id),
+            error=str(exc),
+        )
     return get_agent_operating_manual(fallback_tools_config)
 
 
