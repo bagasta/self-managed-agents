@@ -1116,6 +1116,7 @@ def _build_owner_setup_status(
     escalation_enabled: bool,
     readiness_blockers: list[str],
     readiness_warnings: list[str],
+    media_enabled: bool = False,
 ) -> dict[str, Any]:
     items: list[dict[str, str]] = []
     next_steps: list[str] = []
@@ -1150,10 +1151,16 @@ def _build_owner_setup_status(
         )
         next_steps.append("Buat atau review SOP kerja agent.")
     elif manual_maturity in {"draft", "needs_review"}:
+        _sop_draft_msg = "SOP kerja agent masih draft. Agent aman untuk tanya kebutuhan dan membuat ringkasan, tapi belum boleh mengambil keputusan final."
+        if media_enabled:
+            _sop_draft_msg += (
+                " Catatan: pengiriman file/gambar via WhatsApp dinonaktifkan sementara sampai SOP di-review"
+                f" (maturity={manual_maturity}). Setelah SOP usable, fitur kirim file/gambar aktif lagi."
+            )
         add_item(
             "operating_manual",
             "needs_review",
-            "SOP kerja agent masih draft. Agent aman untuk tanya kebutuhan dan membuat ringkasan, tapi belum boleh mengambil keputusan final.",
+            _sop_draft_msg,
         )
         next_steps.append("Lengkapi dan review SOP kerja agent sebelum full launch.")
     elif manual_maturity == "verified":
@@ -4625,6 +4632,7 @@ def build_builder_tools(
             escalation_enabled=_tool_config_enabled(tc, "escalation", default=False),
             readiness_blockers=readiness_blockers,
             readiness_warnings=readiness_warnings,
+            media_enabled=_tool_config_enabled(tc, "whatsapp_media", default=False),
         )
 
         summary = {

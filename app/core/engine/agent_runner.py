@@ -1393,8 +1393,6 @@ async def run_agent(
                         tokens_used=0,
                         usage={},
                     )
-        except QuotaExceeded:
-            raise
         except Exception as _quota_exc:
             log.warning(
                 "agent_run.quota_lookup_failed_allow_run",

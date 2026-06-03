@@ -2759,3 +2759,76 @@ def test_non_fallback_unchanged():
     m = mark_manual_needs_review_if_fallback({"maturity": "usable", "owner_review_required": False}, used_fallback=False)
     assert m["maturity"] == "usable"
     assert m["owner_review_required"] is False
+
+
+# ---------------------------------------------------------------------------
+# A6: _build_owner_setup_status — WhatsApp media gate note when SOP is draft/needs_review
+# ---------------------------------------------------------------------------
+from app.core.tools.builder_tools import _build_owner_setup_status  # noqa: E402
+
+_BASE_KWARGS: dict = dict(
+    launch_status="needs_review",
+    owner_present=True,
+    created_by_present=True,
+    google_workspace_enabled=False,
+    rag_enabled=False,
+    document_count=0,
+    whatsapp_channel=True,
+    whatsapp_ready=True,
+    escalation_enabled=False,
+    readiness_blockers=[],
+    readiness_warnings=[],
+)
+
+
+def _get_manual_item(result: dict) -> dict | None:
+    for item in result.get("items", []):
+        if item.get("key") == "operating_manual":
+            return item
+    return None
+
+
+def test_sop_needs_review_with_media_enabled_shows_gate_note():
+    result = _build_owner_setup_status(
+        **_BASE_KWARGS,
+        operating_manual={"present": True, "maturity": "needs_review"},
+        media_enabled=True,
+    )
+    item = _get_manual_item(result)
+    assert item is not None
+    assert "maturity=needs_review" in item["message"]
+    assert "file/gambar" in item["message"]
+
+
+def test_sop_draft_with_media_enabled_shows_gate_note():
+    result = _build_owner_setup_status(
+        **_BASE_KWARGS,
+        operating_manual={"present": True, "maturity": "draft"},
+        media_enabled=True,
+    )
+    item = _get_manual_item(result)
+    assert item is not None
+    assert "maturity=draft" in item["message"]
+    assert "file/gambar" in item["message"]
+
+
+def test_sop_needs_review_without_media_no_gate_note():
+    result = _build_owner_setup_status(
+        **_BASE_KWARGS,
+        operating_manual={"present": True, "maturity": "needs_review"},
+        media_enabled=False,
+    )
+    item = _get_manual_item(result)
+    assert item is not None
+    assert "file/gambar" not in item["message"]
+
+
+def test_sop_usable_with_media_enabled_no_gate_note():
+    result = _build_owner_setup_status(
+        **_BASE_KWARGS,
+        operating_manual={"present": True, "maturity": "usable"},
+        media_enabled=True,
+    )
+    item = _get_manual_item(result)
+    assert item is not None
+    assert "file/gambar" not in item["message"]
