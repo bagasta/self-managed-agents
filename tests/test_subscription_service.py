@@ -467,10 +467,10 @@ class TestTokenQuotaPreRunGate:
 
         with (
             patch(
-                "app.core.domain.agent_quota_service.get_owner_subscription",
+                "app.core.engine.agent_runner.get_owner_subscription",
                 new=AsyncMock(return_value=(MagicMock(), over_quota_sub)),
             ),
-            patch("app.core.domain.agent_quota_service.is_quota_exempt_builder_agent", return_value=False),
+            patch("app.core.engine.agent_runner.is_quota_exempt_builder_agent", return_value=False),
             patch("app.core.engine.agent_runner.build_agent_llms") as mock_llm,
             patch("app.core.engine.agent_runner.handle_pending_interrupt", new=AsyncMock(return_value=None)),
         ):
@@ -488,3 +488,41 @@ class TestTokenQuotaPreRunGate:
         # Reply must indicate quota exhausted
         assert "kuota" in result["reply"].lower() or "quota" in result["reply"].lower()
         assert result["tokens_used"] == 0
+
+    @pytest.mark.asyncio
+    async def test_quota_lookup_error_allows_run(self):
+        """DB error during quota lookup must NOT block a legitimate run; build_agent_llms IS reached."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        agent = self._make_agent()
+        session = self._make_session(agent.id)
+        db = self._make_db()
+
+        mock_scalar = MagicMock()
+        mock_scalar.scalar_one_or_none = MagicMock(return_value=None)
+        db.execute.return_value = mock_scalar
+
+        # Simulate a DB OperationalError during quota lookup
+        with (
+            patch(
+                "app.core.engine.agent_runner.get_owner_subscription",
+                new=AsyncMock(side_effect=Exception("DB connection lost")),
+            ),
+            patch("app.core.engine.agent_runner.is_quota_exempt_builder_agent", return_value=False),
+            patch("app.core.engine.agent_runner.build_agent_llms") as mock_llm,
+            patch("app.core.engine.agent_runner.handle_pending_interrupt", new=AsyncMock(return_value=None)),
+        ):
+            mock_llm.side_effect = Exception("stop here")  # stop after quota gate
+            from app.core.engine.agent_runner import run_agent
+            try:
+                await run_agent(
+                    agent_model=agent,
+                    session=session,
+                    user_message="Halo",
+                    db=db,
+                )
+            except Exception:
+                pass  # expected — we just want to confirm build_agent_llms was reached
+
+        # build_agent_llms MUST have been called (run was not blocked by quota lookup failure)
+        mock_llm.assert_called_once()

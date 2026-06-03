@@ -57,6 +57,8 @@ from app.core.engine.result_parser import (
 )
 from app.core.engine.reply_guard import ensure_non_empty_reply
 from app.core.utils.phone_utils import normalize_phone
+from app.core.domain.agent_quota_service import get_owner_subscription, is_quota_exempt_builder_agent
+from app.core.domain.subscription_service import QuotaExceeded, assert_token_quota_available
 from app.core.engine.google_mcp_support import (
     _build_google_mcp_auth_failure_reply,
     _build_google_mcp_unavailable_reply,
@@ -1367,30 +1369,37 @@ async def run_agent(
     # --- Token quota pre-run gate ---
     # Block before LLM is built or invoked when subscription quota is exhausted.
     # Builder/system agents are exempt (platform infrastructure).
-    from app.core.domain.agent_quota_service import get_owner_subscription, is_quota_exempt_builder_agent
-    from app.core.domain.subscription_service import QuotaExceeded, assert_token_quota_available
+    # NOTE: overlaps check_agent_quota in agent_quota_service.py; kept as explicit pre-LLM gate.
     if not is_quota_exempt_builder_agent(agent_model):
-        _, _owner_sub = await get_owner_subscription(agent_model, db)
-        if _owner_sub is not None:
-            try:
-                assert_token_quota_available(_owner_sub)
-            except QuotaExceeded as _qe:
-                log.warning("agent_run.quota_exceeded_pre_run", detail=str(_qe))
-                run_record.status = "completed"
-                run_record.completed_at = datetime.now(timezone.utc)
-                run_record.tokens_used = 0
-                await db.flush()
-                _quota_reply = (
-                    "Maaf, kuota token subscription pemilik agent ini sudah habis. "
-                    "Silakan upgrade plan atau tunggu reset kuota berikutnya."
-                )
-                return AgentRunResult(
-                    reply=_quota_reply,
-                    steps=[],
-                    run_id=run_id,
-                    tokens_used=0,
-                    usage={},
-                )
+        try:
+            _, _owner_sub = await get_owner_subscription(agent_model, db)
+            if _owner_sub is not None:
+                try:
+                    assert_token_quota_available(_owner_sub)
+                except QuotaExceeded as _qe:
+                    log.warning("agent_run.quota_exceeded_pre_run", detail=str(_qe))
+                    run_record.status = "completed"
+                    run_record.completed_at = datetime.now(timezone.utc)
+                    run_record.tokens_used = 0
+                    await db.flush()
+                    _quota_reply = (
+                        "Maaf, kuota token subscription pemilik agent ini sudah habis. "
+                        "Silakan upgrade plan atau tunggu reset kuota berikutnya."
+                    )
+                    return AgentRunResult(
+                        reply=_quota_reply,
+                        steps=[],
+                        run_id=run_id,
+                        tokens_used=0,
+                        usage={},
+                    )
+        except QuotaExceeded:
+            raise
+        except Exception as _quota_exc:
+            log.warning(
+                "agent_run.quota_lookup_failed_allow_run",
+                error=str(_quota_exc),
+            )
 
     llm_raw, llm = build_agent_llms(agent_model, settings, temperature)
 
