@@ -30,6 +30,7 @@ from app.core.engine.tool_builder import (
     build_wa_notify_tool,
     build_whatsapp_media_tools,
 )
+from app.core.engine.sop_runtime_gate import filter_tools_by_sop
 from app.core.infra.sandbox import DockerSandbox
 from app.core.utils.phone_utils import normalize_phone
 from app.models.agent import Agent as AgentModel
@@ -84,6 +85,7 @@ async def build_agent_tool_setup(
     escalation_user_jid: str | None,
     sender_name: str | None,
     user_message: str,
+    operating_manual: dict[str, Any] | None = None,
 ) -> AgentToolSetup:
     settings = get_settings()
     agent_id = session.agent_id
@@ -261,6 +263,20 @@ async def build_agent_tool_setup(
                 )
                 if "deploy" in active_groups:
                     active_groups.remove("deploy")
+
+    # SOP runtime gate: remove final-action tools when SOP is not mature.
+    # Builder/system agents are exempt.
+    _caps = list(getattr(agent_model, "capabilities", None) or [])
+    _before_sop = len(tools)
+    tools = filter_tools_by_sop(tools, sop=operating_manual, caps=_caps)
+    _removed_sop = _before_sop - len(tools)
+    if _removed_sop:
+        _maturity = (operating_manual or {}).get("maturity", "missing") if isinstance(operating_manual, dict) else "missing"
+        log.info(
+            "agent_tool_setup.sop_locked_tools_removed",
+            removed=_removed_sop,
+            maturity=_maturity,
+        )
 
     return AgentToolSetup(
         tools=tools,

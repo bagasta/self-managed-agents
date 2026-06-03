@@ -1403,6 +1403,13 @@ async def run_agent(
 
     llm_raw, llm = build_agent_llms(agent_model, settings, temperature)
 
+    # Fetch operating manual early so it can be passed to tool setup for SOP gating.
+    _early_operating_manual = await get_latest_agent_operating_manual(
+        agent_id,
+        db,
+        fallback_tools_config=tools_config,
+    )
+
     # Tool setup lives in agent_tool_setup.py; it still gates builder tools via
     # capabilities and build_builder_tools.
     tool_setup = await build_agent_tool_setup(
@@ -1415,6 +1422,7 @@ async def run_agent(
         escalation_user_jid=escalation_user_jid,
         sender_name=sender_name,
         user_message=user_message,
+        operating_manual=_early_operating_manual,
     )
     tools = tool_setup.tools
     active_groups = tool_setup.active_groups
@@ -1454,11 +1462,8 @@ async def run_agent(
 
     memory_block = await build_memory_context(agent_id, db, scope=_memory_scope)
     layered_memory = await load_layered_memory(agent_id, db, scope=_memory_scope)
-    operating_manual = await get_latest_agent_operating_manual(
-        agent_id,
-        db,
-        fallback_tools_config=tools_config,
-    )
+    # Reuse the operating manual already fetched before tool setup (avoids duplicate DB query).
+    operating_manual = _early_operating_manual
     setattr(agent_model, "_runtime_operating_manual", operating_manual)
 
     # When a context summary is already injected into the system prompt (triggered
