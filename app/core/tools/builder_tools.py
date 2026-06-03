@@ -1799,6 +1799,24 @@ def _subagents_enabled(tools_config: dict[str, Any]) -> bool:
     return bool(subagents_cfg.get("enabled") if isinstance(subagents_cfg, dict) else subagents_cfg)
 
 
+def file_delivery_contract_issues(instructions: str, *, file_delivery: bool) -> list[str]:
+    """Validasi kontrak parent-delivery untuk agent yang menghasilkan file.
+    Kontrak benar: subagent tulis ke /workspace/shared, return SIAP_DIKIRIM_PARENT,
+    subagent tidak kirim WA, parent yang memanggil media-send."""
+    if not file_delivery:
+        return []
+    text = (instructions or "").lower()
+    issues: list[str] = []
+    if "/workspace/shared" not in text:
+        issues.append("Instruksi file harus menyuruh subagent menyimpan ke /workspace/shared/<file>.")
+    if "siap_dikirim_parent" not in text:
+        issues.append("Instruksi file harus mewajibkan subagent return penanda SIAP_DIKIRIM_PARENT.")
+    parent_sends = ("send_whatsapp_document" in text) or ("send_whatsapp_image" in text)
+    if not parent_sends:
+        issues.append("Instruksi harus menyebut parent memanggil send_whatsapp_document/send_whatsapp_image setelah artifact kembali.")
+    return issues
+
+
 def _critical_workflow_config_errors(
     *,
     name: str = "",
@@ -1842,8 +1860,7 @@ def _critical_workflow_config_errors(
     if file_delivery_workflow:
         if not tc.get("whatsapp_media"):
             errors.append("Workflow delivery file wajib whatsapp_media=true.")
-        if "send_whatsapp_document" not in (instructions or ""):
-            errors.append("Instructions wajib menyebut send_whatsapp_document untuk delivery file final.")
+        errors.extend(file_delivery_contract_issues(instructions or "", file_delivery=True))
     if generated_file_workflow and (not tc.get("sandbox") or not _subagents_enabled(tc)):
         errors.append("Workflow pembuatan file final wajib sandbox=true dan subagents.enabled=true.")
     return errors
@@ -3729,7 +3746,7 @@ def build_builder_tools(
                     len(instructions.strip()) < 1200
                     or not _has_approval_state_contract(instructions)
                     or "escalate_to_human" not in instructions
-                    or (file_delivery_workflow and "send_whatsapp_document" not in instructions)
+                    or bool(file_delivery_contract_issues(instructions, file_delivery=file_delivery_workflow))
                 )
             )
             hallucinated_payment_contract = (
@@ -4761,8 +4778,7 @@ def build_builder_tools(
         if file_delivery_workflow:
             if not tc.get("whatsapp_media"):
                 errors.append("Workflow delivery file via WhatsApp wajib mengaktifkan whatsapp_media: true.")
-            if "send_whatsapp_document" not in instructions:
-                errors.append("Workflow delivery file wajib menginstruksikan pengiriman via send_whatsapp_document.")
+            errors.extend(file_delivery_contract_issues(instructions, file_delivery=True))
         if generated_file_workflow:
             subagents_cfg = tc.get("subagents", {})
             subagents_enabled = bool(
@@ -5061,8 +5077,7 @@ def build_builder_tools(
         if file_delivery_workflow:
             if not tc.get("whatsapp_media"):
                 critical_errors.append("Workflow delivery file wajib whatsapp_media=true.")
-            if "send_whatsapp_document" not in instructions:
-                critical_errors.append("Instructions wajib menyebut send_whatsapp_document untuk delivery file final.")
+            critical_errors.extend(file_delivery_contract_issues(instructions, file_delivery=True))
         if generated_file_workflow:
             subagents_cfg = tc.get("subagents", {})
             subagents_enabled = bool(

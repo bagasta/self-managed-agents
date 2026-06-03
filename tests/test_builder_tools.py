@@ -2714,3 +2714,25 @@ class TestLlmJsonRecovery:
         assert _parse_llm_json_object('{"needs_upload":tru')[0] == {"needs_upload": True}
         assert _parse_llm_json_object('{"flag":fal')[0] == {"flag": False}
         assert _parse_llm_json_object('{"x":[1,nul')[0] == {"x": [1, None]}
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Section: file_delivery_contract_issues (A4)
+# ────────────────────────────────────────────────────────────────────────────
+
+from app.core.tools.builder_tools import file_delivery_contract_issues
+
+
+def test_parent_delivery_contract_ok():
+    instr = ("Subagent simpan ke /workspace/shared/hasil.pdf, return SIAP_DIKIRIM_PARENT. "
+             "Subagent tidak boleh kirim WhatsApp. Parent kirim via send_whatsapp_document.")
+    assert file_delivery_contract_issues(instr, file_delivery=True) == []
+
+
+def test_parent_delivery_contract_missing_markers():
+    issues = file_delivery_contract_issues("Kirim file ke customer.", file_delivery=True)
+    assert issues
+
+
+def test_no_file_delivery_means_no_issue():
+    assert file_delivery_contract_issues("CS biasa tanpa file.", file_delivery=False) == []
