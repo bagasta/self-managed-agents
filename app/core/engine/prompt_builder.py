@@ -12,6 +12,7 @@ Fungsi yang diekspor:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import uuid
 from typing import Any
 
@@ -27,6 +28,82 @@ from app.core.engine.context_service import count_user_messages, load_history
 from app.core.engine.tool_capability_registry import build_runtime_tool_contract_text
 from app.core.utils.phone_utils import normalize_phone
 from app.core.utils.wa_identity import is_probable_whatsapp_lid
+
+_WIB = timezone(timedelta(hours=7), name="WIB")
+_WEEKDAYS_ID = [
+    "Senin",
+    "Selasa",
+    "Rabu",
+    "Kamis",
+    "Jumat",
+    "Sabtu",
+    "Minggu",
+]
+_MONTHS_ID = [
+    "Januari",
+    "Februari",
+    "Maret",
+    "April",
+    "Mei",
+    "Juni",
+    "Juli",
+    "Agustus",
+    "September",
+    "Oktober",
+    "November",
+    "Desember",
+]
+
+
+def _build_current_time_block(now: datetime | None = None) -> str:
+    current = now or datetime.now(_WIB)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(_WIB)
+    weekday = _WEEKDAYS_ID[current.weekday()]
+    month = _MONTHS_ID[current.month - 1]
+    human_time = (
+        f"{weekday}, {current.day} {month} {current.year}, "
+        f"{current:%H:%M} WIB"
+    )
+    return (
+        "## Current Time\n"
+        f"- Sekarang: {human_time} (Asia/Jakarta, UTC+7).\n"
+        f"- ISO lokal: {current.isoformat(timespec='seconds')}.\n"
+        "- Pakai waktu ini untuk memahami `hari ini`, `besok`, `kemarin`, "
+        "`nanti malam`, deadline, reminder, jadwal, dan konteks real-time lain. "
+        "Jangan mengandalkan tanggal dari training model."
+    )
+
+
+def _build_arthur_tool_category_guide() -> str:
+    return (
+        "\n\n## Arthur Tool Categories\n"
+        "Sebelum memilih tool, klasifikasikan request user ke satu kategori utama. "
+        "Kategori ini adalah routing policy, bukan teks untuk disebut ke user.\n"
+        "- User Management: kenali owner/user, nomor WhatsApp asli, subscription, "
+        "slot agent, quota, dan preferensi. Gunakan get_user_subscription dan memory tools.\n"
+        "- Plan & Billing: pertanyaan paket, limit, quota, atau pembelian plan. "
+        "Payment gateway otomatis masih coming soon; jangan mengklaim bisa checkout/payment "
+        "kalau tool payment belum tersedia.\n"
+        "- Agent Builder: user ingin membuat agent baru. Gunakan get_platform_capabilities, "
+        "get_presets, plan_agent, compose_agent_blueprint, compose_agent_operating_manual, "
+        "compose_agent_instructions, compose_agent_soul, validate_agent_config, create_agent, "
+        "dan verify_agent.\n"
+        "- Agent Management: user membahas agent yang sudah ada, minta edit/perbaikan, "
+        "agent belum sesuai, minta status, atau minta hapus. Wajib mulai dari "
+        "list_my_agents atau get_agent_detail, lalu update_agent/delete_agent/set_agent_memory "
+        "sesuai kebutuhan. Jangan create_agent untuk request edit agent existing.\n"
+        "- Channel Management: WhatsApp/webchat/API sebagai tempat agent dipasang atau dicoba. "
+        "Untuk WhatsApp gunakan create_wa_dev_trial_link, send_agent_wa_qr, "
+        "list_available_wa_devices, dan WhatsApp media tools sesuai konteks.\n"
+        "- Workspace/App Connectors: koneksi aplikasi eksternal seperti Google Workspace. "
+        "Untuk Google, aktifkan kemampuan di agent target dengan update_agent jika perlu, "
+        "lalu generate_google_auth_link. Kalau service/auth belum siap, jelaskan blocker "
+        "secara jujur dan jangan fallback ke Channel Management.\n"
+        "- Runtime Support: Tavily browsing, skills, memory, escalation, dan notifikasi progress. "
+        "Gunakan hanya untuk mendukung kategori utama, bukan sebagai pengganti action utama."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -483,6 +560,7 @@ def build_system_prompt(
     escalation_context: str | None,
     is_operator_message: bool,
     user_message: str = "",
+    current_time: datetime | None = None,
 ) -> str:
     """
     Rakit system prompt lengkap dari semua komponen.
@@ -506,6 +584,7 @@ def build_system_prompt(
         sender_name=sender_name,
         is_operator_message=is_operator_message,
     )
+    current_time_block = _build_current_time_block(current_time)
     base_instructions = agent_model.instructions or "You are a helpful assistant."
 
     # --- Layered memory (OpenClaw-style) ---
@@ -598,11 +677,11 @@ def build_system_prompt(
         )
 
         layered_block = "\n".join(p)
-        system_prompt = f"{context_block}\n\n{layered_block}"
+        system_prompt = f"{context_block}\n\n{current_time_block}\n\n{layered_block}"
         if _soul and base_instructions and base_instructions.strip() != _soul:
             system_prompt += f"\n\n---\n\n{base_instructions}"
     else:
-        system_prompt = f"{context_block}\n\n{base_instructions}"
+        system_prompt = f"{context_block}\n\n{current_time_block}\n\n{base_instructions}"
 
     # 1. Conversation context summary
     if context_summary:
@@ -661,12 +740,14 @@ def build_system_prompt(
     )
 
     if "builder" in active_groups:
+        system_prompt += _build_arthur_tool_category_guide()
         system_prompt += (
             "\n\n## Arthur Builder Mode\n"
             "Kamu adalah agent builder. Tujuan utama kamu adalah membuat, mengubah, mengecek, dan menyiapkan agent user sampai bisa dicoba.\n"
             "Aturan kerja wajib:\n"
+            "- Selalu tentukan kategori request secara internal sebelum tool call: User Management, Plan & Billing, Agent Builder, Agent Management, Channel Management, Workspace/App Connectors, atau Runtime Support.\n"
             "- Tolak pembuatan atau update agent untuk buzzer, kampanye politik, propaganda politik, atau manipulasi opini publik. Jangan bantu menyusun blueprint, instruksi, soul, atau strategi untuk tujuan itu.\n"
-            "- Jika user sudah meminta dibuatkan agent dan konteksnya cukup, langsung jalankan tool berurutan: plan_agent -> compose_agent_blueprint -> compose_agent_instructions -> validate_agent_config -> create_agent.\n"
+            "- Jika user sudah meminta dibuatkan agent dan konteksnya cukup, langsung jalankan tool berurutan: plan_agent -> compose_agent_blueprint -> compose_agent_operating_manual -> compose_agent_instructions -> validate_agent_config -> compose_agent_soul -> create_agent -> verify_agent.\n"
             "- Kamu bertindak sebagai builder yang menyiapkan agent sampai user tahu langkah berikutnya. Jangan membuat user menebak cara pakai, cara test, cara connect Google, cara pasang WhatsApp, atau apa yang masih kurang.\n"
             "- Untuk setiap agent bisnis, tentukan dan masukkan workflow nyata: data yang dikumpulkan, kapan minta pembayaran, bukti apa yang diminta, siapa admin/operatornya, kapan eskalasi, dan kapan hasil boleh dikirim. Jangan hanya membuat persona umum.\n"
             "- Setiap agent yang kamu buat harus sadar bahwa dia dibuat oleh Arthur, punya Owner, dan Owner adalah bos/superadmin. Masukkan pemahaman ini ke instructions/soul agent, termasuk aturan minta bantuan Owner saat butuh keputusan manusia, izin Google, akses akun, atau menghadapi masalah yang tidak bisa diselesaikan sendiri.\n"

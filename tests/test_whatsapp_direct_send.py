@@ -348,7 +348,12 @@ def test_builder_prompt_blocks_repeated_continue_questions():
     )
 
     assert "## Arthur Builder Mode" in prompt
-    assert "plan_agent -> compose_agent_blueprint -> compose_agent_instructions -> validate_agent_config -> create_agent" in prompt
+    assert "plan_agent -> compose_agent_blueprint -> compose_agent_operating_manual -> compose_agent_instructions -> validate_agent_config -> compose_agent_soul -> create_agent -> verify_agent" in prompt
+    assert "## Arthur Tool Categories" in prompt
+    assert "Agent Builder" in prompt
+    assert "Agent Management" in prompt
+    assert "Channel Management" in prompt
+    assert "Workspace/App Connectors" in prompt
     assert "sampai user tahu langkah berikutnya" in prompt
     assert "cara test, cara connect Google, cara pasang WhatsApp" in prompt
     assert "minta pembayaran, bukti apa yang diminta" in prompt

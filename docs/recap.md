@@ -1,5 +1,50 @@
 # Recap: Deep Agent SaaS Hardening — MCP, Subagent, Sandbox, Builder Entitlements
 
+## 2026-06-04 — Arthur Builder Tools Refactor dari 3000+ Baris ke Facade Modular
+
+### Masalah yang Ditemukan
+- `app/core/tools/builder_tools.py` sudah menjadi file ribuan baris yang mencampur katalog preset, policy/ownership helper, writer tool, create/update agent, channel trial, connector Google, validation, verify, dan agent management.
+- Ukuran file membuat fixing Arthur berisiko karena perubahan kecil mudah menyentuh area yang tidak terkait.
+
+### Perubahan Utama
+- `builder_tools.py` dipertahankan sebagai facade `build_builder_tools(...)`, sementara logic dipindah per kategori ke module kecil:
+  `builder_catalog.py`, `builder_identity.py`, `builder_google.py`, `builder_json.py`, `builder_intent.py`, `builder_fallbacks.py`, `builder_read_tools.py`, `builder_user_tools.py`, `builder_planning_tools.py`, `builder_blueprint_tools.py`, `builder_manual_tools.py`, `builder_instruction_tools.py`, `builder_soul_tools.py`, `builder_verify_tools.py`, `builder_validation_tools.py`, `builder_management_tools.py`, `builder_connector_tools.py`, `builder_channel_tools.py`, `builder_create_tools.py`, `builder_update_tools.py`, dan `builder_runtime_text.py`.
+- Public entrypoint, nama tool Arthur, urutan tool, dan compatibility import lama tetap dijaga.
+- `create_agent` dan `update_agent` dipisahkan ke factory sendiri dengan dependency eksplisit, tapi patch seam lama untuk `Agent`, writer, logger, dan settings tetap kompatibel.
+- Ukuran file setelah refactor:
+  - `app/core/tools/builder_tools.py` turun menjadi 401 baris.
+  - Logic create/update masih terbesar, tapi sudah terisolasi: `builder_create_tools.py` 659 baris dan `builder_update_tools.py` 547 baris.
+
+### Validasi
+- `PYTHONPATH=. .venv/bin/python -m pytest -q tests/test_builder_tools.py` → 117 passed.
+- Focused builder/deploy suite → 193 passed.
+- Broad Arthur/WA/MCP regression suite → 264 passed.
+- Smoke test khusus flow Arthur bikin agent:
+  - compose blueprint dan instructions;
+  - validate config sebelum create;
+  - `create_agent` dengan owner metadata, SOP/operating manual, Google instruction append, dan policy blocker;
+  - WA dev trial fallback;
+  - verify readiness sebelum launch;
+  - hasil: 45 passed.
+- Smoke test runtime/prompt Arthur builder:
+  - Arthur paham CRUD agent sebagai tugas utama;
+  - prompt mencegah loop pertanyaan "lanjut/continue";
+  - kategori tool terdokumentasi;
+  - pipeline validate -> create -> list -> get detail -> update tetap jalan;
+  - tenant isolation tetap memblokir akses agent user lain;
+  - builder runtime tetap skip sandbox/subagent walau config drift;
+  - hasil: 21 passed.
+- Regression suite terakhir:
+  - `PYTHONPATH=. .venv/bin/python -m pytest -q tests/test_builder_tools.py tests/test_agent_builder_phase1.py tests/test_agent_builder_phase2.py tests/test_agent_builder_phase4.py tests/test_agent_quota_service.py tests/test_whatsapp_progress.py tests/test_whatsapp_direct_send.py tests/test_tool_call_orchestration.py tests/test_mcp_tool_priority.py`
+  - hasil: 264 passed, 1 warning existing terkait `asyncio.get_event_loop()` di test helper.
+
+### Penilaian Setelah Refactor
+- Arthur untuk bikin agent sudah sehat di deterministic local/regression test.
+- Refactor membuat boundary tool Arthur jauh lebih jelas: user management, agent builder, integration/connector, channel/WhatsApp, validation, verify, create/update, dan agent management tidak lagi numpuk di satu script raksasa.
+- Blast radius fixing berikutnya jauh lebih kecil karena perubahan bisa diarahkan ke module sesuai kategori.
+- Sisa risiko teknis: `builder_create_tools.py` dan `builder_update_tools.py` masih cukup panjang, sehingga nanti masih layak dipecah lagi kalau area create/update makin sering berubah.
+- Google live service tidak dites karena service memang belum aktif/tidak merespons. WhatsApp real send production juga tidak dipaksa; validasi saat ini adalah local deterministic test dan regression suite.
+
 ## 2026-06-03 — Arthur Builder SOP Semantic, Bahasa Fleksibel, dan Tier Check Awal
 
 ### Masalah yang Ditemukan

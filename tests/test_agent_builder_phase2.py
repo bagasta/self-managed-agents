@@ -83,6 +83,38 @@ class TestRulebookSections:
             "Harus ada aturan perilaku yang wajib diikuti"
 
 
+class TestToolCategories:
+    """Kategori tool Arthur harus terdokumentasi sebagai routing policy."""
+
+    REQUIRED_CATEGORIES = [
+        "User Management",
+        "Plan & Billing",
+        "Agent Builder",
+        "Agent Management",
+        "Channel Management",
+        "Workspace / App Connectors",
+        "Runtime Support",
+    ]
+
+    def setup_method(self):
+        self.content = RULEBOOK_PATH.read_text(encoding="utf-8")
+
+    def test_all_tool_categories_documented(self):
+        for category in self.REQUIRED_CATEGORIES:
+            assert category in self.content, f"Kategori tool '{category}' harus ada di rulebook"
+
+    def test_existing_agent_requests_route_to_agent_management(self):
+        assert "Jangan create_agent" in self.content
+        assert "list_my_agents/get_agent_detail" in self.content
+        assert "update_agent/delete_agent" in self.content
+
+    def test_whatsapp_and_google_are_separate_categories(self):
+        assert "Channel Management" in self.content
+        assert "create_wa_dev_trial_link" in self.content
+        assert "Workspace / App Connectors" in self.content
+        assert "generate_google_auth_link" in self.content
+
+
 class TestWhatsAppBestPractices:
     """Best practices spesifik untuk WhatsApp harus terdokumentasi."""
 

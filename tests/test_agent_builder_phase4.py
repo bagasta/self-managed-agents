@@ -121,6 +121,7 @@ class TestArthurConfig:
         src = p.read_text()
         assert "Model Arthur sendiri: openai/gpt-4.1-mini" in src
         assert "Model Arthur sendiri: deepseek/deepseek-v4-flash" not in src
+        assert "Model writer untuk blueprint/instructions/manual/soul: deepseek/deepseek-v4-pro" in src
 
     def test_arthur_has_system_capabilities(self):
         p = pathlib.Path(__file__).parent.parent / "scripts/seed_arthur.py"
@@ -134,6 +135,59 @@ class TestArthurConfig:
         assert "allowed_senders': None" in src or '"allowed_senders": None' in src or \
                "allowed_senders=None" in src or "allowed_senders\": None" in src, \
             "Arthur harus allowed_senders=None agar terbuka untuk siapapun"
+
+    def test_system_prompt_injects_current_time_and_arthur_tool_categories(self):
+        from app.core.engine.prompt_builder import build_system_prompt
+
+        agent_id = uuid.uuid4()
+        agent = SimpleNamespace(
+            id=agent_id,
+            name="Arthur",
+            model="openai/gpt-4.1-mini",
+            instructions="Kamu adalah Arthur.",
+            tools_config={"builder": True, "memory": True},
+            safety_policy={},
+            escalation_config={},
+            operator_ids=[],
+            owner_external_id="",
+            created_by_type="system",
+            created_by_agent_id="",
+            created_by_agent_name="System",
+            capabilities=["system", "builder"],
+            _runtime_operating_manual={},
+        )
+        session = SimpleNamespace(
+            id=uuid.uuid4(),
+            agent_id=agent_id,
+            channel_type="whatsapp",
+            channel_config={"user_phone": "628111111111"},
+            external_user_id="628111111111",
+        )
+
+        prompt = build_system_prompt(
+            agent_model=agent,
+            session=session,
+            active_groups=["memory", "skills", "tavily", "wa_agent_manager", "builder"],
+            saved_custom_tools=[],
+            subagent_list=[],
+            sender_name="Bagas",
+            context_summary="",
+            memory_block="",
+            layered_memory={},
+            rag_context="",
+            escalation_user_jid=None,
+            escalation_context=None,
+            is_operator_message=False,
+            user_message="edit agent saya",
+            current_time=datetime(2026, 6, 4, 9, 30, tzinfo=timezone.utc),
+        )
+
+        assert "## Current Time" in prompt
+        assert "Kamis, 4 Juni 2026, 16:30 WIB" in prompt
+        assert "## Arthur Tool Categories" in prompt
+        assert "Agent Management" in prompt
+        assert "Channel Management" in prompt
+        assert "Workspace/App Connectors" in prompt
 
 
 # ── Section 3: Full Builder Pipeline ────────────────────────────────────────

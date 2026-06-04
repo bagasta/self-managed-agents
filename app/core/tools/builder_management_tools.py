@@ -1,0 +1,320 @@
+"""Per-user agent management tools for Arthur builder."""
+from __future__ import annotations
+
+import json
+import uuid
+from typing import Any, Callable
+
+import structlog
+from langchain_core.tools import tool
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from app.core.domain.agent_sop_service import get_latest_agent_operating_manual, summarize_operating_manual
+from app.core.tools.builder_google import has_google_workspace_tools as _has_google_workspace_tools
+from app.core.tools.builder_identity import (
+    agent_belongs_to_owner as _agent_belongs_to_owner,
+    agent_created_by_metadata as _agent_created_by_metadata,
+)
+from app.models.agent import Agent
+
+logger = structlog.get_logger(__name__)
+
+LoggerProvider = Callable[[], Any]
+
+
+def build_builder_management_tools(
+    db_factory: async_sessionmaker,
+    *,
+    owner_phone: str | None = None,
+    self_agent_id: str | None = None,
+    get_logger: LoggerProvider | None = None,
+) -> dict[str, Any]:
+    _get_logger = get_logger or (lambda: logger)
+
+    @tool
+    async def set_agent_memory(agent_id: str, key: str, value: str) -> str:
+        """
+        Simpan/update memory global untuk agent milik user ini secara langsung ke database.
+        Gunakan ini sebagai fallback jika soul/blueprint belum dikirim saat create_agent.
+
+        Args:
+            agent_id: UUID agent yang memory-nya akan diubah
+            key: Nama memory, misalnya "soul" atau "agent_blueprint"
+            value: Isi memory
+        """
+        try:
+            agent_uuid = uuid.UUID(agent_id)
+        except ValueError:
+            return f"[error] agent_id tidak valid: {agent_id}"
+        if not key.strip():
+            return "[error] key memory wajib diisi"
+        if not value.strip():
+            return "[error] value memory wajib diisi"
+
+        async with db_factory() as db:
+            result = await db.execute(
+                select(Agent).where(Agent.id == agent_uuid, Agent.is_deleted.is_(False))
+            )
+            agent = result.scalar_one_or_none()
+            if not agent:
+                return f"[error] Agent dengan ID {agent_id} tidak ditemukan"
+            if owner_phone and not _agent_belongs_to_owner(agent, owner_phone):
+                return "[error] Kamu tidak punya akses ke agent ini"
+
+            from app.core.domain.memory_service import upsert_memory
+
+            await upsert_memory(agent.id, key.strip(), value.strip(), db, scope=None)
+            await db.commit()
+
+        return json.dumps({
+            "success": True,
+            "agent_id": agent_id,
+            "key": key.strip(),
+            "message": f"Memory '{key.strip()}' berhasil disimpan.",
+        }, ensure_ascii=False, indent=2)
+
+    @tool
+    async def delete_agent(
+        agent_id: str,
+        confirm_name: str = "",
+    ) -> str:
+        """
+        Hapus agent milik user ini secara soft-delete.
+
+        Gunakan hanya setelah user eksplisit meminta hapus/delete agent dan sudah
+        mengonfirmasi nama agent. Jika user belum menyebut agent mana, panggil
+        list_my_agents() dulu. Jika confirm_name kosong atau tidak sama dengan
+        nama agent, tool akan meminta konfirmasi dan tidak menghapus.
+
+        Args:
+            agent_id: UUID agent yang akan dihapus
+            confirm_name: Nama agent persis sebagai konfirmasi hapus
+        """
+        try:
+            agent_uuid = uuid.UUID(agent_id)
+        except ValueError:
+            return f"[error] agent_id tidak valid: {agent_id}"
+
+        if self_agent_id and str(agent_uuid) == self_agent_id:
+            return "[error] Arthur tidak boleh menghapus dirinya sendiri."
+
+        async with db_factory() as db:
+            result = await db.execute(
+                select(Agent).where(Agent.id == agent_uuid, Agent.is_deleted.is_(False))
+            )
+            agent = result.scalar_one_or_none()
+            if not agent:
+                return f"[error] Agent dengan ID {agent_id} tidak ditemukan"
+            if owner_phone and not _agent_belongs_to_owner(agent, owner_phone):
+                return "[error] Kamu tidak punya akses untuk menghapus agent ini"
+
+            expected_name = (agent.name or "").strip()
+            if not confirm_name or confirm_name.strip() != expected_name:
+                return json.dumps({
+                    "success": False,
+                    "needs_confirmation": True,
+                    "agent_id": str(agent.id),
+                    "agent_name": expected_name,
+                    "message": (
+                        f"Konfirmasi dulu sebelum menghapus agent '{expected_name}'. "
+                        "Panggil delete_agent lagi dengan confirm_name persis sama dengan nama agent."
+                    ),
+                }, ensure_ascii=False, indent=2)
+
+            wa_device_id = agent.wa_device_id
+            wa_disconnect_error = ""
+            if wa_device_id and not str(wa_device_id).startswith("wadev_"):
+                try:
+                    from app.core.infra.wa_client import delete_wa_device
+
+                    await delete_wa_device(wa_device_id)
+                except Exception as exc:
+                    wa_disconnect_error = str(exc)
+                    _get_logger().warning(
+                        "builder_tools.delete_agent.wa_disconnect_failed",
+                        agent_id=str(agent.id),
+                        error=wa_disconnect_error,
+                    )
+
+            agent.is_deleted = True
+            agent.version = (agent.version or 1) + 1
+            await db.commit()
+
+        _get_logger().info("builder_tools.delete_agent.success", agent_id=agent_id, owner_phone=owner_phone)
+        return json.dumps({
+            "success": True,
+            "agent_id": agent_id,
+            "agent_name": expected_name,
+            "wa_device_id": wa_device_id,
+            "wa_disconnect_error": wa_disconnect_error,
+            "message": f"Agent '{expected_name}' berhasil dihapus.",
+        }, ensure_ascii=False, indent=2)
+
+    @tool
+    async def get_agent_detail(agent_id: str, include_instructions: bool = False) -> str:
+        """
+        Baca konfigurasi lengkap sebuah agent. Gunakan untuk review sebelum update,
+        atau untuk debugging konfigurasi agent yang sudah ada.
+
+        Args:
+            agent_id: UUID agent yang ingin dilihat
+            include_instructions: True jika perlu membaca full instructions sebelum update.
+        """
+        try:
+            agent_uuid = uuid.UUID(agent_id)
+        except ValueError:
+            return f"[error] agent_id tidak valid: {agent_id}"
+
+        async with db_factory() as db:
+            result = await db.execute(
+                select(Agent).where(Agent.id == agent_uuid, Agent.is_deleted.is_(False))
+            )
+            agent = result.scalar_one_or_none()
+        if not agent:
+            return f"[error] Agent dengan ID {agent_id} tidak ditemukan"
+
+        # Cek kepemilikan — bypass jika membaca diri sendiri
+        is_self = self_agent_id and str(agent_uuid) == self_agent_id
+        if not is_self and owner_phone and not _agent_belongs_to_owner(agent, owner_phone):
+            return f"[error] Kamu tidak punya akses ke agent ini"
+
+        memory_summary: dict[str, str] = {}
+        try:
+            from app.core.domain.memory_service import get_memory
+
+            async with db_factory() as db:
+                soul_mem = await get_memory(agent.id, "soul", db, scope=None)
+                blueprint_mem = await get_memory(agent.id, "agent_blueprint", db, scope=None)
+                platform_identity_mem = await get_memory(agent.id, "platform_identity", db, scope=None)
+            if soul_mem:
+                soul_value = getattr(soul_mem, "value_data", "")
+                if isinstance(soul_value, str):
+                    memory_summary["soul_preview"] = soul_value[:500] + (
+                        "..." if len(soul_value) > 500 else ""
+                    )
+            if blueprint_mem:
+                blueprint_value = getattr(blueprint_mem, "value_data", "")
+                if isinstance(blueprint_value, str):
+                    memory_summary["agent_blueprint_preview"] = blueprint_value[:800] + (
+                        "..." if len(blueprint_value) > 800 else ""
+                    )
+            if platform_identity_mem:
+                platform_identity_value = getattr(platform_identity_mem, "value_data", "")
+                if isinstance(platform_identity_value, str):
+                    memory_summary["platform_identity_preview"] = platform_identity_value[:500] + (
+                        "..." if len(platform_identity_value) > 500 else ""
+                    )
+        except Exception as exc:
+            memory_summary["memory_warning"] = f"Gagal membaca memory agent: {exc}"
+
+        instructions_text = agent.instructions or ""
+        created_by_metadata = _agent_created_by_metadata(agent)
+        operating_manual = None
+        try:
+            async with db_factory() as db:
+                operating_manual = await get_latest_agent_operating_manual(
+                    agent.id,
+                    db,
+                    fallback_tools_config=agent.tools_config if isinstance(agent.tools_config, dict) else {},
+                )
+        except Exception as exc:
+            memory_summary["operating_manual_warning"] = f"Gagal membaca SOP agent: {exc}"
+        payload = {
+            "id": str(agent.id),
+            "name": agent.name,
+            "description": agent.description,
+            "model": agent.model,
+            "temperature": agent.temperature,
+            "tools_config": agent.tools_config,
+            "google_workspace_enabled": _has_google_workspace_tools(
+                agent.tools_config if isinstance(agent.tools_config, dict) else {}
+            ),
+            "instructions_include_google_workspace": "Google Workspace" in (agent.instructions or ""),
+            "escalation_config": agent.escalation_config,
+            "operator_ids": agent.operator_ids,
+            "allowed_senders": agent.allowed_senders,
+            **created_by_metadata,
+            "launch_metadata": {
+                "owner_present": bool(getattr(agent, "owner_external_id", None) or (getattr(agent, "operator_ids", None) or [])),
+                "created_by_present": bool(created_by_metadata["created_by_type"]),
+                "created_by_arthur": created_by_metadata["created_by_type"] == "arthur_builder",
+                "operating_manual": summarize_operating_manual(operating_manual),
+            },
+            "channel_type": agent.channel_type,
+            "wa_device_id": agent.wa_device_id,
+            "token_quota": agent.token_quota,
+            "tokens_used": agent.tokens_used,
+            "active_until": agent.active_until.isoformat() if agent.active_until else None,
+            "version": agent.version,
+            "instructions_len": len(instructions_text),
+            "instructions_preview": instructions_text[:300] + ("..." if len(instructions_text) > 300 else ""),
+            "memory": memory_summary,
+        }
+        if include_instructions:
+            payload["instructions"] = instructions_text
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    @tool
+    async def list_my_agents() -> str:
+        """
+        Tampilkan semua agent yang kamu buat/miliki di platform ini.
+        Agent diidentifikasi berdasarkan nomor WA yang sedang digunakan untuk chat.
+        """
+        if not owner_phone:
+            return "[error] Tidak bisa identifikasi pemilik — pastikan kamu chat dari nomor WA yang terdaftar"
+
+        try:
+            async with db_factory() as db:
+                result = await db.execute(
+                    select(Agent).where(
+                        Agent.is_deleted.is_(False),
+                        ~Agent.capabilities.contains(["system"]),
+                    )
+                )
+                all_agents = result.scalars().all()
+
+                my_agents = [a for a in all_agents if _agent_belongs_to_owner(a, owner_phone)]
+
+            if not my_agents:
+                return json.dumps({
+                    "count": 0,
+                    "agents": [],
+                    "message": "Kamu belum punya agent. Mau saya bantu buatkan yang pertama?",
+                }, ensure_ascii=False, indent=2)
+
+            return json.dumps({
+                "count": len(my_agents),
+                "agents": [
+                    {
+                        "id": str(a.id),
+                        "name": a.name,
+                        "description": a.description,
+                        "model": a.model,
+                        "channel_type": a.channel_type,
+                        "wa_device_id": a.wa_device_id,
+                        **_agent_created_by_metadata(a),
+                        "launch_metadata": {
+                            "owner_present": bool(getattr(a, "owner_external_id", None) or (getattr(a, "operator_ids", None) or [])),
+                            "created_by_present": bool(_agent_created_by_metadata(a)["created_by_type"]),
+                            "created_by_arthur": _agent_created_by_metadata(a)["created_by_type"] == "arthur_builder",
+                        },
+                        "token_quota": a.token_quota,
+                        "tokens_used": a.tokens_used,
+                        "active_until": a.active_until.isoformat() if a.active_until else None,
+                        "tools_active": [k for k, v in (a.tools_config or {}).items() if v],
+                    }
+                    for a in my_agents
+                ],
+            }, ensure_ascii=False, indent=2)
+
+        except Exception as exc:
+            _get_logger().error("builder_tools.list_my_agents.error", error=str(exc))
+            return f"[error] Gagal mengambil daftar agent: {exc}"
+
+    return {
+        "set_agent_memory": set_agent_memory,
+        "delete_agent": delete_agent,
+        "get_agent_detail": get_agent_detail,
+        "list_my_agents": list_my_agents,
+    }
