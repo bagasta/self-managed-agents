@@ -7,7 +7,6 @@ for Google Workspace blockers.
 from __future__ import annotations
 
 import copy
-import json
 import re
 import uuid
 from typing import Any
@@ -20,6 +19,10 @@ from app.core.engine.agent_identity import (
     _session_real_phone,
     _session_sender_phone,
 )
+from app.core.engine.agent_step_utils import (
+    _operator_message_payload,
+    _parse_step_result_json,
+)
 from app.core.engine.google_mcp_support import (
     _candidate_external_user_ids,
     _fetch_google_auth_link,
@@ -28,35 +31,6 @@ from app.core.utils.phone_utils import normalize_phone
 from app.models.session import Session
 
 logger = structlog.get_logger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Local utilities (copies of tiny pure helpers that still live in agent_runner)
-# ---------------------------------------------------------------------------
-
-def _parse_step_result_json(result: Any) -> dict[str, Any] | None:
-    if isinstance(result, dict):
-        return result
-    if not isinstance(result, str):
-        return None
-    try:
-        parsed = json.loads(result)
-    except Exception:
-        return None
-    return parsed if isinstance(parsed, dict) else None
-
-
-def _operator_message_payload(message: str) -> str:
-    """Return the actual operator text from WA/API operator envelopes."""
-    text = message or ""
-    if text.startswith("[OPERATOR] "):
-        return text.removeprefix("[OPERATOR] ").strip()
-    if text.startswith("<OPERATOR>"):
-        marker = "\nPesan:"
-        idx = text.find(marker)
-        if idx != -1:
-            return text[idx + len(marker):].strip()
-    return text
 
 
 # ---------------------------------------------------------------------------

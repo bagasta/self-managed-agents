@@ -55,6 +55,10 @@ from app.core.engine.agent_identity import (
     _session_real_phone,
     _session_sender_phone,
 )
+from app.core.engine.agent_step_utils import (
+    _operator_message_payload,
+    _parse_step_result_json,
+)
 from app.core.engine.agent_tool_setup import build_agent_tool_setup
 from app.core.engine.agent_policy import (
     AgentRuntimePolicy,
@@ -118,18 +122,6 @@ settings = get_settings()
 
 _URL_RE = re.compile(r"https://[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}(?:/[^\s\"']*)?")
 _SHARED_WORKSPACE_FILE_RE = re.compile(r"(/workspace/shared/[^\s`'\"),]+)")
-
-
-def _parse_step_result_json(result: Any) -> dict[str, Any] | None:
-    if isinstance(result, dict):
-        return result
-    if not isinstance(result, str):
-        return None
-    try:
-        parsed = json.loads(result)
-    except Exception:
-        return None
-    return parsed if isinstance(parsed, dict) else None
 
 
 async def _graph_result_from_output(
@@ -386,19 +378,6 @@ _DIRECT_WA_TEXT_WRONG_TOOLS = {
     "send_whatsapp_document",
     "notify_user",
 }
-
-
-def _operator_message_payload(message: str) -> str:
-    """Return the actual operator text from WA/API operator envelopes."""
-    text = message or ""
-    if text.startswith("[OPERATOR] "):
-        return text.removeprefix("[OPERATOR] ").strip()
-    if text.startswith("<OPERATOR>"):
-        marker = "\nPesan:"
-        idx = text.find(marker)
-        if idx != -1:
-            return text[idx + len(marker):].strip()
-    return text
 
 
 def _is_operator_envelope(message: str) -> bool:
