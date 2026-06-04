@@ -1,5 +1,29 @@
 # Recap: Deep Agent SaaS Hardening — MCP, Subagent, Sandbox, Builder Entitlements
 
+## 2026-06-04 — Agent Runner Guard/Middleware Extraction (Fase 3)
+
+### Masalah yang Ditemukan
+- `app/core/engine/agent_runner.py` membengkak ke 3118 baris: orchestration `run_agent` bercampur dengan puluhan guard/detector lintas-domain (Google routing, WhatsApp direct-send, reply guard task/escalation, deploy/file/builder-create followup) plus 2 middleware LangGraph.
+- Banyak test (≈34 symbol private) mengimpor langsung dari `agent_runner`, jadi refactor harus mempertahankan semua symbol tetap importable dari `agent_runner` (facade).
+
+### Perubahan Utama
+- Ekstraksi guard/detector/middleware ke modul per-domain, `agent_runner.py` tetap facade re-export:
+  - `agent_step_utils.py` — leaf bebas-dependency: `_parse_step_result_json`, `_operator_message_payload`, `_is_operator_envelope`, `_URL_RE`, `_has_whatsapp_media_send_step` (helper lintas-domain ditaruh di leaf agar graph import mengarah ke bawah, bukan sibling-to-sibling).
+  - `agent_identity.py` — resolusi phone/owner/session.
+  - `agent_google_routing.py` — routing/runtime Google Workspace + builder auth-link.
+  - `agent_whatsapp_guards.py` — 13 detector/guard direct-send WhatsApp + konstanta privatnya.
+  - `agent_reply_guards.py` — `_task_result_guard_reply`, `_operator_escalation_reply_guard`.
+  - `agent_followups.py` — 15 detector deploy/file-delivery/builder-create/website.
+  - `agent_middleware.py` — `BlockTaskToolMiddleware`, `ExternalServiceFallbackGuardMiddleware`.
+- Pure refactor: nol perubahan behavior/prompt/model/config. Semua kode dipindah verbatim.
+- `agent_runner.py` turun dari 3118 → 1980 baris (−36%). Sisanya didominasi body `run_agent` (≈1700 baris) — dekomposisi body adalah Task 8 (opsional, risiko tinggi) yang sengaja ditunda.
+
+### Validasi
+- Re-export contract (34 symbol) → `REEXPORT OK` setelah tiap task.
+- Full regression suite tetap identik baseline: **286 passed + 1 failure pre-existing** (`tests/test_google_mcp_subagent_routing.py::test_builder_policy_is_not_redirected_by_google_mcp_intent`, sudah merah sebelum refactor di `fc4d1af`, di luar scope agent_runner).
+- `import app.main` → OK.
+- Plan: `docs/superpowers/plans/2026-06-04-agent-runner-refactor-plan.md`.
+
 ## 2026-06-04 — Arthur Builder Tools Refactor dari 3000+ Baris ke Facade Modular
 
 ### Masalah yang Ditemukan
