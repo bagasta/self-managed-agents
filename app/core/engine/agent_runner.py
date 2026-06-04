@@ -56,6 +56,8 @@ from app.core.engine.agent_identity import (
     _session_sender_phone,
 )
 from app.core.engine.agent_step_utils import (
+    _URL_RE,
+    _has_whatsapp_media_send_step,
     _is_operator_envelope,
     _operator_message_payload,
     _parse_step_result_json,
@@ -122,8 +124,6 @@ settings = get_settings()
 
 
 from app.core.engine.agent_reply_guards import (
-    _URL_RE,
-    _has_whatsapp_media_send_step,
     _operator_escalation_reply_guard,
     _task_result_guard_reply,
 )

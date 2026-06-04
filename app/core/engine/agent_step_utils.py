@@ -7,7 +7,10 @@ it (e.g. `agent_google_routing`) without creating import cycles.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
+
+_URL_RE = re.compile(r"https://[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}(?:/[^\s\"']*)?")
 
 
 def _parse_step_result_json(result: Any) -> dict[str, Any] | None:
@@ -38,3 +41,17 @@ def _operator_message_payload(message: str) -> str:
 def _is_operator_envelope(message: str) -> bool:
     text = message or ""
     return text.startswith("[OPERATOR] ") or text.startswith("<OPERATOR>")
+
+
+def _has_whatsapp_media_send_step(steps: list[dict[str, Any]]) -> bool:
+    for step in steps or []:
+        tool_name = str((step or {}).get("tool") or "")
+        if tool_name not in {"send_whatsapp_document", "send_whatsapp_image"}:
+            continue
+        result = str((step or {}).get("result") or "")
+        lower = result.lower()
+        if "[error]" in lower or "gagal" in lower:
+            continue
+        if "[document_sent]" in lower or "[image_sent]" in lower or "terkirim" in lower or " dikirim " in lower:
+            return True
+    return False

@@ -5,27 +5,15 @@ Extracted from agent_runner.py — PURE refactor, zero behaviour change.
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
-from app.core.engine.agent_step_utils import _is_operator_envelope, _operator_message_payload
+from app.core.engine.agent_step_utils import (
+    _URL_RE,
+    _has_whatsapp_media_send_step,
+    _is_operator_envelope,
+    _operator_message_payload,
+)
 from app.core.engine.agent_whatsapp_guards import _has_reply_to_user_step, _has_send_to_number_step
-
-_URL_RE = re.compile(r"https://[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}(?:/[^\s\"']*)?")
-
-
-def _has_whatsapp_media_send_step(steps: list[dict[str, Any]]) -> bool:
-    for step in steps or []:
-        tool_name = str((step or {}).get("tool") or "")
-        if tool_name not in {"send_whatsapp_document", "send_whatsapp_image"}:
-            continue
-        result = str((step or {}).get("result") or "")
-        lower = result.lower()
-        if "[error]" in lower or "gagal" in lower:
-            continue
-        if "[document_sent]" in lower or "[image_sent]" in lower or "terkirim" in lower or " dikirim " in lower:
-            return True
-    return False
 
 
 def _task_result_guard_reply(final_reply: str, steps: list[dict[str, Any]], user_message: str) -> str:
