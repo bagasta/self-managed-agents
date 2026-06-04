@@ -603,6 +603,55 @@ class TestGetUserSubscription:
 
         assert _resolve_builder_owner_phone(session) == "628111222333"
 
+    def test_phone_arg_does_not_override_session_owner(self):
+        """Regression: Arthur passing a chat-typed number must NOT override the
+        verified session owner. The owner's plan is always the session owner's.
+
+        Production bug: user typed "6289477477238" in chat (a number with no
+        account → auto-provisioned trial), while the real sender owner
+        "62895619356936" had Enterprise. get_user_subscription resolved the
+        chat number first and reported "trial" repeatedly.
+        """
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        sub = SimpleNamespace(
+            status="active",
+            is_usable=True,
+            plan_id=uuid.uuid4(),
+            token_quota=100_000_000,
+            tokens_used=0,
+            tokens_remaining=100_000_000,
+            expires_at=None,
+        )
+        plan = SimpleNamespace(id=sub.plan_id, code="tier_3", label="Enterprise", max_agents=None)
+        plan_result = MagicMock()
+        plan_result.scalar_one.return_value = plan
+        agents_result = MagicMock()
+        agents_result.scalars.return_value.all.return_value = []
+        db.execute = AsyncMock(side_effect=[plan_result, agents_result])
+
+        seen: dict[str, str] = {}
+
+        async def _fake_get_or_create(_phone, _db):
+            seen["phone"] = _phone
+            return SimpleNamespace(id=uuid.uuid4()), sub
+
+        with patch("app.core.domain.subscription_service.get_or_create_wa_user", _fake_get_or_create):
+            tools = build_builder_tools(
+                db_factory=db,
+                owner_phone="62895619356936",
+                default_target="151414827434073@lid",
+            )
+            tool = next(t for t in tools if t.name == "get_user_subscription")
+            result = _run(tool.ainvoke({"phone": "6289477477238"}))
+
+        # The verified session owner must win over the chat-typed phone arg.
+        assert seen.get("phone") == "62895619356936"
+        data = json.loads(result)
+        assert data["phone"] == "62895619356936"
+        assert data["plan_code"] == "tier_3"
+
 
 class TestComposeAgentBlueprint:
     def test_repairs_missing_comma_json_from_writer(self):
@@ -2085,6 +2134,52 @@ class TestUpdateAgent:
         assert "google_workspace_enabled" not in data
         assert data["memory_refresh"]["updated"] is False
         assert my_agent.name == "Agent Baru"
+
+    def test_update_blocked_when_new_config_exceeds_owner_plan(self):
+        """Editing model/tools_config must be checked against the OWNER's current
+        plan. A config that exceeds entitlement is rejected and not persisted.
+        """
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        my_agent = _make_mock_agent(
+            operator_ids=["62895619356936"],
+            owner_external_id="62895619356936",
+        )
+        my_agent.tools_config = {}
+        my_agent.channel_type = "whatsapp"
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = my_agent
+        db.execute = AsyncMock(return_value=mock_result)
+
+        plan = SimpleNamespace(code="trial", label="Trial", max_agents=1)
+        sub = SimpleNamespace(tokens_remaining=2_000_000)
+
+        async def _fake_get_sub(_phone, _db):
+            return SimpleNamespace(id=uuid.uuid4()), sub, plan
+
+        def _fake_validate(_plan, *, model, tools_config, channel_type):
+            return ["Plan trial tidak mendukung subagents."]
+
+        tools = build_builder_tools(db_factory=db, owner_phone="62895619356936")
+        tool = next(t for t in tools if t.name == "update_agent")
+        with patch(
+            "app.core.domain.subscription_service.get_subscription_by_external_id",
+            _fake_get_sub,
+        ), patch(
+            "app.core.domain.subscription_service.validate_agent_entitlements",
+            _fake_validate,
+        ):
+            result = _run(tool.ainvoke({
+                "agent_id": str(my_agent.id),
+                "tools_config": json.dumps({"subagents": {"enabled": True}}),
+            }))
+
+        data = json.loads(result)
+        assert "error" in data
+        blob = (data.get("error", "") + " " + " ".join(data.get("violations", []))).lower()
+        assert "subagents" in blob or "plan" in blob
+        db.commit.assert_not_called()
 
     def test_update_agent_selective_refresh_writes_versioned_memory(self):
         from app.core.tools.builder_tools import build_builder_tools

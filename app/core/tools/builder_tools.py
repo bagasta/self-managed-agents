@@ -4054,12 +4054,17 @@ def build_builder_tools(
     @tool
     async def get_user_subscription(phone: str = "") -> str:
         """
-        Cek status subscription dan kuota agent user berdasarkan nomor telepon.
-        Gunakan ini sebelum atau sesudah create_agent untuk memberikan info
+        Cek status subscription dan kuota agent owner sesi ini.
+        Gunakan ini sebelum/sesudah create_agent atau update_agent untuk info
         akurat tentang plan, sisa slot agent, dan status subscription.
 
+        Tool ini SELALU melaporkan plan owner sesi yang terverifikasi (nomor
+        WhatsApp pengirim). Jangan tebak/isi `phone` dari teks chat — nomor yang
+        disebut user di percakapan bisa berbeda dari nomor pengirim aslinya.
+
         Args:
-            phone: Nomor telepon user (format: 628xxx). Kosong = gunakan owner agent saat ini.
+            phone: Opsional. Hanya dipakai sebagai fallback kalau identitas owner
+                   sesi tidak terbaca; TIDAK menimpa owner sesi yang terverifikasi.
         """
         try:
             from app.core.domain.subscription_service import (
@@ -4070,7 +4075,10 @@ def build_builder_tools(
             from app.models.agent import Agent
             from app.models.subscription import SubscriptionPlan
 
-            target_phone = _best_owner_identifier(phone, owner_phone, default_target)
+            # Owner identity sesi (nomor pengirim terverifikasi) selalu menang.
+            # `phone` dari LLM hanya fallback terakhir — mencegah Arthur membaca
+            # plan akun lain karena salah nomor dari teks chat.
+            target_phone = _best_owner_identifier(owner_phone, default_target, phone)
             if not target_phone:
                 return json.dumps({"error": "phone tidak tersedia"}, ensure_ascii=False)
 
