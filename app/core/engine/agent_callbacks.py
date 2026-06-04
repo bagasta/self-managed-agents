@@ -1,6 +1,7 @@
 """Callback helpers for agent graph execution."""
 from __future__ import annotations
 
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -21,6 +22,9 @@ class AgentStepLogger(AsyncCallbackHandler):
         self._progress_callback = progress_callback
         self._tool_inputs: dict[str, Any] = {}
         self._tool_names: dict[str, str] = {}
+        self._step: int = 0
+        self._tool_steps: dict[str, int] = {}
+        self._tool_started_at: dict[str, float] = {}
         self.total_tokens_from_callbacks: int = 0
         self.prompt_tokens_from_callbacks: int = 0
         self.completion_tokens_from_callbacks: int = 0
@@ -93,7 +97,11 @@ class AgentStepLogger(AsyncCallbackHandler):
         )
 
     async def on_llm_start(self, serialized, prompts, **kwargs):
-        self.log.debug("agent_step.llm_thinking")
+        self.log.debug(
+            "agent_step.llm_thinking",
+            next_step=self._step + 1,
+            prompt_count=len(prompts) if isinstance(prompts, (list, tuple)) else None,
+        )
 
     async def on_llm_end(self, response, **kwargs):
         try:
@@ -146,15 +154,28 @@ class AgentStepLogger(AsyncCallbackHandler):
 
     async def on_tool_start(self, serialized, input_str, **kwargs):
         tool_name = serialized.get("name", "?")
-        tool_call_id = kwargs.get("tool_call_id") or kwargs.get("run_id") or "?"
-        self._tool_inputs[str(tool_call_id)] = input_str
-        self._tool_names[str(tool_call_id)] = str(tool_name)
-        safe_input = redact_pii(str(input_str)[:300])
+        tool_call_id = str(kwargs.get("tool_call_id") or kwargs.get("run_id") or "?")
+        self._step += 1
+        step = self._step
+        self._tool_inputs[tool_call_id] = input_str
+        self._tool_names[tool_call_id] = str(tool_name)
+        self._tool_steps[tool_call_id] = step
+        self._tool_started_at[tool_call_id] = time.monotonic()
+        # INFO: tidy one-liner per step (safe for production ingestion).
         self.log.info(
             "agent_step.tool_start",
+            step=step,
             tool=tool_name,
-            tool_call_id=str(tool_call_id)[:36],
-            input=safe_input,
+            tool_call_id=tool_call_id[:36],
+            input=redact_pii(str(input_str)[:300]),
+        )
+        # DEBUG: complete payload for deep debugging.
+        self.log.debug(
+            "agent_step.tool_start.full",
+            step=step,
+            tool=tool_name,
+            tool_call_id=tool_call_id[:36],
+            input=redact_pii(str(input_str)[:4000]),
         )
         if self._progress_callback:
             try:
@@ -162,28 +183,59 @@ class AgentStepLogger(AsyncCallbackHandler):
             except Exception as exc:
                 self.log.debug("agent_step.progress_callback_failed", error=str(exc)[:200])
 
+    @staticmethod
+    def _tool_status(output: Any) -> str:
+        text = str(output).lstrip()[:200].lower()
+        if text.startswith("[error]") or '"error"' in text or "traceback (most recent" in text:
+            return "error"
+        return "ok"
+
     async def on_tool_end(self, output, **kwargs):
-        tool_call_id = kwargs.get("tool_call_id") or kwargs.get("run_id") or "?"
-        tool_input = self._tool_inputs.get(str(tool_call_id))
-        tool_name = self._tool_names.get(str(tool_call_id), "?")
+        tool_call_id = str(kwargs.get("tool_call_id") or kwargs.get("run_id") or "?")
+        tool_input = self._tool_inputs.get(tool_call_id)
+        tool_name = self._tool_names.get(tool_call_id, "?")
+        step = self._tool_steps.get(tool_call_id, self._step)
+        started_at = self._tool_started_at.get(tool_call_id)
+        duration_ms = int((time.monotonic() - started_at) * 1000) if started_at else None
+        status = self._tool_status(output)
+        # INFO: tidy result line — tool name + status + duration + short output.
         self.log.info(
             "agent_step.tool_end",
-            tool_call_id=str(tool_call_id)[:36],
-            output=str(output)[:300],
+            step=step,
+            tool=tool_name,
+            status=status,
+            duration_ms=duration_ms,
+            tool_call_id=tool_call_id[:36],
+            output=redact_pii(str(output)[:300]),
+        )
+        # DEBUG: complete output for deep debugging.
+        self.log.debug(
+            "agent_step.tool_end.full",
+            step=step,
+            tool=tool_name,
+            status=status,
+            duration_ms=duration_ms,
+            output=redact_pii(str(output)[:4000]),
         )
         if self._progress_callback:
             try:
                 await self._progress_callback(str(tool_name), tool_input, "end", output)
             except Exception as exc:
                 self.log.debug("agent_step.progress_callback_failed", error=str(exc)[:200])
-        self._tool_inputs.pop(str(tool_call_id), None)
-        self._tool_names.pop(str(tool_call_id), None)
+        self._tool_inputs.pop(tool_call_id, None)
+        self._tool_names.pop(tool_call_id, None)
+        self._tool_steps.pop(tool_call_id, None)
+        self._tool_started_at.pop(tool_call_id, None)
 
     async def on_tool_error(self, error, **kwargs):
-        tool_call_id = kwargs.get("tool_call_id") or kwargs.get("run_id") or "?"
+        tool_call_id = str(kwargs.get("tool_call_id") or kwargs.get("run_id") or "?")
+        tool_name = self._tool_names.get(tool_call_id, "?")
+        step = self._tool_steps.get(tool_call_id, self._step)
         self.log.warning(
             "agent_step.tool_error",
-            tool_call_id=str(tool_call_id)[:36],
+            step=step,
+            tool=tool_name,
+            tool_call_id=tool_call_id[:36],
             error=str(error)[:500],
         )
 
