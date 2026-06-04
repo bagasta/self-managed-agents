@@ -30,6 +30,8 @@ from langchain_core.tools import tool, StructuredTool
 from pydantic import Field, create_model
 
 from app.core.domain.custom_tool_service import create_or_update_custom_tool, list_custom_tools
+from app.core.utils.phone_utils import normalize_phone
+from app.core.utils.wa_identity import is_probable_whatsapp_lid
 from app.core.domain.memory_service import (
     build_memory_context as _build_memory_context,
     delete_memory,
@@ -673,6 +675,26 @@ def build_wa_agent_manager_tools(session: Any, db_factory: async_sessionmaker) -
     channel_cfg: dict = _raw_cfg if isinstance(_raw_cfg, dict) else {}
     device_id: str = channel_cfg.get("device_id", "")
     default_target: str = channel_cfg.get("user_phone", "")
+    # Verified sender phone of the session owner. This — not a chat-typed number
+    # nor the internal LID — is the authoritative QR recipient.
+    verified_owner: str = channel_cfg.get("phone_number", "")
+
+    def _resolve_qr_target(phone_arg: str) -> str:
+        """Pick a real (non-LID) WhatsApp recipient, owner identity first.
+
+        Prevents the production bug where a chat-typed number (or the internal
+        LID user_phone) became the QR target and the owner never received it.
+        """
+        for candidate in (verified_owner, phone_arg, default_target):
+            raw = str(candidate or "")
+            # Check the raw value so an "@lid" suffix is caught before normalize
+            # strips it (a 15-digit LID body passes the digit-length guard alone).
+            if is_probable_whatsapp_lid(raw):
+                continue
+            normalized = normalize_phone(raw)
+            if normalized and not is_probable_whatsapp_lid(normalized):
+                return normalized
+        return ""
 
     @tool
     async def send_agent_wa_qr(
@@ -687,14 +709,23 @@ def build_wa_agent_manager_tools(session: Any, db_factory: async_sessionmaker) -
         maupun saat user minta QR baru / QR refresh. Tool ini selalu menggunakan
         wa_device_id yang tersimpan di DB untuk agent tersebut.
 
+        QR selalu dikirim ke nomor WhatsApp owner sesi yang terverifikasi. JANGAN
+        isi `phone` dengan nomor yang disebut user di teks chat — nomor itu bisa
+        berbeda dari nomor pengirim aslinya, dan QR akan nyasar.
+
         Args:
             agent_id : UUID agent yang QR-nya ingin dikirim (dari response saat agent dibuat)
             caption  : Caption gambar QR (opsional)
-            phone    : Nomor tujuan WA. Biarkan kosong untuk kirim ke user saat ini.
+            phone    : Opsional. Hanya fallback kalau nomor owner sesi tak terbaca;
+                       tidak menimpa owner terverifikasi.
         """
-        target = phone or default_target
+        target = _resolve_qr_target(phone)
         if not target:
-            return "[error] Tidak ada target nomor WhatsApp — set phone atau pastikan session punya user_phone"
+            return (
+                "[error] Tidak ada nomor WhatsApp tujuan yang valid. Nomor owner sesi "
+                "belum terbaca sebagai nomor asli (kemungkinan masih ID internal/LID). "
+                "Minta user mengirim pesan dari nomor WhatsApp aslinya dulu."
+            )
         if not device_id:
             return "[error] Tidak ada device_id WhatsApp pada session ini"
 
