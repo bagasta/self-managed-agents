@@ -57,6 +57,7 @@ from app.models.session import Session
 # Helper functions untuk wa_incoming — dipecah agar bisa di-test secara independen
 from app.api.wa_helpers import (
     check_wa_spam_window,
+    reset_wa_spam_window,
     extract_messages_to_user,
     find_agent_by_device,
     find_escalation_context,
@@ -445,6 +446,25 @@ async def _remember_pending_operator_text_reply(
     await db.commit()
 
 
+async def _stop_customer_typing(device_id: str, session: Session, log: structlog.BoundLogger) -> None:
+    """Kill the WhatsApp typing keep-alive for a customer chat.
+
+    The Go wa-service refreshes the "composing" presence on a loop until a
+    Paused presence is sent. When AI is disabled (spam / ai_disabled) the run
+    path is skipped, so without this the indicator would keep showing forever.
+    """
+    cfg = session.channel_config if isinstance(session.channel_config, dict) else {}
+    target = cfg.get("user_phone") or ""
+    if not (device_id and target):
+        return
+    try:
+        from app.core.infra.wa_client import stop_wa_typing
+
+        await stop_wa_typing(device_id, target)
+    except Exception as exc:
+        log.warning("wa_incoming.stop_typing_failed", error=str(exc)[:200])
+
+
 async def _notify_operator_spam_autostop(
     *,
     agent: Agent,
@@ -493,6 +513,9 @@ async def _notify_operator_spam_autostop(
     ))
     db.add(session)
     await db.commit()
+
+    # Kill the typing indicator so it doesn't keep showing on a disabled chat.
+    await _stop_customer_typing(device_id, session, log)
 
     if not operator_phone:
         log.warning("wa_incoming.spam_no_operator_config", case_id=case_id)
@@ -551,6 +574,16 @@ async def _handle_operator_activate_command(
     target_session.ai_disabled = False
     db.add(target_session)
     await db.commit()
+
+    # Clear the spam window so the next customer message starts fresh instead of
+    # immediately re-tripping the still-full window and disabling AI again.
+    await reset_wa_spam_window(
+        agent_id=str(agent.id),
+        session_id=str(target_session.id),
+        sender_id=target_session.external_user_id or "",
+    )
+    # Stop any leftover typing indicator from before the disable.
+    await _stop_customer_typing(device_id, target_session, log)
 
     customer_phone = _wa_real_customer_phone(target_session)
     reply = f"AI untuk customer {customer_phone} sudah aktif kembali."
@@ -1439,6 +1472,7 @@ async def wa_incoming(
     # 4.5. Fitur 2 — cek ai_disabled (hanya untuk non-operator)
     if not _is_operator and getattr(session, "ai_disabled", False):
         log.info("wa_incoming.ai_disabled", session_id=str(session.id))
+        await _stop_customer_typing(body.device_id, session, log)
         return {"status": "ai_disabled"}
 
     # 5. Proses media jika ada

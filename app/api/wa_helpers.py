@@ -232,6 +232,31 @@ async def check_wa_spam_window(
     count = len(timestamps)
     return count > limit, count
 
+
+async def reset_wa_spam_window(
+    *,
+    agent_id: str,
+    session_id: str,
+    sender_id: str,
+) -> None:
+    """Clear the spam sliding window for an agent + customer.
+
+    Called when an operator re-enables AI so the very next customer message
+    starts from a clean window instead of re-tripping the still-full window.
+    """
+    from app.core.infra.redis_client import get_redis
+
+    identity = normalize_phone(sender_id) or str(session_id)
+    key = f"wa_spam:{agent_id}:{identity}"
+    r = await get_redis()
+    if r:
+        try:
+            await r.delete(key)
+        except Exception as exc:
+            log.warning("wa_spam.reset_redis_fail", error=str(exc))
+    _mem_spam_windows.pop(key, None)
+
+
 async def is_duplicate_message(
     device_id: str,
     from_phone: str,
