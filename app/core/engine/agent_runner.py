@@ -208,6 +208,51 @@ from app.core.engine.agent_middleware import (  # noqa: E402
 )
 
 
+async def _pre_run_quota_gate(
+    *,
+    agent_model: AgentModel,
+    db: AsyncSession,
+    log: Any,
+    run_record: Run,
+    run_id: uuid.UUID,
+) -> AgentRunResult | None:
+    """Block before the LLM is built when the owner subscription quota is exhausted.
+
+    Returns an AgentRunResult to short-circuit the run, or None to continue.
+    Builder/system agents are exempt (platform infrastructure).
+    NOTE: overlaps check_agent_quota in agent_quota_service.py; kept as explicit pre-LLM gate.
+    """
+    if not is_quota_exempt_builder_agent(agent_model):
+        try:
+            _, _owner_sub = await get_owner_subscription(agent_model, db)
+            if _owner_sub is not None:
+                try:
+                    assert_token_quota_available(_owner_sub)
+                except QuotaExceeded as _qe:
+                    log.warning("agent_run.quota_exceeded_pre_run", detail=str(_qe))
+                    run_record.status = "completed"
+                    run_record.completed_at = datetime.now(timezone.utc)
+                    run_record.tokens_used = 0
+                    await db.flush()
+                    _quota_reply = (
+                        "Maaf, kuota token subscription pemilik agent ini sudah habis. "
+                        "Silakan upgrade plan atau tunggu reset kuota berikutnya."
+                    )
+                    return AgentRunResult(
+                        reply=_quota_reply,
+                        steps=[],
+                        run_id=run_id,
+                        tokens_used=0,
+                        usage={},
+                    )
+        except Exception as _quota_exc:
+            log.warning(
+                "agent_run.quota_lookup_failed_allow_run",
+                error=str(_quota_exc),
+            )
+    return None
+
+
 async def run_agent(
     *,
     agent_model: AgentModel,
@@ -283,37 +328,15 @@ async def run_agent(
         return AgentRunResult(**resumed_result)
 
     # --- Token quota pre-run gate ---
-    # Block before LLM is built or invoked when subscription quota is exhausted.
-    # Builder/system agents are exempt (platform infrastructure).
-    # NOTE: overlaps check_agent_quota in agent_quota_service.py; kept as explicit pre-LLM gate.
-    if not is_quota_exempt_builder_agent(agent_model):
-        try:
-            _, _owner_sub = await get_owner_subscription(agent_model, db)
-            if _owner_sub is not None:
-                try:
-                    assert_token_quota_available(_owner_sub)
-                except QuotaExceeded as _qe:
-                    log.warning("agent_run.quota_exceeded_pre_run", detail=str(_qe))
-                    run_record.status = "completed"
-                    run_record.completed_at = datetime.now(timezone.utc)
-                    run_record.tokens_used = 0
-                    await db.flush()
-                    _quota_reply = (
-                        "Maaf, kuota token subscription pemilik agent ini sudah habis. "
-                        "Silakan upgrade plan atau tunggu reset kuota berikutnya."
-                    )
-                    return AgentRunResult(
-                        reply=_quota_reply,
-                        steps=[],
-                        run_id=run_id,
-                        tokens_used=0,
-                        usage={},
-                    )
-        except Exception as _quota_exc:
-            log.warning(
-                "agent_run.quota_lookup_failed_allow_run",
-                error=str(_quota_exc),
-            )
+    _quota_block = await _pre_run_quota_gate(
+        agent_model=agent_model,
+        db=db,
+        log=log,
+        run_record=run_record,
+        run_id=run_id,
+    )
+    if _quota_block is not None:
+        return _quota_block
 
     llm_raw, llm = build_agent_llms(agent_model, settings, temperature)
 
