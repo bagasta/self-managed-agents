@@ -324,6 +324,11 @@ git commit -m "docs: recap agent_runner guard/middleware extraction"
 
 ## Task 8 (OPSIONAL, RISIKO TINGGI): Dekomposisi Body `run_agent()`
 
+> **STATUS (2026-06-04): SEBAGIAN — dihentikan oleh stop-condition.**
+> - Step 1–2 SELESAI: `_pre_run_quota_gate(...)` diekstrak sebagai helper module-level di `agent_runner.py` (bukan modul terpisah, supaya patch target test `agent_runner.get_owner_subscription` dkk tetap berlaku). `tests/test_subscription_service.py` 19 passed.
+> - Step 3–6 DIHENTIKAN: blok post-graph TIDAK punya boundary bersih. Ada closure `_apply_run_usage` yang menutup `run_record`/`summary`/`_agent_logger`, dipakai oleh ~12 titik early-return yang masing-masing mutate `run_record`, panggil `_apply_run_usage()`, `db.add(Message)`, dan rakit `AgentRunResult`, terjalin di cabang deploy/followup/guard. Mengekstraknya butuh threading state besar atau restrukturisasi control-flow = risiko ubah behavior. Sesuai stop-condition di bawah, dibiarkan inline. `run_agent` body tetap ~1747 baris.
+> - Untuk lanjut suatu hari: bongkar dulu state machine post-graph (satukan titik return jadi satu jalur akumulasi `final_reply`/`status`/`tokens`, baru ekstrak) — itu pekerjaan behavior-sensitive yang butuh characterization test menyeluruh, bukan sekadar pindah kode.
+
 > Body `run_agent` (~1770 baris) penuh local state & closure. Ini **paling berharga tapi paling berisiko**. Kerjakan HANYA setelah Task 1–7 hijau, dan **PR/commit terpisah**. Kalau ragu, stop di Task 7 — file sudah jauh lebih sehat.
 
 **Prasyarat:** Blok yang mau diekstrak harus punya boundary jelas (input/output eksplisit, bukan menyentuh banyak local var). Kalau sebuah blok belum punya test, **tulis characterization test dulu** (snapshot output untuk input tetap) sebelum memindah.
