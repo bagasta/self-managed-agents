@@ -33,3 +33,8 @@ def _operator_message_payload(message: str) -> str:
         if idx != -1:
             return text[idx + len(marker):].strip()
     return text
+
+
+def _is_operator_envelope(message: str) -> bool:
+    text = message or ""
+    return text.startswith("[OPERATOR] ") or text.startswith("<OPERATOR>")

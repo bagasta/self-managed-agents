@@ -56,6 +56,7 @@ from app.core.engine.agent_identity import (
     _session_sender_phone,
 )
 from app.core.engine.agent_step_utils import (
+    _is_operator_envelope,
     _operator_message_payload,
     _parse_step_result_json,
 )
@@ -378,11 +379,6 @@ _DIRECT_WA_TEXT_WRONG_TOOLS = {
     "send_whatsapp_document",
     "notify_user",
 }
-
-
-def _is_operator_envelope(message: str) -> bool:
-    text = message or ""
-    return text.startswith("[OPERATOR] ") or text.startswith("<OPERATOR>")
 
 
 def _is_direct_whatsapp_send_confirmation(user_message: str) -> bool:
