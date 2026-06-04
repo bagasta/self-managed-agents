@@ -1,5 +1,22 @@
 # Recap: Deep Agent SaaS Hardening — MCP, Subagent, Sandbox, Builder Entitlements
 
+## 2026-06-04 — Fix Latency Arthur (Revert Model Reasoning)
+
+### Masalah yang Ditemukan
+- Setelah kerjaan terakhir, Arthur jadi sangat lambat memproses pesan — bahkan untuk request sepele seperti minta kode trial WA ke nomor demo.
+- Investigasi: BUKAN karena refactor `builder_tools` (itu behavior-preserving, 264 test pass). Penyebabnya perubahan config yang ikut ke-bundle di working tree yang sama:
+  - `scripts/seed_arthur.py`: model Arthur `openai/gpt-4.1-mini` → `deepseek/deepseek-v4-flash` (model reasoning) dan `max_tokens` 2048 → 60000.
+- Mekanisme lambat: `agent_llm.py:20` meneruskan `max_tokens` apa adanya ke `ChatOpenAI` tanpa rem; model reasoning emit reasoning trace tiap step (lihat `reasoning_tokens` di `agent_callbacks.py`); prompt builder baru mewajibkan "klasifikasi kategori sebelum tiap tool call" → reasoning ekstra tiap step. Tiap langkah agent loop jadi jauh lebih lama dari gpt-4.1-mini.
+
+### Perubahan Utama
+- Revert model Arthur ke `openai/gpt-4.1-mini` + `max_tokens` 2048 di `scripts/seed_arthur.py`.
+- Sinkronkan baris "Model Arthur sendiri" di `system-message-builder.md` ke `gpt-4.1-mini`.
+- Update assertion test `tests/test_agent_builder_phase4.py::test_rulebook_uses_current_arthur_model` mengikuti revert.
+- Model writer untuk blueprint/instructions/manual/soul (`deepseek/deepseek-v4-pro`) TETAP — itu panggilan one-shot, bukan loop per-step. Prinsip: loop runtime pakai model cepat non-reasoning; reasoning hanya untuk tugas berat one-shot (writer/subagent).
+
+### Catatan Operasional
+- Perubahan ada di `seed_arthur.py`, jadi Arthur di DB baru berubah setelah `PYTHONPATH=. .venv/bin/python scripts/seed_arthur.py` dijalankan ulang (sudah dilakukan). Config agent dibaca dari DB tiap run, jadi efektif tanpa perlu nunggu; restart backend hanya bila ada cache config.
+
 ## 2026-06-04 — Agent Runner Guard/Middleware Extraction (Fase 3)
 
 ### Masalah yang Ditemukan
@@ -16,12 +33,14 @@
   - `agent_followups.py` — 15 detector deploy/file-delivery/builder-create/website.
   - `agent_middleware.py` — `BlockTaskToolMiddleware`, `ExternalServiceFallbackGuardMiddleware`.
 - Pure refactor: nol perubahan behavior/prompt/model/config. Semua kode dipindah verbatim.
-- `agent_runner.py` turun dari 3118 → 1980 baris (−36%). Sisanya didominasi body `run_agent` (≈1700 baris) — dekomposisi body adalah Task 8 (opsional, risiko tinggi) yang sengaja ditunda.
+- Task 8 (dekomposisi body `run_agent`) dikerjakan SEBAGIAN: hanya `_pre_run_quota_gate(...)` diekstrak (helper module-level di `agent_runner` supaya patch target test tetap berlaku). Sisa body post-graph SENGAJA dibiarkan inline karena bukan blok bersih — ada closure `_apply_run_usage` + ~12 titik early-return terjalin di cabang deploy/followup/guard; mengekstraknya = risiko ubah behavior. Dicatat sebagai follow-up di plan.
+- `agent_runner.py` turun dari 3118 → 1980 baris (−36%); 7 modul per-domain baru. Body `run_agent` masih ~1747 baris (didominasi state machine post-graph yang ditunda).
 
 ### Validasi
 - Re-export contract (34 symbol) → `REEXPORT OK` setelah tiap task.
 - Full regression suite tetap identik baseline: **286 passed + 1 failure pre-existing** (`tests/test_google_mcp_subagent_routing.py::test_builder_policy_is_not_redirected_by_google_mcp_intent`, sudah merah sebelum refactor di `fc4d1af`, di luar scope agent_runner).
 - `import app.main` → OK.
+- 12 commit kecil (`3f7f09a..72c7cb3`), tiap task: pindah verbatim → re-export contract → test gate → commit.
 - Plan: `docs/superpowers/plans/2026-06-04-agent-runner-refactor-plan.md`.
 
 ## 2026-06-04 — Arthur Builder Tools Refactor dari 3000+ Baris ke Facade Modular
