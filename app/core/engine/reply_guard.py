@@ -207,19 +207,27 @@ def _builder_fallback_reply(steps: list[dict[str, Any]]) -> str | None:
         if error:
             return f"Belum berhasil diupdate: {error}"
 
+    # The build/update chain ran but never reached create_agent/update_agent.
+    # By the time this fallback is used, the runtime's internal continuation
+    # retry has already been attempted. Do NOT surface a confusing
+    # "gagal/belum berhasil ... kirim lanjut" loop to the user — frame it as a
+    # transient system hiccup they can simply retry.
     if any(name in _UPDATE_INTENT_TOOLS for name in tool_names) and "update_agent" not in tool_names:
         return (
-            "Agent belum berhasil diupdate di giliran ini karena proses berhenti sebelum tahap penyimpanan. "
-            "Kirim lanjut, saya akan teruskan langsung tanpa tanya ulang."
+            "Maaf, lagi ada kendala sistem sebentar di sisi saya, jadi update agennya belum kelar. "
+            "Coba kirim lagi ya, nanti saya lanjutkan sampai selesai."
         )
 
     if "create_agent" not in tool_names:
         return (
-            "Agent belum berhasil dibuat di giliran ini karena proses berhenti sebelum tahap pembuatan. "
-            "Kirim lanjut, saya akan teruskan langsung tanpa tanya ulang."
+            "Maaf, lagi ada kendala sistem sebentar di sisi saya, jadi agennya belum selesai saya buat. "
+            "Coba kirim lagi ya, nanti saya lanjutkan sampai selesai."
         )
 
-    return "Proses pembuatan agent belum selesai dengan jelas. Kirim lanjut, saya akan cek dan teruskan langsung."
+    return (
+        "Maaf, lagi ada kendala sistem sebentar di sisi saya. "
+        "Coba kirim lagi ya, nanti saya lanjutkan sampai selesai."
+    )
 
 
 def _disabled_capability_guard_reply(

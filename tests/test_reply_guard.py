@@ -32,6 +32,54 @@ def test_builder_google_auth_agent_id_skips_when_tool_already_called():
     assert _builder_google_auth_agent_id(steps) is None
 
 
+def test_needs_builder_create_completion_when_planned_but_not_created():
+    from app.core.engine.agent_runner import _needs_builder_create_completion
+
+    steps = [
+        {"tool": "plan_agent", "result": "ok"},
+        {"tool": "compose_agent_instructions", "result": "ok"},
+    ]
+    assert _needs_builder_create_completion(steps, is_builder=True) is True
+
+
+def test_needs_builder_create_completion_false_when_created():
+    from app.core.engine.agent_runner import _needs_builder_create_completion
+
+    steps = [
+        {"tool": "plan_agent", "result": "ok"},
+        {"tool": "create_agent", "result": '{"success": true}'},
+    ]
+    assert _needs_builder_create_completion(steps, is_builder=True) is False
+
+
+def test_needs_builder_create_completion_false_for_non_builder():
+    from app.core.engine.agent_runner import _needs_builder_create_completion
+
+    steps = [{"tool": "plan_agent", "result": "ok"}]
+    assert _needs_builder_create_completion(steps, is_builder=False) is False
+
+
+def test_needs_builder_create_completion_false_on_entitlement_block():
+    from app.core.engine.agent_runner import _needs_builder_create_completion
+
+    steps = [
+        {"tool": "plan_agent", "result": '{"creation_entitlement_check": {"allowed": false, "reason": "Konfigurasi agent melebihi entitlement plan."}}'},
+    ]
+    assert _needs_builder_create_completion(steps, is_builder=True) is False
+
+
+def test_needs_builder_create_completion_false_without_plan_agent():
+    from app.core.engine.agent_runner import _needs_builder_create_completion
+
+    # Update flow (no plan_agent) is out of scope for create-completion.
+    steps = [
+        {"tool": "list_my_agents", "result": "ok"},
+        {"tool": "get_agent_detail", "result": "ok"},
+        {"tool": "compose_agent_blueprint", "result": "ok"},
+    ]
+    assert _needs_builder_create_completion(steps, is_builder=True) is False
+
+
 def test_keep_existing_reply():
     assert ensure_non_empty_reply("Halo jadi", []) == "Halo jadi"
 
@@ -194,19 +242,24 @@ def test_builder_update_agent_success_overrides_technical_reply():
     assert out == "CeritaCV sudah saya edit."
 
 
-def test_builder_partial_flow_does_not_claim_agent_created():
+def test_builder_partial_flow_shows_system_hiccup_not_failure():
+    # Incomplete build (no create_agent) must NOT show a confusing "gagal/belum
+    # berhasil ... kirim lanjut" loop. Frame it as a transient system hiccup.
     steps = [
         {"tool": "plan_agent", "result": "ok"},
         {"tool": "compose_agent_blueprint", "result": "ok"},
         {"tool": "compose_agent_instructions", "result": "ok"},
     ]
     out = ensure_non_empty_reply("", steps)
-    assert "belum berhasil dibuat" in out.lower()
+    lower = out.lower()
+    assert "kendala sistem" in lower
+    assert "belum berhasil dibuat" not in lower
+    assert "kirim lanjut" not in lower
     assert "plan_agent" not in out
     assert "compose_agent" not in out
 
 
-def test_builder_partial_update_flow_does_not_claim_agent_created():
+def test_builder_partial_update_flow_shows_system_hiccup_not_failure():
     steps = [
         {"tool": "list_my_agents", "result": "ok"},
         {"tool": "get_agent_detail", "result": "ok"},
@@ -214,8 +267,10 @@ def test_builder_partial_update_flow_does_not_claim_agent_created():
         {"tool": "compose_agent_soul", "result": "ok"},
     ]
     out = ensure_non_empty_reply("", steps)
-    assert "belum berhasil diupdate" in out.lower()
-    assert "belum berhasil dibuat" not in out.lower()
+    lower = out.lower()
+    assert "kendala sistem" in lower
+    assert "belum berhasil" not in lower
+    assert "kirim lanjut" not in lower
     assert "get_agent_detail" not in out
 
 
@@ -226,8 +281,10 @@ def test_builder_partial_soul_reply_is_overridden():
         {"tool": "compose_agent_soul", "result": "ok"},
     ]
     out = ensure_non_empty_reply("Soul sudah siap, mau saya lanjut buat agent?", steps)
-    assert "belum berhasil dibuat" in out.lower()
-    assert "soul" not in out.lower()
+    lower = out.lower()
+    assert "kendala sistem" in lower
+    assert "belum berhasil dibuat" not in lower
+    assert "soul" not in lower
 
 
 def test_generic_when_no_steps():

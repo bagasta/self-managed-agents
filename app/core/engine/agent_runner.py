@@ -1157,6 +1157,60 @@ def _has_code_creation_evidence(steps: list[dict[str, Any]]) -> bool:
     return False
 
 
+_BUILD_PROGRESS_TOOLS = frozenset(
+    {
+        "plan_agent",
+        "compose_agent_blueprint",
+        "compose_agent_instructions",
+        "compose_agent_soul",
+    }
+)
+
+
+def _needs_builder_create_completion(
+    steps: list[dict[str, Any]],
+    *,
+    is_builder: bool,
+) -> bool:
+    """Detect a build that planned/composed an agent but never reached create_agent.
+
+    Arthur (on a small model) often stops after plan_agent — e.g. to ask about
+    Google — and never chains through to create_agent, leaving the user with a
+    confusing "belum berhasil" loop. When that happens with no real plan/
+    entitlement block, the runtime continues the build once internally instead
+    of bouncing it back to the user.
+    """
+    if not is_builder:
+        return False
+    tool_names = {str(step.get("tool", "")).strip() for step in (steps or [])}
+    # Only the create flow (which always starts with plan_agent) is in scope.
+    if "plan_agent" not in tool_names:
+        return False
+    if not (tool_names & _BUILD_PROGRESS_TOOLS):
+        return False
+    if "create_agent" in tool_names or "update_agent" in tool_names:
+        return False
+    # A real plan/entitlement limit is not something to silently retry.
+    for step in steps or []:
+        result_text = str(step.get("result", "")).lower()
+        if "entitlement" in result_text or "melebihi entitlement" in result_text:
+            return False
+    return True
+
+
+def _builder_create_completion_directive() -> str:
+    """Directive that pushes Arthur to finish the build through create_agent."""
+    return (
+        "LANJUTKAN PEMBUATAN AGENT SEKARANG SAMPAI SELESAI — JANGAN BERHENTI.\n"
+        "Kamu sudah merencanakan/menyusun agent tapi belum memanggil create_agent. "
+        "JANGAN bertanya konfirmasi lagi, JANGAN menawarkan Google lagi, JANGAN mengulang plan_agent. "
+        "Langsung jalankan berurutan: compose_agent_blueprint (jika belum) -> compose_agent_instructions -> "
+        "validate_agent_config -> create_agent, memakai konteks bisnis yang sudah ada. "
+        "Kalau ada detail yang belum lengkap, pakai asumsi wajar dan tandai untuk direview nanti — "
+        "jangan berhenti untuk bertanya. Setelah create_agent sukses, balas singkat dan natural bahwa agennya sudah jadi."
+    )
+
+
 def _needs_deploy_followup(
     user_message: str,
     tools_config: dict[str, Any],
@@ -2611,6 +2665,49 @@ async def run_agent(
                 log.warning(
                     "agent_run.google_mcp_retry_after_blocked_fallback_failed",
                     error=str(_mcp_retry_exc)[:300],
+                )
+
+        if _needs_builder_create_completion(steps, is_builder=runtime_policy.is_builder):
+            log.warning(
+                "agent_run.builder_create_completion_continue",
+                steps=len(steps),
+            )
+            _create_completion_input = _sanitize_input_messages(input_messages)
+            _create_completion_input.append(
+                HumanMessage(content=_builder_create_completion_directive())
+            )
+            try:
+                async with asyncio.timeout(_timeout):
+                    _create_completion_output = await graph.ainvoke(
+                        {"messages": _create_completion_input},
+                        config=_graph_config,
+                        version="v2",
+                    )
+                    result = await _graph_result_from_output(
+                        graph=graph,
+                        graph_config=_graph_config,
+                        graph_output=_create_completion_output,
+                        log=log,
+                    )
+                parsed = parse_agent_result(
+                    result=result,
+                    input_messages=input_messages,
+                    session_id=session.id,
+                    run_id=run_id,
+                    step_start=step_counter,
+                    log=log,
+                )
+                final_reply = parsed["final_reply"]
+                steps = parsed["steps"]
+                total_tokens_used = _agent_logger.total_tokens_from_callbacks or parsed["total_tokens_used"]
+                log.info(
+                    "agent_run.builder_create_completion_continue_ok",
+                    created=any(str(s.get("tool", "")) == "create_agent" for s in steps),
+                )
+            except Exception as _create_completion_exc:
+                log.warning(
+                    "agent_run.builder_create_completion_continue_failed",
+                    error=str(_create_completion_exc)[:300],
                 )
 
         if _needs_deploy_followup(execution_user_message, tools_config, steps, final_reply):
