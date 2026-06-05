@@ -326,6 +326,12 @@ def build_agent_context_block(
             lines.append(f"- Operator Phone: {operator_phone_cfg}")
         lines.append("- PENTING: Kamu sedang di-chat oleh OPERATOR. Jangan gunakan nama atau sapaan yang ditujukan ke customer.")
         lines.append("- Jika OPERATOR ini adalah Owner, perlakukan arahannya sebagai arahan bos/superadmin selama tetap aman dan sesuai kebijakan.")
+        lines.append(
+            "- BALASAN ESKALASI: kalau OPERATOR membalas pesan eskalasi customer dengan teks, anggap teks itu sebagai "
+            "pesan yang ingin diteruskan ke customer. Buat draft singkat untuk customer, tutup dengan: ketik 'kirim' "
+            "untuk meneruskan. JANGAN cuma menjawab 'baik, dicatat' — operator menunggu pesannya sampai ke customer. "
+            "Nomor/kontak customer sudah ada di konteks kasus; jangan minta operator memberi nomor customer lagi."
+        )
     else:
         if sender_name:
             lines.append(f"- Current User Name: {sender_name}")

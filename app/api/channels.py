@@ -446,6 +446,63 @@ async def _remember_pending_operator_text_reply(
     await db.commit()
 
 
+async def _maybe_stage_operator_text_draft(
+    *,
+    agent: Agent,
+    operator_session: Session,
+    quoted_text: str | None,
+    quoted_stanza_id: str | None,
+    operator_message: str,
+    device_id: str,
+    operator_reply_target: str,
+    db: AsyncSession,
+    log: structlog.BoundLogger,
+) -> dict | None:
+    """Deterministically stage an operator's quoted escalation reply as a draft.
+
+    When an operator REPLIES TO (quotes) an escalation notification and types a
+    plain message, treat that text as the reply meant for the customer WITHOUT
+    relying on the LLM to produce a draft (gpt-4.1-mini often just acknowledges
+    instead of forwarding). Stage it as a pending draft and ask the operator to
+    confirm with 'kirim'. Returns a response dict, or None when this is not a
+    quoted escalation reply so the normal agent turn can handle it.
+    """
+    draft_message = sanitize_user_input(operator_message or "").strip()
+    if not draft_message:
+        return None
+
+    target_session, case_id = await find_session_by_quoted_message_id(agent, db, quoted_stanza_id)
+    if target_session is None:
+        target_session, case_id = await find_session_by_quoted_case(agent, db, quoted_text)
+    if target_session is None:
+        return None
+
+    await _remember_pending_operator_text_reply(
+        operator_session=operator_session,
+        target_session=target_session,
+        case_id=case_id,
+        draft_message=draft_message,
+        db=db,
+    )
+
+    cc = target_session.channel_config if isinstance(target_session.channel_config, dict) else {}
+    customer_name = str(cc.get("sender_name") or "").strip()
+    reply = (
+        "Draft balasan untuk customer"
+        + (f" ({customer_name})" if customer_name else "")
+        + ":\n----\n"
+        + draft_message
+        + "\n----\nKetik *kirim* untuk teruskan ke customer, atau ketik ulang pesannya kalau mau revisi."
+    )
+    await send_wa_message(device_id, operator_reply_target, reply)
+    log.info(
+        "wa_incoming.operator_text_draft_staged",
+        case_id=case_id,
+        target_session_id=str(target_session.id),
+    )
+    return {"status": "ok", "reply": reply, "run_id": "", "steps": [], "messages_to_user": []}
+
+
 async def _stop_customer_typing(device_id: str, session: Session, log: structlog.BoundLogger) -> None:
     """Kill the WhatsApp typing keep-alive for a customer chat.
 
@@ -1522,6 +1579,22 @@ async def wa_incoming(
             f"Pesan: {user_message}"
         )
         log.info("wa_incoming.operator_command")
+        # Deterministic operator escalation reply: if the operator quoted an
+        # escalation message and typed plain text, stage it as a draft for the
+        # customer instead of leaving it to the LLM (which may just acknowledge).
+        _staged_draft = await _maybe_stage_operator_text_draft(
+            agent=agent,
+            operator_session=session,
+            quoted_text=body.quoted_text,
+            quoted_stanza_id=body.quoted_stanza_id,
+            operator_message=body.message,
+            device_id=body.device_id,
+            operator_reply_target=reply_target,
+            db=db,
+            log=log,
+        )
+        if _staged_draft is not None:
+            return _staged_draft
     else:
         if _is_owner_sender:
             user_message = _label_owner_wa_message(
