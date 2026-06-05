@@ -83,3 +83,6 @@ test_out.txt
 # System message drafts (large markdown, managed via scripts/seed_*.py)
 
 
+
+# Local DB dumps (contain data/secrets — never commit)
+db_backup_*.sql

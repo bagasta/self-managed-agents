@@ -1,5 +1,26 @@
 # Recap: Deep Agent SaaS Hardening — MCP, Subagent, Sandbox, Builder Entitlements
 
+## 2026-06-05 — Builder Stall, Tier/Update Block & Eskalasi Operator (4 Fix)
+
+Lanjutan testing pra-launch (DB sudah di-wipe bersih + Arthur di-seed ulang, model `gpt-4.1-mini`). Empat bug ditemukan saat user bikin & iterasi agent "Admin Laundry Kiloan" lewat nomor demo (wa-dev-service).
+
+### Masalah & Fix
+- **`fac0d66` — Arthur mandek setelah `plan_agent`.** Auto-continue `_needs_builder_create_completion` bail karena cek entitlement-nya naif: `"entitlement" in result_text` ikut match field sukses `creation_entitlement_check` di output `plan_agent`. Akibatnya auto-continue tak nyala → stall guard keluarin "Maaf, kendala sistem, coba lagi". Fix: deteksi blok asli lewat field terstruktur (`creation_entitlement_check.checked && !allowed`), bukan substring.
+- **`519b8a7` — Update agent diblok "upgrade Tier 2".** User Trial (1/1 agent) minta perbaiki agent existing; Arthur ikut panggil `plan_agent` (planner agent BARU) → cek limit-create gagal → salah nyuruh upgrade. Padahal update existing tak kena limit jumlah, dan eskalasi/whatsapp_media tidak di-gate tier. Fix: kalau blok karena **jumlah agent**, `plan_agent.next_action` arahkan Arthur ke `update_agent`, bukan pitch upgrade.
+- **`2e46836` — Balasan operator tak diteruskan ke customer.** Operator reply pesan eskalasi, tapi agent (gpt-4.1-mini) cuma jawab "Baik, saya catat" — forwarding bergantung LLM bikin draft. Fix gabungan: (1) deterministik — `_maybe_stage_operator_text_draft` di `channels.py` langsung stage teks operator jadi draft (konfirmasi `kirim`) saat reply quote eskalasi yang resolve ke customer; (2) instruksi mode-operator di `prompt_builder.py` untuk path yang masih lewat agent.
+- **`1e219f4` — Case tak tertutup + caption media hilang.** (a) Setelah balasan terkirim, reply lagi ke notifikasi lama re-draft → sekarang case ditandai `escalation_replied_case` dan re-reply ditolak ("kasus sudah ditutup"). (b) Regresi dari `2e46836`: flow media masuk lagi dengan prompt internal `[OPERATOR_MEDIA_PENDING]` yang ke-stage sebagai draft → agent tak bikin caption. Fix: draft-deterministik skip prompt internal itu agar agent compose caption seperti semula.
+
+### Tier feature matrix (referensi)
+Trial: 1 agent / 2jt token / no subagents · Starter: 1 / 10jt / subagents · Pro: 2 / 20jt / +deepseek · Enterprise: ∞ / 100jt / semua model. Yang di-gate: jumlah agent, token, subagents, model. Eskalasi & whatsapp_media TIDAK di-gate.
+
+### Validasi
+- TDD untuk tiap fix; test DB-backed di `tests/test_builder_create_completion.py`, `tests/test_plan_agent_update_routing.py`, `tests/test_operator_reply_draft.py`.
+- Full suite `tests/`: **733 passed**, 9 skipped. 2 gagal = pre-existing tak terkait (`test_google_mcp_subagent_routing::test_builder_policy_is_not_redirected_by_google_mcp_intent`, `test_whatsapp_spam_escalation::test_operator_activate_reenables_quoted_customer`).
+
+### Sisa follow-up
+- Reliability run gagal mid-flight (Google MCP `401` + kemungkinan timeout build) — belum disentuh.
+- LID addressing wa-dev (customer `user_phone` = `...@lid`): pengiriman pakai LID; perlu dicek kalau ada kasus media `kirim` yang gagal sampai.
+
 ## 2026-06-05 — Task Hilang & Halusinasi Portofolio (3 Fix)
 
 ### Masalah yang Ditemukan
