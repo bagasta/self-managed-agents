@@ -470,12 +470,28 @@ async def _maybe_stage_operator_text_draft(
     draft_message = sanitize_user_input(operator_message or "").strip()
     if not draft_message:
         return None
+    # The media draft-first flow re-enters the operator branch with an internal
+    # prompt as the message; let the agent compose the media caption instead of
+    # staging that prompt as a text draft.
+    if "[OPERATOR_MEDIA_PENDING]" in draft_message:
+        return None
 
     target_session, case_id = await find_session_by_quoted_message_id(agent, db, quoted_stanza_id)
     if target_session is None:
         target_session, case_id = await find_session_by_quoted_case(agent, db, quoted_text)
     if target_session is None:
         return None
+
+    # Case already answered: a reply was sent for this exact case. Don't re-open
+    # a draft when the operator replies to the SAME old escalation notification.
+    tmeta = target_session.metadata_ if isinstance(target_session.metadata_, dict) else {}
+    if case_id and tmeta.get("escalation_replied_case") == case_id:
+        reply = (
+            "Balasan untuk kasus ini sudah dikirim ke customer sebelumnya, jadi kasusnya sudah saya tutup. "
+            "Kalau ada update baru, reply chat terakhir dari customer-nya ya — bukan notifikasi eskalasi yang lama."
+        )
+        await send_wa_message(device_id, operator_reply_target, reply)
+        return {"status": "ok", "reply": reply, "run_id": "", "steps": [], "messages_to_user": []}
 
     await _remember_pending_operator_text_reply(
         operator_session=operator_session,
@@ -865,6 +881,14 @@ async def _send_pending_operator_text_reply(
         sess_meta.pop("pending_operator_text_reply", None)
         operator_session.metadata_ = sess_meta
         db.add(operator_session)
+        # Close the case so re-replying to the same old escalation notification
+        # is not treated as a new outbound message.
+        tmeta = dict(target_session.metadata_ or {})
+        if pending.get("case_id"):
+            tmeta["escalation_replied_case"] = pending.get("case_id")
+            tmeta["escalation_replied_at"] = int(time.time())
+            target_session.metadata_ = tmeta
+            db.add(target_session)
         await db.commit()
         reply = "Terkirim ✓"
         await send_wa_message(device_id, operator_reply_target, reply)

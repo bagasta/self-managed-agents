@@ -105,6 +105,78 @@ async def test_quoted_escalation_reply_staged_as_draft(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_media_pending_prompt_defers_to_agent(monkeypatch):
+    """Media draft-first re-enters with an internal prompt; must not be staged."""
+    monkeypatch.setattr(channels, "send_wa_message", lambda *a, **k: None)
+    agent_id, cust_id, op_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    case_id = f"esc_1780629788_{uuid.uuid4().hex[:6]}"
+    await _seed(agent_id, cust_id, op_id, case_id)
+    try:
+        async with _Session() as db:
+            agent = await db.get(Agent, agent_id)
+            op_sess = await db.get(Session, op_id)
+            res = await _maybe_stage_operator_text_draft(
+                agent=agent,
+                operator_session=op_sess,
+                quoted_text=f"ID Kasus: {case_id}",
+                quoted_stanza_id=None,
+                operator_message=f"[OPERATOR_MEDIA_PENDING] Case {case_id}. Lampiran image siap dikirim.",
+                device_id="dev",
+                operator_reply_target="62895619356936",
+                db=db,
+                log=_LOG,
+            )
+        assert res is None
+    finally:
+        await _cleanup(agent_id, cust_id, op_id)
+
+
+@pytest.mark.asyncio
+async def test_already_replied_case_is_closed(monkeypatch):
+    """Re-replying to an already-answered case must not re-open a draft."""
+    sent = []
+
+    async def _fake_send(device_id, target, text):
+        sent.append((target, text))
+        return "msgid"
+
+    monkeypatch.setattr(channels, "send_wa_message", _fake_send)
+
+    agent_id, cust_id, op_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    case_id = f"esc_1780629788_{uuid.uuid4().hex[:6]}"
+    await _seed(agent_id, cust_id, op_id, case_id)
+    # Mark the case as already replied.
+    async with _Session() as db:
+        cust = await db.get(Session, cust_id)
+        cust.metadata_ = {**(cust.metadata_ or {}), "escalation_replied_case": case_id}
+        await db.commit()
+
+    try:
+        async with _Session() as db:
+            agent = await db.get(Agent, agent_id)
+            op_sess = await db.get(Session, op_id)
+            res = await _maybe_stage_operator_text_draft(
+                agent=agent,
+                operator_session=op_sess,
+                quoted_text=f"ID Kasus: {case_id}",
+                quoted_stanza_id=None,
+                operator_message="mau kirim lagi nih",
+                device_id="dev",
+                operator_reply_target="62895619356936",
+                db=db,
+                log=_LOG,
+            )
+        assert res is not None and res["status"] == "ok"
+        assert "ditutup" in res["reply"].lower() or "sudah dikirim" in res["reply"].lower()
+        # No new pending draft should be staged.
+        async with _Session() as db:
+            op_sess = await db.get(Session, op_id)
+            assert "pending_operator_text_reply" not in (op_sess.metadata_ or {})
+    finally:
+        await _cleanup(agent_id, cust_id, op_id)
+
+
+@pytest.mark.asyncio
 async def test_no_quoted_target_returns_none(monkeypatch):
     monkeypatch.setattr(channels, "send_wa_message", lambda *a, **k: None)
     agent_id, cust_id, op_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
