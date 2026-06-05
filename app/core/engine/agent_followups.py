@@ -10,6 +10,7 @@ from typing import Any
 from app.core.engine.agent_step_utils import (
     _URL_RE,
     _has_whatsapp_media_send_step,
+    _parse_step_result_json,
 )
 from app.core.engine.tool_builder import _is_enabled
 
@@ -245,10 +246,17 @@ def _needs_builder_create_completion(
         return False
     if "create_agent" in tool_names or "update_agent" in tool_names:
         return False
-    # A real plan/entitlement limit is not something to silently retry.
+    # A real entitlement BLOCK is not something to silently retry. Match the
+    # actual block — NOT the word "entitlement", because plan_agent always emits
+    # a `creation_entitlement_check` field even on success (allowed=true).
     for step in steps or []:
-        result_text = str(step.get("result", "")).lower()
-        if "entitlement" in result_text or "melebihi entitlement" in result_text:
+        result = step.get("result")
+        parsed = _parse_step_result_json(result)
+        if isinstance(parsed, dict):
+            check = parsed.get("creation_entitlement_check")
+            if isinstance(check, dict) and check.get("checked") and not check.get("allowed", True):
+                return False
+        if "melebihi entitlement" in str(result or "").lower():
             return False
     return True
 
