@@ -239,6 +239,7 @@ def build_builder_tools(
     self_agent_id: str | None = None,
     device_id: str = "",
     default_target: str = "",
+    session_id: str | None = None,
 ) -> list:
     """
     Build semua builder tools untuk system agent.
@@ -248,6 +249,7 @@ def build_builder_tools(
         owner_phone: external_user_id (nomor WA/JID) dari pengguna yang chat dengan Arthur.
         self_agent_id: UUID agent ini sendiri (Arthur) — untuk self-modification.
         device_id/default_target: konteks WhatsApp saat Arthur dipanggil dari WA.
+        session_id: UUID sesi saat ini — untuk membaca file yang dikirim user di workspace.
     """
 
     user_tools = build_builder_user_tools(
@@ -294,6 +296,7 @@ def build_builder_tools(
         db_factory,
         owner_phone=owner_phone,
         self_agent_id=self_agent_id,
+        session_id=session_id,
         get_logger=_get_builder_logger,
     )
     connector_tools = build_builder_connector_tools(
@@ -393,6 +396,7 @@ def build_builder_tools(
         create_tools["create_agent"],
         channel_tools["create_wa_dev_trial_link"],
         management_tools["set_agent_memory"],
+        management_tools["add_agent_knowledge"],
         update_tools["update_agent"],
         management_tools["delete_agent"],
         management_tools["get_agent_detail"],

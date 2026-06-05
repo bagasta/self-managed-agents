@@ -28,6 +28,7 @@ def build_builder_management_tools(
     *,
     owner_phone: str | None = None,
     self_agent_id: str | None = None,
+    session_id: str | None = None,
     get_logger: LoggerProvider | None = None,
 ) -> dict[str, Any]:
     _get_logger = get_logger or (lambda: logger)
@@ -312,9 +313,161 @@ def build_builder_management_tools(
             _get_logger().error("builder_tools.list_my_agents.error", error=str(exc))
             return f"[error] Gagal mengambil daftar agent: {exc}"
 
+    @tool
+    async def add_agent_knowledge(agent_id: str, filename: str = "", title: str = "") -> str:
+        """
+        Tambahkan FILE yang dikirim user (via WhatsApp) sebagai knowledge base (RAG)
+        milik agent TARGET. File yang baru dikirim user otomatis tersimpan di workspace
+        sesi ini; tool mengekstrak teksnya (PDF→OCR, DOCX/PPTX/TXT/MD/CSV), memecah jadi
+        chunk, meng-embed, lalu menyimpannya ke tabel documents agent target, dan
+        mengaktifkan RAG (search_documents) pada agent itu bila belum aktif.
+
+        PENTING: JANGAN pakai remember/set_agent_memory untuk menambah knowledge dokumen —
+        itu hanya memori KV milik Arthur, BUKAN knowledge base agent target. Jangan klaim
+        dokumen sudah ditambahkan sebelum tool ini mengembalikan success: true.
+
+        Args:
+            agent_id: UUID agent target yang akan diberi knowledge.
+            filename: Nama file di workspace (opsional). Kosongkan = pakai file terbaru.
+            title: Judul dokumen (opsional). Default: nama file.
+        """
+        try:
+            agent_uuid = uuid.UUID(agent_id)
+        except ValueError:
+            return f"[error] agent_id tidak valid: {agent_id}"
+
+        if not session_id:
+            return "[error] Konteks sesi tidak tersedia, tidak bisa membaca file. Minta user kirim ulang file-nya."
+
+        from app.config import get_settings
+        from app.core.domain.document_service import create_document
+        from app.core.domain.file_processor import (
+            SUPPORTED_EXTENSIONS,
+            chunk_text,
+            extract_text,
+        )
+        from app.core.infra.sandbox import get_workspace_dir
+
+        workspace = get_workspace_dir(session_id)
+        if not workspace.exists():
+            return "[error] Belum ada file yang diterima di sesi ini. Minta user kirim dokumennya dulu."
+
+        if filename.strip():
+            target_file = workspace / filename.strip()
+            if not target_file.is_file():
+                return f"[error] File '{filename.strip()}' tidak ditemukan di workspace sesi."
+        else:
+            candidates = [
+                p for p in workspace.iterdir()
+                if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS
+            ]
+            if not candidates:
+                return (
+                    "[error] Tidak ada file dokumen yang didukung di sesi ini "
+                    "(PDF/DOCX/PPTX/TXT/MD/CSV). Minta user kirim file dokumennya."
+                )
+            target_file = max(candidates, key=lambda p: p.stat().st_mtime)
+
+        ext = target_file.suffix.lower()
+        if ext not in SUPPORTED_EXTENSIONS:
+            return (
+                f"[error] Tipe file '{ext}' tidak didukung. "
+                f"Didukung: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
+            )
+
+        raw = target_file.read_bytes()
+        if not raw:
+            return f"[error] File {target_file.name} kosong."
+
+        try:
+            full_text = await extract_text(
+                content=raw,
+                filename=target_file.name,
+                content_type=None,
+                mistral_api_key=get_settings().mistral_api_key,
+            )
+        except Exception as exc:
+            _get_logger().warning("builder_tools.add_agent_knowledge.extract_failed", error=str(exc))
+            return f"[error] Gagal mengekstrak teks dari {target_file.name}: {exc}"
+
+        if not full_text.strip():
+            return f"[error] Tidak ada teks yang bisa diekstrak dari {target_file.name}."
+
+        doc_title = title.strip() or target_file.name
+        chunks = chunk_text(full_text)
+        if not chunks:
+            return f"[error] Dokumen {target_file.name} tidak menghasilkan chunk teks."
+
+        try:
+            async with db_factory() as db:
+                result = await db.execute(
+                    select(Agent).where(Agent.id == agent_uuid, Agent.is_deleted.is_(False))
+                )
+                agent = result.scalar_one_or_none()
+                if not agent:
+                    return f"[error] Agent dengan ID {agent_id} tidak ditemukan"
+                if owner_phone and not _agent_belongs_to_owner(agent, owner_phone):
+                    return "[error] Kamu tidak punya akses ke agent ini"
+
+                total = len(chunks)
+                for i, chunk_content in enumerate(chunks, 1):
+                    chunk_title = doc_title if total == 1 else f"{doc_title} (Part {i}/{total})"
+                    await create_document(
+                        agent_id=agent.id,
+                        title=chunk_title,
+                        content=chunk_content,
+                        source=target_file.name,
+                        doc_metadata={
+                            "original_filename": target_file.name,
+                            "chunk_index": i,
+                            "total_chunks": total,
+                            "added_by": "arthur_builder",
+                        },
+                        db=db,
+                    )
+
+                tc = dict(agent.tools_config) if isinstance(agent.tools_config, dict) else {}
+                rag_was_enabled = bool(tc.get("rag"))
+                if not rag_was_enabled:
+                    tc["rag"] = True
+                    agent.tools_config = tc
+
+                await db.commit()
+                agent_name = agent.name or ""
+        except Exception as exc:
+            _get_logger().error("builder_tools.add_agent_knowledge.error", error=str(exc))
+            return f"[error] Gagal menyimpan knowledge ke agent: {exc}"
+
+        _get_logger().info(
+            "builder_tools.add_agent_knowledge.ok",
+            agent_id=agent_id,
+            filename=target_file.name,
+            chunks=total,
+            rag_was_enabled=rag_was_enabled,
+        )
+        msg = (
+            f"{total} chunk dari '{target_file.name}' berhasil ditambahkan ke "
+            f"knowledge base agent '{agent_name}'."
+        )
+        if not rag_was_enabled:
+            msg += " RAG (search_documents) diaktifkan untuk agent ini."
+        return json.dumps({
+            "success": True,
+            "agent_id": agent_id,
+            "agent_name": agent_name,
+            "filename": target_file.name,
+            "title": doc_title,
+            "chunks_added": total,
+            "extracted_chars": len(full_text),
+            "rag_enabled": True,
+            "rag_was_already_enabled": rag_was_enabled,
+            "message": msg,
+        }, ensure_ascii=False, indent=2)
+
     return {
         "set_agent_memory": set_agent_memory,
         "delete_agent": delete_agent,
         "get_agent_detail": get_agent_detail,
         "list_my_agents": list_my_agents,
+        "add_agent_knowledge": add_agent_knowledge,
     }

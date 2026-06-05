@@ -834,6 +834,7 @@ def build_builder_tools(
     self_agent_id: str | None = None,
     device_id: str = "",
     default_target: str = "",
+    session_id: str | None = None,
 ) -> list:
     """
     Build tools eksklusif untuk system agent (Agent Builder / Arthur).
@@ -844,6 +845,7 @@ def build_builder_tools(
         owner_phone: external_user_id caller (nomor WA/JID) untuk scoping keamanan
         self_agent_id: UUID agent ini sendiri — untuk self-modification
         device_id/default_target: konteks WhatsApp saat tersedia
+        session_id: UUID sesi saat ini — untuk membaca file yang dikirim user di workspace
     """
     from app.core.tools.builder_tools import build_builder_tools as _build
     return _build(
@@ -852,6 +854,7 @@ def build_builder_tools(
         self_agent_id=self_agent_id,
         device_id=device_id,
         default_target=default_target,
+        session_id=session_id,
     )
 
 
