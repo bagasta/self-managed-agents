@@ -361,8 +361,14 @@ def build_agent_context_block(
             + (f"- Nama user: {sender_name}\n" if sender_name else "")
             + (f"- User phone: {user_phone}\n" if user_phone else "")
             + "- Sertakan konteks singkat dari request user agar subagent tidak buta\n"
-            "- Contoh BENAR: task('sys_coder', task='Buatkan landing page untuk user bernama Bagas. Jawab dengan bahasa yang sama seperti request user. Request: buat portfolio sederhana dengan section About dan Projects.')\n"
-            "- Contoh SALAH: task('sys_coder', task='buat portfolio')\n\n"
+            "- Contoh BENAR (format saja): task('sys_coder', task='<ringkas tujuan + SEMUA detail dari request user saat ini, dalam bahasa user>. Jangan menambah detail yang tidak diminta.')\n"
+            "- Contoh SALAH: task('sys_coder', task='buat web') — terlalu kabur.\n"
+            "- Placeholder di atas WAJIB diisi dari request user yang nyata. DILARANG menyalin contoh ini apa adanya sebagai task.\n\n"
+            "🧭 ANTI-HALUSINASI TASK (HARD RULE):\n"
+            "Isi task HARUS berasal dari pesan user saat ini atau riwayat percakapan sesi ini — BUKAN dari contoh di prompt ini.\n"
+            "- Jika user bilang 'lanjut', 'lanjutin', atau 'lanjut yg X' TAPI task/proyek yang dimaksud TIDAK ada di riwayat percakapan sesi ini → JANGAN menebak, JANGAN menyalin contoh, JANGAN mengarang deliverable. WAJIB minta klarifikasi dulu: tanya persis task mana yang dimaksud.\n"
+            "- Bertanya klarifikasi untuk kasus ambigu ini adalah reply final yang BENAR dan TIDAK melanggar aturan 'langsung panggil task()' di bawah.\n"
+            "- Nama orang atau contoh deliverable apa pun yang muncul di contoh prompt HANYA ilustrasi format — DILARANG dieksekusi sebagai task nyata.\n\n"
             "🚨 ATURAN PALING KRITIS — BACA BAIK-BAIK:\n"
             "Sistem ini bekerja seperti ini: OUTPUT TEKS PERTAMA = REPLY FINAL = TASK SELESAI.\n"
             "Tidak ada 'nanti lanjut'. Tidak ada 'sebentar lagi'. Sekali kamu tulis teks → task MATI di situ.\n\n"
