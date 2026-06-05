@@ -244,6 +244,15 @@ def build_builder_planning_tools(
                 "Cek tier/slot awal belum bisa diverifikasi; create_agent tetap akan melakukan hard gate sebelum menyimpan agent."
             )
 
+        # Distinguish an agent-COUNT block (user already has agent[s] → likely
+        # wants to MODIFY, which is not count-limited) from other blocks.
+        agent_count_block = bool(
+            entitlement_blocked
+            and creation_entitlement_check.get("max_agents") is not None
+            and creation_entitlement_check.get("agents_used", 0)
+            >= creation_entitlement_check.get("max_agents", 0)
+        )
+
         # Surface critical limitations
         critical_limitations = []
         for lid in preset.get("runtime_limitations", []):
@@ -304,7 +313,13 @@ def build_builder_planning_tools(
             "google_workspace_option": google_workspace_option,
             "smoke_test_guidance": preset.get("smoke_test", {}).get("steps", []),
             "next_action": (
-                "Jelaskan limit paket dengan bahasa sederhana dan tawarkan upgrade/top up sebelum lanjut membuat agent."
+                "User SUDAH punya agent dan sedang di batas jumlah agent paketnya. "
+                "Kalau user ingin MENGUBAH/MEMPERBAIKI agent yang sudah ada (mis. eskalasi, notifikasi, "
+                "instruksi, fitur) — itu TIDAK kena limit jumlah agent. JANGAN suruh upgrade. "
+                "Pakai list_my_agents lalu update_agent pada agent yang dimaksud. "
+                "Tawarkan upgrade HANYA kalau user benar-benar ingin MEMBUAT agent BARU tambahan."
+                if agent_count_block
+                else "Jelaskan limit paket dengan bahasa sederhana dan tawarkan upgrade/top up sebelum lanjut membuat agent."
                 if entitlement_blocked
                 else
                 (
