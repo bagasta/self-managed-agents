@@ -59,6 +59,7 @@ type WhatsAppClient struct {
 	latestQR    string
 	latestQRRaw string // raw QR code text for terminal rendering
 	onMessage   func(msg IncomingMessage)
+	needsReset  bool // device was logged out/deleted; client must be rebuilt before next pair
 }
 
 func quotedMessageText(ctx *waE2E.ContextInfo) string {
@@ -145,26 +146,38 @@ func NewWhatsAppClient(storeDir string, onMessage func(msg IncomingMessage)) (*W
 }
 
 func (wa *WhatsAppClient) Connect() (string, error) {
-	wa.mu.RLock()
-	status := wa.status
-	wa.mu.RUnlock()
-
-	if status == WAStatusConnected {
+	wa.mu.Lock()
+	if wa.status == WAStatusConnected {
+		wa.mu.Unlock()
 		return "", nil
 	}
 
+	// If the previous device was logged out/deleted, the whatsmeow client is
+	// poisoned (Connect returns "invalid use of deleted device"). Rebuild a
+	// fresh device + client so a new QR can be generated without a restart.
+	if wa.needsReset {
+		wa.rebuildClientLocked()
+		wa.needsReset = false
+	}
+
+	// Saved, non-deleted session → just reconnect, no QR needed.
 	if wa.client.Store.ID != nil {
-		if err := wa.client.Connect(); err != nil {
+		client := wa.client
+		wa.mu.Unlock()
+		if err := client.Connect(); err != nil {
 			return "", fmt.Errorf("reconnect: %w", err)
 		}
 		return "", nil
 	}
 
-	qrChan, err := wa.client.GetQRChannel(context.Background())
+	client := wa.client
+	wa.mu.Unlock()
+
+	qrChan, err := client.GetQRChannel(context.Background())
 	if err != nil {
 		return "", fmt.Errorf("GetQRChannel: %w", err)
 	}
-	if err = wa.client.Connect(); err != nil {
+	if err = client.Connect(); err != nil {
 		return "", fmt.Errorf("connect: %w", err)
 	}
 
@@ -191,8 +204,8 @@ func (wa *WhatsAppClient) Connect() (string, error) {
 				wa.status = WAStatusConnected
 				wa.latestQR = ""
 				wa.latestQRRaw = ""
-				if wa.client.Store.ID != nil {
-					wa.phoneNumber = wa.client.Store.ID.User
+				if client.Store.ID != nil {
+					wa.phoneNumber = client.Store.ID.User
 				}
 				wa.mu.Unlock()
 			}
@@ -205,6 +218,25 @@ func (wa *WhatsAppClient) Connect() (string, error) {
 	case <-time.After(30 * time.Second):
 		return "", fmt.Errorf("timeout waiting for QR")
 	}
+}
+
+// rebuildClientLocked discards the current (logged-out/poisoned) whatsmeow
+// client and creates a fresh device + client so a new QR pairing can start.
+// Caller must hold wa.mu. Safe to call after LoggedOut: the old client is
+// already disconnected, so Disconnect() (which dispatches events on another
+// goroutine) is not invoked here.
+func (wa *WhatsAppClient) rebuildClientLocked() {
+	if wa.client != nil && wa.client.IsConnected() {
+		wa.client.Disconnect()
+	}
+	deviceStore := wa.container.NewDevice()
+	client := whatsmeow.NewClient(deviceStore, waLog.Stdout("WA", "ERROR", true))
+	client.AddEventHandler(wa.eventHandler)
+	wa.client = client
+	wa.status = WAStatusWaitingQR
+	wa.latestQR = ""
+	wa.latestQRRaw = ""
+	wa.phoneNumber = ""
 }
 
 func (wa *WhatsAppClient) GetStatus() (WAStatus, string, string, string) {
@@ -396,7 +428,10 @@ func (wa *WhatsAppClient) eventHandler(evt interface{}) {
 		wa.status = WAStatusDisconnected
 		wa.latestQR = ""
 		wa.phoneNumber = ""
+		// Delete poisons this device; mark for rebuild so the next Connect()
+		// creates a fresh device instead of reusing the deleted one.
 		_ = wa.client.Store.Delete(context.Background())
+		wa.needsReset = true
 		wa.mu.Unlock()
 	}
 }
