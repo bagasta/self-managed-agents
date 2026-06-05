@@ -280,6 +280,26 @@ async def _persist_inbound_user_message(
     return msg
 
 
+async def _persist_run_failure(
+    db,
+    *,
+    run_record,
+    status: str,
+    error_message: str | None,
+) -> None:
+    """Durably record a terminal run failure so it survives the caller rollback.
+
+    The WA caller rolls back on cancel/timeout/error; without committing here the
+    failed/timed_out/cancelled status is lost and the run is left stuck as
+    'running' with no audit trail. Committing leaves a durable trace.
+    """
+    run_record.status = status
+    run_record.completed_at = datetime.now(timezone.utc)
+    if error_message is not None:
+        run_record.error_message = error_message[:2000]
+    await db.commit()
+
+
 async def run_agent(
     *,
     agent_model: AgentModel,
@@ -1079,11 +1099,13 @@ async def run_agent(
         except asyncio.CancelledError:
             # Human interrupt — user sent a new message while this run was active.
             log.info("agent_run.cancelled_by_interrupt", session_id=str(session.id))
-            run_record.status = "cancelled"
-            run_record.completed_at = datetime.now(timezone.utc)
-            run_record.error_message = "Cancelled because a newer user message interrupted this run."
             _apply_run_usage(_agent_logger.total_tokens_from_callbacks)
-            await db.flush()
+            await _persist_run_failure(
+                db,
+                run_record=run_record,
+                status="cancelled",
+                error_message="Cancelled because a newer user message interrupted this run.",
+            )
             await _cancel_wa_long_progress_notice()
             await _cleanup_sandboxes()
             raise  # propagate so the task is properly marked cancelled
@@ -1093,10 +1115,12 @@ async def run_agent(
                 timeout_seconds=_timeout,
                 session_id=str(session.id),
             )
-            run_record.status = "timed_out"
-            run_record.completed_at = datetime.now(timezone.utc)
-            run_record.error_message = f"Timeout after {_timeout}s"
-            await db.flush()
+            await _persist_run_failure(
+                db,
+                run_record=run_record,
+                status="timed_out",
+                error_message=f"Timeout after {_timeout}s",
+            )
             await _cancel_wa_long_progress_notice()
             await _cleanup_sandboxes()
             await send_agent_recovery_message(
@@ -1490,13 +1514,26 @@ async def run_agent(
 
                 if not _recovered_via_retry:
                     log.error("agent_run.error", error=err_str)
-                    # Update Run → failed
-                    run_record.status = "failed"
-                    run_record.completed_at = datetime.now(timezone.utc)
-                    run_record.error_message = err_str[:2000]
+                    # Update Run → failed (durable trace) + tell the user instead
+                    # of failing silently with a rolled-back transaction.
                     _apply_run_usage(_agent_logger.total_tokens_from_callbacks)
-                    await db.flush()
+                    await _persist_run_failure(
+                        db,
+                        run_record=run_record,
+                        status="failed",
+                        error_message=err_str,
+                    )
+                    await _cancel_wa_long_progress_notice()
                     await _cleanup_sandboxes()
+                    await send_agent_recovery_message(
+                        is_wa_session=_is_wa_session,
+                        wa_device_id=_wa_device_id,
+                        wa_target=_wa_target,
+                        llm_raw=llm_raw,
+                        system_prompt=system_prompt,
+                        reason="mengalami kendala teknis dan terpaksa dihentikan",
+                        log=log,
+                    )
                     raise
 
 

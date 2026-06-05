@@ -21,9 +21,10 @@ from sqlalchemy.pool import NullPool
 
 load_dotenv()
 
-from app.core.engine.agent_runner import _persist_inbound_user_message
+from app.core.engine.agent_runner import _persist_inbound_user_message, _persist_run_failure
 from app.models.agent import Agent
 from app.models.message import Message
+from app.models.run import Run
 from app.models.session import Session
 
 _engine = create_async_engine(os.environ["DATABASE_URL"], poolclass=NullPool)
@@ -67,6 +68,38 @@ async def test_inbound_user_message_survives_caller_rollback():
     finally:
         async with _Session() as db:
             await db.execute(Message.__table__.delete().where(Message.session_id == session_id))
+            await db.execute(Session.__table__.delete().where(Session.id == session_id))
+            await db.execute(Agent.__table__.delete().where(Agent.id == agent_id))
+            await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_run_failure_status_survives_caller_rollback():
+    agent_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+
+    async with _Session() as db:
+        db.add(Agent(id=agent_id, name="durability-test"))
+        db.add(Session(id=session_id, agent_id=agent_id))
+        await db.commit()
+        db.add(Run(id=run_id, session_id=session_id, status="running"))
+        await db.commit()
+
+    try:
+        # A failure path marks the run failed, then the caller rolls back.
+        async with _Session() as db:
+            run = await db.get(Run, run_id)
+            await _persist_run_failure(db, run_record=run, status="failed", error_message="boom")
+            await db.rollback()
+
+        async with _Session() as db:
+            run = await db.get(Run, run_id)
+        assert run.status == "failed", "run failure status was lost on rollback"
+        assert run.error_message == "boom"
+    finally:
+        async with _Session() as db:
+            await db.execute(Run.__table__.delete().where(Run.id == run_id))
             await db.execute(Session.__table__.delete().where(Session.id == session_id))
             await db.execute(Agent.__table__.delete().where(Agent.id == agent_id))
             await db.commit()
