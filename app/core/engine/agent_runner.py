@@ -253,6 +253,33 @@ async def _pre_run_quota_gate(
     return None
 
 
+async def _persist_inbound_user_message(
+    db,
+    *,
+    session_id: uuid.UUID,
+    run_id: uuid.UUID,
+    content: str,
+    step_index: int,
+) -> Message:
+    """Persist the inbound user message durably BEFORE running the agent graph.
+
+    Committed in its own transaction so that a later `db.rollback()` in the
+    caller (on run cancel/timeout/error) cannot silently erase the user's
+    request. Without this, a failed run drops the message entirely and the next
+    turn has no record of what the user asked for.
+    """
+    msg = Message(
+        session_id=session_id,
+        role="user",
+        content=content,
+        step_index=step_index,
+        run_id=run_id,
+    )
+    db.add(msg)
+    await db.commit()
+    return msg
+
+
 async def run_agent(
     *,
     agent_model: AgentModel,
@@ -493,14 +520,15 @@ async def run_agent(
     # 7. Persist user message                                             #
     # ------------------------------------------------------------------ #
     step_base = max((m.step_index for m in history_rows), default=-1) + 1
-    db.add(Message(
+    # Commit the inbound message before running the graph so a later rollback
+    # (cancel/timeout/error in the caller) cannot silently drop the user's request.
+    await _persist_inbound_user_message(
+        db,
         session_id=session.id,
-        role="user",
+        run_id=run_id,
         content=user_message,
         step_index=step_base,
-        run_id=run_id,
-    ))
-    await db.flush()
+    )
 
     # ------------------------------------------------------------------ #
     # 8. Run agent graph (with MCP tools)                                 #
