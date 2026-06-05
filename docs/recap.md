@@ -1,5 +1,26 @@
 # Recap: Deep Agent SaaS Hardening — MCP, Subagent, Sandbox, Builder Entitlements
 
+## 2026-06-05 — Task Hilang & Halusinasi Portofolio (3 Fix)
+
+### Masalah yang Ditemukan
+- User (PA Bagas, WA `62895619356936`) malam 06-04 jam 22:11 minta agent bikin **web dimsum**. Agent membalas progress notice "Masih saya proses ya", lalu task **hilang**. Pagi 06-05 user bilang "lanjut yg pembuatan web" → agent malah bikin **landing page portofolio**.
+- Investigasi DB (sesi `e5805345`): timeline loncat 22:10:46 → 08:34, pesan dimsum 22:11 **nol** di tabel `messages`, dan **nol** row di `runs` jam 22:11. Konfirmasi 1 nomor + 1 agent = 1 sesi (`wa_helpers.py` get-or-create by `normalize_phone`), jadi task memang masuk ke agent ini tapi tak tersimpan.
+- **Akar 1 (data loss):** pesan masuk user di-`flush` (bukan `commit`) di `agent_runner.run_agent` (`§7`). Caller WA (`channels.py:1133-1145`) `db.rollback()` saat run cancel/timeout/error → pesan + run record yang belum commit **terhapus**. Progress notice WA = side-effect non-transaksional → bertahan, bikin user kira task diproses.
+- **Akar 2 (halusinasi):** waktu pagi "lanjut web" tak ada grounding di history (sudah keburu hilang), prompt subagent (`prompt_builder.py:364`) punya **contoh few-shot konkret** "landing page portfolio untuk Bagas, section About & Projects" → model menyalinnya verbatim (task args persis sama). Diperparah hard-rule "langsung panggil task(), dilarang nulis teks" → agent tak boleh nanya klarifikasi.
+- Run 21:59 sudah nunjukin Google MCP `401 Unauthorized` → infra rapuh, kemungkinan pemicu kegagalan run 22:11.
+
+### Perubahan Utama (3 commit)
+- **`369c34d` — anti-halusinasi prompt** (`prompt_builder.py`): contoh portofolio-Bagas yang bisa disalin → placeholder generik; tambah blok **"ANTI-HALUSINASI TASK"** (isi task wajib dari pesan/history, bukan contoh prompt; "lanjut X" tanpa jejak di history → wajib klarifikasi, bukan menebak).
+- **`541f452` — pesan masuk durable** (`agent_runner.py`): helper `_persist_inbound_user_message()` `commit` pesan user **sebelum** graph jalan. Rollback caller tak bisa lagi menghapus request. Aman karena sessionmaker `expire_on_commit=False`.
+- **`eebf382` — jejak gagal + recovery** (`agent_runner.py`): helper `_persist_run_failure()` set status terminal + `commit`, dipakai di 3 jalur raising (CancelledError, TimeoutError, Exception umum) yang dulu `flush`+`raise` → trace hilang. Jalur Exception umum sekarang juga kirim recovery message ke user (dulu diam → HTTP 500).
+
+### Validasi
+- TDD, test DB-backed: `tests/test_inbound_message_durability.py` (flush-only hilang saat rollback → commit bertahan, untuk pesan & status run), `tests/test_subagent_task_grounding.py` (no contoh portofolio + ada aturan klarifikasi).
+- Full suite `tests/`: **724 passed**, 9 skipped. 2 gagal = pre-existing tak terkait (`test_google_mcp_subagent_routing::test_builder_policy_is_not_redirected_by_google_mcp_intent`, `test_whatsapp_spam_escalation::test_operator_activate_reenables_quoted_customer`; gagal juga saat perubahan di-stash).
+
+### Sisa Follow-up (belum dikerjakan)
+- Reliability: kenapa run 22:11 gagal di awal (Google MCP `401` + kemungkinan timeout build web lambat). Dampak sudah jauh berkurang (task tak hilang, user dikabari, ada jejak `runs.status`), tapi run-nya sendiri masih bisa gagal di tengah.
+
 ## 2026-06-04 — Fix Latency Arthur (Revert Model Reasoning)
 
 ### Masalah yang Ditemukan
