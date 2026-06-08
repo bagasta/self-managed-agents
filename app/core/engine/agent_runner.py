@@ -145,7 +145,6 @@ from app.core.engine.agent_followups import (
     _needs_whatsapp_file_delivery_followup,
     _SHARED_WORKSPACE_FILE_RE,
     _step_text,
-    _whatsapp_file_delivery_followup_message,
 )
 
 
@@ -299,6 +298,82 @@ async def _persist_run_failure(
     if error_message is not None:
         run_record.error_message = error_message[:2000]
     await db.commit()
+
+
+async def _deliver_shared_whatsapp_file_via_tool(
+    *,
+    tools: list[Any],
+    shared_path: str,
+    parsed: ParsedResult,
+    session_id: uuid.UUID,
+    run_id: uuid.UUID,
+    step_index: int,
+    log: Any,
+) -> tuple[bool, str]:
+    """Send a known /workspace/shared file via the parent WA media tool without an LLM pass."""
+    filename = (shared_path or "").rsplit("/", 1)[-1] or "file"
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    image_exts = {"jpg", "jpeg", "png", "webp"}
+    tool_name = "send_whatsapp_image" if ext in image_exts else "send_whatsapp_document"
+    send_tool = next((tool for tool in tools if getattr(tool, "name", "") == tool_name), None)
+    if send_tool is None:
+        return (
+            False,
+            f"Belum saya kirim. Tool {tool_name} tidak tersedia di run ini, jadi saya tidak bisa mengirim {filename} sebagai file WhatsApp.",
+        )
+
+    if tool_name == "send_whatsapp_image":
+        args = {
+            "image_path_or_base64": shared_path,
+            "caption": f"Berikut file {filename}.",
+        }
+    else:
+        args = {
+            "file_path_or_base64": shared_path,
+            "filename": filename,
+            "caption": f"Berikut file {filename}.",
+        }
+
+    try:
+        raw_result = await send_tool.ainvoke(args)
+    except Exception as exc:
+        log.warning("agent_run.whatsapp_file_direct_delivery_exception", tool=tool_name, error=str(exc)[:300])
+        return False, f"Gagal mengirim {filename} lewat WhatsApp: {exc}"
+
+    result_text = str(raw_result or "")
+    step_no = max([int(step.get("step") or 0) for step in parsed.get("steps", [])] + [0]) + 1
+    parsed["steps"].append(
+        {
+            "step": step_no,
+            "tool": tool_name,
+            "args": args,
+            "result": result_text[:4000],
+            "tool_call_id": "deterministic_whatsapp_file_delivery",
+        }
+    )
+    parsed["db_messages"].append(
+        Message(
+            session_id=session_id,
+            role="tool",
+            tool_name=tool_name,
+            tool_args=args,
+            tool_result=result_text[:2000],
+            step_index=step_index,
+            run_id=run_id,
+        )
+    )
+
+    sent = _has_whatsapp_media_send_step(parsed["steps"])
+    if not sent:
+        log.warning(
+            "agent_run.whatsapp_file_direct_delivery_failed",
+            tool=tool_name,
+            result=result_text[:300],
+        )
+        return False, f"Gagal mengirim {filename} lewat WhatsApp: {result_text or 'tool tidak mengembalikan hasil sukses'}"
+
+    log.info("agent_run.whatsapp_file_direct_delivery_sent", tool=tool_name, filename=filename)
+    return True, f"File {filename} sudah saya kirim ke WhatsApp."
 
 
 async def run_agent(
@@ -1716,49 +1791,22 @@ async def run_agent(
         )
         if _needs_wa_file_followup and _wa_shared_file_path:
             log.info("agent_run.whatsapp_file_delivery_followup", path=_wa_shared_file_path)
-            _wa_file_followup_directive = _whatsapp_file_delivery_followup_message(
-                final_reply,
-                steps,
-                _wa_shared_file_path,
+            _sent, _delivery_reply = await _deliver_shared_whatsapp_file_via_tool(
+                tools=tools,
+                shared_path=_wa_shared_file_path,
+                parsed=parsed,
+                session_id=session.id,
+                run_id=run_id,
+                step_index=step_counter + len(parsed["db_messages"]),
+                log=log,
             )
-            _wa_file_previous_db_messages = list(parsed["db_messages"])
-            try:
-                from langgraph.prebuilt import create_react_agent as _cra
-
-                _wa_file_prompt = (
-                    (system_prompt + "\n\n" + _wa_file_followup_directive)
-                    if isinstance(system_prompt, str)
-                    else system_prompt
-                )
-                _wa_file_graph = _cra(llm, tools=tools, prompt=_wa_file_prompt)
-                _wa_file_input = _sanitize_input_messages(input_messages)
-                async with asyncio.timeout(settings.agent_timeout_seconds):
-                    result = await _wa_file_graph.ainvoke(
-                        {"messages": _wa_file_input}, config=_graph_config
-                    )
-                parsed = parse_agent_result(
-                    result=result,
-                    input_messages=input_messages,
-                    session_id=session.id,
-                    run_id=run_id,
-                    step_start=step_counter,
-                    log=log,
-                )
-                final_reply = parsed["final_reply"]
-                steps = parsed["steps"]
-                total_tokens_used = _agent_logger.total_tokens_from_callbacks or parsed["total_tokens_used"]
-                for _msg_record in _wa_file_previous_db_messages:
-                    db.add(_msg_record)
-                log.info(
-                    "agent_run.whatsapp_file_delivery_followup_ok",
-                    sent=_has_whatsapp_media_send_step(steps),
-                )
-            except Exception as _wa_file_followup_exc:
-                log.warning(
-                    "agent_run.whatsapp_file_delivery_followup_failed",
-                    path=_wa_shared_file_path,
-                    error=str(_wa_file_followup_exc)[:300],
-                )
+            final_reply = _delivery_reply
+            steps = parsed["steps"]
+            log.info(
+                "agent_run.whatsapp_file_delivery_followup_ok",
+                sent=_sent,
+                deterministic=True,
+            )
         for _msg_record in parsed["db_messages"]:
             db.add(_msg_record)
 

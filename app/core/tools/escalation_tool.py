@@ -41,6 +41,34 @@ def _clean_jid_from_text(text: str) -> str:
     return _re.sub(r'(\d+)@(?:lid|s\.whatsapp\.net|c\.us)', r'\1', text)
 
 
+def _looks_like_media_delivery_text(message: str) -> bool:
+    lowered = (message or "").lower()
+    if not any(marker in lowered for marker in ("file", "dokumen", "pdf", "gambar", "foto", "attachment", "lampiran")):
+        return False
+    return any(
+        marker in lowered
+        for marker in (
+            "sudah saya kirim",
+            "sudah dikirim",
+            "sudah terkirim",
+            "berhasil saya kirim",
+            "saya kirim sekarang",
+            "saya akan kirim",
+            "akan segera mengirim",
+            "langsung kirim file",
+            "mengirimkan file",
+            "mengirim file",
+            "mengirim dokumen",
+            "silakan cek filenya",
+            "cek filenya di attachment",
+            "cek file terlampir",
+            "mohon tunggu sebentar",
+            "siap saya kirim",
+            "siap dikirim",
+        )
+    )
+
+
 def build_escalation_tools(
     session_id: uuid.UUID,
     agent_id: uuid.UUID,
@@ -279,6 +307,11 @@ def build_escalation_tools(
         from app.models.message import Message as Msg
 
         message = _clean_jid_from_text(message)
+        if _looks_like_media_delivery_text(message):
+            return (
+                "[send_to_number blocked] Pesan ini mengklaim pengiriman file/dokumen/gambar. "
+                "send_to_number hanya untuk teks. Untuk file gunakan send_whatsapp_document/send_whatsapp_image."
+            )
         channel_type_val: str | None = None
         channel_config_val: dict = {}
 

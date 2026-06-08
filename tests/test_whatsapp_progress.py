@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import uuid
 
 import pytest
 
@@ -141,6 +142,69 @@ def test_media_delivery_claim_is_kept_after_media_send_step():
     ]
 
     assert _whatsapp_media_delivery_guard_reply(reply, steps) == reply
+
+
+@pytest.mark.asyncio
+async def test_shared_pdf_followup_invokes_document_tool_directly():
+    from app.core.engine.agent_runner import _deliver_shared_whatsapp_file_via_tool
+
+    calls: list[dict] = []
+
+    class FakeDocumentTool:
+        name = "send_whatsapp_document"
+
+        async def ainvoke(self, args):
+            calls.append(args)
+            return "[DOCUMENT_SENT] Dokumen 'Laporan.pdf' dikirim ke 628111"
+
+    parsed = {
+        "final_reply": "PDF siap di /workspace/shared/Laporan.pdf",
+        "steps": [
+            {
+                "step": 1,
+                "tool": "task",
+                "args": {"name": "sys_coder"},
+                "result": "Selesai: /workspace/shared/Laporan.pdf SIAP_DIKIRIM_PARENT",
+            }
+        ],
+        "total_tokens_used": 0,
+        "db_messages": [],
+        "has_output": True,
+    }
+
+    sent, reply = await _deliver_shared_whatsapp_file_via_tool(
+        tools=[FakeDocumentTool()],
+        shared_path="/workspace/shared/Laporan.pdf",
+        parsed=parsed,
+        session_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        step_index=10,
+        log=SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None),
+    )
+
+    assert sent is True
+    assert reply == "File Laporan.pdf sudah saya kirim ke WhatsApp."
+    assert calls == [
+        {
+            "file_path_or_base64": "/workspace/shared/Laporan.pdf",
+            "filename": "Laporan.pdf",
+            "caption": "Berikut file Laporan.pdf.",
+        }
+    ]
+    assert parsed["steps"][-1]["tool"] == "send_whatsapp_document"
+    assert parsed["db_messages"][-1].tool_name == "send_whatsapp_document"
+
+
+def test_send_to_number_blocks_media_delivery_claim_text():
+    from app.core.tools.escalation_tool import _looks_like_media_delivery_text
+
+    assert _looks_like_media_delivery_text(
+        "Bos Bagas, ini file PDF hasil visualisasi data Titanic yang sudah saya buat. Silakan cek filenya di attachment ya."
+    )
+    assert _looks_like_media_delivery_text(
+        "Maaf Bos, saya akan langsung kirim file PDF visualisasi data Titanic sekarang."
+    )
+    assert not _looks_like_media_delivery_text("Halo Julia, meeting kita jam 3 sore ya.")
 
 
 def test_task_guard_does_not_override_arthur_planning_after_document_upload():
