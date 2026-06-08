@@ -126,6 +126,7 @@ settings = get_settings()
 from app.core.engine.agent_reply_guards import (
     _operator_escalation_reply_guard,
     _task_result_guard_reply,
+    _whatsapp_media_delivery_guard_reply,
 )
 from app.core.engine.agent_followups import (
     _builder_create_completion_directive,
@@ -2002,6 +2003,10 @@ async def run_agent(
     guarded_reply = _operator_escalation_reply_guard(final_reply, steps, execution_user_message, escalation_user_jid)
     if guarded_reply != final_reply:
         log.warning("agent_run.final_reply_overridden_by_operator_escalation_guard")
+        final_reply = guarded_reply
+    guarded_reply = _whatsapp_media_delivery_guard_reply(final_reply, steps)
+    if guarded_reply != final_reply:
+        log.warning("agent_run.final_reply_overridden_by_wa_media_delivery_guard")
         final_reply = guarded_reply
 
     _reply_before_non_empty_guard = final_reply

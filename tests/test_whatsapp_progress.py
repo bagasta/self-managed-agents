@@ -1,3 +1,8 @@
+from types import SimpleNamespace
+
+import pytest
+
+from app.core.engine.agent_reply_guards import _whatsapp_media_delivery_guard_reply
 from app.core.engine.wa_progress import build_progress_message, build_task_done_message
 from app.core.engine.subagent_builder import should_expose_wa_media_tools
 from app.core.engine.wa_reply_delivery import should_skip_whatsapp_final_reply
@@ -63,6 +68,79 @@ def test_media_send_success_final_reply_without_url_is_suppressed():
 
     assert should_skip_whatsapp_final_reply("File sudah saya kirim ke WhatsApp kamu.", steps) is True
     assert should_skip_whatsapp_final_reply("Link: https://example.trycloudflare.com", steps) is False
+
+
+@pytest.mark.asyncio
+async def test_notify_user_is_single_use_per_run(monkeypatch):
+    from app.core.engine.tool_builder import build_wa_notify_tool
+
+    sent: list[str] = []
+
+    async def fake_send_wa_message(_device_id, _target, message):
+        sent.append(message)
+
+    async def fake_start_typing(_device_id, _target):
+        return None
+
+    monkeypatch.setattr("app.core.infra.wa_client.send_wa_message", fake_send_wa_message)
+    monkeypatch.setattr("app.core.infra.wa_client.start_wa_typing", fake_start_typing)
+
+    notify = build_wa_notify_tool(
+        SimpleNamespace(channel_config={"device_id": "wa-device", "user_phone": "628111"})
+    )[0]
+
+    first = await notify.ainvoke({"message": "Masih saya proses ya. Saya akan kirim hasilnya begitu selesai."})
+    second = await notify.ainvoke({"message": "Mohon tunggu sebentar, masih saya proses."})
+
+    assert first == "notifikasi terkirim"
+    assert "suppressed" in second
+    assert sent == ["Masih saya proses ya. Saya akan kirim hasilnya begitu selesai."]
+
+
+@pytest.mark.asyncio
+async def test_notify_user_suppresses_media_delivery_claim(monkeypatch):
+    from app.core.engine.tool_builder import build_wa_notify_tool
+
+    sent: list[str] = []
+
+    async def fake_send_wa_message(_device_id, _target, message):
+        sent.append(message)
+
+    async def fake_start_typing(_device_id, _target):
+        return None
+
+    monkeypatch.setattr("app.core.infra.wa_client.send_wa_message", fake_send_wa_message)
+    monkeypatch.setattr("app.core.infra.wa_client.start_wa_typing", fake_start_typing)
+
+    notify = build_wa_notify_tool(
+        SimpleNamespace(channel_config={"device_id": "wa-device", "user_phone": "628111"})
+    )[0]
+
+    result = await notify.ainvoke({"message": "Bos, file PDF sudah siap saya kirim sekarang."})
+
+    assert "send_whatsapp_document" in result
+    assert sent == []
+
+
+def test_media_delivery_claim_without_media_send_step_is_rewritten():
+    reply = "Bos Bagas, file PDF Laporan_Titanic_Bagas.pdf sudah saya kirim ke WhatsApp."
+
+    guarded = _whatsapp_media_delivery_guard_reply(reply, [])
+
+    assert guarded.startswith("Belum saya kirim.")
+    assert "tool kirim dokumen/gambar WhatsApp" in guarded
+
+
+def test_media_delivery_claim_is_kept_after_media_send_step():
+    reply = "Bos Bagas, file PDF Laporan_Titanic_Bagas.pdf sudah saya kirim ke WhatsApp."
+    steps = [
+        {
+            "tool": "send_whatsapp_document",
+            "result": "[DOCUMENT_SENT] Dokumen 'Laporan_Titanic_Bagas.pdf' dikirim ke 628111",
+        }
+    ]
+
+    assert _whatsapp_media_delivery_guard_reply(reply, steps) == reply
 
 
 def test_task_guard_does_not_override_arthur_planning_after_document_upload():

@@ -750,6 +750,7 @@ def build_system_prompt(
         "- `write_file` hanya untuk membuat file baru. Tool ini akan gagal jika path sudah ada.\n"
         "- Jika `write_file` gagal karena file sudah ada, JANGAN panggil `write_file` lagi dengan path yang sama.\n"
         "- Untuk memperbarui file yang sudah ada: panggil `read_file` dulu, lalu `edit_file`; atau gunakan nama file baru yang jelas jika memang butuh versi baru.\n"
+        "- Jika user mengirim file WhatsApp, sistem akan menyebut path `/workspace/shared/<filename>`; gunakan path itu sebagai input utama. Untuk subagent, file yang sama juga terlihat di `/workspace/data/incoming/<filename>`. JANGAN pakai dataset contoh/built-in sebelum mengecek file user di path tersebut.\n"
         "- Untuk riset, ringkasan, FAQ, catatan, atau knowledge yang perlu diingat, default-nya balas user di chat dan simpan inti informasi ke memory. "
         "Jangan membuat file laporan kecuali user meminta ekspor/file atau output terlalu panjang untuk chat.\n"
         "- Setelah file final berhasil dibuat atau isi final sudah cukup di chat, hentikan tool call dan beri jawaban final. "

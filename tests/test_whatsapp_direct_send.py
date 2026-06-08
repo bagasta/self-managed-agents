@@ -1,5 +1,8 @@
+import base64
+import uuid
 from types import SimpleNamespace
 
+import pytest
 from langchain_core.messages import ToolMessage
 
 from app.core.engine.agent_runner import (
@@ -490,6 +493,9 @@ def test_prompt_file_rules_prevent_write_file_retry_loop_for_research():
     assert "`write_file` hanya untuk membuat file baru" in prompt
     assert "JANGAN panggil `write_file` lagi dengan path yang sama" in prompt
     assert "default-nya balas user di chat dan simpan inti informasi ke memory" in prompt
+    assert "/workspace/shared/<filename>" in prompt
+    assert "/workspace/data/incoming/<filename>" in prompt
+    assert "JANGAN pakai dataset contoh/built-in" in prompt
     assert "Jangan membuat ulang file final_v2/final_v3/final_v4" in prompt
 
 
@@ -538,6 +544,43 @@ def test_prompt_requires_brief_and_memory_provenance_for_underspecified_landing_
     assert "JANGAN delegate/deploy berdasarkan asumsi" in prompt
     assert "pernah saya tangani" in prompt
     assert "Jika recall kosong" in prompt
+
+
+@pytest.mark.asyncio
+async def test_process_wa_media_saves_document_to_shared_workspace(tmp_path, monkeypatch):
+    from app.api.wa_helpers import process_wa_media
+
+    settings = SimpleNamespace(
+        sandbox_base_dir=str(tmp_path),
+        media_doc_max_chars=1000,
+        mistral_api_key="",
+    )
+    monkeypatch.setattr("app.config.get_settings", lambda: settings)
+    monkeypatch.setattr("app.core.infra.sandbox.get_settings", lambda: settings)
+
+    raw = b"fake spreadsheet bytes"
+    media_context, image_b64, image_mime, media_meta = await process_wa_media(
+        media_type="document",
+        media_data=base64.b64encode(raw).decode("ascii"),
+        media_filename="../Titanic.xlsx",
+        session_id=uuid.uuid4(),
+        logger=SimpleNamespace(info=lambda *args, **kwargs: None, warning=lambda *args, **kwargs: None),
+    )
+
+    assert image_b64 is None
+    assert image_mime is None
+    assert media_meta is not None
+    assert media_meta["filename"] == "Titanic.xlsx"
+    assert media_context
+    assert "/workspace/shared/Titanic.xlsx" in media_context
+    assert "workflow file/sandbox/subagent" in media_context
+
+    root_path = media_meta["workspace_path"]
+    shared_path = media_meta["shared_workspace_path"]
+    assert root_path.endswith("/Titanic.xlsx")
+    assert shared_path.endswith("/shared/Titanic.xlsx")
+    assert open(root_path, "rb").read() == raw
+    assert open(shared_path, "rb").read() == raw
 
 
 def test_runtime_tool_contract_lists_only_actual_tools_and_disabled_risks():

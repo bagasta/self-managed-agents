@@ -133,6 +133,20 @@ class DockerSandbox:
                     session_id=self.session_id,
                     error=str(exc),
                 )
+            local_incoming = self.workspace_dir / "data" / "incoming"
+            try:
+                if local_incoming.is_symlink():
+                    if local_incoming.resolve() != self.shared_dir.resolve():
+                        local_incoming.unlink()
+                        local_incoming.symlink_to(Path("../shared"), target_is_directory=True)
+                elif not local_incoming.exists():
+                    local_incoming.symlink_to(Path("../shared"), target_is_directory=True)
+            except OSError as exc:
+                logger.warning(
+                    "sandbox.incoming_symlink_failed",
+                    session_id=self.session_id,
+                    error=str(exc),
+                )
         else:
             self.shared_dir = self.workspace_dir / "shared"
 

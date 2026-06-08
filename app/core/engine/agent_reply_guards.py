@@ -171,3 +171,43 @@ def _operator_escalation_reply_guard(
         "Saya belum mengirim atau membuat ulang deliverable dari sesi operator ini. "
         "Silakan tulis pesan yang ingin diteruskan ke customer, lalu ketik 'kirim' setelah draft-nya sudah OK."
     )
+
+
+def _whatsapp_media_delivery_guard_reply(final_reply: str, steps: list[dict[str, Any]]) -> str:
+    """Block claims/promises that a WA media file was sent when no media-send tool ran."""
+    if not final_reply or _has_whatsapp_media_send_step(steps):
+        return final_reply
+
+    lowered = final_reply.lower()
+    has_media_noun = any(
+        marker in lowered
+        for marker in ("file", "dokumen", "pdf", "gambar", "foto", "laporan")
+    )
+    if not has_media_noun:
+        return final_reply
+
+    claims_delivery = any(
+        marker in lowered
+        for marker in (
+            "sudah saya kirim",
+            "sudah dikirim",
+            "sudah terkirim",
+            "berhasil saya kirim",
+            "saya kirim sekarang",
+            "saya akan kirim",
+            "berikut saya kirim",
+            "mengirim file",
+            "mengirim dokumen",
+            "siap saya kirim",
+            "siap dikirim",
+            "mohon tunggu sebentar",
+        )
+    )
+    if not claims_delivery:
+        return final_reply
+
+    return (
+        "Belum saya kirim. Saya belum menemukan eksekusi tool kirim dokumen/gambar WhatsApp "
+        "di run ini, jadi saya tidak akan mengklaim file sudah terkirim. "
+        "Kirim ulang `kirim file PDF` supaya saya coba kirim dokumennya langsung."
+    )

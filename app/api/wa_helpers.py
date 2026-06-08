@@ -10,6 +10,7 @@ import base64
 import re
 import time
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -569,19 +570,34 @@ async def process_wa_media(
     try:
         raw_bytes = base64.b64decode(media_data)
         workspace = get_workspace_dir(session_id)
-        filename = media_filename or f"incoming_{media_type}"
+        filename = Path(media_filename or f"incoming_{media_type}").name
+        if not filename:
+            filename = f"incoming_{media_type}"
         if "." not in filename:
             ext_map = {"image": ".jpg", "document": ".bin", "sticker": ".webp"}
             filename += ext_map.get(media_type, ".bin")
         target_path = workspace / filename
+        shared_path = workspace / "shared" / filename
         target_path.write_bytes(raw_bytes)
-        logger.info("wa_incoming.media_saved", media_type=media_type, filename=filename)
+        shared_path.parent.mkdir(parents=True, exist_ok=True)
+        shared_path.write_bytes(raw_bytes)
+        logger.info(
+            "wa_incoming.media_saved",
+            media_type=media_type,
+            filename=filename,
+            shared_workspace_path=str(shared_path),
+        )
         media_meta = {
             "media_type": media_type,
             "filename": filename,
             "workspace_path": str(target_path),
+            "shared_workspace_path": str(shared_path),
             "size_bytes": len(raw_bytes),
         }
+        workspace_hint = (
+            f"tersimpan di /workspace/{filename}. "
+            f"Untuk workflow file/sandbox/subagent, gunakan /workspace/shared/{filename}"
+        )
 
         if media_type == "image":
             ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "jpg"
@@ -596,7 +612,7 @@ async def process_wa_media(
             media_image_b64 = media_data
             media_context = (
                 f"\n[Gambar diterima dan ditampilkan di atas. "
-                f"File juga tersimpan di /workspace/{filename}]"
+                f"File juga {workspace_hint}]"
             )
 
         elif media_type == "document":
@@ -616,18 +632,18 @@ async def process_wa_media(
                     if len(extracted) > max_chars:
                         extracted = extracted[:max_chars] + f"\n... [dipotong, total {len(extracted)} karakter]"
                     media_context = (
-                        f"\n[Dokumen diterima: {filename}]\n"
+                        f"\n[Dokumen diterima: {filename}, {workspace_hint}]\n"
                         f"Isi dokumen:\n```\n{extracted}\n```"
                     )
                 except Exception as exc:
                     logger.warning("wa_incoming.doc_extract_failed", error=str(exc))
-                    media_context = f"\n[Dokumen diterima: {filename}, tersimpan di /workspace/{filename}]"
+                    media_context = f"\n[Dokumen diterima: {filename}, {workspace_hint}]"
             else:
-                media_context = f"\n[Dokumen diterima: {filename}, tersimpan di /workspace/{filename}]"
+                media_context = f"\n[Dokumen diterima: {filename}, {workspace_hint}]"
 
         elif media_type == "sticker":
             media_meta["mimetype"] = "image/webp"
-            media_context = f"\n[Stiker diterima, tersimpan di /workspace/{filename}]"
+            media_context = f"\n[Stiker diterima, {workspace_hint}]"
 
         elif media_type in ("audio", "ptt"):
             media_meta["mimetype"] = "audio/ogg"

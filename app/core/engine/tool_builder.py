@@ -506,6 +506,27 @@ def build_wa_notify_tool(session: Any) -> list:
     channel_cfg: dict = _raw_cfg if isinstance(_raw_cfg, dict) else {}
     device_id: str = channel_cfg.get("device_id", "")
     default_target: str = channel_cfg.get("user_phone", "")
+    notify_attempted = False
+
+    def _looks_like_delivery_claim(message: str) -> bool:
+        lowered = (message or "").lower()
+        if not any(marker in lowered for marker in ("file", "dokumen", "pdf", "gambar", "foto", "laporan")):
+            return False
+        return any(
+            marker in lowered
+            for marker in (
+                "sudah saya kirim",
+                "sudah dikirim",
+                "sudah terkirim",
+                "berhasil saya kirim",
+                "saya kirim sekarang",
+                "saya akan kirim",
+                "mengirim file",
+                "mengirim dokumen",
+                "siap saya kirim",
+                "siap dikirim",
+            )
+        )
 
     @tool
     async def notify_user(message: str) -> str:
@@ -513,6 +534,15 @@ def build_wa_notify_tool(session: Any) -> list:
         Gunakan ini untuk memberi tahu user bahwa pekerjaan masih berjalan, BUKAN sebagai reply final.
         Contoh: notify_user('Sedang menulis file HTML...'), notify_user('Deploy sedang berjalan, hampir selesai...')
         """
+        nonlocal notify_attempted
+        if notify_attempted:
+            return "[notify_user] suppressed: progress notification already attempted for this run"
+        notify_attempted = True
+        if _looks_like_delivery_claim(message):
+            return (
+                "[notify_user] suppressed: jangan pakai notify_user untuk klaim file siap/terkirim. "
+                "Jika perlu mengirim file, panggil send_whatsapp_document/send_whatsapp_image."
+            )
         if not device_id or not default_target:
             return "[notify_user] no WA device/target configured"
         try:

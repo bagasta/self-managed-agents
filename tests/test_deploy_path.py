@@ -278,6 +278,32 @@ def test_docker_backend_write():
     print("✓ DockerBackend.write() writes to correct workspace path")
 
 
+def test_subagent_workspace_exposes_parent_shared_as_data_incoming(tmp_path, monkeypatch):
+    """Subagents should find incoming WhatsApp files even if they inspect /workspace/data."""
+    from app.core.infra import sandbox as sandbox_mod
+
+    settings = SimpleNamespace(
+        sandbox_base_dir=str(tmp_path),
+        docker_host="unix:///run/docker.sock",
+        docker_sandbox_image="managed-agents-sandbox:latest",
+        max_concurrent_sandboxes=10,
+    )
+    monkeypatch.setattr(sandbox_mod, "get_settings", lambda: settings)
+
+    parent_session_id = uuid.uuid4()
+    parent_workspace = sandbox_mod.get_workspace_dir(parent_session_id)
+    (parent_workspace / "shared" / "titanic.csv").write_text("Survived,Pclass\n1,3\n")
+
+    sub_sandbox = sandbox_mod.DockerSandbox(
+        f"{parent_session_id}_sys_sys_coder",
+        parent_session_id=parent_session_id,
+    )
+
+    incoming = sub_sandbox.workspace_dir / "data" / "incoming"
+    assert incoming.is_symlink()
+    assert (incoming / "titanic.csv").read_text() == "Survived,Pclass\n1,3\n"
+
+
 @pytest.mark.asyncio
 async def test_parent_deploy_tools_require_deploy_enabled(monkeypatch):
     """sandbox:true alone must not expose public deployment tools."""
