@@ -179,6 +179,23 @@ class TestCancelActiveRun:
         await unregister_active_task(sid)
 
 
+class TestWhatsAppRunLifecycle:
+    def test_success_path_stops_wa_typing_before_return(self):
+        from app.core.engine import agent_runner
+
+        src = inspect.getsource(agent_runner.run_agent)
+        cleanup_pos = src.index("await _cleanup_sandboxes()")
+        return_pos = src.index('return {\n        "reply": final_reply')
+        assert cleanup_pos < return_pos
+
+    def test_long_progress_notice_not_scheduled_for_every_wa_run(self):
+        from app.core.engine import agent_runner
+
+        src = inspect.getsource(agent_runner.run_agent)
+        assert '_schedule_wa_long_progress_notice("run")' not in src
+        assert "await _schedule_wa_long_progress_notice(tool_name)" in src
+
+
 class TestGraphResultExtraction:
     def test_agent_runner_initializes_graph_output_before_recoverable_retries(self):
         from app.core.engine import agent_runner

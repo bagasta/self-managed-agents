@@ -120,14 +120,16 @@ func (r *Router) HandleMessage(msg IncomingMessage) {
 		go r.forwardWebhook(msg)
 	}
 
-	// TEST MODE: auto-route semua pesan ke agent tertentu
-	if r.autoAgentID != "" {
-		r.forwardToAgent(r.autoAgentID, msg)
-		return
-	}
-
 	keys := messageConnectionKeys(msg)
 	conn, connectedKey, connected := r.store.GetAny(keys...)
+
+	if !connected && r.autoAgentID != "" && isDisconnect(msg.Text) {
+		_ = r.store.SuppressMany(keys, msg.ChatID, r.autoAgentID)
+		go r.notifyDisconnect(r.autoAgentID, msg)
+		_, _ = r.wa.SendText(msg.ChatID, "✅ Kamu berhasil disconnect dari agent.\n\nKirim kode baru dari Arthur kapan saja untuk connect ke agent lagi.")
+		log.Printf("[dev-router] %s disconnected from auto-routed agent %s", msg.From, r.autoAgentID)
+		return
+	}
 
 	if connected && isDisconnect(msg.Text) {
 		_ = r.store.SuppressMany(keys, msg.ChatID, conn.AgentID)
@@ -156,6 +158,13 @@ func (r *Router) HandleMessage(msg IncomingMessage) {
 			return
 		}
 		log.Printf("[dev-router] suppressed msg from %s until new trial code", connectedKey)
+		return
+	}
+
+	// TEST MODE: auto-route messages only after disconnect suppression has had
+	// a chance to win. Otherwise /stop would be forwarded to the agent as chat.
+	if r.autoAgentID != "" {
+		r.forwardToAgent(r.autoAgentID, msg)
 		return
 	}
 

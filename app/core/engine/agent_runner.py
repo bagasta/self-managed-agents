@@ -948,9 +948,6 @@ async def run_agent(
                 await _progress_notice_task
             _progress_notice_task = None
 
-        if _is_wa_session:
-            await _schedule_wa_long_progress_notice("run")
-
         _agent_logger = AgentStepLogger(log,
             progress_callback=_wa_progress_callback if _is_wa_session else None,
         )
@@ -1941,10 +1938,7 @@ async def run_agent(
     await _cancel_wa_long_progress_notice()
 
     # cleanup
-    if sandbox:
-        await sandbox.aclose()
-    for _ssb in sub_sandboxes:
-        await _ssb.aclose()
+    await _cleanup_sandboxes()
 
     if not final_reply:
         _empty_llm = not parsed["has_output"]
