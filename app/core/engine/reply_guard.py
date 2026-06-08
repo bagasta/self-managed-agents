@@ -217,7 +217,25 @@ def _builder_fallback_reply(steps: list[dict[str, Any]]) -> str | None:
         data = _parse_step_result(step.get("result"))
         if not data:
             continue
-        link = data.get("wa_link") or data.get("link") or data.get("trial_link")
+        if data.get("success") is False:
+            error = str(data.get("error") or "").strip()
+            if error in {"agent_target_required", "agent_name_ambiguous", "agent_name_not_found_or_ambiguous"}:
+                agents = data.get("available_agents") or data.get("candidate_agents") or []
+                names = [
+                    str(item.get("agent_name") or "").strip()
+                    for item in agents
+                    if isinstance(item, dict) and str(item.get("agent_name") or "").strip()
+                ]
+                if names:
+                    return "Mau nomor demo agent yang mana? Pilih salah satu: " + ", ".join(names) + "."
+                return "Mau nomor demo agent yang mana? Sebut nama agent-nya dulu ya."
+            if error == "agent_target_conflict":
+                detected = data.get("detected_agent") if isinstance(data.get("detected_agent"), dict) else {}
+                name = str(detected.get("agent_name") or "").strip()
+                if name:
+                    return f"Saya tahan dulu supaya tidak salah kirim. Kamu maksud nomor demo untuk {name}, kan?"
+                return "Saya tahan dulu supaya tidak salah kirim. Sebut ulang nama agent yang kamu mau."
+        link = data.get("wa_link") or data.get("link") or data.get("trial_link") or data.get("wa_me_url")
         code = data.get("trial_code") or data.get("code")
         if link and code:
             return f"Agent-nya sudah siap dicoba. Kode trialnya {code}. Link: {link}"

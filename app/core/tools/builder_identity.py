@@ -131,16 +131,34 @@ async def latest_owned_agent_for_trial(
     self_agent_id: str | None,
 ) -> Agent | None:
     """Resolve the newest user-owned agent for shared WA trial fallback."""
+    rows = await owned_agents_for_trial(
+        db,
+        owner_phone=owner_phone,
+        self_agent_id=self_agent_id,
+        limit=8,
+    )
+    return rows[0] if rows else None
+
+
+async def owned_agents_for_trial(
+    db: AsyncSession,
+    *,
+    owner_phone: str | None,
+    self_agent_id: str | None,
+    limit: int = 20,
+) -> list[Agent]:
+    """Resolve user-owned non-builder agents eligible for shared WA trial links."""
     if not owner_phone:
-        return None
+        return []
     stmt = (
         select(Agent)
         .where(Agent.is_deleted.is_(False), owner_filter(owner_phone))
         .order_by(Agent.created_at.desc(), Agent.updated_at.desc())
-        .limit(8)
+        .limit(limit)
     )
     result = await db.execute(stmt)
     rows = result.scalars().all()
+    agents: list[Agent] = []
     for agent in rows:
         if self_agent_id and str(getattr(agent, "id", "")) == str(self_agent_id):
             continue
@@ -148,6 +166,5 @@ async def latest_owned_agent_for_trial(
         tools_config = getattr(agent, "tools_config", None) or {}
         if "builder" in capabilities or (isinstance(tools_config, dict) and tools_config.get("builder")):
             continue
-        return agent
-    return None
-
+        agents.append(agent)
+    return agents

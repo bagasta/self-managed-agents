@@ -398,7 +398,8 @@ def test_builder_prompt_blocks_repeated_continue_questions():
     assert "jangan berhenti hanya dengan `agent sudah jadi` atau ID agent" in prompt
     assert "terus gimana pakenya?" in prompt
     assert "bukan `QR`" in prompt
-    assert "create_wa_dev_trial_link boleh dipanggil tanpa agent_id" in prompt
+    assert "jangan fallback ke agent terbaru" in prompt
+    assert "agent_name atau agent_id" in prompt
     assert "langsung cari agent terkait lalu panggil create_wa_dev_trial_link" in prompt
     assert "jangan menjawab `langsung aku betulin`" in prompt
     assert "DILARANG memakai task, subagent, sandbox, read_file, edit_file, atau write_file" in prompt

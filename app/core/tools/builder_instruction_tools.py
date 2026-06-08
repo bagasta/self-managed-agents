@@ -133,8 +133,9 @@ def build_builder_instruction_tools(
                 "- send_agent_wa_qr(agent_id, caption, phone) — kirim QR WhatsApp ke nomor tertentu agar user bisa scan dan connect."
             )
         tool_hints.append(
-            "- create_wa_dev_trial_link(agent_id, phone, force_new_code, send_contact) — "
-            "buat kode 6 karakter + link wa.me untuk user mencoba agent lewat nomor WhatsApp shared Arthur tanpa scan QR."
+            "- create_wa_dev_trial_link(agent_id, agent_name, phone, force_new_code, send_contact) — "
+            "buat kode 6 karakter + link wa.me untuk user mencoba agent lewat nomor WhatsApp shared Arthur tanpa scan QR. "
+            "Jika user menyebut nama agent tertentu, isi agent_name atau agent_id agar tidak salah target."
         )
         tool_hints.append(
             "- set_agent_memory(agent_id, key, value) — simpan soul atau blueprint ke memory agent setelah create, tanpa HTTP/API."

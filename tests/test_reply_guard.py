@@ -153,6 +153,43 @@ def test_builder_create_whatsapp_agent_overrides_id_only_reply():
     )
 
 
+def test_builder_trial_link_ambiguous_target_asks_agent_name():
+    steps = [
+        {
+            "tool": "create_wa_dev_trial_link",
+            "result": (
+                '{"success": false, "error": "agent_target_required", '
+                '"available_agents": [{"agent_name": "Mas Brew"}, {"agent_name": "Rnd"}]}'
+            ),
+        }
+    ]
+
+    out = ensure_non_empty_reply("", steps)
+
+    assert "Mau nomor demo agent yang mana?" in out
+    assert "Mas Brew" in out
+    assert "Rnd" in out
+
+
+def test_builder_trial_link_target_conflict_does_not_claim_sent():
+    steps = [
+        {
+            "tool": "create_wa_dev_trial_link",
+            "result": (
+                '{"success": false, "error": "agent_target_conflict", '
+                '"provided_agent": {"agent_name": "Rnd"}, '
+                '"detected_agent": {"agent_name": "Mas Brew"}}'
+            ),
+        }
+    ]
+
+    out = ensure_non_empty_reply("", steps)
+
+    assert "tidak salah kirim" in out
+    assert "Mas Brew" in out
+    assert "Rnd" not in out
+
+
 def test_builder_reply_sanitizes_webchat_channel_offer():
     reply = (
         "Oke Bagas, untuk agent riset yang kamu mau, saya butuh tahu:\n"

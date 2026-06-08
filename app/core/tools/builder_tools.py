@@ -309,6 +309,7 @@ def build_builder_tools(
         self_agent_id=self_agent_id,
         device_id=device_id,
         default_target=default_target,
+        session_id=session_id,
         get_settings=_get_builder_settings,
     )
     create_tools = build_builder_create_tools(

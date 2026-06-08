@@ -1937,7 +1937,7 @@ class TestCreateWADevTrialLink:
         assert data["shared_whatsapp_name"] == "Demo Agent Baru"
         assert "Simpan kontak Demo Agent Baru" in data["instruction_for_user"]
 
-    def test_omitted_agent_id_uses_latest_owned_non_builder_agent(self):
+    def test_omitted_agent_id_requires_target_when_multiple_owned_agents(self):
         from app.core.tools.builder_tools import build_builder_tools
         db = _make_mock_db()
 
@@ -1976,18 +1976,151 @@ class TestCreateWADevTrialLink:
             result = _run(tool.ainvoke({}))
 
         data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"] == "agent_target_required"
+        assert {a["agent_name"] for a in data["available_agents"]} == {"CS Toko Baju Cewek", "CV Maker"}
+        ensure_code.assert_not_awaited()
+        send_contact.assert_not_awaited()
+
+    def test_agent_name_selects_requested_agent_not_latest_agent(self):
+        from app.core.tools.builder_tools import build_builder_tools
+        db = _make_mock_db()
+
+        rnd_agent = _make_mock_agent(name="Rnd", operator_ids=["+62811xxx"])
+        mas_brew_agent = _make_mock_agent(name="Mas Brew", operator_ids=["+62811xxx"])
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = [rnd_agent, mas_brew_agent]
+        db.execute = AsyncMock(return_value=mock_result)
+
+        settings = MagicMock()
+        settings.wa_dev_public_phone = "+628123456789"
+
+        with (
+            patch("app.core.tools.builder_tools.get_settings", return_value=settings),
+            patch(
+                "app.core.domain.wa_dev_trial_service.ensure_wa_dev_trial_code",
+                new=AsyncMock(return_value="79ZSXT"),
+            ) as ensure_code,
+            patch("app.core.infra.wa_client.send_wa_contact", new=AsyncMock()) as send_contact,
+        ):
+            tools = build_builder_tools(
+                db_factory=db,
+                owner_phone="+62811xxx",
+                device_id="arthur-device",
+                default_target="+62811xxx",
+            )
+            tool = next(t for t in tools if t.name == "create_wa_dev_trial_link")
+            result = _run(tool.ainvoke({"agent_name": "masbrew"}))
+
+        data = json.loads(result)
         assert data["success"] is True
-        assert data["agent_id"] == str(latest_agent.id)
-        assert data["agent_name"] == "CS Toko Baju Cewek"
-        assert data["shared_whatsapp_name"] == "Demo CS Toko Baju Cewek"
+        assert data["agent_id"] == str(mas_brew_agent.id)
+        assert data["agent_name"] == "Mas Brew"
+        assert data["shared_whatsapp_name"] == "Demo Mas Brew"
         ensure_code.assert_awaited_once()
-        assert ensure_code.await_args.args[1] is latest_agent
-        send_contact.assert_awaited_once_with(
-            "arthur-device",
-            "+62811xxx",
-            "Demo CS Toko Baju Cewek",
-            "628123456789",
-        )
+        assert ensure_code.await_args.args[1] is mas_brew_agent
+        send_contact.assert_awaited_once_with("arthur-device", "+62811xxx", "Demo Mas Brew", "628123456789")
+
+    def test_stale_agent_id_conflicting_with_user_message_does_not_send_wrong_contact(self):
+        from app.core.tools.builder_tools import build_builder_tools
+        db = _make_mock_db()
+
+        session_id = uuid.uuid4()
+        rnd_agent = _make_mock_agent(name="Rnd", operator_ids=["+62811xxx"])
+        mas_brew_agent = _make_mock_agent(name="Mas Brew", operator_ids=["+62811xxx"])
+        direct_result = MagicMock()
+        direct_result.scalar_one_or_none.return_value = rnd_agent
+        owned_result = MagicMock()
+        owned_result.scalars.return_value.all.return_value = [rnd_agent, mas_brew_agent]
+        message_result = MagicMock()
+        message_result.scalar_one_or_none.return_value = "gua minta nomer mas brew bukan rnd"
+        db.execute = AsyncMock(side_effect=[direct_result, owned_result, message_result])
+
+        settings = MagicMock()
+        settings.wa_dev_public_phone = "+628123456789"
+
+        with (
+            patch("app.core.tools.builder_tools.get_settings", return_value=settings),
+            patch(
+                "app.core.domain.wa_dev_trial_service.ensure_wa_dev_trial_code",
+                new=AsyncMock(return_value="WRONG1"),
+            ) as ensure_code,
+            patch("app.core.infra.wa_client.send_wa_contact", new=AsyncMock()) as send_contact,
+        ):
+            tools = build_builder_tools(
+                db_factory=db,
+                owner_phone="+62811xxx",
+                device_id="arthur-device",
+                default_target="+62811xxx",
+                session_id=str(session_id),
+            )
+            tool = next(t for t in tools if t.name == "create_wa_dev_trial_link")
+            result = _run(tool.ainvoke({"agent_id": str(rnd_agent.id)}))
+
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"] == "agent_target_conflict"
+        assert data["provided_agent"]["agent_name"] == "Rnd"
+        assert data["detected_agent"]["agent_name"] == "Mas Brew"
+        ensure_code.assert_not_awaited()
+        send_contact.assert_not_awaited()
+
+    def test_duplicate_contact_send_is_suppressed_for_same_session_and_agent(self):
+        from app.core.tools import builder_channel_tools
+        from app.core.tools.builder_tools import build_builder_tools
+        db = _make_mock_db()
+        builder_channel_tools._contact_send_dedupe.clear()
+
+        session_id = uuid.uuid4()
+        agent = _make_mock_agent(name="Mas Brew", operator_ids=["+62811xxx"])
+        first_direct = MagicMock()
+        first_direct.scalar_one_or_none.return_value = agent
+        first_owned = MagicMock()
+        first_owned.scalars.return_value.all.return_value = [agent]
+        first_message = MagicMock()
+        first_message.scalar_one_or_none.return_value = ""
+        second_direct = MagicMock()
+        second_direct.scalar_one_or_none.return_value = agent
+        second_owned = MagicMock()
+        second_owned.scalars.return_value.all.return_value = [agent]
+        second_message = MagicMock()
+        second_message.scalar_one_or_none.return_value = ""
+        db.execute = AsyncMock(side_effect=[
+            first_direct,
+            first_owned,
+            first_message,
+            second_direct,
+            second_owned,
+            second_message,
+        ])
+
+        settings = MagicMock()
+        settings.wa_dev_public_phone = "+628123456789"
+
+        with (
+            patch("app.core.tools.builder_tools.get_settings", return_value=settings),
+            patch(
+                "app.core.domain.wa_dev_trial_service.ensure_wa_dev_trial_code",
+                new=AsyncMock(return_value="79ZSXT"),
+            ),
+            patch("app.core.infra.wa_client.send_wa_contact", new=AsyncMock()) as send_contact,
+        ):
+            tools = build_builder_tools(
+                db_factory=db,
+                owner_phone="+62811xxx",
+                device_id="arthur-device",
+                default_target="+62811xxx",
+                session_id=str(session_id),
+            )
+            tool = next(t for t in tools if t.name == "create_wa_dev_trial_link")
+            first = json.loads(_run(tool.ainvoke({"agent_id": str(agent.id)})))
+            second = json.loads(_run(tool.ainvoke({"agent_id": str(agent.id)})))
+
+        assert first["contact_sent"] is True
+        assert first["contact_already_sent"] is False
+        assert second["contact_sent"] is False
+        assert second["contact_already_sent"] is True
+        send_contact.assert_awaited_once_with("arthur-device", "+62811xxx", "Demo Mas Brew", "628123456789")
 
 
 # ────────────────────────────────────────────────────────────────────────────
