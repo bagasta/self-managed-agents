@@ -374,6 +374,7 @@ def build_agent_context_block(
             "🧭 ANTI-HALUSINASI TASK (HARD RULE):\n"
             "Isi task HARUS berasal dari pesan user saat ini atau riwayat percakapan sesi ini — BUKAN dari contoh di prompt ini.\n"
             "- Jika user bilang 'lanjut', 'lanjutin', atau 'lanjut yg X' TAPI task/proyek yang dimaksud TIDAK ada di riwayat percakapan sesi ini → JANGAN menebak, JANGAN menyalin contoh, JANGAN mengarang deliverable. WAJIB minta klarifikasi dulu: tanya persis task mana yang dimaksud.\n"
+            "- Jika user meminta landing page/website untuk event, lomba, produk, kampanye, atau pendaftaran tetapi belum memberi detail inti seperti nama event/produk, target peserta/audience, tanggal/timeline, hadiah/benefit, syarat, CTA, atau materi brand → JANGAN delegate/deploy berdasarkan asumsi. Balas minta brief minimal dulu.\n"
             "- Bertanya klarifikasi untuk kasus ambigu ini adalah reply final yang BENAR dan TIDAK melanggar aturan 'langsung panggil task()' di bawah.\n"
             "- Nama orang atau contoh deliverable apa pun yang muncul di contoh prompt HANYA ilustrasi format — DILARANG dieksekusi sebagai task nyata.\n\n"
             "🚨 ATURAN PALING KRITIS — BACA BAIK-BAIK:\n"
@@ -615,7 +616,7 @@ def build_system_prompt(
         p.append("# Panduan Operasional")
         p.append(
             "Ini adalah workspace-mu. Semua konteks sudah di-load untuk kamu — baca dan pahami sebelum membalas apapun.\n"
-            "Jangan minta izin. Langsung kerja."
+            "Langsung kerja jika brief user sudah cukup jelas. Jika user meminta aset publik/kreatif seperti landing page, website event, kampanye, poster, atau copywriting tetapi detail intinya belum ada, tanya brief minimal dulu sebelum membuat atau deploy."
         )
 
         # --- Identitas ---
@@ -663,7 +664,10 @@ def build_system_prompt(
             "### Kapan harus recall:\n"
             "- User tanya sesuatu yang mungkin pernah dibahas → `recall('longterm')` dulu\n"
             "- User minta lanjutkan task dari sesi lalu → cek `recall('daily:YYYY-MM-DD')`\n"
-            "- Jangan mulai dari nol kalau konteks mungkin sudah tersimpan"
+            "- Jangan mulai dari nol kalau konteks mungkin sudah tersimpan\n\n"
+            "### Aturan klaim memory:\n"
+            "- DILARANG bilang `pernah saya tangani`, `berdasarkan pengalaman sebelumnya`, atau mengaku punya riwayat kasus kecuali ada bukti eksplisit di memory yang di-load, hasil recall, atau history sesi ini.\n"
+            "- Jika kamu menjawab berdasarkan asumsi umum, sebut itu sebagai asumsi umum, bukan memory atau pengalaman."
         )
 
         # --- Heartbeat ---
@@ -1050,7 +1054,8 @@ def build_system_prompt(
             "`order_context`, `deploy_url`, `project_name`, `user_preference_language`, dll\n\n"
             "**Recall dulu sebelum bekerja:** Jika user minta sesuatu yang mungkin pernah dibahas "
             "(edit portfolio, update deploy, dll), panggil `recall()` atau `recall(key)` dulu "
-            "untuk memeriksa apa yang sudah tersimpan — jangan mulai dari nol jika sudah ada konteks."
+            "untuk memeriksa apa yang sudah tersimpan — jangan mulai dari nol jika sudah ada konteks.\n"
+            "JANGAN mengklaim `pernah saya tangani`, `berdasarkan pengalaman sebelumnya`, atau riwayat kasus lain kecuali ada bukti eksplisit di memory/history. Jika recall kosong, akui bahwa kamu belum punya detail dan minta brief."
         )
 
     return system_prompt

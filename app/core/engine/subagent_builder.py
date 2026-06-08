@@ -462,6 +462,7 @@ async def build_subagents(
     wa_target: str = "",
     user_message: str = "",
     expose_wa_media_tools_override: bool | None = None,
+    memory_scope: str | None = None,
 ) -> tuple[list, list[DockerSandbox]]:
     """
     Build SubAgent / CompiledSubAgent list untuk Deep Agents SDK.
@@ -572,7 +573,7 @@ async def build_subagents(
             # tool calls cannot conflict with the parent final reply.
 
         if _is_enabled(sub_cfg, "memory", default=True):
-            extra_tools.extend(build_memory_tools(agent_row.id, AsyncSessionLocal, scope=None))
+            extra_tools.extend(build_memory_tools(agent_row.id, AsyncSessionLocal, scope=memory_scope))
 
         if _is_enabled(sub_cfg, "skills", default=True):
             extra_tools.extend(build_skill_tools(agent_row.id, AsyncSessionLocal))

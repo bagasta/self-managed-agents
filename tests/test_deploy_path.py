@@ -473,6 +473,56 @@ async def test_build_subagents_system_defaults_compiled():
     print(f"✓ build_subagents: {len(subagents)} subagents built, {len(sandboxes)} sandboxes registered for cleanup")
 
 
+@pytest.mark.asyncio
+async def test_custom_subagent_memory_uses_parent_user_scope():
+    """Custom subagent memory must not fall back to agent-global scope."""
+    from app.core.engine import subagent_builder
+
+    agent_id = uuid.uuid4()
+    parent_scope = "628111111111@s.whatsapp.net"
+    agent_row = SimpleNamespace(
+        id=agent_id,
+        name="Custom Researcher",
+        description="",
+        instructions="You help research.",
+        model="openai/gpt-4o-mini",
+        temperature=0.3,
+        tools_config={
+            "memory": True,
+            "skills": False,
+            "http": False,
+            "tavily": False,
+            "sandbox": False,
+        },
+        is_deleted=False,
+    )
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = agent_row
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=result)
+    captured: list[tuple[uuid.UUID, str | None]] = []
+
+    def fake_build_memory_tools(agent_id_arg, _db_factory, scope=None):
+        captured.append((agent_id_arg, scope))
+        return []
+
+    with (
+        patch("app.core.engine.subagent_builder.build_memory_tools", side_effect=fake_build_memory_tools),
+        patch("app.core.engine.subagent_builder._make_sub_llm", return_value=MagicMock()),
+    ):
+        subagents, sandboxes = await subagent_builder.build_subagents(
+            agent_ids=[str(agent_id)],
+            parent_session_id=uuid.uuid4(),
+            db=db,
+            log=MagicMock(),
+            memory_scope=parent_scope,
+        )
+
+    assert [s["name"] for s in subagents] == ["Custom Researcher"]
+    assert sandboxes == []
+    assert captured == [(agent_id, parent_scope)]
+
+
 # ---------------------------------------------------------------------------
 # Main runner (for running without pytest)
 # ---------------------------------------------------------------------------

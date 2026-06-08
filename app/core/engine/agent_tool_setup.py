@@ -246,6 +246,7 @@ async def build_agent_tool_setup(
             wa_target=sub_channel.get("user_phone", ""),
             user_message=user_message,
             expose_wa_media_tools_override=False,
+            memory_scope=memory_scope,
         )
         if subagent_list:
             active_groups.append(f"subagents({len(subagent_list)})")

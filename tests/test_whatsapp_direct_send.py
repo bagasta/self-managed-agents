@@ -516,6 +516,30 @@ def test_layered_memory_tells_agent_to_use_memory_not_files():
     assert "Kalau penting → tulis ke file" not in prompt
 
 
+def test_prompt_requires_brief_and_memory_provenance_for_underspecified_landing_page():
+    prompt = build_system_prompt(
+        agent_model=_agent(instructions="Kamu adalah assistant yang bisa bikin website."),
+        session=_session(channel_type="whatsapp"),
+        active_groups=["memory", "subagents(1)"],
+        saved_custom_tools=[],
+        subagent_list=[{"name": "sys_coder", "description": "Bikin web dan deploy."}],
+        sender_name="Bagas",
+        context_summary="",
+        memory_block="",
+        layered_memory={"soul": "Yo Besty", "today_date": "2026-06-08"},
+        rag_context="",
+        escalation_user_jid=None,
+        escalation_context=None,
+        is_operator_message=False,
+        user_message="bisa bantu bikin landing page gak buat lomba bikin game dengan AI?",
+    )
+
+    assert "tanya brief minimal dulu sebelum membuat atau deploy" in prompt
+    assert "JANGAN delegate/deploy berdasarkan asumsi" in prompt
+    assert "pernah saya tangani" in prompt
+    assert "Jika recall kosong" in prompt
+
+
 def test_runtime_tool_contract_lists_only_actual_tools_and_disabled_risks():
     prompt = build_system_prompt(
         agent_model=_agent(
