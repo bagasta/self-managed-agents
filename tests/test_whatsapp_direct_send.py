@@ -383,6 +383,8 @@ def test_builder_prompt_blocks_repeated_continue_questions():
     assert "Jangan menyebut blockers/warnings/raw JSON ke user" in prompt
     assert "whatsapp_media=true, sandbox=true" in prompt
     assert "link Google Form yang sudah ada sebagai link order pelanggan" in prompt
+    assert "DILARANG menawarkan webchat" in prompt
+    assert "WhatsApp/webchat/API" not in prompt
     assert "Jangan minta user mengisi placeholder" in prompt
     assert "jangan menawarkan versi sederhana atau minta user pilih downgrade" in prompt
     assert "enable_google_workspace=True" in prompt

@@ -15,7 +15,7 @@ AGENT_PRESETS: dict[str, dict] = {
         "default_model": "openai/gpt-4.1-mini",
         "default_temperature": 0.5,
         "default_max_tokens": 2048,
-        "default_channel": "webchat",
+        "default_channel": "whatsapp",
         "tools_config": {
             "memory": True,
             "skills": True,
@@ -35,7 +35,7 @@ AGENT_PRESETS: dict[str, dict] = {
         "runtime_limitations": [
             "deploy_requires_docker_socket",
             "cloudflare_tunnel_url_changes_on_redeploy",
-            "deploy_ttl_4h_max",
+            "deploy_ttl_24h_max",
             "no_persistent_storage_across_sessions",
         ],
         "instruction_skeleton": (
@@ -219,12 +219,12 @@ AGENT_PRESETS: dict[str, dict] = {
         },
     },
     "faq_webchat_rag": {
-        "label": "FAQ & RAG Webchat Agent",
+        "label": "FAQ & RAG WhatsApp Agent",
         "description": "Agent yang menjawab pertanyaan berdasarkan dokumen yang diupload (PDF, DOCX). Cocok untuk FAQ produk, kebijakan, manual.",
         "default_model": "openai/gpt-4.1-mini",
         "default_temperature": 0.3,
         "default_max_tokens": 1024,
-        "default_channel": "webchat",
+        "default_channel": "whatsapp",
         "tools_config": {
             "memory": True,
             "skills": True,
@@ -398,7 +398,7 @@ AGENT_PRESETS: dict[str, dict] = {
     },
     "data_analyst_agent": {
         "label": "Data Analyst Agent",
-        "description": "Agent analisis data — upload file Excel/CSV, dapatkan insight, grafik, dan laporan langsung di WhatsApp atau webchat.",
+        "description": "Agent analisis data — upload file Excel/CSV, dapatkan insight, grafik, dan laporan langsung di WhatsApp.",
         "default_model": "openai/gpt-4.1-mini",
         "default_temperature": 0.3,
         "default_max_tokens": 2048,
@@ -462,7 +462,7 @@ AGENT_PRESETS: dict[str, dict] = {
         "default_model": "openai/gpt-4.1-mini",
         "default_temperature": 0.4,
         "default_max_tokens": 2048,
-        "default_channel": "webchat",
+        "default_channel": "whatsapp",
         "tools_config": {
             "memory": True,
             "skills": True,
@@ -640,7 +640,7 @@ AGENT_PRESETS: dict[str, dict] = {
         "default_model": "openai/gpt-4.1-mini",
         "default_temperature": 0.3,
         "default_max_tokens": 1024,
-        "default_channel": "webchat",
+        "default_channel": "whatsapp",
         "tools_config": {
             "memory": True,
             "skills": True,
@@ -719,12 +719,12 @@ RUNTIME_LIMITATIONS: dict[str, dict] = {
         "mitigation": "Instruksikan agent untuk cek get_deployment_status() sebelum deploy ulang.",
         "user_message": "URL akan berubah setiap kali deploy ulang — tidak bisa pakai URL permanen dengan Cloudflare Quick Tunnel.",
     },
-    "deploy_ttl_4h_max": {
+    "deploy_ttl_24h_max": {
         "severity": "info",
         "affects": ["coding_deploy_agent"],
-        "description": "Deployment otomatis dihapus setelah 4 jam (configurable via DEPLOYMENT_TTL_SECONDS).",
+        "description": "Deployment otomatis dihapus setelah 24 jam (configurable via DEPLOYMENT_TTL_SECONDS).",
         "mitigation": "Gunakan untuk demo/testing, bukan production long-running apps.",
-        "user_message": "App yang di-deploy otomatis berhenti setelah ~4 jam.",
+        "user_message": "App yang di-deploy otomatis berhenti setelah ~24 jam.",
     },
     "no_persistent_storage_across_sessions": {
         "severity": "info",
@@ -813,11 +813,13 @@ _TOOLS_CONFIG_DOCS = {
 }
 
 _PLATFORM_CHANNELS = [
-    {"type": "whatsapp", "description": "WhatsApp Business via wa-service. Butuh device/QR."},
-    {"type": "webchat", "description": "Embed di website. Tidak butuh nomor WA."},
-    {"type": "telegram", "description": "Telegram bot. Butuh bot_token."},
-    {"type": "slack", "description": "Slack incoming webhook."},
-    {"type": "in-app", "description": "Pesan tersimpan di DB, tidak dikirim ke channel. Untuk integrasi custom."},
+    {
+        "type": "whatsapp",
+        "description": (
+            "Channel user-facing yang tersedia. Bisa dicoba lewat nomor demo Arthur "
+            "atau dipasang ke nomor WhatsApp user dengan scan sekali dari WhatsApp."
+        ),
+    },
 ]
 
 _RECOMMENDED_MODELS = [

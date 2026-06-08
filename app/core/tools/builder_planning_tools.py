@@ -70,7 +70,7 @@ def build_builder_planning_tools(
         Args:
             user_goal: Deskripsi singkat apa yang user ingin agentnya lakukan
             agent_name: Nama agent yang diinginkan (opsional)
-            channel: Channel yang diinginkan: 'whatsapp', 'webchat', atau kosong
+            channel: Channel yang diinginkan: 'whatsapp' atau kosong. Kosong berarti WhatsApp.
             requested_features: Fitur-fitur yang diminta, dipisah koma (misal: 'coding,deploy,http')
             persona: Persona/gaya bicara agent (opsional)
             business_context: Konteks bisnis untuk agent CS/FAQ (opsional)
@@ -215,8 +215,14 @@ def build_builder_planning_tools(
             tools_config["sandbox"] = True
             validation_warnings.append("tool_creator membutuhkan sandbox — sandbox otomatis diaktifkan")
 
-        # Channel validation
-        effective_channel = channel or preset.get("default_channel", "webchat")
+        # Channel validation. Arthur only offers user-facing WhatsApp onboarding.
+        requested_channel = str(channel or "").strip().lower()
+        effective_channel = requested_channel or preset.get("default_channel", "whatsapp")
+        if effective_channel != "whatsapp":
+            validation_warnings.append(
+                f"Channel {effective_channel} belum tersedia untuk onboarding Arthur; agent disiapkan lewat WhatsApp."
+            )
+            effective_channel = "whatsapp"
         if effective_channel == "whatsapp" and not tools_config.get("escalation"):
             validation_warnings.append("Agent WhatsApp sebaiknya mengaktifkan escalation untuk operator handoff")
 
@@ -224,7 +230,7 @@ def build_builder_planning_tools(
         creation_entitlement_check = await _preview_agent_creation_entitlement(
             tools_config=tools_config,
             model=effective_model,
-            channel_type=effective_channel if effective_channel != "webchat" else "",
+            channel_type=effective_channel,
         )
         entitlement_blocked = bool(
             creation_entitlement_check.get("checked")
@@ -299,7 +305,7 @@ def build_builder_planning_tools(
                 "temperature": preset.get("default_temperature", 0.7),
                 "max_tokens": preset.get("default_max_tokens", 1024),
                 "tools_config": tools_config,
-                "channel_type": effective_channel if effective_channel != "webchat" else "",
+                "channel_type": effective_channel,
                 "escalation_config": (
                     {"channel_type": "whatsapp", "operator_phone": operator_phone}
                     if operator_phone else {}

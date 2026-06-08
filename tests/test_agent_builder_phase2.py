@@ -114,6 +114,21 @@ class TestToolCategories:
         assert "Workspace / App Connectors" in self.content
         assert "generate_google_auth_link" in self.content
 
+    def test_rulebook_does_not_offer_webchat_or_api_channels(self):
+        forbidden_phrases = [
+            "bisa di WhatsApp, webchat, atau API",
+            "WhatsApp, webchat, API",
+            "default: tidak — gunakan webchat",
+            "Default channel = webchat",
+            "Channel default: **webchat**",
+        ]
+        for phrase in forbidden_phrases:
+            assert phrase not in self.content
+
+        assert "DILARANG menawarkan webchat" in self.content
+        assert "nomor demo Arthur" in self.content
+        assert "scan sekali dari WhatsApp" in self.content
+
 
 class TestWhatsAppBestPractices:
     """Best practices spesifik untuk WhatsApp harus terdokumentasi."""

@@ -20,6 +20,13 @@ from app.models.agent import Agent
 SettingsProvider = Callable[[], Any]
 
 
+def _demo_contact_name(agent_name: str) -> str:
+    clean_name = str(agent_name or "").strip()
+    if clean_name:
+        return f"Demo {clean_name}"
+    return "Demo Agent"
+
+
 def build_builder_channel_tools(
     db_factory: async_sessionmaker,
     *,
@@ -64,7 +71,6 @@ def build_builder_channel_tools(
 
         target = phone or default_target or owner_phone or ""
         settings = _get_settings()
-        contact_name = settings.wa_dev_public_name or "Arthur AI Dev"
 
         async with db_factory() as db:
             if agent_uuid:
@@ -88,6 +94,7 @@ def build_builder_channel_tools(
                 return "[error] Kamu tidak punya akses ke agent ini"
             resolved_agent_id = str(agent.id)
             resolved_agent_name = agent.name
+            contact_name = _demo_contact_name(resolved_agent_name)
 
             from app.core.domain.wa_dev_trial_service import ensure_wa_dev_trial_code
 

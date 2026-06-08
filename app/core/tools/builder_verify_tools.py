@@ -301,7 +301,7 @@ def build_builder_verify_tools(db_factory: async_sessionmaker) -> dict[str, Any]
         ]
 
         smoke_test = preset.get("smoke_test", {})
-        post_create = _get_post_create_steps(detected_preset, agent.channel_type or "webchat", tc)
+        post_create = _get_post_create_steps(detected_preset, agent.channel_type or "whatsapp", tc)
         setup_status_for_owner = _build_owner_setup_status(
             launch_status=launch_status,
             owner_present=owner_present,

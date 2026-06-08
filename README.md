@@ -75,12 +75,13 @@ DOCKER_HOST=unix:///run/docker.sock
 # Agent limits
 AGENT_MAX_STEPS=12
 AGENT_TIMEOUT_SECONDS=300
+DEPLOYMENT_TTL_SECONDS=86400       # 24 jam
 
 # WhatsApp microservices
 WA_SERVICE_URL=http://localhost:8080
 WA_DEV_SERVICE_URL=http://localhost:8081
 WA_DEV_PUBLIC_PHONE=628xxxxxxxxxx
-WA_DEV_PUBLIC_NAME=Arthur AI Dev
+WA_DEV_PUBLIC_NAME=Demo Agent
 ```
 
 ### 3. Jalankan PostgreSQL
@@ -298,7 +299,7 @@ Environment variables wa-dev-service (dibaca dari `.env` via `make wa-dev`):
 | `WA_DEV_STORE_DIR` | `wa-dev-store` | Direktori SQLite session WA |
 | `CONNECTIONS_FILE` | `connections.json` | File mapping phone→agent |
 | `WA_DEV_PUBLIC_PHONE` | — | Nomor shared wa-dev untuk link `wa.me` Arthur |
-| `WA_DEV_PUBLIC_NAME` | `Arthur AI Dev` | Nama kontak vCard shared wa-dev |
+| `WA_DEV_PUBLIC_NAME` | `Demo Agent` | Fallback legacy; vCard Arthur memakai `Demo <nama agent>` |
 
 ---
 

@@ -38,7 +38,7 @@ def build_builder_instruction_tools(
         agent_name: str,
         business_context: str,
         persona: str = "ramah dan profesional",
-        channel: str = "webchat",
+        channel: str = "whatsapp",
         escalation_info: str = "",
         extra_rules: str = "",
         agent_blueprint: str = "",
@@ -63,7 +63,7 @@ def build_builder_instruction_tools(
             business_context: Info bisnis lengkap: produk, layanan, jam buka, kebijakan, harga, dll.
                               Semakin detail semakin baik. Kosong hanya untuk agent coding/general.
             persona: Gaya bicara dan karakter agent (misal: "hangat, sabar, suka bercanda")
-            channel: Channel: 'whatsapp' atau 'webchat'
+            channel: Channel: 'whatsapp'
             escalation_info: Kondisi eskalasi dan info operator (misal: "Eskalasi jika komplain besar. Operator: +62812xxx")
             extra_rules: Aturan tambahan yang diminta user
             agent_blueprint: JSON/string hasil compose_agent_blueprint agar instructions mengikuti workflow custom user.

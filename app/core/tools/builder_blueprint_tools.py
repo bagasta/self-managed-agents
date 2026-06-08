@@ -34,7 +34,7 @@ def build_builder_blueprint_tools(
         agent_name: str = "",
         business_context: str = "",
         target_users: str = "",
-        channel: str = "webchat",
+        channel: str = "whatsapp",
         requested_features: str = "",
         known_constraints: str = "",
     ) -> str:
@@ -54,7 +54,7 @@ def build_builder_blueprint_tools(
             agent_name: Nama agent jika sudah ada
             business_context: Detail bisnis/produk/SOP yang user sudah jelaskan
             target_users: Siapa yang akan ngobrol dengan agent ini
-            channel: whatsapp, webchat, atau channel lain
+            channel: whatsapp
             requested_features: Fitur yang diminta user, dipisah koma
             known_constraints: Batasan penting, compliance, gaya komunikasi, atau larangan
         """

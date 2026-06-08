@@ -38,7 +38,7 @@ def build_builder_validation_tools() -> dict[str, Any]:
             instructions: System prompt yang akan divalidasi
             tools_config: JSON string dari tools_config yang direncanakan
             model: Model LLM yang akan digunakan (kosong = pakai default gpt-4.1-mini)
-            channel_type: Channel agent: 'whatsapp', 'webchat', atau kosong
+            channel_type: Channel agent: 'whatsapp' atau kosong
             preset_id: ID preset yang digunakan (opsional — untuk validasi preset-specific rules)
         """
         warnings: list[str] = []

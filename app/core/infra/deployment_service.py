@@ -9,8 +9,8 @@ URL changes every time deploy_app() is called (Cloudflare Quick Tunnel limitatio
 
 Resource limits:
   - MAX_DEPLOYMENTS: max concurrent deployments (oldest evicted when exceeded)
-  - DEPLOYMENT_TTL_SECONDS: auto-kill deployments older than this (default: 1 hour)
-    Deployed containers are automatically stopped after 1 hour to free resources.
+  - DEPLOYMENT_TTL_SECONDS: auto-kill deployments older than this (default: 24 hours)
+    Deployed containers are automatically stopped after 24 hours to free resources.
 """
 from __future__ import annotations
 
@@ -30,7 +30,8 @@ _CF_IMAGE = "cloudflare/cloudflared:latest"
 _URL_RE = re.compile(r"https://[a-z0-9\-]+\.trycloudflare\.com")
 
 _MAX_DEPLOYMENTS = int(os.environ.get("MAX_DEPLOYMENTS", "10"))
-_DEPLOYMENT_TTL_SECONDS = int(os.environ.get("DEPLOYMENT_TTL_SECONDS", str(1 * 3600)))  # 1 hour — auto-kill after 1h
+_DEPLOYMENT_TTL_SECONDS = int(os.environ.get("DEPLOYMENT_TTL_SECONDS", str(24 * 3600)))
+_DEPLOYMENT_CLEANUP_INTERVAL_SECONDS = int(os.environ.get("DEPLOYMENT_CLEANUP_INTERVAL_SECONDS", "300"))
 
 # module-level registry: session_id -> deployment state dict
 _deployments: dict[str, dict[str, Any]] = {}
@@ -117,23 +118,35 @@ def _pull_cf_image(client: docker.DockerClient) -> None:
         client.images.pull(_CF_IMAGE)
 
 
-def _kill_existing(client: docker.DockerClient, session_id: str) -> None:
+def deployment_ttl_seconds() -> int:
+    return _DEPLOYMENT_TTL_SECONDS
+
+
+def deployment_cleanup_interval_seconds() -> int:
+    return max(60, _DEPLOYMENT_CLEANUP_INTERVAL_SECONDS)
+
+
+def _kill_existing(client: docker.DockerClient, session_id: str) -> int:
     app_name, cf_name, _ = _names(session_id)
+    removed = 0
     for name in [cf_name, app_name]:
         try:
             c = client.containers.get(name)
             c.remove(force=True)
+            removed += 1
             log.info("deployment.removed_container", name=name)
         except docker.errors.NotFound:
             pass
+    return removed
 
 
-def _evict_expired(client: docker.DockerClient) -> None:
+def _evict_expired(client: docker.DockerClient) -> int:
     """Kill all madeploy-* containers older than TTL — checks Docker labels, not just in-memory registry.
 
     This handles containers from previous server restarts that are no longer in `_deployments`.
     """
     now = time.time()
+    removed = 0
 
     # Evict from in-memory registry
     expired_in_mem = [
@@ -141,19 +154,20 @@ def _evict_expired(client: docker.DockerClient) -> None:
         if now - state.get("deployed_at", 0) > _DEPLOYMENT_TTL_SECONDS
     ]
     for sid in expired_in_mem:
-        _kill_existing(client, sid)
+        removed += _kill_existing(client, sid)
         _deployments.pop(sid, None)
         log.info("deployment.evicted_expired", session_id=sid[:12])
 
     # Evict orphaned containers (from previous server restarts) using Docker label
     try:
-        for c in client.containers.list(filters={"name": "madeploy-app-"}):
+        for c in client.containers.list(all=True, filters={"name": "madeploy-app-"}):
             label_ts = c.labels.get("madeploy.deployed_at")
             if label_ts:
                 try:
                     age = now - float(label_ts)
                     if age > _DEPLOYMENT_TTL_SECONDS:
                         c.remove(force=True)
+                        removed += 1
                         log.info("deployment.evicted_orphan_by_label", name=c.name, age_hours=round(age / 3600, 1))
                 except (ValueError, Exception):
                     pass
@@ -162,9 +176,10 @@ def _evict_expired(client: docker.DockerClient) -> None:
                 known_app_names = {s.get("app_container") for s in _deployments.values()}
                 if c.name not in known_app_names:
                     c.remove(force=True)
+                    removed += 1
                     log.info("deployment.evicted_orphan_no_label", name=c.name)
         # Also clean up orphaned CF containers
-        for c in client.containers.list(filters={"name": "madeploy-cf-"}):
+        for c in client.containers.list(all=True, filters={"name": "madeploy-cf-"}):
             known_cf_names = {s.get("cf_container") for s in _deployments.values()}
             label_ts = c.labels.get("madeploy.deployed_at")
             if label_ts:
@@ -172,13 +187,28 @@ def _evict_expired(client: docker.DockerClient) -> None:
                     age = now - float(label_ts)
                     if age > _DEPLOYMENT_TTL_SECONDS:
                         c.remove(force=True)
+                        removed += 1
+                        log.info("deployment.evicted_cf_orphan_by_label", name=c.name, age_hours=round(age / 3600, 1))
                 except (ValueError, Exception):
                     pass
             elif c.name not in known_cf_names:
                 c.remove(force=True)
+                removed += 1
                 log.info("deployment.evicted_cf_orphan", name=c.name)
     except Exception as exc:
         log.warning("deployment.evict_orphan_error", error=str(exc))
+    return removed
+
+
+def cleanup_expired_deployments() -> dict[str, Any]:
+    """Public cleanup entrypoint for startup/background maintenance."""
+    client = _docker()
+    removed = _evict_expired(client)
+    return {
+        "status": "ok",
+        "evicted": removed,
+        "ttl_seconds": _DEPLOYMENT_TTL_SECONDS,
+    }
 
 
 def _get_cf_url(client: docker.DockerClient, cf_name: str, timeout: int = 40) -> str | None:
@@ -250,7 +280,11 @@ def deploy_app(
             working_dir="/workspace",
             mem_limit="512m",
             restart_policy={"Name": "unless-stopped"},
-            labels={"madeploy.deployed_at": _deploy_ts, "madeploy.session_id": session_id[:12]},
+            labels={
+                "madeploy.deployed_at": _deploy_ts,
+                "madeploy.session_id": session_id[:12],
+                "madeploy.ttl_seconds": str(_DEPLOYMENT_TTL_SECONDS),
+            },
         )
         log.info("deployment.app_started", name=app_name, command=safe_command, port=port)
     except Exception as exc:
@@ -280,7 +314,11 @@ def deploy_app(
                 network_mode=f"container:{app_container.id}",
                 mem_limit="64m",
                 restart_policy={"Name": "unless-stopped"},
-                labels={"madeploy.deployed_at": _deploy_ts, "madeploy.session_id": session_id[:12]},
+                labels={
+                    "madeploy.deployed_at": _deploy_ts,
+                    "madeploy.session_id": session_id[:12],
+                    "madeploy.ttl_seconds": str(_DEPLOYMENT_TTL_SECONDS),
+                },
             )
             log.info("deployment.cf_started", name=cf_name, attempt=attempt)
             break
@@ -328,6 +366,11 @@ def get_deployment_status(session_id: str) -> dict[str, Any]:
     state = _deployments.get(session_id)
     if not state:
         return {"status": "not_deployed"}
+    if time.time() - state.get("deployed_at", 0) > _DEPLOYMENT_TTL_SECONDS:
+        client = _docker()
+        _kill_existing(client, session_id)
+        _deployments.pop(session_id, None)
+        return {"status": "not_deployed", "expired": True}
 
     client = _docker()
     app_name, cf_name, _ = _names(session_id)

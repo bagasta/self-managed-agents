@@ -117,8 +117,32 @@ async def lifespan(_app: FastAPI):
     from app.core.workers.scheduler_service import start_scheduler, stop_scheduler
     start_scheduler()
 
+    from app.core.infra.deployment_service import (
+        cleanup_expired_deployments,
+        deployment_cleanup_interval_seconds,
+    )
+
+    async def _deployment_cleanup_loop() -> None:
+        cleanup_log = structlog.get_logger(__name__)
+        interval = deployment_cleanup_interval_seconds()
+        while True:
+            try:
+                result = await asyncio.to_thread(cleanup_expired_deployments)
+                if result.get("evicted"):
+                    cleanup_log.info("deployment_cleanup.evicted", **result)
+            except Exception as exc:
+                cleanup_log.warning("deployment_cleanup.error", error=str(exc))
+            await asyncio.sleep(interval)
+
+    deployment_cleanup_task = asyncio.create_task(_deployment_cleanup_loop())
+
     yield
 
+    deployment_cleanup_task.cancel()
+    try:
+        await deployment_cleanup_task
+    except asyncio.CancelledError:
+        pass
     stop_scheduler()
 
 

@@ -16,9 +16,22 @@ from langchain_core.tools import tool
 from app.core.infra import deployment_service as _svc
 
 
+def _deployment_ttl_label() -> str:
+    seconds = _svc.deployment_ttl_seconds()
+    if seconds % 86400 == 0:
+        days = seconds // 86400
+        return f"{days} hari"
+    if seconds % 3600 == 0:
+        hours = seconds // 3600
+        return f"{hours} jam"
+    minutes = max(1, seconds // 60)
+    return f"{minutes} menit"
+
+
 def build_deployment_tools(session_id: str, workspace_dir: Path, sandbox_image: str) -> list:
     sid = str(session_id)
     wdir = workspace_dir
+    ttl_label = _deployment_ttl_label()
 
     @tool
     def deploy_app(command: str, port: int = 8080) -> str:
@@ -26,16 +39,16 @@ def build_deployment_tools(session_id: str, workspace_dir: Path, sandbox_image: 
         Deploy aplikasi dari workspace ke public URL via Cloudflare tunnel.
         App berjalan di persistent Docker container yang mount /workspace.
 
-        ⚠️ PENTING — DEPLOYMENT OTOMATIS MATI SETELAH 1 JAM.
-        Setelah 1 jam, container di-stop otomatis untuk menghemat resource.
-        Beritahu user bahwa URL hanya aktif selama ~1 jam sejak deploy.
+        PENTING — DEPLOYMENT OTOMATIS MATI SETELAH 24 JAM.
+        Setelah 24 jam, container di-stop otomatis untuk menghemat resource.
+        Beritahu user bahwa URL hanya aktif selama ~24 jam sejak deploy.
 
         ALUR WAJIB untuk membuat dan deploy app baru:
         1. Tulis semua file dulu dengan write_file (workspace otomatis terbuat, JANGAN ls dulu)
         2. Panggil get_deployment_status() untuk cek apakah sudah ada deployment
         3. Jika status "running" → JANGAN deploy ulang, kembalikan URL yang ada
         4. Jika "not_deployed" → panggil deploy_app dengan command yang tepat
-        5. Kembalikan URL hasil deploy_app kepada user — INI WAJIB, termasuk info 1 jam TTL
+        5. Kembalikan URL hasil deploy_app kepada user — INI WAJIB, termasuk info 24 jam TTL
 
         PENTING untuk static file server (python3 -m http.server, npx serve):
         - Edit file di /workspace/ langsung terlihat tanpa restart server.
@@ -53,7 +66,7 @@ def build_deployment_tools(session_id: str, workspace_dir: Path, sandbox_image: 
 
         Returns:
             URL publik yang bisa diakses, contoh: https://xxx.trycloudflare.com
-            (URL aktif selama 1 jam, setelah itu deployment otomatis berhenti)
+            (URL aktif selama 24 jam, setelah itu deployment otomatis berhenti)
         """
         result = _svc.deploy_app(
             session_id=sid,
@@ -69,7 +82,7 @@ def build_deployment_tools(session_id: str, workspace_dir: Path, sandbox_image: 
             f"URL: {result['url']}\n"
             f"Status: {result['status']}\n"
             f"Command: {result['command']}\n\n"
-            f"⚠️ Deployment otomatis berhenti setelah 1 jam untuk menghemat resource.\n"
+            f"Deployment otomatis berhenti setelah {ttl_label} untuk menghemat resource.\n"
             f"Catatan: URL akan berubah jika deployment di-restart."
         )
 

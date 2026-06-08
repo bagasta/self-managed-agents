@@ -181,7 +181,7 @@ class TestBuilderToolsReturnsList:
         from app.core.tools.builder_tools import build_builder_tools
         db = _make_mock_db()
         tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
-        assert len(tools) == 20, f"Harus ada 20 tools, dapat {len(tools)}"
+        assert len(tools) == 21, f"Harus ada 21 tools, dapat {len(tools)}"
 
     def test_all_tools_have_name(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -223,6 +223,7 @@ class TestBuilderToolsReturnsList:
             "get_agent_detail",
             "list_my_agents",
             "generate_google_auth_link",
+            "add_agent_knowledge",
         }
         assert names == expected, f"Tool names tidak sesuai. Dapat: {names}"
 
@@ -230,7 +231,7 @@ class TestBuilderToolsReturnsList:
         from app.core.tools.builder_tools import build_builder_tools
         db = _make_mock_db()
         tools = build_builder_tools(db_factory=db, owner_phone=None)
-        assert len(tools) == 20
+        assert len(tools) == 21
 
     def test_travel_planning_request_uses_personal_assistant_not_faq(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -256,6 +257,22 @@ class TestBuilderToolsReturnsList:
         assert payload["google_workspace_option"]["enabled"] is False
         assert "Google Calendar" in payload["google_workspace_option"]["suggested_apps"]
         assert "Google Docs" in payload["google_workspace_option"]["suggested_apps"]
+
+    def test_plan_agent_defaults_unspecified_channel_to_whatsapp(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        plan = next(t for t in tools if t.name == "plan_agent")
+
+        result = _run(plan.ainvoke({
+            "user_goal": "Buat agent riset kompetitor dan rangkum insight pasar",
+            "agent_name": "RisetBot",
+        }))
+        payload = json.loads(result)
+
+        assert payload["channel"] == "whatsapp"
+        assert payload["recommended_config"]["channel_type"] == "whatsapp"
 
     def test_plan_agent_blocks_buzzer_or_politics(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -537,6 +554,17 @@ class TestGetPlatformCapabilities:
         assert "recommended_models" in data
         assert "platform_limitations" in data
         assert "wa_best_practices" in data
+
+    def test_supported_channels_only_exposes_whatsapp_for_arthur(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "get_platform_capabilities")
+        result = _run(tool.ainvoke({}))
+        data = json.loads(result)
+
+        assert [channel["type"] for channel in data["supported_channels"]] == ["whatsapp"]
 
     def test_tools_config_has_all_keys(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -1276,6 +1304,34 @@ class TestCreateAgent:
             db.add.assert_called_once()
             db.flush.assert_called_once()
 
+    def test_create_agent_normalizes_legacy_webchat_channel_to_whatsapp(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        with patch("app.core.tools.builder_tools.Agent") as MockAgent:
+            captured = {}
+
+            def capture(**kwargs):
+                captured.update(kwargs)
+                return _make_mock_agent(operator_ids=["+62811xxx"], channel_type=kwargs.get("channel_type"))
+
+            MockAgent.side_effect = capture
+            tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+            tool = next(t for t in tools if t.name == "create_agent")
+
+            result = _run(tool.ainvoke({
+                "name": "FAQ Agent",
+                "instructions": "Kamu adalah FAQ agent yang membantu pelanggan.",
+                "tools_config": '{"memory": true, "escalation": true}',
+                "channel_type": "webchat",
+            }))
+            data = json.loads(result)
+
+        assert data["success"] is True
+        assert captured["channel_type"] == "whatsapp"
+        assert captured["wa_device_id"]
+        assert data["whatsapp_onboarding_required"] is True
+
     def test_create_agent_creates_operating_manual_separate_from_instructions(self):
         from app.core.tools.builder_tools import build_builder_tools
 
@@ -1875,9 +1931,11 @@ class TestCreateWADevTrialLink:
         send_contact.assert_awaited_once_with(
             "arthur-device",
             "+62811xxx",
-            "Arthur AI Dev",
+            "Demo Agent Baru",
             "628123456789",
         )
+        assert data["shared_whatsapp_name"] == "Demo Agent Baru"
+        assert "Simpan kontak Demo Agent Baru" in data["instruction_for_user"]
 
     def test_omitted_agent_id_uses_latest_owned_non_builder_agent(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -1905,7 +1963,7 @@ class TestCreateWADevTrialLink:
                 "app.core.domain.wa_dev_trial_service.ensure_wa_dev_trial_code",
                 new=AsyncMock(return_value="3HRNM4"),
             ) as ensure_code,
-            patch("app.core.infra.wa_client.send_wa_contact", new=AsyncMock()),
+            patch("app.core.infra.wa_client.send_wa_contact", new=AsyncMock()) as send_contact,
         ):
             tools = build_builder_tools(
                 db_factory=db,
@@ -1921,8 +1979,15 @@ class TestCreateWADevTrialLink:
         assert data["success"] is True
         assert data["agent_id"] == str(latest_agent.id)
         assert data["agent_name"] == "CS Toko Baju Cewek"
+        assert data["shared_whatsapp_name"] == "Demo CS Toko Baju Cewek"
         ensure_code.assert_awaited_once()
         assert ensure_code.await_args.args[1] is latest_agent
+        send_contact.assert_awaited_once_with(
+            "arthur-device",
+            "+62811xxx",
+            "Demo CS Toko Baju Cewek",
+            "628123456789",
+        )
 
 
 # ────────────────────────────────────────────────────────────────────────────

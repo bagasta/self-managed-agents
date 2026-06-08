@@ -40,7 +40,7 @@ def build_builder_manual_tools(
         business_context: str = "",
         agent_blueprint: str = "",
         target_users: str = "",
-        channel: str = "webchat",
+        channel: str = "whatsapp",
         requested_features: str = "",
         known_constraints: str = "",
         domain: str = "",
@@ -59,7 +59,7 @@ def build_builder_manual_tools(
             business_context: Detail bisnis/SOP/kebijakan yang user berikan.
             agent_blueprint: JSON/string hasil compose_agent_blueprint.
             target_users: Siapa yang akan menggunakan agent.
-            channel: whatsapp, webchat, atau channel lain.
+            channel: whatsapp.
             requested_features: Fitur yang diminta user.
             known_constraints: Batasan penting/compliance.
             domain: Domain bisnis jika diketahui.
@@ -227,4 +227,3 @@ def build_builder_manual_tools(
         return json.dumps(payload, ensure_ascii=False, indent=2)
 
     return {"compose_agent_operating_manual": compose_agent_operating_manual}
-

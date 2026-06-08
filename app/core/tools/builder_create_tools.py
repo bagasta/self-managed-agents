@@ -229,7 +229,7 @@ def build_builder_create_tools(
             temperature: Kreativitas respons, 0.0-2.0 (default: 0.7)
             tools_config: JSON string atau object konfigurasi tools, contoh: '{"memory": true, "scheduler": true}'
             allowed_senders: JSON array/string nomor WA yang diizinkan, contoh: '["+62811xxx"]'. Kosong = semua.
-            channel_type: Channel yang dipakai: 'whatsapp', 'webchat', atau kosong
+            channel_type: Channel yang dipakai: 'whatsapp' atau kosong. Arthur tidak membuat channel webchat/API.
             escalation_config: JSON string konfigurasi eskalasi, contoh: '{"channel_type": "whatsapp", "operator_phone": "+62xxx"}'
             operator_phone: Nomor WA operator/admin yang akan dapat notifikasi eskalasi
             operator_name: Nama operator/admin (misal: "Budi", "Tim CS"). Wajib diisi agar agent tahu siapa operatornya.
@@ -259,6 +259,8 @@ def build_builder_create_tools(
                 "[error] Tidak bisa membuat agent karena owner_external_id tidak tersedia. "
                 "Pastikan Arthur dijalankan dari session user yang memiliki external_user_id."
             )
+        requested_channel_type = str(channel_type or "").strip().lower()
+        channel_type = "whatsapp" if requested_channel_type != "whatsapp" else requested_channel_type
 
         tc, tc_error = _parse_json_arg(
             tools_config,

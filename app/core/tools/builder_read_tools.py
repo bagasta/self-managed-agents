@@ -98,7 +98,7 @@ def build_builder_read_tools(
             "critical_limitations": [
                 RUNTIME_LIMITATIONS["wa_device_scan_required_before_use"]["user_message"],
                 RUNTIME_LIMITATIONS["deploy_requires_docker_socket"]["user_message"],
-                RUNTIME_LIMITATIONS["deploy_ttl_4h_max"]["user_message"],
+                RUNTIME_LIMITATIONS["deploy_ttl_24h_max"]["user_message"],
                 RUNTIME_LIMITATIONS["one_wa_number_per_agent"]["user_message"],
             ],
             "prohibited_agent_purposes": [
@@ -214,4 +214,3 @@ def build_builder_read_tools(
         "list_available_wa_devices": list_available_wa_devices,
         "get_presets": get_presets,
     }
-
