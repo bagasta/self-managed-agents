@@ -153,6 +153,26 @@ def test_builder_create_whatsapp_agent_overrides_id_only_reply():
     )
 
 
+def test_builder_reply_sanitizes_webchat_channel_offer():
+    reply = (
+        "Oke Bagas, untuk agent riset yang kamu mau, saya butuh tahu:\n"
+        "* Nama agent-nya mau apa?\n"
+        "* Fokus risetnya tentang apa atau bidang apa?\n"
+        "* Mau channel apa? WhatsApp atau webchat?\n"
+        "* Perlu fitur khusus seperti browsing internet, buat ringkasan, atau lainnya?"
+    )
+
+    out = ensure_non_empty_reply(reply, [], active_groups=["builder"])
+
+    assert "webchat" not in out.lower()
+    assert "mau channel apa" not in out.lower()
+    assert "Nama agent-nya mau apa?" in out
+    assert "Fokus risetnya" in out
+    assert "Channelnya saya set ke WhatsApp" in out
+    assert "nomor demo Arthur" in out
+    assert "nomor WhatsApp kamu sendiri" in out
+
+
 def test_builder_update_agent_success_reply_is_natural():
     steps = [
         {

@@ -144,6 +144,48 @@ def _looks_like_technical_builder_reply(reply: str) -> bool:
     )
 
 
+def _is_builder_context(
+    steps: list[dict[str, Any]],
+    active_groups: list[str] | tuple[str, ...] | set[str] | None,
+) -> bool:
+    groups = {str(group) for group in (active_groups or [])}
+    return "builder" in groups or any(name in _BUILDER_TOOLS for name in _step_tool_names(steps))
+
+
+def _sanitize_builder_channel_reply(reply: str) -> str:
+    text = (reply or "").strip()
+    normalized = text.lower()
+    if "webchat" not in normalized and "web chat" not in normalized:
+        return text
+    if "channel" not in normalized and "whatsapp" not in normalized:
+        return text
+
+    kept_lines: list[str] = []
+    removed_channel_offer = False
+    for line in text.splitlines():
+        line_lower = line.lower()
+        if "webchat" in line_lower or "web chat" in line_lower:
+            removed_channel_offer = True
+            continue
+        if "channel apa" in line_lower or "mau channel" in line_lower:
+            removed_channel_offer = True
+            continue
+        kept_lines.append(line.rstrip())
+
+    sanitized = "\n".join(kept_lines).strip()
+    channel_note = (
+        "Channelnya saya set ke WhatsApp. Setelah jadi, bisa dicoba lewat nomor demo Arthur "
+        "atau dipasang ke nomor WhatsApp kamu sendiri."
+    )
+    if not removed_channel_offer:
+        return sanitized or channel_note
+    if not sanitized:
+        return channel_note
+    if "nomor demo arthur" in sanitized.lower() and "nomor whatsapp kamu sendiri" in sanitized.lower():
+        return sanitized
+    return f"{sanitized}\n\n{channel_note}"
+
+
 def _create_agent_success_reply(data: dict[str, Any]) -> str:
     name = str(data.get("name") or "agent").strip()
     agent_id = str(data.get("agent_id") or "").strip()
@@ -265,6 +307,8 @@ def ensure_non_empty_reply(
             return entitlement_retry
 
     if text:
+        if _is_builder_context(steps, active_groups):
+            text = _sanitize_builder_channel_reply(text)
         builder_reply = _builder_fallback_reply(steps)
         missing_whatsapp_onboarding = (
             builder_reply
