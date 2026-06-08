@@ -14,7 +14,13 @@ from app.core.engine.agent_runner import (
     _prioritize_direct_whatsapp_text_send_tools,
 )
 from app.core.engine.prompt_builder import build_system_prompt
-from app.api.channels import _is_wa_owner_sender, _label_owner_wa_message
+from app.api.channels import (
+    _is_wa_dev_device,
+    _is_wa_dev_disconnect_command,
+    _is_wa_owner_sender,
+    _label_owner_wa_message,
+    _wa_dev_session_lookup_candidates,
+)
 
 
 def _agent(**overrides):
@@ -55,6 +61,28 @@ def test_wa_owner_sender_detects_resolved_phone_and_jid():
 
     assert _is_wa_owner_sender(agent, "+628owner", "628owner@s.whatsapp.net") is True
     assert _is_wa_owner_sender(agent, "+628customer", "628customer@s.whatsapp.net") is False
+
+
+def test_wa_dev_disconnect_command_is_backend_guarded():
+    assert _is_wa_dev_device("wadev_123")
+    assert not _is_wa_dev_device("real-device")
+    assert _is_wa_dev_disconnect_command("/stop")
+    assert _is_wa_dev_disconnect_command("/disconnect")
+    assert _is_wa_dev_disconnect_command("berhenti")
+    assert not _is_wa_dev_disconnect_command("hi")
+
+
+def test_wa_dev_disconnect_lookup_candidates_cover_phone_lid_and_group():
+    assert _wa_dev_session_lookup_candidates(
+        "+628123456789",
+        "103160936972328@lid",
+        "120363000000000000@g.us",
+    ) == [
+        "628123456789",
+        "103160936972328",
+        "120363000000000000",
+        "120363000000000000@g.us",
+    ]
 
 
 def test_wa_owner_message_gets_explicit_owner_label():

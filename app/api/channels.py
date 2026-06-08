@@ -75,6 +75,7 @@ from app.api.wa_helpers import (
 _settings = get_settings()
 _DEVELOPER_PHONE: str = _settings.developer_phone
 _GENERIC_ERROR_MSG = "Maaf, terjadi gangguan sementara. Silakan coba lagi dalam beberapa saat."
+_WA_DEV_DISCONNECT_COMMANDS = {"/stop", "berhenti", "/disconnect", "stop"}
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/v1/channels", tags=["channels"])
@@ -126,6 +127,64 @@ def _label_owner_wa_message(
         f"No Telepon/WA/Id: {from_phone or '(tidak diketahui)'}\n"
         f"Pesan: {message}"
     )
+
+
+def _is_wa_dev_device(device_id: str | None) -> bool:
+    return str(device_id or "").startswith("wadev_")
+
+
+def _is_wa_dev_disconnect_command(message: str | None) -> bool:
+    return str(message or "").strip().lower() in _WA_DEV_DISCONNECT_COMMANDS
+
+
+def _wa_dev_session_lookup_candidates(*values: str | None) -> list[str]:
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        normalized = normalize_phone(text)
+        for candidate in (normalized, text if text.endswith("@g.us") else ""):
+            if candidate and candidate not in seen:
+                seen.add(candidate)
+                candidates.append(candidate)
+    return candidates
+
+
+async def _disconnect_wa_dev_sessions(
+    *,
+    agent_id: uuid.UUID,
+    phone: str | None,
+    from_phone: str | None,
+    chat_id: str | None,
+    db: AsyncSession,
+) -> int:
+    candidates = _wa_dev_session_lookup_candidates(phone, from_phone, chat_id)
+    if not candidates:
+        return 0
+
+    result = await db.execute(
+        select(Session).where(
+            Session.agent_id == agent_id,
+            Session.channel_type == "whatsapp",
+            Session.external_user_id.in_(candidates),
+        )
+    )
+    sessions = list(result.scalars().all())
+    if not sessions:
+        return 0
+
+    from app.core.engine.session_lock import cancel_active_run
+
+    for session in sessions:
+        await cancel_active_run(session.id)
+        meta = dict(session.metadata_ or {})
+        meta["wa_dev_disconnected_at"] = int(time.time())
+        session.metadata_ = meta
+        db.add(session)
+    await db.commit()
+    return len(sessions)
 
 
 def _looks_like_operator_media_request(text: str | None) -> bool:
@@ -535,7 +594,9 @@ async def _stop_customer_typing(device_id: str, session: Session, log: structlog
 
         await stop_wa_typing(device_id, target)
     except Exception as exc:
-        log.warning("wa_incoming.stop_typing_failed", error=str(exc)[:200])
+        warning = getattr(log, "warning", None)
+        if callable(warning):
+            warning("wa_incoming.stop_typing_failed", error=str(exc)[:200])
 
 
 async def _notify_operator_spam_autostop(
@@ -1072,6 +1133,35 @@ async def wa_dev_claim_code(
     }
 
 
+class WADevDisconnectRequest(BaseModel):
+    agent_id: uuid.UUID
+    phone: str | None = None
+    from_phone: str | None = None
+    chat_id: str | None = None
+
+
+@router.post("/wa-dev/disconnect")
+async def wa_dev_disconnect(
+    body: WADevDisconnectRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Used by wa-dev-service when a shared-number trial user sends /stop.
+
+    The Go gateway owns phone->agent routing, but Python owns active run
+    cancellation. This endpoint prevents an old run from sending a late final
+    reply after the trial connection was disconnected.
+    """
+    disconnected_sessions = await _disconnect_wa_dev_sessions(
+        agent_id=body.agent_id,
+        phone=body.phone,
+        from_phone=body.from_phone,
+        chat_id=body.chat_id,
+        db=db,
+    )
+    return {"status": "ok", "disconnected_sessions": disconnected_sessions}
+
+
 class IncomingMessage(BaseModel):
     from_phone: str | None = None
     message: str = Field(..., max_length=10_000)
@@ -1310,6 +1400,31 @@ async def wa_incoming(
         body.sender_alt,
         reply_target,
     )
+
+    if _is_wa_dev_device(body.device_id) and _is_wa_dev_disconnect_command(body.message):
+        disconnected_sessions = await _disconnect_wa_dev_sessions(
+            agent_id=agent.id,
+            phone=real_from_phone,
+            from_phone=body.from_,
+            chat_id=body.chat_id,
+            db=db,
+        )
+        try:
+            await send_wa_message(
+                body.device_id,
+                reply_target,
+                "✅ Kamu sudah disconnect dari agent.\n\nKirim kode baru dari Arthur kapan saja untuk connect ke agent lagi.",
+            )
+        except Exception as exc:
+            log.warning("wa_incoming.wa_dev_disconnect_reply_failed", error=str(exc)[:200])
+        log.info("wa_incoming.wa_dev_disconnect_ignored", sessions=disconnected_sessions)
+        return {
+            "status": "disconnected",
+            "reply": "",
+            "run_id": "",
+            "steps": [],
+            "messages_to_user": [],
+        }
 
     # 1.5. Cek deduplikasi WA (handling multiple webhook calls for the same message)
     if body.message_id or body.timestamp:

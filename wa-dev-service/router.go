@@ -51,6 +51,17 @@ func isDisconnect(text string) bool {
 	return false
 }
 
+func isDisconnectedConnection(conn *UserConnection) bool {
+	return conn != nil && conn.Disconnected
+}
+
+func hasOperatorRouteContext(msg IncomingMessage) bool {
+	return strings.TrimSpace(msg.QuotedText) != "" ||
+		strings.TrimSpace(msg.QuotedStanzaID) != "" ||
+		strings.TrimSpace(msg.QuotedParticipant) != "" ||
+		strings.TrimSpace(msg.QuotedRemoteJID) != ""
+}
+
 func normalizeTrialCode(text string) string {
 	var b strings.Builder
 	for _, r := range strings.ToUpper(strings.TrimSpace(text)) {
@@ -119,9 +130,32 @@ func (r *Router) HandleMessage(msg IncomingMessage) {
 	conn, connectedKey, connected := r.store.GetAny(keys...)
 
 	if connected && isDisconnect(msg.Text) {
-		_ = r.store.DeleteMany(keys...)
+		_ = r.store.SuppressMany(keys, msg.ChatID, conn.AgentID)
+		go r.notifyDisconnect(conn.AgentID, msg)
 		_, _ = r.wa.SendText(msg.ChatID, "✅ Kamu berhasil disconnect dari agent.\n\nKirim kode baru dari Arthur kapan saja untuk connect ke agent lagi.")
 		log.Printf("[dev-router] %s disconnected from agent %s", connectedKey, conn.AgentID)
+		return
+	}
+
+	if connected && isDisconnectedConnection(conn) {
+		codes := trialCodeCandidates(msg.Text)
+		if len(codes) > 0 {
+			for _, code := range codes {
+				if agentID, agentName, ok := r.claimTrialCode(code, msg.From, msg.PhoneFrom, msg.ChatID, msg.PushName); ok {
+					r.saveConnection(keys, msg.ChatID, agentID)
+					_, _ = r.wa.SendText(msg.ChatID, fmt.Sprintf("✅ Berhasil terhubung ke agent *%s*!\n\nSekarang kamu bisa chat langsung di sini.\nKirim */stop* kalau mau disconnect.", agentName))
+					log.Printf("[dev-router] %s reconnected to agent %s via trial code", connectedKey, agentID)
+					return
+				}
+			}
+			if len(codes) == 1 {
+				_, _ = r.wa.SendText(msg.ChatID, "❌ Kode tidak ditemukan atau sudah tidak aktif.\n\nMinta kode baru dari Arthur, lalu kirim 6 karakter kodenya ke sini.")
+				return
+			}
+			_, _ = r.wa.SendText(msg.ChatID, "❌ Kode di pesan ini tidak ditemukan atau sudah tidak aktif.\n\nBuka link dari Arthur lagi, atau kirim 6 karakter kode saja.")
+			return
+		}
+		log.Printf("[dev-router] suppressed msg from %s until new trial code", connectedKey)
 		return
 	}
 
@@ -161,10 +195,12 @@ func (r *Router) HandleMessage(msg IncomingMessage) {
 			return
 		}
 		// Check if this phone is an operator for any agent — auto-route without requiring 'connect'
-		if agentID, ok := r.lookupOperatorAgent(msg.From, msg.PhoneFrom); ok {
-			log.Printf("[dev-router] operator %s auto-routed to agent %s", msg.From, agentID)
-			r.forwardToAgent(agentID, msg)
-			return
+		if hasOperatorRouteContext(msg) {
+			if agentID, ok := r.lookupOperatorAgent(msg.From, msg.PhoneFrom); ok {
+				log.Printf("[dev-router] operator %s auto-routed to agent %s", msg.From, agentID)
+				r.forwardToAgent(agentID, msg)
+				return
+			}
 		}
 		// _ = r.wa.SendText(msg.ChatID, "👋 Halo! Ini adalah *WhatsApp Development Agent*.\n\nKirim perintah berikut untuk mulai:\n*connect AGENT_ID*\n\nContoh: connect abc123-def456\n\nDapatkan Agent ID dari dashboard.")
 		return
@@ -311,6 +347,42 @@ func (r *Router) forwardToAgent(agentID string, msg IncomingMessage) {
 	// Python normally sends the reply back via wa-dev-service's /send/text endpoint.
 	// The fallback above only fires when Python explicitly reports that final delivery failed.
 	log.Printf("[dev-router] forwarded msg from %s to agent %s", msg.From, agentID)
+}
+
+func (r *Router) notifyDisconnect(agentID string, msg IncomingMessage) {
+	if strings.TrimSpace(agentID) == "" {
+		return
+	}
+	phone := msg.From
+	if strings.TrimSpace(msg.PhoneFrom) != "" {
+		phone = msg.PhoneFrom
+	}
+	payload := map[string]string{
+		"agent_id":   agentID,
+		"phone":      phone,
+		"from_phone": msg.From,
+		"chat_id":    msg.ChatID,
+	}
+	data, _ := json.Marshal(payload)
+	req, err := http.NewRequest("POST", r.mainAPIURL+"/v1/channels/wa-dev/disconnect", bytes.NewReader(data))
+	if err != nil {
+		log.Printf("[dev-router] build disconnect notify request err: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", r.mainAPIKey)
+
+	client := http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[dev-router] disconnect notify err: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(resp.Body)
+		log.Printf("[dev-router] disconnect notify HTTP %d: %s", resp.StatusCode, string(b))
+	}
 }
 
 // lookupOperatorAgent checks whether a phone number is an operator for any agent.

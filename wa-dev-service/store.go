@@ -8,10 +8,12 @@ import (
 )
 
 type UserConnection struct {
-	AgentID     string    `json:"agent_id"`
-	SessionID   string    `json:"session_id"`
-	ConnectedAt time.Time `json:"connected_at"`
-	ChatID      string    `json:"chat_id"`
+	AgentID        string     `json:"agent_id"`
+	SessionID      string     `json:"session_id"`
+	ConnectedAt    time.Time  `json:"connected_at"`
+	ChatID         string     `json:"chat_id"`
+	Disconnected   bool       `json:"disconnected,omitempty"`
+	DisconnectedAt *time.Time `json:"disconnected_at,omitempty"`
 }
 
 type ConnectionStore struct {
@@ -65,6 +67,38 @@ func (s *ConnectionStore) SetMany(keys []string, conn *UserConnection) error {
 	for _, key := range keys {
 		if key != "" {
 			s.connections[key] = conn
+		}
+	}
+	return s.save()
+}
+
+func (s *ConnectionStore) SuppressMany(keys []string, chatID, agentID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	targetKeys := map[string]bool{}
+	for _, key := range keys {
+		if key != "" {
+			targetKeys[key] = true
+		}
+	}
+	for key, conn := range s.connections {
+		if conn == nil {
+			continue
+		}
+		if conn.AgentID == agentID && (chatID == "" || conn.ChatID == "" || conn.ChatID == chatID) {
+			targetKeys[key] = true
+		}
+	}
+
+	now := time.Now()
+	for key := range targetKeys {
+		s.connections[key] = &UserConnection{
+			AgentID:        agentID,
+			ConnectedAt:    now,
+			ChatID:         chatID,
+			Disconnected:   true,
+			DisconnectedAt: &now,
 		}
 	}
 	return s.save()
