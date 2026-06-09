@@ -5,6 +5,7 @@ Extracted from agent_runner.py — PURE refactor, zero behaviour change.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from app.core.engine.agent_step_utils import (
@@ -14,6 +15,35 @@ from app.core.engine.agent_step_utils import (
     _operator_message_payload,
 )
 from app.core.engine.agent_whatsapp_guards import _has_reply_to_user_step, _has_send_to_number_step
+
+
+_MEDIA_CLAIM_SPLIT_RE = re.compile(r"[\n.!?;]+")
+
+
+def _has_media_delivery_claim(text: str) -> bool:
+    lowered = (text or "").lower()
+    media_nouns = ("file", "dokumen", "pdf", "gambar", "foto", "laporan", "attachment", "lampiran")
+    delivery_markers = (
+        "sudah saya kirim",
+        "sudah dikirim",
+        "sudah terkirim",
+        "berhasil saya kirim",
+        "saya kirim sekarang",
+        "saya kirim file",
+        "saya kirim dokumen",
+        "saya kirim pdf",
+        "saya akan kirim",
+        "berikut saya kirim",
+        "berikut saya kirimkan",
+        "mengirim file",
+        "mengirim dokumen",
+        "siap saya kirim",
+        "siap dikirim",
+    )
+    for segment in _MEDIA_CLAIM_SPLIT_RE.split(lowered):
+        if any(noun in segment for noun in media_nouns) and any(marker in segment for marker in delivery_markers):
+            return True
+    return False
 
 
 def _task_result_guard_reply(final_reply: str, steps: list[dict[str, Any]], user_message: str) -> str:
@@ -177,33 +207,7 @@ def _whatsapp_media_delivery_guard_reply(final_reply: str, steps: list[dict[str,
     """Block claims/promises that a WA media file was sent when no media-send tool ran."""
     if not final_reply or _has_whatsapp_media_send_step(steps):
         return final_reply
-
-    lowered = final_reply.lower()
-    has_media_noun = any(
-        marker in lowered
-        for marker in ("file", "dokumen", "pdf", "gambar", "foto", "laporan")
-    )
-    if not has_media_noun:
-        return final_reply
-
-    claims_delivery = any(
-        marker in lowered
-        for marker in (
-            "sudah saya kirim",
-            "sudah dikirim",
-            "sudah terkirim",
-            "berhasil saya kirim",
-            "saya kirim sekarang",
-            "saya akan kirim",
-            "berikut saya kirim",
-            "mengirim file",
-            "mengirim dokumen",
-            "siap saya kirim",
-            "siap dikirim",
-            "mohon tunggu sebentar",
-        )
-    )
-    if not claims_delivery:
+    if not _has_media_delivery_claim(final_reply):
         return final_reply
 
     return (

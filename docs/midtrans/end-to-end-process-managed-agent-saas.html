@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <title>End-to-End Process - Managed Agent Platform</title>
+  <style>
+    @page {
+      size: A4;
+      margin: 18mm 16mm;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      color: #172033;
+      font-family: Arial, Helvetica, sans-serif;
+      font-size: 11px;
+      line-height: 1.5;
+      margin: 0;
+    }
+
+    h1, h2, h3, p {
+      margin-top: 0;
+    }
+
+    h1 {
+      color: #ffffff;
+      font-size: 25px;
+      line-height: 1.25;
+      margin-bottom: 8px;
+    }
+
+    h2 {
+      border-bottom: 2px solid #2563eb;
+      color: #16325c;
+      font-size: 16px;
+      margin: 22px 0 10px;
+      padding-bottom: 4px;
+    }
+
+    h3 {
+      color: #1f3f73;
+      font-size: 12px;
+      margin: 14px 0 6px;
+    }
+
+    table {
+      border-collapse: collapse;
+      margin: 8px 0 14px;
+      page-break-inside: avoid;
+      width: 100%;
+    }
+
+    th {
+      background: #eff6ff;
+      color: #17345f;
+      font-weight: 700;
+    }
+
+    td, th {
+      border: 1px solid #cbd5e1;
+      padding: 7px 8px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    ul, ol {
+      margin: 6px 0 12px 18px;
+      padding: 0;
+    }
+
+    li {
+      margin: 3px 0;
+    }
+
+    .cover {
+      background: linear-gradient(135deg, #0f6abf, #38bdf8);
+      border-radius: 10px;
+      color: #ffffff;
+      margin-bottom: 18px;
+      padding: 28px 30px;
+    }
+
+    .subtitle {
+      font-size: 13px;
+      margin-bottom: 0;
+      opacity: 0.95;
+    }
+
+    .meta-grid {
+      display: grid;
+      gap: 10px;
+      grid-template-columns: 1fr 1fr;
+      margin: 14px 0 4px;
+    }
+
+    .meta-card {
+      background: rgba(255, 255, 255, 0.14);
+      border: 1px solid rgba(255, 255, 255, 0.28);
+      border-radius: 8px;
+      padding: 10px 12px;
+    }
+
+    .meta-label {
+      font-size: 9px;
+      letter-spacing: 0.05em;
+      opacity: 0.82;
+      text-transform: uppercase;
+    }
+
+    .meta-value {
+      font-size: 12px;
+      font-weight: 700;
+      margin-top: 2px;
+    }
+
+    .note {
+      background: #fff7ed;
+      border-left: 4px solid #f97316;
+      border-radius: 6px;
+      margin: 10px 0 14px;
+      padding: 9px 11px;
+    }
+
+    .success {
+      background: #f0fdf4;
+      border-left: 4px solid #22c55e;
+      border-radius: 6px;
+      margin: 10px 0 14px;
+      padding: 9px 11px;
+    }
+
+    .flow {
+      display: grid;
+      gap: 8px;
+      grid-template-columns: repeat(4, 1fr);
+      margin: 10px 0 14px;
+      page-break-inside: avoid;
+    }
+
+    .step {
+      background: #f8fafc;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      min-height: 88px;
+      padding: 9px;
+      position: relative;
+    }
+
+    .step-number {
+      background: #2563eb;
+      border-radius: 999px;
+      color: #ffffff;
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 700;
+      height: 20px;
+      line-height: 20px;
+      margin-bottom: 5px;
+      text-align: center;
+      width: 20px;
+    }
+
+    .step-title {
+      color: #17345f;
+      font-weight: 700;
+      margin-bottom: 2px;
+    }
+
+    .muted {
+      color: #64748b;
+    }
+
+    .page-break {
+      break-before: page;
+    }
+
+    .footer-note {
+      border-top: 1px solid #cbd5e1;
+      color: #64748b;
+      font-size: 9px;
+      margin-top: 20px;
+      padding-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <section class="cover">
+    <h1>End-to-End Customer Process & Product Overview</h1>
+    <p class="subtitle">Dokumen pendukung onboarding Midtrans untuk produk jasa Managed Agent Platform.</p>
+    <div class="meta-grid">
+      <div class="meta-card">
+        <div class="meta-label">Nama Produk / Brand</div>
+        <div class="meta-value">Managed Agent Platform</div>
+      </div>
+      <div class="meta-card">
+        <div class="meta-label">Jenis Usaha</div>
+        <div class="meta-value">SaaS / Jasa AI Agent</div>
+      </div>
+      <div class="meta-card">
+        <div class="meta-label">Website / Aplikasi</div>
+        <div class="meta-value">https://managed-agent.chiefaiofficer.id</div>
+      </div>
+      <div class="meta-card">
+      <div class="meta-label">Tujuan Pembayaran</div>
+      <div class="meta-value">Payment link Midtrans dari Arthur untuk subscription, renewal, dan top-up</div>
+      </div>
+    </div>
+  </section>
+
+  <h2>1. Ringkasan Produk Barang/Jasa</h2>
+  <p>
+    Managed Agent Platform adalah layanan SaaS untuk membuat, menjalankan, dan mengelola AI agent
+    yang dapat melayani customer melalui WhatsApp, webchat, API, atau channel lain. Produk yang dijual
+    berupa akses layanan digital, subscription bulanan, aktivasi agent, integrasi WhatsApp, token pemakaian,
+    dan layanan setup/konfigurasi sesuai kebutuhan customer.
+  </p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Paket / Produk</th>
+        <th>Deskripsi Jasa</th>
+        <th>Fitur Utama</th>
+        <th>Harga</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Trial</td>
+        <td>Akses uji coba untuk membuat dan mencoba 1 AI agent.</td>
+        <td>1 agent, model GPT-4.1 Mini, kuota sekitar 2 juta token, WhatsApp demo/testing.</td>
+        <td>Rp0 / gratis</td>
+      </tr>
+      <tr>
+        <td>Starter</td>
+        <td>Subscription bulanan untuk 1 AI agent aktif.</td>
+        <td>1 agent, 1 koneksi WhatsApp, kuota sekitar 10 juta token, konfigurasi dasar.</td>
+        <td>Ditampilkan oleh Arthur sebelum payment link Midtrans dikirim.</td>
+      </tr>
+      <tr>
+        <td>Pro</td>
+        <td>Subscription bulanan untuk kebutuhan bisnis dengan lebih dari 1 agent.</td>
+        <td>Maksimal 2 agent, maksimal 2 koneksi WhatsApp, kuota sekitar 20 juta token, pilihan model tambahan.</td>
+        <td>Ditampilkan oleh Arthur sebelum payment link Midtrans dikirim.</td>
+      </tr>
+      <tr>
+        <td>Enterprise / Custom</td>
+        <td>Paket custom untuk kebutuhan volume tinggi atau integrasi khusus.</td>
+        <td>Jumlah agent dan kuota disesuaikan, setup integrasi, dukungan operasional, SLA sesuai kesepakatan.</td>
+        <td>Berdasarkan quotation/invoice.</td>
+      </tr>
+      <tr>
+        <td>Token Top-up</td>
+        <td>Tambahan kuota pemakaian untuk subscription aktif.</td>
+        <td>Kuota token tambahan untuk memperpanjang kapasitas pemakaian agent.</td>
+        <td>Ditampilkan oleh Arthur sebelum payment link Midtrans dikirim.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="note">
+    <strong>Catatan harga:</strong> nominal final dikonfirmasi dalam percakapan dengan Arthur sebelum payment link dibuat.
+    Arthur menyampaikan rincian paket, periode, nominal, dan total pembayaran, lalu mengirim link pembayaran Midtrans.
+  </div>
+
+  <h2>2. End-to-End Process Customer Memesan Layanan</h2>
+  <div class="flow">
+    <div class="step">
+      <span class="step-number">1</span>
+      <div class="step-title">Customer chat Arthur</div>
+      <div>Customer menghubungi Arthur melalui WhatsApp atau channel chat resmi untuk membuat/mengelola AI agent.</div>
+    </div>
+    <div class="step">
+      <span class="step-number">2</span>
+      <div class="step-title">Konsultasi kebutuhan</div>
+      <div>Arthur menanyakan kebutuhan bisnis, jumlah agent, channel WhatsApp, dan kebutuhan integrasi.</div>
+    </div>
+    <div class="step">
+      <span class="step-number">3</span>
+      <div class="step-title">Rekomendasi paket</div>
+      <div>Arthur merekomendasikan Trial, Starter, Pro, Enterprise, renewal, atau token top-up sesuai kebutuhan.</div>
+    </div>
+    <div class="step">
+      <span class="step-number">4</span>
+      <div class="step-title">Konfirmasi order</div>
+      <div>Arthur menyampaikan nama paket, periode layanan, fitur, harga, dan meminta konfirmasi customer.</div>
+    </div>
+  </div>
+
+  <div class="flow">
+    <div class="step">
+      <span class="step-number">5</span>
+      <div class="step-title">Arthur kirim link</div>
+      <div>Setelah customer setuju, sistem membuat payment link Midtrans dan Arthur mengirim link tersebut ke customer.</div>
+    </div>
+    <div class="step">
+      <span class="step-number">6</span>
+      <div class="step-title">Bayar</div>
+      <div>Customer membuka payment link Midtrans, memilih metode pembayaran, lalu menyelesaikan pembayaran.</div>
+    </div>
+    <div class="step">
+      <span class="step-number">7</span>
+      <div class="step-title">Notifikasi</div>
+      <div>Midtrans mengirim status transaksi ke backend melalui callback/webhook pembayaran.</div>
+    </div>
+    <div class="step">
+      <span class="step-number">8</span>
+      <div class="step-title">Aktivasi</div>
+      <div>Sistem mengaktifkan subscription, token quota, agent, atau top-up sesuai transaksi yang berhasil.</div>
+    </div>
+  </div>
+
+  <h2 class="page-break">3. Detail Proses Pembayaran</h2>
+  <ol>
+    <li>Customer memulai percakapan dengan Arthur melalui WhatsApp atau channel chat resmi.</li>
+    <li>Arthur mengumpulkan kebutuhan customer dan merekomendasikan paket subscription, renewal, atau token top-up.</li>
+    <li>Customer menyetujui paket, periode, dan nominal pembayaran yang disampaikan Arthur.</li>
+    <li>Sistem membuat order dengan order ID unik, item name, quantity, periode layanan, nominal, dan data customer.</li>
+    <li>Sistem membuat payment link Midtrans untuk order tersebut.</li>
+    <li>Arthur mengirim payment link Midtrans ke customer di percakapan yang sama.</li>
+    <li>Customer membuka link dan menyelesaikan pembayaran di halaman Midtrans menggunakan metode yang dipilih.</li>
+    <li>Midtrans mengirim status transaksi ke backend: pending, settlement/success, expire, cancel, deny, atau failure.</li>
+    <li>Jika pembayaran success/settlement, backend menandai invoice paid, mengaktifkan layanan, dan Arthur mengirim konfirmasi ke customer.</li>
+    <li>Jika pembayaran pending, Arthur dapat mengingatkan customer untuk menyelesaikan pembayaran melalui link yang sama.</li>
+    <li>Jika pembayaran gagal/expired/cancel, order ditandai gagal dan customer dapat membuat order baru.</li>
+  </ol>
+
+  <h3>Data Transaksi yang Dikaitkan</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Data</th>
+        <th>Keterangan</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Order ID</td>
+        <td>ID unik per transaksi untuk rekonsiliasi dengan Midtrans dan invoice internal.</td>
+      </tr>
+      <tr>
+        <td>Customer Data</td>
+        <td>Nama, email/nomor WhatsApp, dan user ID internal jika customer sudah login.</td>
+      </tr>
+      <tr>
+        <td>Item Details</td>
+        <td>Nama paket, periode, kuota, jumlah agent, token top-up, atau layanan custom.</td>
+      </tr>
+      <tr>
+        <td>Gross Amount</td>
+        <td>Total pembayaran dalam IDR sesuai paket dan nominal yang dikonfirmasi customer ke Arthur.</td>
+      </tr>
+      <tr>
+        <td>Transaction Status</td>
+        <td>Status dari Midtrans dipakai untuk aktivasi, pembatalan, atau retry pembayaran.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>4. Proses Setelah Pembayaran Sukses</h2>
+  <div class="success">
+    Setelah status transaksi diterima sebagai berhasil, sistem tidak mengirim barang fisik.
+    Deliverable customer berupa akses digital, aktivasi AI agent, kuota pemakaian, konfigurasi WhatsApp,
+    dan dukungan setup sesuai paket.
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Tahap</th>
+        <th>Output untuk Customer</th>
+        <th>Estimasi</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Aktivasi subscription</td>
+        <td>Status subscription aktif, masa berlaku diperbarui, dan token quota ditambahkan.</td>
+        <td>Otomatis setelah pembayaran berhasil.</td>
+      </tr>
+      <tr>
+        <td>Pembuatan / update agent</td>
+        <td>Arthur melanjutkan pembuatan agent baru atau mengaktifkan agent existing sesuai paket.</td>
+        <td>Otomatis melalui percakapan Arthur atau dibantu tim support.</td>
+      </tr>
+      <tr>
+        <td>Koneksi WhatsApp</td>
+        <td>Arthur memberi instruksi pairing/QR atau mengarahkan customer ke dashboard koneksi WhatsApp.</td>
+        <td>Dipandu oleh Arthur, dashboard, atau tim support.</td>
+      </tr>
+      <tr>
+        <td>Konfirmasi</td>
+        <td>Customer menerima konfirmasi dari Arthur melalui chat, serta dapat melihat status di dashboard jika tersedia.</td>
+        <td>Setelah aktivasi selesai.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2 class="page-break">5. Batasan, Refund, dan Support</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Area</th>
+        <th>Kebijakan Operasional</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Sifat Produk</td>
+        <td>Layanan digital berbasis subscription. Tidak ada pengiriman barang fisik.</td>
+      </tr>
+      <tr>
+        <td>Aktivasi</td>
+        <td>Layanan aktif setelah pembayaran berhasil dan data order valid.</td>
+      </tr>
+      <tr>
+        <td>Kegagalan Pembayaran</td>
+        <td>Jika transaksi pending/gagal/expired, layanan belum diaktifkan sampai pembayaran berhasil.</td>
+      </tr>
+      <tr>
+        <td>Refund</td>
+        <td>Permintaan refund ditangani manual oleh tim support sesuai status pemakaian dan kebijakan merchant.</td>
+      </tr>
+      <tr>
+        <td>Support</td>
+        <td>Customer dapat menghubungi Arthur atau tim support melalui WhatsApp, dashboard, email, atau channel merchant.</td>
+      </tr>
+      <tr>
+        <td>Keamanan</td>
+        <td>Data pembayaran diproses oleh Midtrans. Sistem merchant hanya menerima status transaksi dan data order yang dibutuhkan.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>6. Ringkasan Flow Teknis</h2>
+  <ol>
+    <li>Customer chat dengan Arthur dan menyetujui paket subscription/top-up.</li>
+    <li>Backend membuat order dan payment link Midtrans dengan item details dan gross amount.</li>
+    <li>Arthur mengirim payment link Midtrans ke customer.</li>
+    <li>Customer membuka link dan melakukan pembayaran di halaman Midtrans.</li>
+    <li>Midtrans mengirim notification callback ke backend merchant.</li>
+    <li>Backend melakukan validasi status transaksi dan mencegah duplicate processing.</li>
+    <li>Jika success, backend mengaktifkan subscription/top-up dan mencatat invoice paid.</li>
+    <li>Arthur mengirim konfirmasi pembayaran dan customer dapat memakai layanan Managed Agent Platform.</li>
+  </ol>
+
+  <p class="footer-note">
+    Dokumen ini disiapkan sebagai file pendukung onboarding Midtrans untuk menjelaskan produk/jasa dan proses customer
+    dari pemesanan sampai pembayaran serta aktivasi layanan.
+  </p>
+</body>
+</html>

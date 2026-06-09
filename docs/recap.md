@@ -1,5 +1,38 @@
 # Recap: Deep Agent SaaS Hardening — MCP, Subagent, Sandbox, Builder Entitlements
 
+## 2026-06-09 — WhatsApp PDF Delivery Loop di wa-dev-service
+
+Testing agent buatan Arthur lewat nomor demo `wa-dev-service` menemukan bug saat user minta laporan visualisasi data/PDF dikirim ke WhatsApp. Agent berhasil membuat PDF di sandbox, tapi berulang kali hanya membalas teks seperti "sudah saya kirim" tanpa attachment.
+
+### Masalah yang Ditemukan
+- **Tool kirim file sebenarnya ada.** `wa-dev-service` dan `wa-service` harus punya kemampuan runtime yang sama untuk media delivery; bedanya hanya cara koneksi WhatsApp (kode pairing vs scan QR). Jadi akar masalah bukan karena `wa-dev-service` tidak bisa kirim dokumen.
+- **Runtime salah membaca envelope owner.** Pesan WA owner datang dalam format `<OWNER>... Pesan: ok/iya`, tapi `_operator_message_payload` hanya membersihkan `<OPERATOR>`. Akibatnya metadata nomor WA di envelope ikut terbaca dan turn seperti "ok" setelah konteks PDF bisa masuk jalur direct text-send, bukan jalur kirim dokumen.
+- **SOP latest bisa mencabut media tools.** Live log run `5fea0047` menunjukkan `agent_tool_setup.sop_locked_tools_removed` karena latest operating manual agent masih `needs_review`. Walaupun config agent punya `whatsapp_media`, runtime tetap menghapus tool media berdasarkan SOP latest.
+- **Guard klaim attachment kurang ketat.** Kalimat seperti "Saya kirim file PDF-nya ke WhatsApp sekarang" belum dianggap klaim media delivery, sehingga bisa lolos lewat `send_to_number` sebagai teks biasa.
+- **Path file sandbox belum durable untuk turn berikutnya.** PDF dibuat di `/workspace/shared/...pdf`, tapi path itu belum dipersist sebagai artifact session. Saat user lanjut bilang "kirim sekarang/kirim file pdf", runtime tidak punya recovery path deterministik untuk langsung memanggil `send_whatsapp_document`.
+
+### Perubahan Utama
+- `agent_step_utils.py`: `_operator_message_payload` sekarang membersihkan envelope `<OWNER>` seperti `<OPERATOR>`, sehingga isi pesan owner saja yang dipakai untuk deteksi direct-send.
+- `agent_runner.py`: menambahkan penyimpanan `latest_shared_artifact` dan `shared_artifacts` di `session.metadata_`, recovery path dari history, pencocokan ekstensi file yang diminta, dan fast-path deterministik untuk mengirim file WhatsApp dari artifact sebelum model masuk loop.
+- `agent_runner.py`: setelah graph selesai membuat artifact `/workspace/shared`, runtime mencatat artifact; jika request memang minta kirim file dan media tool tersedia, runtime langsung memanggil tool dokumen/gambar, bukan mengandalkan LLM mengarang balasan.
+- `escalation_tool.py`: media-claim guard diperluas untuk frasa "saya kirim file", "saya kirim pdf", "berikut saya kirimkan", "cek attachment/lampiran", dan variasi terkait supaya `send_to_number` tidak boleh mengklaim attachment.
+- `builder_intent.py`: workflow "laporan PDF", "visualisasi data", "grafik", dan "chart" dikenali sebagai generated-file/file-delivery workflow, jadi Arthur tidak membuat agent dengan config yang melemahkan sandbox/subagent/media requirement.
+
+### Validasi
+- Focused regression:
+  `PYTHONPATH=. .venv/bin/python -m pytest tests/test_whatsapp_direct_send.py tests/test_whatsapp_progress.py tests/test_sop_runtime_gate.py tests/test_builder_tools.py -q`
+- Hasil: **194 passed**.
+- Tambahan case menutup bug utama:
+  - `<OWNER>... Pesan: ok` setelah konteks PDF tidak lagi dianggap direct text-send.
+  - frasa "Saya kirim file PDF-nya..." diblok sebagai klaim palsu kalau belum lewat media tool.
+  - artifact `/workspace/shared/*.pdf` bisa disimpan dan dikirim ulang dari history/session saat user minta "kirim file pdf".
+  - visualisasi data/laporan PDF dihitung sebagai workflow file generated.
+
+### Catatan Operasional
+- Deploy kode saja belum cukup kalau latest `agent_operating_manuals` untuk agent terdampak masih `needs_review`; latest SOP harus direview/usable agar runtime tidak mencabut `whatsapp_media`.
+- Setelah deploy, test manual yang paling representatif: minta agent buat PDF, tunggu file selesai, lalu kirim "kirim file pdf" atau "kirim sekarang". Expected: ada tool media `send_whatsapp_document` dan user menerima attachment, bukan hanya teks klaim terkirim.
+- Jangan klaim "file sudah terkirim" dari layer agent kecuali ada eksekusi tool media atau deterministic delivery path yang benar-benar menghasilkan send attempt.
+
 ## 2026-06-05 — Builder Stall, Tier/Update Block & Eskalasi Operator (4 Fix)
 
 Lanjutan testing pra-launch (DB sudah di-wipe bersih + Arthur di-seed ulang, model `gpt-4.1-mini`). Empat bug ditemukan saat user bikin & iterasi agent "Admin Laundry Kiloan" lewat nomor demo (wa-dev-service).

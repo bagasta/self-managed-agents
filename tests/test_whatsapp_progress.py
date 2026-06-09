@@ -132,6 +132,23 @@ def test_media_delivery_claim_without_media_send_step_is_rewritten():
     assert "tool kirim dokumen/gambar WhatsApp" in guarded
 
 
+def test_media_delivery_guard_does_not_rewrite_demo_contact_plus_file_capability():
+    reply = (
+        "Bisa. Baas bisa bikin visualisasi data dan generate file PDF. "
+        "Kontak Demo Baas sudah saya kirim."
+    )
+
+    assert _whatsapp_media_delivery_guard_reply(reply, []) == reply
+
+
+def test_media_delivery_guard_rewrites_file_send_claim_in_same_sentence():
+    reply = "Baas sudah selesai. Saya kirim file PDF-nya ke WhatsApp sekarang."
+
+    guarded = _whatsapp_media_delivery_guard_reply(reply, [])
+
+    assert guarded.startswith("Belum saya kirim.")
+
+
 def test_media_delivery_claim_is_kept_after_media_send_step():
     reply = "Bos Bagas, file PDF Laporan_Titanic_Bagas.pdf sudah saya kirim ke WhatsApp."
     steps = [
@@ -251,6 +268,28 @@ def test_shared_artifact_can_be_recovered_from_history_for_file_request():
     )
 
     assert resend_path == "/workspace/shared/Laporan_Titanic_Bagas.pdf"
+
+
+def test_shared_artifact_is_not_reused_for_capability_question():
+    from app.core.engine.agent_runner import (
+        _latest_shared_artifact_path_for_delivery,
+        _remember_shared_artifact_path,
+    )
+
+    session = SimpleNamespace(metadata_={})
+    _remember_shared_artifact_path(
+        session,
+        "/workspace/shared/Laporan_Titanic_Bagas.pdf",
+        sent=False,
+    )
+
+    resend_path = _latest_shared_artifact_path_for_delivery(
+        session=session,
+        history_rows=[],
+        user_message="agent gua ini bisa bikin visualisasi data jadi file PDF gak?",
+    )
+
+    assert resend_path is None
 
 
 def test_send_to_number_blocks_media_delivery_claim_text():

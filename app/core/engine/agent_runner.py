@@ -485,8 +485,33 @@ def _shared_file_matches_request(shared_path: str, user_message: str) -> bool:
     return ext in requested
 
 
+def _is_explicit_shared_file_delivery_command(user_message: str) -> bool:
+    text = _operator_message_payload(user_message).strip().lower()
+    if not text:
+        return False
+    explicit_markers = (
+        "kirim file",
+        "kirim filenya",
+        "kirim file-nya",
+        "kirim pdf",
+        "kirim dokumen",
+        "kirim gambar",
+        "kirim foto",
+        "send file",
+        "send pdf",
+        "send document",
+        "send image",
+        "upload file",
+        "attachment",
+        "lampiran",
+        "filenya",
+        "file-nya",
+    )
+    return any(marker in text for marker in explicit_markers)
+
+
 def _is_whatsapp_file_delivery_turn(user_message: str, history_rows: list[Any]) -> bool:
-    if _is_whatsapp_file_delivery_request(user_message, [], ""):
+    if _is_explicit_shared_file_delivery_command(user_message):
         return True
     text = _operator_message_payload(user_message).strip().lower()
     if not text:
@@ -2279,10 +2304,11 @@ async def run_agent(
     if guarded_reply != final_reply:
         log.warning("agent_run.final_reply_overridden_by_operator_escalation_guard")
         final_reply = guarded_reply
-    guarded_reply = _whatsapp_media_delivery_guard_reply(final_reply, steps)
-    if guarded_reply != final_reply:
-        log.warning("agent_run.final_reply_overridden_by_wa_media_delivery_guard")
-        final_reply = guarded_reply
+    if not runtime_policy.is_builder:
+        guarded_reply = _whatsapp_media_delivery_guard_reply(final_reply, steps)
+        if guarded_reply != final_reply:
+            log.warning("agent_run.final_reply_overridden_by_wa_media_delivery_guard")
+            final_reply = guarded_reply
 
     _reply_before_non_empty_guard = final_reply
     final_reply = ensure_non_empty_reply(

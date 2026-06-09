@@ -89,6 +89,27 @@ def _mark_contact_sent(key: str) -> None:
     _contact_send_dedupe[key] = time.monotonic()
 
 
+def _trial_instruction_message(
+    *,
+    contact_name: str,
+    code: str,
+    wa_me_url: str,
+    contact_sent: bool,
+) -> str:
+    prefix = (
+        f"Kontak {contact_name} sudah saya kirim."
+        if contact_sent
+        else f"Nomor demo untuk {contact_name} sudah siap."
+    )
+    return (
+        f"{prefix}\n\n"
+        "Cara pakainya:\n"
+        f"1. Simpan kontak {contact_name}, atau buka link ini:\n{wa_me_url}\n"
+        f"2. Kirim kode: {code}\n"
+        "3. Setelah terhubung, langsung chat dengan agent kamu di nomor demo itu."
+    )
+
+
 async def _latest_user_message_for_session(db: Any, session_id: str | None) -> str:
     if not session_id:
         return ""
@@ -267,6 +288,8 @@ def build_builder_channel_tools(
         contact_sent = False
         contact_error = ""
         contact_already_sent = False
+        instruction_message_sent = False
+        instruction_message_error = ""
         if send_contact and target:
             dedupe_key = _contact_dedupe_key(session_id, target, resolved_agent_id)
             if _contact_recently_sent(dedupe_key):
@@ -289,6 +312,30 @@ def build_builder_channel_tools(
             else:
                 contact_error = "Arthur session tidak punya device_id WhatsApp, jadi vCard tidak bisa dikirim dari nomor Arthur."
 
+        instruction_message = _trial_instruction_message(
+            contact_name=contact_name,
+            code=code,
+            wa_me_url=wa_me_url,
+            contact_sent=contact_sent,
+        )
+        if target and device_id and not device_id.startswith("wadev_") and not contact_already_sent:
+            try:
+                from app.core.infra.wa_client import send_wa_message
+
+                await send_wa_message(device_id, target, instruction_message)
+                instruction_message_sent = True
+            except Exception as exc:
+                instruction_message_error = str(exc)
+        elif device_id and device_id.startswith("wadev_"):
+            instruction_message_error = (
+                "Arthur sedang berjalan lewat nomor shared wa-dev, jadi pesan kode/link tidak dikirim "
+                "dari nomor trial itu sendiri."
+            )
+        elif not target:
+            instruction_message_error = "Target WhatsApp kosong, jadi pesan kode/link tidak bisa dikirim."
+        elif not device_id:
+            instruction_message_error = "Arthur session tidak punya device_id WhatsApp, jadi pesan kode/link tidak bisa dikirim."
+
         return json.dumps({
             "success": True,
             "agent_id": resolved_agent_id,
@@ -300,6 +347,9 @@ def build_builder_channel_tools(
             "contact_sent": contact_sent,
             "contact_already_sent": contact_already_sent,
             "contact_error": contact_error,
+            "instruction_message_sent": instruction_message_sent,
+            "instruction_message_error": instruction_message_error,
+            "instruction_message": instruction_message,
             "instruction_for_user": (
                 f"Simpan kontak {contact_name}, atau buka link wa.me. "
                 f"Kirim kode {code} untuk menghubungkan WhatsApp ke agent ini. "
