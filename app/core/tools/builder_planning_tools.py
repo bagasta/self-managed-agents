@@ -67,6 +67,11 @@ def build_builder_planning_tools(
         "setuju/lanjut?" kecuali ada validation_errors atau data kritis yang benar-benar
         wajib dari user.
 
+        PENGECUALIAN WAJIB: kalau plan_status == "needs_clarification" atau ada isi di
+        capability_clarifications, JANGAN create dulu. Tanyakan dulu kebutuhan itu ke user
+        (mis. apakah agent perlu menerima/membuat file atau visualisasi data) supaya tools
+        seperti sandbox/whatsapp_media tidak salah ditebak. Pahami kebutuhan dulu, jangan asumsi.
+
         Args:
             user_goal: Deskripsi singkat apa yang user ingin agentnya lakukan
             agent_name: Nama agent yang diinginkan (opsional)
@@ -203,6 +208,55 @@ def build_builder_planning_tools(
         if wants_google:
             tools_config = _enable_google_workspace_tools(tools_config)
 
+        # --- Capability discovery: JANGAN asumsi kebutuhan file/data/visualisasi ---
+        # Agent percakapan/CS sering belakangan diminta MENERIMA file (PDF/Excel/CSV/gambar)
+        # atau MEMBUAT laporan/visualisasi PDF. Tanpa sandbox + whatsapp_media agent tak punya
+        # tool untuk baca file maupun bikin/kirim file → balas "file tidak ditemukan" padahal
+        # filenya tersimpan. Kalau sinyal kebutuhan file tidak jelas DAN tidak dinegasikan user,
+        # Arthur WAJIB tanya dulu sebelum create — bukan menebak.
+        file_capability_signal = bool(
+            wants_files
+            or wants_generated_files
+            or explicit_media_request
+            or file_delivery_workflow
+            or generated_file_workflow
+        )
+        file_capability_negated = any(
+            p in feature_text
+            for p in (
+                "tanpa file",
+                "tidak perlu file",
+                "tidak butuh file",
+                "no file",
+                "tanpa dokumen",
+                "tidak perlu dokumen",
+                "hanya teks",
+                "cuma teks",
+                "teks saja",
+                "text only",
+                "tanpa lampiran",
+            )
+        )
+        file_ready = bool(tools_config.get("sandbox")) and bool(tools_config.get("whatsapp_media"))
+        capability_clarifications: list[dict] = []
+        if not file_capability_signal and not file_capability_negated and not file_ready:
+            capability_clarifications.append(
+                {
+                    "topic": "file_data_visualization",
+                    "question": (
+                        "Apakah agent ini nantinya perlu MENERIMA file dari user (mis. PDF, Excel, "
+                        "CSV, gambar) ATAU MEMBUAT file/laporan/visualisasi data (mis. grafik atau PDF) "
+                        "untuk dikirim balik ke user?"
+                    ),
+                    "if_yes": (
+                        "Panggil plan_agent LAGI dengan requested_features menambahkan "
+                        "'file,visualisasi' (tambah 'sandbox' bila perlu analisa/olah data) supaya "
+                        "sandbox + whatsapp_media + subagents otomatis aktif sebelum create."
+                    ),
+                    "if_no": "Lanjut tanpa tools file (sandbox & whatsapp_media tetap nonaktif).",
+                }
+            )
+
         # Validate tool dependencies
         validation_errors: list[str] = []
         validation_warnings: list[str] = []
@@ -273,8 +327,44 @@ def build_builder_planning_tools(
         plan_status = (
             "blocked_by_subscription"
             if entitlement_blocked
-            else "ready" if not validation_errors else "has_errors"
+            else "has_errors"
+            if validation_errors
+            else "needs_clarification"
+            if capability_clarifications
+            else "ready"
         )
+
+        if agent_count_block:
+            next_action = (
+                "User SUDAH punya agent dan sedang di batas jumlah agent paketnya. "
+                "Kalau user ingin MENGUBAH/MEMPERBAIKI agent yang sudah ada (mis. eskalasi, notifikasi, "
+                "instruksi, fitur) — itu TIDAK kena limit jumlah agent. JANGAN suruh upgrade. "
+                "Pakai list_my_agents lalu update_agent pada agent yang dimaksud. "
+                "Tawarkan upgrade HANYA kalau user benar-benar ingin MEMBUAT agent BARU tambahan."
+            )
+        elif entitlement_blocked:
+            next_action = "Jelaskan limit paket dengan bahasa sederhana dan tawarkan upgrade/top up sebelum lanjut membuat agent."
+        elif validation_errors:
+            next_action = "Perbaiki validation_errors sebelum create."
+        elif capability_clarifications:
+            next_action = (
+                "JANGAN create_agent dulu — PAHAMI kebutuhan user, jangan menebak. "
+                "Tanyakan ke user (bahasa awam) pertanyaan di capability_clarifications[].question "
+                "untuk memastikan apakah agent perlu menerima/membuat file atau visualisasi data. "
+                "Kalau user jawab YA → ikuti if_yes (panggil plan_agent ulang dengan fitur file). "
+                "Kalau user jawab TIDAK → ikuti if_no, lalu lanjut compose_agent_blueprint/compose_agent_instructions."
+            )
+        elif google_workspace_option.get("should_offer"):
+            next_action = (
+                "Tawarkan opsi integrasi Google Workspace dengan bahasa awam memakai google_workspace_option.user_facing_pitch. "
+                "Jika user setuju, panggil plan_agent lagi dengan requested_features berisi google sebelum create. "
+                "Jika user menolak, lanjutkan compose_agent_blueprint/compose_agent_instructions tanpa Google."
+            )
+        else:
+            next_action = (
+                "Untuk agent bisnis/custom, panggil compose_agent_blueprint lalu compose_agent_instructions. "
+                "Setelah itu validate_agent_config dan create_agent tanpa minta approval mikro."
+            )
         plan = {
             "plan_status": plan_status,
             "detected_preset": detected_preset,
@@ -314,31 +404,12 @@ def build_builder_planning_tools(
             "required_post_create_steps": _get_post_create_steps(detected_preset, effective_channel, tools_config),
             "validation_errors": validation_errors,
             "validation_warnings": validation_warnings,
+            "capability_clarifications": capability_clarifications,
             "critical_limitations": critical_limitations,
             "creation_entitlement_check": creation_entitlement_check,
             "google_workspace_option": google_workspace_option,
             "smoke_test_guidance": preset.get("smoke_test", {}).get("steps", []),
-            "next_action": (
-                "User SUDAH punya agent dan sedang di batas jumlah agent paketnya. "
-                "Kalau user ingin MENGUBAH/MEMPERBAIKI agent yang sudah ada (mis. eskalasi, notifikasi, "
-                "instruksi, fitur) — itu TIDAK kena limit jumlah agent. JANGAN suruh upgrade. "
-                "Pakai list_my_agents lalu update_agent pada agent yang dimaksud. "
-                "Tawarkan upgrade HANYA kalau user benar-benar ingin MEMBUAT agent BARU tambahan."
-                if agent_count_block
-                else "Jelaskan limit paket dengan bahasa sederhana dan tawarkan upgrade/top up sebelum lanjut membuat agent."
-                if entitlement_blocked
-                else
-                (
-                    "Tawarkan opsi integrasi Google Workspace dengan bahasa awam memakai google_workspace_option.user_facing_pitch. "
-                    "Jika user setuju, panggil plan_agent lagi dengan requested_features berisi google sebelum create. "
-                    "Jika user menolak, lanjutkan compose_agent_blueprint/compose_agent_instructions tanpa Google."
-                )
-                if google_workspace_option.get("should_offer") and not validation_errors
-                else "Untuk agent bisnis/custom, panggil compose_agent_blueprint lalu compose_agent_instructions. "
-                "Setelah itu validate_agent_config dan create_agent tanpa minta approval mikro."
-                if not validation_errors
-                else "Perbaiki validation_errors sebelum create."
-            ),
+            "next_action": next_action,
         }
         return json.dumps(plan, ensure_ascii=False, indent=2)
 
