@@ -89,27 +89,6 @@ def _mark_contact_sent(key: str) -> None:
     _contact_send_dedupe[key] = time.monotonic()
 
 
-def _trial_instruction_message(
-    *,
-    contact_name: str,
-    code: str,
-    wa_me_url: str,
-    contact_sent: bool,
-) -> str:
-    prefix = (
-        f"Kontak {contact_name} sudah saya kirim."
-        if contact_sent
-        else f"Nomor demo untuk {contact_name} sudah siap."
-    )
-    return (
-        f"{prefix}\n\n"
-        "Cara pakainya:\n"
-        f"1. Simpan kontak {contact_name}, atau buka link ini:\n{wa_me_url}\n"
-        f"2. Kirim kode: {code}\n"
-        "3. Setelah terhubung, langsung chat dengan agent kamu di nomor demo itu."
-    )
-
-
 async def _latest_user_message_for_session(db: Any, session_id: str | None) -> str:
     if not session_id:
         return ""
@@ -124,6 +103,33 @@ async def _latest_user_message_for_session(db: Any, session_id: str | None) -> s
         .limit(1)
     )
     return str(result.scalar_one_or_none() or "")
+
+
+def _agent_id(agent: Agent | None) -> str:
+    return str(getattr(agent, "id", "") or "")
+
+
+def _trial_target_error(
+    *,
+    error: str,
+    latest_user_message: str,
+    provided_agent: Agent | None,
+    latest_agent: Agent | None,
+    owned_agents: list[Agent],
+) -> str:
+    return json.dumps({
+        "success": False,
+        "error": error,
+        "requested_message": latest_user_message,
+        "provided_agent": _agent_summary(provided_agent) if provided_agent else None,
+        "latest_agent": _agent_summary(latest_agent) if latest_agent else None,
+        "available_agents": [_agent_summary(a) for a in owned_agents],
+        "instruction_for_assistant": (
+            "Jangan kirim vCard/kode untuk agent lain dari history lama. "
+            "Jika user tidak menyebut nama agent dan ada agent terbaru dari konteks pembuatan terakhir, "
+            "pakai latest_agent. Kalau ragu, minta user pilih nama agent."
+        ),
+    }, ensure_ascii=False, indent=2)
 
 
 def build_builder_channel_tools(
@@ -176,6 +182,8 @@ def build_builder_channel_tools(
         settings = _get_settings()
 
         async with db_factory() as db:
+            owned_agents_for_context: list[Agent] = []
+            latest_user_message = ""
             if agent_uuid:
                 result = await db.execute(
                     select(Agent).where(Agent.id == agent_uuid, Agent.is_deleted.is_(False))
@@ -187,6 +195,7 @@ def build_builder_channel_tools(
                     owner_phone=owner_phone,
                     self_agent_id=self_agent_id,
                 )
+                owned_agents_for_context = owned_agents
                 latest_user_message = await _latest_user_message_for_session(db, session_id)
                 match_source = agent_name or latest_user_message
                 agent, ambiguous = _match_agent_by_text(owned_agents, match_source)
@@ -228,13 +237,13 @@ def build_builder_channel_tools(
                 )
             if owner_phone and not _agent_belongs_to_owner(agent, owner_phone):
                 return "[error] Kamu tidak punya akses ke agent ini"
-            if agent_uuid and owner_phone and session_id:
-                owned_agents = await _owned_agents_for_trial(
+            if owner_phone and session_id:
+                owned_agents = owned_agents_for_context or await _owned_agents_for_trial(
                     db,
                     owner_phone=owner_phone,
                     self_agent_id=self_agent_id,
                 )
-                latest_user_message = await _latest_user_message_for_session(db, session_id)
+                latest_user_message = latest_user_message or await _latest_user_message_for_session(db, session_id)
                 mentioned_agent, _ = _match_agent_by_text(owned_agents, latest_user_message)
                 if mentioned_agent and str(getattr(mentioned_agent, "id", "")) != str(getattr(agent, "id", "")):
                     return json.dumps({
@@ -248,6 +257,16 @@ def build_builder_channel_tools(
                             "panggil create_wa_dev_trial_link lagi dengan agent_id/agent_name detected_agent."
                         ),
                     }, ensure_ascii=False, indent=2)
+                if len(owned_agents) > 1 and not mentioned_agent:
+                    latest_agent = owned_agents[0] if owned_agents else None
+                    if latest_agent and _agent_id(agent) != _agent_id(latest_agent):
+                        return _trial_target_error(
+                            error="agent_target_ambiguous_for_current_request",
+                            latest_user_message=latest_user_message,
+                            provided_agent=agent,
+                            latest_agent=latest_agent,
+                            owned_agents=owned_agents,
+                        )
             resolved_agent_id = str(agent.id)
             resolved_agent_name = agent.name
             contact_name = _demo_contact_name(resolved_agent_name)
@@ -288,8 +307,6 @@ def build_builder_channel_tools(
         contact_sent = False
         contact_error = ""
         contact_already_sent = False
-        instruction_message_sent = False
-        instruction_message_error = ""
         if send_contact and target:
             dedupe_key = _contact_dedupe_key(session_id, target, resolved_agent_id)
             if _contact_recently_sent(dedupe_key):
@@ -312,30 +329,6 @@ def build_builder_channel_tools(
             else:
                 contact_error = "Arthur session tidak punya device_id WhatsApp, jadi vCard tidak bisa dikirim dari nomor Arthur."
 
-        instruction_message = _trial_instruction_message(
-            contact_name=contact_name,
-            code=code,
-            wa_me_url=wa_me_url,
-            contact_sent=contact_sent,
-        )
-        if target and device_id and not device_id.startswith("wadev_") and not contact_already_sent:
-            try:
-                from app.core.infra.wa_client import send_wa_message
-
-                await send_wa_message(device_id, target, instruction_message)
-                instruction_message_sent = True
-            except Exception as exc:
-                instruction_message_error = str(exc)
-        elif device_id and device_id.startswith("wadev_"):
-            instruction_message_error = (
-                "Arthur sedang berjalan lewat nomor shared wa-dev, jadi pesan kode/link tidak dikirim "
-                "dari nomor trial itu sendiri."
-            )
-        elif not target:
-            instruction_message_error = "Target WhatsApp kosong, jadi pesan kode/link tidak bisa dikirim."
-        elif not device_id:
-            instruction_message_error = "Arthur session tidak punya device_id WhatsApp, jadi pesan kode/link tidak bisa dikirim."
-
         return json.dumps({
             "success": True,
             "agent_id": resolved_agent_id,
@@ -347,9 +340,6 @@ def build_builder_channel_tools(
             "contact_sent": contact_sent,
             "contact_already_sent": contact_already_sent,
             "contact_error": contact_error,
-            "instruction_message_sent": instruction_message_sent,
-            "instruction_message_error": instruction_message_error,
-            "instruction_message": instruction_message,
             "instruction_for_user": (
                 f"Simpan kontak {contact_name}, atau buka link wa.me. "
                 f"Kirim kode {code} untuk menghubungkan WhatsApp ke agent ini. "

@@ -171,6 +171,26 @@ def test_builder_trial_link_ambiguous_target_asks_agent_name():
     assert "Rnd" in out
 
 
+def test_builder_trial_link_current_request_ambiguity_asks_agent_name():
+    steps = [
+        {
+            "tool": "create_wa_dev_trial_link",
+            "result": (
+                '{"success": false, "error": "agent_target_ambiguous_for_current_request", '
+                '"available_agents": [{"agent_name": "Baas"}, {"agent_name": "Mas Brew"}], '
+                '"latest_agent": {"agent_name": "Baas"}, '
+                '"provided_agent": {"agent_name": "Mas Brew"}}'
+            ),
+        }
+    ]
+
+    out = ensure_non_empty_reply("", steps)
+
+    assert "Mau nomor demo agent yang mana?" in out
+    assert "Baas" in out
+    assert "Mas Brew" in out
+
+
 def test_builder_trial_link_target_conflict_does_not_claim_sent():
     steps = [
         {
@@ -188,6 +208,53 @@ def test_builder_trial_link_target_conflict_does_not_claim_sent():
     assert "tidak salah kirim" in out
     assert "Mas Brew" in out
     assert "Rnd" not in out
+
+
+def test_builder_trial_link_reply_without_code_or_link_is_replaced():
+    steps = [
+        {
+            "tool": "create_wa_dev_trial_link",
+            "result": (
+                '{"success": true, "agent_name": "Baas", "code": "8EX446", '
+                '"wa_me_url": "https://wa.me/6282221000062?text=Kode%208EX446", '
+                '"shared_whatsapp_name": "Demo Baas", "contact_sent": true}'
+            ),
+        }
+    ]
+
+    out = ensure_non_empty_reply("Kode demo untuk Baas sudah saya kirim ke WhatsApp kamu.", steps)
+
+    assert "Kontak Demo Baas sudah saya kirim" in out
+    assert "8EX446" in out
+    assert "https://wa.me/6282221000062" in out
+
+
+def test_builder_trial_link_success_wins_over_later_blocked_stale_target():
+    steps = [
+        {
+            "tool": "create_wa_dev_trial_link",
+            "result": (
+                '{"success": true, "agent_name": "Baas", "code": "8EX446", '
+                '"wa_me_url": "https://wa.me/6282221000062?text=Kode%208EX446", '
+                '"shared_whatsapp_name": "Demo Baas", "contact_sent": true}'
+            ),
+        },
+        {
+            "tool": "create_wa_dev_trial_link",
+            "result": (
+                '{"success": false, "error": "agent_target_ambiguous_for_current_request", '
+                '"available_agents": [{"agent_name": "Baas"}, {"agent_name": "Mas Brew"}], '
+                '"latest_agent": {"agent_name": "Baas"}, '
+                '"provided_agent": {"agent_name": "Mas Brew"}}'
+            ),
+        },
+    ]
+
+    out = ensure_non_empty_reply("", steps)
+
+    assert "Kontak Demo Baas sudah saya kirim" in out
+    assert "8EX446" in out
+    assert "Mas Brew" not in out
 
 
 def test_builder_reply_sanitizes_webchat_channel_offer():

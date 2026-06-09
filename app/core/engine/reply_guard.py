@@ -211,6 +211,7 @@ def _builder_fallback_reply(steps: list[dict[str, Any]]) -> str | None:
     if not any(name in _BUILDER_TOOLS for name in tool_names):
         return None
 
+    trial_link_error_reply: str | None = None
     for step in reversed(steps or []):
         if step.get("tool") != "create_wa_dev_trial_link":
             continue
@@ -219,7 +220,12 @@ def _builder_fallback_reply(steps: list[dict[str, Any]]) -> str | None:
             continue
         if data.get("success") is False:
             error = str(data.get("error") or "").strip()
-            if error in {"agent_target_required", "agent_name_ambiguous", "agent_name_not_found_or_ambiguous"}:
+            if error in {
+                "agent_target_required",
+                "agent_name_ambiguous",
+                "agent_name_not_found_or_ambiguous",
+                "agent_target_ambiguous_for_current_request",
+            }:
                 agents = data.get("available_agents") or data.get("candidate_agents") or []
                 names = [
                     str(item.get("agent_name") or "").strip()
@@ -227,20 +233,32 @@ def _builder_fallback_reply(steps: list[dict[str, Any]]) -> str | None:
                     if isinstance(item, dict) and str(item.get("agent_name") or "").strip()
                 ]
                 if names:
-                    return "Mau nomor demo agent yang mana? Pilih salah satu: " + ", ".join(names) + "."
-                return "Mau nomor demo agent yang mana? Sebut nama agent-nya dulu ya."
+                    trial_link_error_reply = trial_link_error_reply or (
+                        "Mau nomor demo agent yang mana? Pilih salah satu: " + ", ".join(names) + "."
+                    )
+                    continue
+                trial_link_error_reply = trial_link_error_reply or "Mau nomor demo agent yang mana? Sebut nama agent-nya dulu ya."
+                continue
             if error == "agent_target_conflict":
                 detected = data.get("detected_agent") if isinstance(data.get("detected_agent"), dict) else {}
                 name = str(detected.get("agent_name") or "").strip()
                 if name:
-                    return f"Saya tahan dulu supaya tidak salah kirim. Kamu maksud nomor demo untuk {name}, kan?"
-                return "Saya tahan dulu supaya tidak salah kirim. Sebut ulang nama agent yang kamu mau."
+                    trial_link_error_reply = trial_link_error_reply or f"Saya tahan dulu supaya tidak salah kirim. Kamu maksud nomor demo untuk {name}, kan?"
+                    continue
+                trial_link_error_reply = trial_link_error_reply or "Saya tahan dulu supaya tidak salah kirim. Sebut ulang nama agent yang kamu mau."
+                continue
         link = data.get("wa_link") or data.get("link") or data.get("trial_link") or data.get("wa_me_url")
         code = data.get("trial_code") or data.get("code")
         if link and code:
-            return f"Agent-nya sudah siap dicoba. Kode trialnya {code}. Link: {link}"
+            agent_name = str(data.get("agent_name") or "agent").strip()
+            contact_name = str(data.get("shared_whatsapp_name") or "").strip()
+            if data.get("contact_sent") and contact_name:
+                return f"Kontak {contact_name} sudah saya kirim. Kode trial {agent_name}: {code}. Link: {link}"
+            return f"Kode trial {agent_name}: {code}. Link: {link}"
         if link:
             return f"Agent-nya sudah siap dicoba. Link: {link}"
+    if trial_link_error_reply:
+        return trial_link_error_reply
 
     for step in reversed(steps or []):
         if step.get("tool") != "create_agent":
@@ -290,6 +308,24 @@ def _builder_fallback_reply(steps: list[dict[str, Any]]) -> str | None:
     )
 
 
+def _trial_link_reply_is_complete(reply: str, steps: list[dict[str, Any]]) -> bool:
+    text = reply or ""
+    for step in reversed(steps or []):
+        if step.get("tool") != "create_wa_dev_trial_link":
+            continue
+        data = _parse_step_result(step.get("result"))
+        if not data or data.get("success") is False:
+            continue
+        link = str(data.get("wa_link") or data.get("link") or data.get("trial_link") or data.get("wa_me_url") or "")
+        code = str(data.get("trial_code") or data.get("code") or "")
+        if link and link not in text:
+            return False
+        if code and code not in text:
+            return False
+        return True
+    return True
+
+
 def _disabled_capability_guard_reply(
     reply: str,
     *,
@@ -328,6 +364,13 @@ def ensure_non_empty_reply(
         if _is_builder_context(steps, active_groups):
             text = _sanitize_builder_channel_reply(text)
         builder_reply = _builder_fallback_reply(steps)
+        tool_names = _step_tool_names(steps)
+        if (
+            builder_reply
+            and "create_wa_dev_trial_link" in tool_names
+            and not _trial_link_reply_is_complete(text, steps)
+        ):
+            return builder_reply
         missing_whatsapp_onboarding = (
             builder_reply
             and "nomor demo Arthur" in builder_reply
@@ -338,7 +381,6 @@ def ensure_non_empty_reply(
             or _looks_like_technical_builder_reply(text)
             or missing_whatsapp_onboarding
         ):
-            tool_names = _step_tool_names(steps)
             if (
                 "create_agent" in tool_names
                 or "update_agent" in tool_names
@@ -353,16 +395,16 @@ def ensure_non_empty_reply(
         )
         return disabled_guard_reply or text
 
+    builder_reply = _builder_fallback_reply(steps)
+    if builder_reply:
+        return builder_reply
+
     url_pat = re.compile(r"https://[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}(?:/[^\s\"']*)?")
     for step in steps or []:
         result = str(step.get("result", ""))
         match = url_pat.search(result)
         if match:
             return f"Proses selesai. Cek hasilnya di sini: {match.group(0).rstrip('.,)')}"
-
-    builder_reply = _builder_fallback_reply(steps)
-    if builder_reply:
-        return builder_reply
 
     if steps:
         tool_names = _step_tool_names(steps)

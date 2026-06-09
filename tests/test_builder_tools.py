@@ -1914,7 +1914,6 @@ class TestCreateWADevTrialLink:
                 new=AsyncMock(return_value="AB234C"),
             ),
             patch("app.core.infra.wa_client.send_wa_contact", new=AsyncMock()) as send_contact,
-            patch("app.core.infra.wa_client.send_wa_message", new=AsyncMock()) as send_message,
         ):
             tools = build_builder_tools(
                 db_factory=db,
@@ -1935,15 +1934,8 @@ class TestCreateWADevTrialLink:
             "Demo Agent Baru",
             "628123456789",
         )
-        send_message.assert_awaited_once()
-        assert send_message.await_args.args[0] == "arthur-device"
-        assert send_message.await_args.args[1] == "+62811xxx"
-        assert "https://wa.me/628123456789" in send_message.await_args.args[2]
-        assert "AB234C" in send_message.await_args.args[2]
         assert data["shared_whatsapp_name"] == "Demo Agent Baru"
-        assert data["instruction_message_sent"] is True
-        assert "AB234C" in data["instruction_message"]
-        assert data["wa_me_url"] in data["instruction_message"]
+        assert "AB234C" in data["wa_me_url"]
         assert "Simpan kontak Demo Agent Baru" in data["instruction_for_user"]
 
     def test_omitted_agent_id_requires_target_when_multiple_owned_agents(self):
@@ -1973,7 +1965,6 @@ class TestCreateWADevTrialLink:
                 new=AsyncMock(return_value="3HRNM4"),
             ) as ensure_code,
             patch("app.core.infra.wa_client.send_wa_contact", new=AsyncMock()) as send_contact,
-            patch("app.core.infra.wa_client.send_wa_message", new=AsyncMock()) as send_message,
         ):
             tools = build_builder_tools(
                 db_factory=db,
@@ -2012,7 +2003,6 @@ class TestCreateWADevTrialLink:
                 new=AsyncMock(return_value="79ZSXT"),
             ) as ensure_code,
             patch("app.core.infra.wa_client.send_wa_contact", new=AsyncMock()) as send_contact,
-            patch("app.core.infra.wa_client.send_wa_message", new=AsyncMock()) as send_message,
         ):
             tools = build_builder_tools(
                 db_factory=db,
@@ -2031,9 +2021,89 @@ class TestCreateWADevTrialLink:
         ensure_code.assert_awaited_once()
         assert ensure_code.await_args.args[1] is mas_brew_agent
         send_contact.assert_awaited_once_with("arthur-device", "+62811xxx", "Demo Mas Brew", "628123456789")
-        send_message.assert_awaited_once()
-        assert "79ZSXT" in send_message.await_args.args[2]
-        assert data["instruction_message_sent"] is True
+
+    def test_ambiguous_code_request_blocks_stale_agent_name_from_history(self):
+        from app.core.tools.builder_tools import build_builder_tools
+        db = _make_mock_db()
+
+        baas_agent = _make_mock_agent(name="Baas", operator_ids=["+62811xxx"])
+        mas_brew_agent = _make_mock_agent(name="Mas Brew", operator_ids=["+62811xxx"])
+        owned_result = MagicMock()
+        owned_result.scalars.return_value.all.return_value = [baas_agent, mas_brew_agent]
+        message_result = MagicMock()
+        message_result.scalar_one_or_none.return_value = "Bagi kodenya"
+        db.execute = AsyncMock(side_effect=[owned_result, message_result])
+
+        settings = MagicMock()
+        settings.wa_dev_public_phone = "+628123456789"
+
+        with (
+            patch("app.core.tools.builder_tools.get_settings", return_value=settings),
+            patch(
+                "app.core.domain.wa_dev_trial_service.ensure_wa_dev_trial_code",
+                new=AsyncMock(return_value="OLD123"),
+            ) as ensure_code,
+            patch("app.core.infra.wa_client.send_wa_contact", new=AsyncMock()) as send_contact,
+        ):
+            tools = build_builder_tools(
+                db_factory=db,
+                owner_phone="+62811xxx",
+                device_id="arthur-device",
+                default_target="+62811xxx",
+                session_id=str(uuid.uuid4()),
+            )
+            tool = next(t for t in tools if t.name == "create_wa_dev_trial_link")
+            result = _run(tool.ainvoke({"agent_name": "Mas Brew"}))
+
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"] == "agent_target_ambiguous_for_current_request"
+        assert data["latest_agent"]["agent_name"] == "Baas"
+        assert data["provided_agent"]["agent_name"] == "Mas Brew"
+        ensure_code.assert_not_awaited()
+        send_contact.assert_not_awaited()
+
+    def test_ambiguous_code_request_allows_latest_agent_id(self):
+        from app.core.tools.builder_tools import build_builder_tools
+        db = _make_mock_db()
+
+        baas_agent = _make_mock_agent(name="Baas", operator_ids=["+62811xxx"])
+        mas_brew_agent = _make_mock_agent(name="Mas Brew", operator_ids=["+62811xxx"])
+        direct_result = MagicMock()
+        direct_result.scalar_one_or_none.return_value = baas_agent
+        owned_result = MagicMock()
+        owned_result.scalars.return_value.all.return_value = [baas_agent, mas_brew_agent]
+        message_result = MagicMock()
+        message_result.scalar_one_or_none.return_value = "Bagi kodenya"
+        db.execute = AsyncMock(side_effect=[direct_result, owned_result, message_result])
+
+        settings = MagicMock()
+        settings.wa_dev_public_phone = "+628123456789"
+
+        with (
+            patch("app.core.tools.builder_tools.get_settings", return_value=settings),
+            patch(
+                "app.core.domain.wa_dev_trial_service.ensure_wa_dev_trial_code",
+                new=AsyncMock(return_value="8EX446"),
+            ) as ensure_code,
+            patch("app.core.infra.wa_client.send_wa_contact", new=AsyncMock()) as send_contact,
+        ):
+            tools = build_builder_tools(
+                db_factory=db,
+                owner_phone="+62811xxx",
+                device_id="arthur-device",
+                default_target="+62811xxx",
+                session_id=str(uuid.uuid4()),
+            )
+            tool = next(t for t in tools if t.name == "create_wa_dev_trial_link")
+            result = _run(tool.ainvoke({"agent_id": str(baas_agent.id)}))
+
+        data = json.loads(result)
+        assert data["success"] is True
+        assert data["agent_name"] == "Baas"
+        assert data["code"] == "8EX446"
+        ensure_code.assert_awaited_once()
+        send_contact.assert_awaited_once_with("arthur-device", "+62811xxx", "Demo Baas", "628123456789")
 
     def test_stale_agent_id_conflicting_with_user_message_does_not_send_wrong_contact(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -2118,7 +2188,6 @@ class TestCreateWADevTrialLink:
                 new=AsyncMock(return_value="79ZSXT"),
             ),
             patch("app.core.infra.wa_client.send_wa_contact", new=AsyncMock()) as send_contact,
-            patch("app.core.infra.wa_client.send_wa_message", new=AsyncMock()) as send_message,
         ):
             tools = build_builder_tools(
                 db_factory=db,
@@ -2136,9 +2205,6 @@ class TestCreateWADevTrialLink:
         assert second["contact_sent"] is False
         assert second["contact_already_sent"] is True
         send_contact.assert_awaited_once_with("arthur-device", "+62811xxx", "Demo Mas Brew", "628123456789")
-        send_message.assert_awaited_once()
-        assert first["instruction_message_sent"] is True
-        assert second["instruction_message_sent"] is False
 
 
 # ────────────────────────────────────────────────────────────────────────────
