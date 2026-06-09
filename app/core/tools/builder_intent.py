@@ -231,7 +231,12 @@ def _looks_like_file_delivery_workflow(*parts: Any) -> bool:
         "cv dikirim",
         "kirim cv",
         "laporan final",
+        "laporan pdf",
         "report final",
+        "visualisasi data",
+        "data visualization",
+        "grafik",
+        "chart",
     )
     return any(marker in text for marker in file_markers)
 
@@ -250,6 +255,9 @@ def _looks_like_generated_file_workflow(*parts: Any) -> bool:
         "resume ats",
         "laporan",
         "report",
+        "visualisasi",
+        "grafik",
+        "chart",
         "proposal",
         "dokumen final",
     )
@@ -397,4 +405,3 @@ def _critical_workflow_config_errors(
     if generated_file_workflow and (not tc.get("sandbox") or not _subagents_enabled(tc)):
         errors.append("Workflow pembuatan file final wajib sandbox=true dan subagents.enabled=true.")
     return errors
-

@@ -195,6 +195,64 @@ async def test_shared_pdf_followup_invokes_document_tool_directly():
     assert parsed["db_messages"][-1].tool_name == "send_whatsapp_document"
 
 
+def test_shared_artifact_is_remembered_for_later_whatsapp_delivery():
+    from app.core.engine.agent_runner import (
+        _latest_shared_artifact_path_for_delivery,
+        _remember_latest_shared_artifact,
+    )
+
+    session = SimpleNamespace(metadata_={})
+    steps = [
+        {
+            "tool": "task",
+            "result": (
+                "Laporan PDF selesai dibuat di "
+                "/workspace/shared/Laporan_Titanic_Bagas.pdf — SIAP_DIKIRIM_PARENT."
+            ),
+        }
+    ]
+    history_rows = [
+        SimpleNamespace(
+            content="Mau saya kirim file PDF Laporan_Titanic_Bagas.pdf sekarang?",
+            tool_result="",
+        )
+    ]
+
+    remembered = _remember_latest_shared_artifact(session, steps, "File siap.", sent=False)
+    resend_path = _latest_shared_artifact_path_for_delivery(
+        session=session,
+        history_rows=history_rows,
+        user_message="Iya",
+    )
+
+    assert remembered == "/workspace/shared/Laporan_Titanic_Bagas.pdf"
+    assert session.metadata_["latest_shared_artifact"]["filename"] == "Laporan_Titanic_Bagas.pdf"
+    assert resend_path == "/workspace/shared/Laporan_Titanic_Bagas.pdf"
+
+
+def test_shared_artifact_can_be_recovered_from_history_for_file_request():
+    from app.core.engine.agent_runner import _latest_shared_artifact_path_for_delivery
+
+    session = SimpleNamespace(metadata_={})
+    history_rows = [
+        SimpleNamespace(
+            content="",
+            tool_result=(
+                "✅ PDF dibuat di /workspace/shared/Laporan_Titanic_Bagas.pdf "
+                "— SIAP_DIKIRIM_PARENT."
+            ),
+        )
+    ]
+
+    resend_path = _latest_shared_artifact_path_for_delivery(
+        session=session,
+        history_rows=history_rows,
+        user_message="Kirim file pdf",
+    )
+
+    assert resend_path == "/workspace/shared/Laporan_Titanic_Bagas.pdf"
+
+
 def test_send_to_number_blocks_media_delivery_claim_text():
     from app.core.tools.escalation_tool import _looks_like_media_delivery_text
 
@@ -204,6 +262,13 @@ def test_send_to_number_blocks_media_delivery_claim_text():
     assert _looks_like_media_delivery_text(
         "Maaf Bos, saya akan langsung kirim file PDF visualisasi data Titanic sekarang."
     )
+    assert _looks_like_media_delivery_text(
+        "Berikut saya kirimkan file PDF laporan visualisasi data Titanic yang Bos minta."
+    )
+    assert _looks_like_media_delivery_text(
+        "Bos Bagas, file laporan sudah selesai dibuat. Saya kirim file PDF-nya ke WhatsApp Bos sekarang."
+    )
+    assert _looks_like_media_delivery_text("Silakan cek file terlampir.")
     assert not _looks_like_media_delivery_text("Halo Julia, meeting kita jam 3 sore ya.")
 
 

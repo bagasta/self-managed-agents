@@ -376,6 +376,165 @@ async def _deliver_shared_whatsapp_file_via_tool(
     return True, f"File {filename} sudah saya kirim ke WhatsApp."
 
 
+def _shared_artifact_record(shared_path: str, *, sent: bool = False) -> dict[str, Any]:
+    filename = (shared_path or "").rsplit("/", 1)[-1] or "file"
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    return {
+        "path": shared_path,
+        "filename": filename,
+        "extension": ext,
+        "sent": bool(sent),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _remember_shared_artifact_path(
+    session: Session,
+    shared_path: str | None,
+    *,
+    sent: bool = False,
+) -> str | None:
+    """Persist the latest shared artifact path so later WA turns can resend it."""
+    if not shared_path:
+        return None
+    record = _shared_artifact_record(shared_path, sent=sent)
+    meta = dict(session.metadata_ or {})
+    artifacts = meta.get("shared_artifacts")
+    if not isinstance(artifacts, list):
+        artifacts = []
+    artifacts = [
+        item
+        for item in artifacts
+        if not (isinstance(item, dict) and item.get("path") == shared_path)
+    ]
+    artifacts.append(record)
+    meta["shared_artifacts"] = artifacts[-10:]
+    meta["latest_shared_artifact"] = record
+    session.metadata_ = meta
+    return shared_path
+
+
+def _remember_latest_shared_artifact(
+    session: Session,
+    steps: list[dict[str, Any]],
+    final_reply: str,
+    *,
+    sent: bool = False,
+) -> str | None:
+    """Store the newest /workspace/shared artifact mentioned by this run."""
+    return _remember_shared_artifact_path(
+        session,
+        _extract_shared_workspace_file_from_steps(steps, final_reply),
+        sent=sent,
+    )
+
+
+def _shared_artifact_paths_from_session(session: Session) -> list[str]:
+    meta = session.metadata_ if isinstance(session.metadata_, dict) else {}
+    paths: list[str] = []
+    latest = meta.get("latest_shared_artifact")
+    if isinstance(latest, dict) and latest.get("path"):
+        paths.append(str(latest["path"]))
+    artifacts = meta.get("shared_artifacts")
+    if isinstance(artifacts, list):
+        for item in reversed(artifacts):
+            if isinstance(item, dict) and item.get("path"):
+                paths.append(str(item["path"]))
+    deduped: list[str] = []
+    for path in paths:
+        if path not in deduped:
+            deduped.append(path)
+    return deduped
+
+
+def _shared_artifact_paths_from_history(history_rows: list[Any]) -> list[str]:
+    paths: list[str] = []
+    for row in reversed(history_rows or []):
+        path = _extract_shared_workspace_file_path(
+            getattr(row, "tool_result", None),
+            getattr(row, "content", None),
+        )
+        if path and path not in paths:
+            paths.append(path)
+    return paths
+
+
+def _requested_shared_file_exts(user_message: str) -> set[str]:
+    text = _operator_message_payload(user_message).lower()
+    requested: set[str] = set()
+    if "pdf" in text:
+        requested.add("pdf")
+    if any(marker in text for marker in ("docx", "word")):
+        requested.add("docx")
+    if any(marker in text for marker in ("xlsx", "excel")):
+        requested.add("xlsx")
+    if "csv" in text:
+        requested.add("csv")
+    if "zip" in text:
+        requested.add("zip")
+    if any(marker in text for marker in ("gambar", "foto", "image", "png", "jpg", "jpeg", "webp")):
+        requested.update({"png", "jpg", "jpeg", "webp"})
+    return requested
+
+
+def _shared_file_matches_request(shared_path: str, user_message: str) -> bool:
+    requested = _requested_shared_file_exts(user_message)
+    if not requested:
+        return True
+    ext = shared_path.rsplit(".", 1)[-1].lower() if "." in shared_path else ""
+    return ext in requested
+
+
+def _is_whatsapp_file_delivery_turn(user_message: str, history_rows: list[Any]) -> bool:
+    if _is_whatsapp_file_delivery_request(user_message, [], ""):
+        return True
+    text = _operator_message_payload(user_message).strip().lower()
+    if not text:
+        return False
+    action_markers = (
+        "kirim",
+        "send",
+        "mana",
+        "ulang",
+        "sekarang",
+        "iya",
+        "ya",
+        "ok",
+        "oke",
+        "boleh",
+        "lanjut",
+    )
+    if not any(marker == text or marker in text for marker in action_markers):
+        return False
+    recent_values: list[str] = []
+    for row in (history_rows or [])[-12:]:
+        recent_values.append(str(getattr(row, "content", "") or ""))
+        recent_values.append(str(getattr(row, "tool_result", "") or ""))
+    recent_text = "\n".join(recent_values)
+    return bool(
+        _extract_shared_workspace_file_path(recent_text)
+        or _is_whatsapp_file_delivery_request("", [], recent_text)
+    )
+
+
+def _latest_shared_artifact_path_for_delivery(
+    *,
+    session: Session,
+    history_rows: list[Any],
+    user_message: str,
+) -> str | None:
+    if not _is_whatsapp_file_delivery_turn(user_message, history_rows):
+        return None
+    candidates = (
+        _shared_artifact_paths_from_session(session)
+        + _shared_artifact_paths_from_history(history_rows)
+    )
+    for path in candidates:
+        if _shared_file_matches_request(path, user_message):
+            return path
+    return candidates[0] if candidates else None
+
+
 async def run_agent(
     *,
     agent_model: AgentModel,
@@ -1068,6 +1227,65 @@ async def run_agent(
             if direct_wa_text_send_context
             else None
         )
+        direct_wa_file_delivery_path = (
+            _latest_shared_artifact_path_for_delivery(
+                session=session,
+                history_rows=history_rows,
+                user_message=execution_user_message,
+            )
+            if getattr(session, "channel_type", None) == "whatsapp"
+            and _is_enabled(tools_config, "whatsapp_media", default=True)
+            and not direct_wa_text_send_context
+            else None
+        )
+        if direct_wa_file_delivery_path:
+            parsed = ParsedResult(
+                final_reply="",
+                steps=[],
+                total_tokens_used=0,
+                db_messages=[],
+                has_output=True,
+            )
+            tool_step_index = step_counter
+            _sent, final_reply = await _deliver_shared_whatsapp_file_via_tool(
+                tools=tools,
+                shared_path=direct_wa_file_delivery_path,
+                parsed=parsed,
+                session_id=session.id,
+                run_id=run_id,
+                step_index=tool_step_index,
+                log=log,
+            )
+            steps = parsed["steps"]
+            _remember_shared_artifact_path(session, direct_wa_file_delivery_path, sent=_sent)
+            for _msg_record in parsed["db_messages"]:
+                db.add(_msg_record)
+            agent_step_index = tool_step_index + len(parsed["db_messages"])
+            db.add(Message(
+                session_id=session.id,
+                role="agent",
+                content=final_reply,
+                step_index=agent_step_index,
+                run_id=run_id,
+            ))
+            run_record.status = "completed"
+            run_record.completed_at = datetime.now(timezone.utc)
+            _apply_run_usage(0)
+            await db.flush()
+            await _cleanup_sandboxes()
+            log.info(
+                "agent_run.whatsapp_file_direct_delivery_from_history",
+                sent=_sent,
+                path=direct_wa_file_delivery_path,
+            )
+            return AgentRunResult(
+                reply=final_reply,
+                steps=steps,
+                run_id=run_id,
+                tokens_used=0,
+                usage=_usage_summary(),
+            )
+
         if direct_wa_confirmation_payload:
             target_phone, draft_message = direct_wa_confirmation_payload
             steps = [
@@ -1640,6 +1858,12 @@ async def run_agent(
         )
         final_reply = parsed["final_reply"]
         steps = parsed["steps"]
+        _current_shared_artifact_path = _remember_latest_shared_artifact(
+            session,
+            steps,
+            final_reply,
+            sent=False,
+        )
         # Prefer callback-based counter — it captures sub-agent LLM calls too.
         # Fall back to result_parser count if callback produced nothing (e.g. mocked LLM).
         _cb_tokens = _agent_logger.total_tokens_from_callbacks
@@ -1802,11 +2026,14 @@ async def run_agent(
             )
             final_reply = _delivery_reply
             steps = parsed["steps"]
+            _remember_shared_artifact_path(session, _wa_shared_file_path, sent=_sent)
             log.info(
                 "agent_run.whatsapp_file_delivery_followup_ok",
                 sent=_sent,
                 deterministic=True,
             )
+        elif _current_shared_artifact_path:
+            log.info("agent_run.shared_artifact_recorded", path=_current_shared_artifact_path)
         for _msg_record in parsed["db_messages"]:
             db.add(_msg_record)
 

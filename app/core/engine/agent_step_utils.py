@@ -30,7 +30,7 @@ def _operator_message_payload(message: str) -> str:
     text = message or ""
     if text.startswith("[OPERATOR] "):
         return text.removeprefix("[OPERATOR] ").strip()
-    if text.startswith("<OPERATOR>"):
+    if text.startswith("<OPERATOR>") or text.startswith("<OWNER>"):
         marker = "\nPesan:"
         idx = text.find(marker)
         if idx != -1:

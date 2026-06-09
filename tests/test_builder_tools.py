@@ -3013,6 +3013,10 @@ class TestLlmJsonRecovery:
 # Section: file_delivery_contract_issues (A4)
 # ────────────────────────────────────────────────────────────────────────────
 
+from app.core.tools.builder_intent import (
+    _looks_like_file_delivery_workflow,
+    _looks_like_generated_file_workflow,
+)
 from app.core.tools.builder_tools import file_delivery_contract_issues
 
 
@@ -3034,6 +3038,13 @@ def test_no_file_delivery_means_no_issue():
 def test_parent_delivery_contract_image_only():
     instr = "/workspace/shared/result.png SIAP_DIKIRIM_PARENT send_whatsapp_image"
     assert file_delivery_contract_issues(instr, file_delivery=True) == []
+
+
+def test_data_visualization_pdf_counts_as_generated_file_workflow():
+    text = "Agent visualisasi data Titanic, buat grafik, lalu kirim laporan PDF ke WhatsApp."
+
+    assert _looks_like_file_delivery_workflow(text) is True
+    assert _looks_like_generated_file_workflow(text) is True
 
 
 # ---------------------------------------------------------------------------

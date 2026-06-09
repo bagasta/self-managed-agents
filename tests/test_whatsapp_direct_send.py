@@ -797,6 +797,24 @@ def test_direct_text_send_context_does_not_capture_media_requests():
     )
 
 
+def test_owner_ok_after_pdf_context_is_not_direct_text_send():
+    owner_ok = (
+        "<OWNER>\n"
+        "Role: OWNER/SUPERADMIN\n"
+        "Name WA: Bagas\n"
+        "No Telepon/WA/Id: 62895619356936\n"
+        "Pesan: ok"
+    )
+
+    assert not _is_direct_whatsapp_text_send_context(
+        owner_ok,
+        [
+            _msg("user", "buatkan visualisasi data dan berikan kembali dalam bentuk file pdf"),
+            _msg("agent", "File PDF sedang saya buat. Nanti akan saya kirimkan segera setelah selesai."),
+        ],
+    )
+
+
 def test_direct_text_send_tool_filter_removes_ambiguous_tools_and_prioritizes_send_to_number():
     tools = [
         _tool("send_message"),
