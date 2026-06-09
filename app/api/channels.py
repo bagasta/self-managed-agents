@@ -81,6 +81,15 @@ logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/v1/channels", tags=["channels"])
 
 
+def _missing_media_payload_reply(media_type: str | None, media_filename: str | None) -> str:
+    safe_name = sanitize_user_input(media_filename or "").strip()
+    label = safe_name or sanitize_user_input(media_type or "lampiran").strip() or "lampiran"
+    return (
+        f"Saya menerima info lampiran {label}, tapi file-nya gagal diambil dari WhatsApp "
+        "jadi belum bisa saya proses. Tolong kirim ulang file itu sekali lagi sebagai dokumen biasa."
+    )
+
+
 def _wa_customer_target(session: Session) -> str:
     cfg = session.channel_config if isinstance(session.channel_config, dict) else {}
     return cfg.get("user_phone") or session.external_user_id or ""
@@ -1182,6 +1191,7 @@ class WAIncomingMessage(BaseModel):
     media_type: str | None = None      # "image" | "document" | "sticker" | "audio" | "ptt" | None
     media_data: str | None = Field(None, max_length=10_000_000)  # base64-encoded raw bytes
     media_filename: str | None = None  # original filename (dokumen) atau generated (gambar/audio)
+    media_mimetype: str | None = None
     quoted_text: str | None = None     # text of the quoted/replied-to message (for escalation routing)
     quoted_stanza_id: str | None = None
     quoted_participant: str | None = None
@@ -1676,6 +1686,21 @@ async def wa_incoming(
     media_image_b64: str | None = None
     media_image_mime: str | None = None
     media_meta: dict | None = None
+
+    if body.media_type and not body.media_data:
+        reply = _missing_media_payload_reply(body.media_type, body.media_filename)
+        log.warning(
+            "wa_incoming.media_payload_missing",
+            media_type=body.media_type,
+            media_filename=body.media_filename,
+            media_mimetype=body.media_mimetype,
+            message_id=body.message_id,
+            session_id=str(session.id),
+        )
+        if not _is_operator:
+            await _stop_customer_typing(body.device_id, session, log)
+        await send_wa_message(body.device_id, reply_target, reply)
+        return {"status": "media_payload_missing", "reply": reply, "run_id": "", "steps": [], "messages_to_user": [reply]}
 
     if body.media_type and body.media_data:
         media_context, media_image_b64, media_image_mime, media_meta = await process_wa_media(

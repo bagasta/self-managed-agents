@@ -1,6 +1,9 @@
 package main
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -88,5 +91,48 @@ func TestSuppressManyMarksAllAgentChatAliasesDisconnected(t *testing.T) {
 		if !isDisconnectedConnection(got) {
 			t.Fatalf("key %s was not marked disconnected: %#v", key, got)
 		}
+	}
+}
+
+func TestForwardToAgentIncludesMediaMetadataWithoutPayload(t *testing.T) {
+	var got map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/channels/wa/incoming" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok","reply":""}`))
+	}))
+	defer server.Close()
+
+	store, err := NewConnectionStore(filepath.Join(t.TempDir(), "connections.json"))
+	if err != nil {
+		t.Fatalf("NewConnectionStore() err = %v", err)
+	}
+	router := NewRouter(server.URL, "test-key", store, "", "")
+
+	router.forwardToAgent("7d97032a-c2af-4bc4-9647-f7953d8ed21c", IncomingMessage{
+		From:          "+628123456789",
+		ChatID:        "628123456789@s.whatsapp.net",
+		Text:          "Buatkan visualisasi berdasarkan data ini",
+		MediaType:     "document",
+		MediaFilename: "titanic.txt",
+		MediaMimetype: "text/plain",
+	})
+
+	if got["media_type"] != "document" {
+		t.Fatalf("media_type = %#v, want document", got["media_type"])
+	}
+	if got["media_filename"] != "titanic.txt" {
+		t.Fatalf("media_filename = %#v, want titanic.txt", got["media_filename"])
+	}
+	if got["media_mimetype"] != "text/plain" {
+		t.Fatalf("media_mimetype = %#v, want text/plain", got["media_mimetype"])
+	}
+	if got["media_data"] != "" {
+		t.Fatalf("media_data = %#v, want empty string", got["media_data"])
 	}
 }

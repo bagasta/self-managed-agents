@@ -734,6 +734,7 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 	mediaType := ""
 	mediaData := ""
 	mediaFilename := ""
+	mediaMimetype := ""
 
 	quotedCtx := quotedMessageContext{} // identity/text of the quoted message for escalation routing
 
@@ -747,6 +748,15 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 		}
 	} else if img := evt.Message.GetImageMessage(); img != nil {
 		// Image message
+		mediaType = "image"
+		mediaMimetype = img.GetMimetype()
+		ext := ".jpg"
+		if mt := img.GetMimetype(); strings.Contains(mt, "png") {
+			ext = ".png"
+		} else if strings.Contains(mt, "webp") {
+			ext = ".webp"
+		}
+		mediaFilename = "image" + ext
 		dm.mu.RLock()
 		info, ok := dm.devices[deviceID]
 		dm.mu.RUnlock()
@@ -754,14 +764,6 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 			raw, err := info.Client.Download(context.Background(), img)
 			if err == nil {
 				mediaData = base64.StdEncoding.EncodeToString(raw)
-				mediaType = "image"
-				ext := ".jpg"
-				if mt := img.GetMimetype(); strings.Contains(mt, "png") {
-					ext = ".png"
-				} else if strings.Contains(mt, "webp") {
-					ext = ".webp"
-				}
-				mediaFilename = "image" + ext
 			} else {
 				log.Printf("[%s] download image err: %v", deviceID, err)
 			}
@@ -777,6 +779,12 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 		}
 	} else if doc := evt.Message.GetDocumentMessage(); doc != nil {
 		// Document message
+		mediaType = "document"
+		mediaMimetype = doc.GetMimetype()
+		mediaFilename = doc.GetFileName()
+		if mediaFilename == "" {
+			mediaFilename = "file"
+		}
 		dm.mu.RLock()
 		info, ok := dm.devices[deviceID]
 		dm.mu.RUnlock()
@@ -784,11 +792,6 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 			raw, err := info.Client.Download(context.Background(), doc)
 			if err == nil {
 				mediaData = base64.StdEncoding.EncodeToString(raw)
-				mediaType = "document"
-				mediaFilename = doc.GetFileName()
-				if mediaFilename == "" {
-					mediaFilename = "file"
-				}
 			} else {
 				log.Printf("[%s] download document err: %v", deviceID, err)
 			}
@@ -803,6 +806,9 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 			quotedCtx = extractQuotedMessageContext(ctx)
 		}
 	} else if sticker := evt.Message.GetStickerMessage(); sticker != nil {
+		mediaType = "sticker"
+		mediaMimetype = "image/webp"
+		mediaFilename = "sticker.webp"
 		dm.mu.RLock()
 		info, ok := dm.devices[deviceID]
 		dm.mu.RUnlock()
@@ -810,8 +816,8 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 			raw, err := info.Client.Download(context.Background(), sticker)
 			if err == nil {
 				mediaData = base64.StdEncoding.EncodeToString(raw)
-				mediaType = "sticker"
-				mediaFilename = "sticker.webp"
+			} else {
+				log.Printf("[%s] download sticker err: %v", deviceID, err)
 			}
 		}
 		text = "[Sticker]"
@@ -821,6 +827,16 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 		}
 	} else if audio := evt.Message.GetAudioMessage(); audio != nil {
 		// Voice note (PTT) atau file audio biasa
+		mediaMimetype = audio.GetMimetype()
+		if audio.GetPTT() {
+			mediaType = "ptt" // push-to-talk / voice note
+			mediaFilename = "voice.ogg"
+			text = "[Voice note]"
+		} else {
+			mediaType = "audio" // file audio biasa
+			mediaFilename = "audio.ogg"
+			text = "[Audio]"
+		}
 		dm.mu.RLock()
 		info, ok := dm.devices[deviceID]
 		dm.mu.RUnlock()
@@ -828,15 +844,6 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 			raw, err := info.Client.Download(context.Background(), audio)
 			if err == nil {
 				mediaData = base64.StdEncoding.EncodeToString(raw)
-				if audio.GetPTT() {
-					mediaType = "ptt" // push-to-talk / voice note
-					mediaFilename = "voice.ogg"
-					text = "[Voice note]"
-				} else {
-					mediaType = "audio" // file audio biasa
-					mediaFilename = "audio.ogg"
-					text = "[Audio]"
-				}
 			} else {
 				log.Printf("[%s] download audio err: %v", deviceID, err)
 			}
@@ -947,6 +954,7 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 		"media_type":         mediaType,
 		"media_data":         mediaData,
 		"media_filename":     mediaFilename,
+		"media_mimetype":     mediaMimetype,
 		"quoted_text":        quotedCtx.Text,
 		"quoted_stanza_id":   quotedCtx.StanzaID,
 		"quoted_participant": quotedCtx.Participant,

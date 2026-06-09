@@ -102,6 +102,59 @@ def test_non_owner_operator_ids_still_work_for_legacy_extra_operator():
 
 
 @pytest.mark.asyncio
+async def test_wa_incoming_media_metadata_without_payload_short_circuits(monkeypatch):
+    from app.api.channels import WAIncomingMessage, wa_incoming
+
+    agent = SimpleNamespace(
+        id=uuid.uuid4(),
+        name="Baas",
+        allowed_senders=None,
+        escalation_config={},
+        owner_external_id="628owner",
+        operator_ids=["628owner"],
+    )
+    session = _session(ai_disabled=False, metadata_={})
+    db = _FakeDB()
+    send_msg = AsyncMock()
+    process_media = AsyncMock()
+    stop_typing = AsyncMock()
+
+    monkeypatch.setattr("app.api.channels.find_agent_by_device", AsyncMock(return_value=agent))
+    monkeypatch.setattr("app.api.channels.is_duplicate_message", AsyncMock(return_value=False))
+    monkeypatch.setattr("app.api.channels.find_or_create_wa_session", AsyncMock(return_value=(session, False)))
+    monkeypatch.setattr("app.api.channels.check_agent_quota", AsyncMock(return_value=SimpleNamespace(allowed=True)))
+    monkeypatch.setattr("app.api.channels.check_wa_spam_window", AsyncMock(return_value=(False, 0)))
+    monkeypatch.setattr("app.api.channels.process_wa_media", process_media)
+    monkeypatch.setattr("app.api.channels._stop_customer_typing", stop_typing)
+    monkeypatch.setattr("app.api.channels.send_wa_message", send_msg)
+
+    body = WAIncomingMessage(
+        device_id=f"wadev_{agent.id}",
+        **{"from": "123456789012345678@lid"},
+        chat_id="123456789012345678@lid",
+        message="Buatkan visualisasi berdasarkan data ini",
+        message_id="MSG-MEDIA-1",
+        timestamp=1,
+        media_type="document",
+        media_filename="titanic.txt",
+        media_mimetype="text/plain",
+    )
+
+    result = await wa_incoming(body, db=db)
+
+    assert result["status"] == "media_payload_missing"
+    assert "titanic.txt" in result["reply"]
+    assert "kirim ulang" in result["reply"]
+    process_media.assert_not_awaited()
+    stop_typing.assert_awaited_once()
+    send_msg.assert_awaited_once_with(
+        f"wadev_{agent.id}",
+        "123456789012345678@lid",
+        result["reply"],
+    )
+
+
+@pytest.mark.asyncio
 async def test_operator_phone_without_escalation_reply_is_customer_turn():
     from app.api.channels import _should_treat_as_operator_turn
 

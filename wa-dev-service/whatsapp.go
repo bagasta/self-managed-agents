@@ -39,7 +39,7 @@ type IncomingMessage struct {
 	Text              string
 	MessageID         string
 	PushName          string // WhatsApp display name of sender
-	MediaType         string // "image" | "document" | "sticker" | ""
+	MediaType         string // "image" | "document" | "sticker" | "audio" | "ptt" | ""
 	MediaData         string // base64
 	MediaFilename     string
 	MediaMimetype     string
@@ -491,12 +491,14 @@ func (wa *WhatsAppClient) handleMessage(evt *events.Message) {
 
 	case evt.Message.GetImageMessage() != nil:
 		img := evt.Message.GetImageMessage()
+		msg.MediaType = "image"
+		msg.MediaMimetype = img.GetMimetype()
+		msg.MediaFilename = "image" + mimeToExt(img.GetMimetype(), ".jpg")
 		raw, err := wa.client.Download(context.Background(), img)
 		if err == nil {
 			msg.MediaData = base64.StdEncoding.EncodeToString(raw)
-			msg.MediaType = "image"
-			msg.MediaMimetype = img.GetMimetype()
-			msg.MediaFilename = "image" + mimeToExt(img.GetMimetype(), ".jpg")
+		} else {
+			log.Printf("[wa-dev] download image err: %v", err)
 		}
 		if ctx := img.GetContextInfo(); ctx != nil {
 			mentionedJIDs = ctx.GetMentionedJID()
@@ -509,15 +511,17 @@ func (wa *WhatsAppClient) handleMessage(evt *events.Message) {
 
 	case evt.Message.GetDocumentMessage() != nil:
 		doc := evt.Message.GetDocumentMessage()
+		msg.MediaType = "document"
+		msg.MediaMimetype = doc.GetMimetype()
+		msg.MediaFilename = doc.GetFileName()
+		if msg.MediaFilename == "" {
+			msg.MediaFilename = "file"
+		}
 		raw, err := wa.client.Download(context.Background(), doc)
 		if err == nil {
 			msg.MediaData = base64.StdEncoding.EncodeToString(raw)
-			msg.MediaType = "document"
-			msg.MediaMimetype = doc.GetMimetype()
-			msg.MediaFilename = doc.GetFileName()
-			if msg.MediaFilename == "" {
-				msg.MediaFilename = "file"
-			}
+		} else {
+			log.Printf("[wa-dev] download document err: %v", err)
 		}
 		msg.Text = doc.GetCaption()
 		if msg.Text == "" {
@@ -530,22 +534,21 @@ func (wa *WhatsAppClient) handleMessage(evt *events.Message) {
 
 	case evt.Message.GetAudioMessage() != nil:
 		audio := evt.Message.GetAudioMessage()
+		msg.MediaMimetype = audio.GetMimetype()
+		if audio.GetPTT() {
+			msg.MediaType = "ptt" // push-to-talk / voice note
+			msg.MediaFilename = "voice.ogg"
+			msg.Text = "[Voice note]"
+		} else {
+			msg.MediaType = "audio" // file audio biasa
+			msg.MediaFilename = "audio.ogg"
+			msg.Text = "[Audio]"
+		}
 		raw, err := wa.client.Download(context.Background(), audio)
 		if err == nil {
 			msg.MediaData = base64.StdEncoding.EncodeToString(raw)
-			msg.MediaMimetype = audio.GetMimetype()
-			if audio.GetPTT() {
-				msg.MediaType = "ptt" // push-to-talk / voice note
-				msg.MediaFilename = "voice.ogg"
-				msg.Text = "[Voice note]"
-			} else {
-				msg.MediaType = "audio" // file audio biasa
-				msg.MediaFilename = "audio.ogg"
-				msg.Text = "[Audio]"
-			}
 		} else {
 			log.Printf("[wa-dev] download audio err: %v", err)
-			msg.Text = "[Audio]"
 		}
 		if ctx := audio.GetContextInfo(); ctx != nil {
 			mentionedJIDs = ctx.GetMentionedJID()
@@ -554,12 +557,14 @@ func (wa *WhatsAppClient) handleMessage(evt *events.Message) {
 
 	case evt.Message.GetStickerMessage() != nil:
 		sticker := evt.Message.GetStickerMessage()
+		msg.MediaType = "sticker"
+		msg.MediaMimetype = "image/webp"
+		msg.MediaFilename = "sticker.webp"
 		raw, err := wa.client.Download(context.Background(), sticker)
 		if err == nil {
 			msg.MediaData = base64.StdEncoding.EncodeToString(raw)
-			msg.MediaType = "sticker"
-			msg.MediaMimetype = "image/webp"
-			msg.MediaFilename = "sticker.webp"
+		} else {
+			log.Printf("[wa-dev] download sticker err: %v", err)
 		}
 		msg.Text = "[Sticker]"
 		if ctx := sticker.GetContextInfo(); ctx != nil {

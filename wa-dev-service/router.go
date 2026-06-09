@@ -309,6 +309,7 @@ func (r *Router) forwardToAgent(agentID string, msg IncomingMessage) {
 		"media_type":         msg.MediaType,
 		"media_data":         msg.MediaData,
 		"media_filename":     msg.MediaFilename,
+		"media_mimetype":     msg.MediaMimetype,
 		"quoted_text":        msg.QuotedText,
 		"quoted_stanza_id":   msg.QuotedStanzaID,
 		"quoted_participant": msg.QuotedParticipant,
