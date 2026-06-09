@@ -81,7 +81,6 @@ def build_builder_planning_tools(
             business_context: Konteks bisnis untuk agent CS/FAQ (opsional)
             operator_phone: Nomor operator/admin untuk eskalasi (opsional)
         """
-        goal_lower = user_goal.lower()
         policy_reason = _blocked_agent_policy_reason(
             user_goal,
             agent_name,

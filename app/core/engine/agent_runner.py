@@ -205,6 +205,7 @@ class AgentRunResult(TypedDict):
 from app.core.engine.agent_middleware import (  # noqa: E402
     BlockTaskToolMiddleware,
     ExternalServiceFallbackGuardMiddleware,
+    ToolErrorRecoveryMiddleware,
 )
 
 
@@ -1063,7 +1064,9 @@ async def run_agent(
                     subagents=subagent_list or None,
                     checkpointer=_checkpointer,
                 )
-                _middleware: list[AgentMiddleware] = []
+                # Outermost: turn any tool exception into recoverable feedback so one
+                # failed tool call (e.g. MCP/Gmail 400) can't abort the whole run.
+                _middleware: list[AgentMiddleware] = [ToolErrorRecoveryMiddleware()]
                 if (
                     runtime_policy.policy_class == "operational"
                     and google_mcp.enabled
