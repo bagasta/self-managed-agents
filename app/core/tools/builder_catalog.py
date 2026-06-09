@@ -100,7 +100,7 @@ AGENT_PRESETS: dict[str, dict] = {
             "subagents": {"enabled": False},
         },
         "required_tools": ["escalation"],
-        "forbidden_tools": ["sandbox", "deploy"],
+        "forbidden_tools": ["deploy"],
         "channel_requirements": ["whatsapp_device_required"],
         "runtime_limitations": [
             "markdown_not_rendered_on_whatsapp",
@@ -538,7 +538,7 @@ AGENT_PRESETS: dict[str, dict] = {
             "subagents": {"enabled": False},
         },
         "required_tools": ["escalation", "whatsapp_media"],
-        "forbidden_tools": ["sandbox", "deploy"],
+        "forbidden_tools": ["deploy"],
         "channel_requirements": ["whatsapp_device_required"],
         "runtime_limitations": [
             "markdown_not_rendered_on_whatsapp",

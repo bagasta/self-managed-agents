@@ -264,6 +264,27 @@ def _looks_like_generated_file_workflow(*parts: Any) -> bool:
     return _looks_like_file_delivery_workflow(text) and any(marker in text for marker in generation_markers)
 
 
+_FILE_CAPABILITY_NEGATION_MARKERS = (
+    "tanpa file",
+    "tidak perlu file",
+    "tidak butuh file",
+    "no file",
+    "tanpa dokumen",
+    "tidak perlu dokumen",
+    "hanya teks",
+    "cuma teks",
+    "teks saja",
+    "text only",
+    "tanpa lampiran",
+)
+
+
+def _file_capability_negated(*parts: Any) -> bool:
+    """User secara eksplisit menolak kemampuan file/lampiran (hanya teks)."""
+    text = _combined_context_text(*parts)
+    return any(marker in text for marker in _FILE_CAPABILITY_NEGATION_MARKERS)
+
+
 def _looks_like_payment_approval_workflow(*parts: Any) -> bool:
     text = _payment_workflow_detection_text(*parts)
     payment = any(marker in text for marker in ("bayar", "pembayaran", "payment", "transfer", "tf", "bukti transfer", "bukti tf", "bukti bayar"))

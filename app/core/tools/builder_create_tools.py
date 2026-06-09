@@ -32,6 +32,7 @@ from app.core.tools.builder_identity import (
 from app.core.tools.builder_json import parse_llm_json_object as _parse_llm_json_object
 from app.core.tools.builder_intent import (
     _detect_preset_from_config,
+    _file_capability_negated,
     _has_approval_state_contract,
     _looks_like_approval_gated_service,
     _looks_like_file_delivery_workflow,
@@ -216,6 +217,7 @@ def build_builder_create_tools(
         business_context: str = "",
         domain: str = "",
         operating_manual: Any = None,
+        file_capability: str = "",
     ) -> str:
         """
         Buat agent baru di platform dan simpan ke database.
@@ -240,6 +242,9 @@ def build_builder_create_tools(
             business_context: Ringkasan konteks bisnis Owner dari interview Arthur. Dipakai untuk membuat SOP terpisah.
             domain: Bidang bisnis jika sudah diketahui, misal food_beverage, travel, ecommerce, local_service, clinic_wellness, education, property.
             operating_manual: Agent Operating Manual/SOP artifact terstruktur. Jika kosong, Arthur/runtime membuat draft dari konteks.
+            file_capability: Keputusan eksplisit kemampuan file agent — WAJIB diisi kalau kebutuhan file ambigu.
+                'enabled' = agent perlu menerima/membuat file (otomatis aktifkan sandbox+whatsapp_media+subagents);
+                'text_only' = user sudah konfirmasi agent hanya butuh teks. Kosongkan hanya jika workflow file sudah jelas dari instruksi.
         """
         if not name or len(name.strip()) < 2:
             return "[error] Nama agent minimal 2 karakter"
@@ -397,6 +402,46 @@ def build_builder_create_tools(
             soul,
             blueprint,
         )
+        # Fix #3: gerbang keras keputusan kemampuan file. Heuristik file_delivery/generated
+        # bisa meleset untuk agent yang baru diminta file saat RUNTIME (mis. user kirim CSV
+        # lalu minta visualisasi). Kalau sinyal file ambigu — tidak terdeteksi, tidak dinegasikan
+        # user, dan config belum file-ready (sandbox+whatsapp_media) — Arthur WAJIB memutuskan
+        # eksplisit via file_capability, bukan menebak diam-diam lalu mengirim agent cacat.
+        file_decision = str(file_capability or "").strip().lower()
+        if file_decision == "enabled":
+            tc["whatsapp_media"] = True
+            tc["sandbox"] = True
+            _subc = tc.get("subagents")
+            if isinstance(_subc, dict):
+                _subc["enabled"] = True
+            else:
+                tc["subagents"] = {"enabled": True}
+        file_ready = bool(tc.get("sandbox")) and bool(tc.get("whatsapp_media"))
+        file_signal = file_delivery_workflow or generated_file_workflow
+        file_negated = _file_capability_negated(
+            name, description, instructions, blueprint, soul, business_context
+        )
+        if (
+            channel_type == "whatsapp"
+            and not file_signal
+            and not file_negated
+            and not file_ready
+            and file_decision not in {"enabled", "text_only", "not_needed"}
+        ):
+            return json.dumps({
+                "error": "Kemampuan file belum diputuskan — jangan menebak.",
+                "validation_errors": [
+                    "Agent WhatsApp ini belum jelas perlu menerima/membuat file atau tidak, "
+                    "dan tools_config belum file-ready (sandbox+whatsapp_media)."
+                ],
+                "hint": (
+                    "Tanyakan ke user (bahasa awam): apakah agent perlu MENERIMA file (PDF/Excel/CSV/gambar) "
+                    "ATAU MEMBUAT file/laporan/visualisasi untuk dikirim balik? "
+                    "Jika YA → create_agent lagi dengan file_capability='enabled' "
+                    "(sandbox+whatsapp_media+subagents otomatis diaktifkan). "
+                    "Jika TIDAK → create_agent lagi dengan file_capability='text_only'."
+                ),
+            }, ensure_ascii=False, indent=2)
         if payment_approval_workflow:
             if len((instructions or "").strip()) < 1200:
                 critical_errors.append("Instructions terlalu pendek untuk workflow pembayaran/admin approval.")

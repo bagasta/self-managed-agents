@@ -17,6 +17,7 @@ from app.core.tools.builder_identity import blocked_agent_policy_reason as _bloc
 from app.core.tools.builder_intent import (
     _combined_context_text,
     _detect_preset,
+    _file_capability_negated,
     _looks_like_approval_gated_service,
     _looks_like_file_delivery_workflow,
     _looks_like_generated_file_workflow,
@@ -176,8 +177,14 @@ def build_builder_planning_tools(
             feat in features
             for feat in ("media", "gambar", "foto", "file", "pdf", "excel", "xlsx", "docx", "dokumen")
         )
-        if not wants_files and not wants_generated_files and not explicit_media_request:
+        # Fix #1: jangan pernah mematikan whatsapp_media hanya karena heuristik keyword
+        # tidak menebak kebutuhan file. Untuk onboarding WhatsApp, kirim/terima file adalah
+        # kebutuhan laten yang nyaris universal — selaras dengan default schema (whatsapp_media=True).
+        # Media hanya dimatikan kalau user EKSPLISIT menolak file (hanya teks).
+        if _file_capability_negated(feature_text):
             tools_config["whatsapp_media"] = False
+        else:
+            tools_config["whatsapp_media"] = True
         if approval_gated_service or payment_approval_workflow:
             tools_config["escalation"] = True
             tools_config["whatsapp_media"] = True
@@ -220,22 +227,7 @@ def build_builder_planning_tools(
             or file_delivery_workflow
             or generated_file_workflow
         )
-        file_capability_negated = any(
-            p in feature_text
-            for p in (
-                "tanpa file",
-                "tidak perlu file",
-                "tidak butuh file",
-                "no file",
-                "tanpa dokumen",
-                "tidak perlu dokumen",
-                "hanya teks",
-                "cuma teks",
-                "teks saja",
-                "text only",
-                "tanpa lampiran",
-            )
-        )
+        file_capability_negated = _file_capability_negated(feature_text)
         file_ready = bool(tools_config.get("sandbox")) and bool(tools_config.get("whatsapp_media"))
         capability_clarifications: list[dict] = []
         if not file_capability_signal and not file_capability_negated and not file_ready:

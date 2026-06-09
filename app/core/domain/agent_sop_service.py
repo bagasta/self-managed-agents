@@ -918,6 +918,33 @@ async def upsert_agent_operating_manual(
 ) -> AgentOperatingManual:
     normalized = normalize_agent_operating_manual(manual)
     target_version = int(version or normalized.get("version") or 1)
+
+    # Fix B: jangan turunkan maturity SOP agent yang sudah usable/verified saat regen
+    # kalau generator tidak menetapkan maturity secara EKSPLISIT. normalize_* default ke
+    # needs_review, sehingga regen polos (mis. Arthur re-compose) diam-diam mengunci kembali
+    # final-action tools (kirim file) lewat SOP gate. Carry-forward maturity lama agar agent
+    # yang sudah jalan tidak mati lagi; SOP baru/mentah tetap kena gate seperti biasa.
+    incoming_explicit_maturity = isinstance(manual, dict) and bool(str(manual.get("maturity") or "").strip())
+    if not incoming_explicit_maturity:
+        prev_result = await db.execute(
+            select(AgentOperatingManual)
+            .where(AgentOperatingManual.agent_id == agent_id)
+            .order_by(AgentOperatingManual.version.desc(), AgentOperatingManual.created_at.desc())
+            .limit(1)
+        )
+        prev_row = prev_result.scalar_one_or_none()
+        prev_maturity = str(getattr(prev_row, "maturity", "") or "").lower()
+        new_maturity = str(normalized.get("maturity") or "").lower()
+        if prev_maturity in {"usable", "verified"} and new_maturity in {"draft", "needs_review", "missing", ""}:
+            normalized["maturity"] = prev_maturity
+            normalized["owner_review_required"] = False
+            logger.info(
+                "agent_sop_service.maturity_downgrade_prevented",
+                agent_id=str(agent_id),
+                prev_maturity=prev_maturity,
+                attempted=new_maturity,
+            )
+
     result = await db.execute(
         select(AgentOperatingManual).where(
             AgentOperatingManual.agent_id == agent_id,

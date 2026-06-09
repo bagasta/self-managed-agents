@@ -200,9 +200,19 @@ async def build_agent_tool_setup(
     if (not operator_turn) and getattr(session, "channel_type", None) == "whatsapp":
         tools.extend(build_wa_notify_tool(session))
         active_groups.append("wa_notify")
-        if _is_enabled(tools_config, "whatsapp_media", default=True):
-            tools.extend(build_whatsapp_media_tools(session, sandbox))
-            active_groups.append("whatsapp_media")
+        # Fix #4 (runtime self-heal): untuk channel WhatsApp SELALU sediakan tool kirim media.
+        # Kirim/terima file adalah kebutuhan laten universal di WA; meng-gate ini di balik
+        # tools_config membuat agent salah-konfigurasi (mis. Arthur set whatsapp_media=false)
+        # mentok "tool send_whatsapp_image tidak tersedia di run ini". Tool defs murah —
+        # container sandbox baru spin saat file benar-benar dibaca, jadi tak ada biaya idle.
+        if not _is_enabled(tools_config, "whatsapp_media", default=True):
+            log.warning(
+                "agent_run.whatsapp_media_self_heal",
+                reason="whatsapp_media_disabled_but_channel_is_whatsapp",
+                agent_id=str(agent_id),
+            )
+        tools.extend(build_whatsapp_media_tools(session, sandbox))
+        active_groups.append("whatsapp_media")
         if _is_enabled(tools_config, "wa_agent_manager", default=False):
             tools.extend(build_wa_agent_manager_tools(session, db_factory=AsyncSessionLocal))
             active_groups.append("wa_agent_manager")
