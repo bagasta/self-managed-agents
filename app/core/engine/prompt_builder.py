@@ -368,6 +368,12 @@ def build_agent_context_block(
             + (f"- Nama user: {sender_name}\n" if sender_name else "")
             + (f"- User phone: {user_phone}\n" if user_phone else "")
             + "- Sertakan konteks singkat dari request user agar subagent tidak buta\n"
+            "- Jika pesan user mengandung `[Dokumen diterima: ... /workspace/shared/<filename>]`, "
+            "task string WAJIB menyebut path input eksplisit untuk subagent: `/workspace/data/incoming/<filename>` "
+            "dan alias parent `/workspace/shared/<filename>`. Jangan hanya menyebut nama file.\n"
+            "- Untuk analisis/visualisasi dari file WhatsApp, delegate ke sys_analyst/sys_coder dengan instruksi: "
+            "cek file di `/workspace/data/incoming/<filename>`, olah data di sandbox, simpan hasil final ke "
+            "`/workspace/shared/<output>`, lalu output path + SIAP_DIKIRIM_PARENT.\n"
             "- Contoh BENAR (format saja): task('sys_coder', task='<ringkas tujuan + SEMUA detail dari request user saat ini, dalam bahasa user>. Jangan menambah detail yang tidak diminta.')\n"
             "- Contoh SALAH: task('sys_coder', task='buat web') — terlalu kabur.\n"
             "- Placeholder di atas WAJIB diisi dari request user yang nyata. DILARANG menyalin contoh ini apa adanya sebagai task.\n\n"

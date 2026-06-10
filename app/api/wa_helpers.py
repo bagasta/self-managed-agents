@@ -596,7 +596,8 @@ async def process_wa_media(
         }
         workspace_hint = (
             f"tersimpan di /workspace/{filename}. "
-            f"Untuk workflow file/sandbox/subagent, gunakan /workspace/shared/{filename}"
+            f"Untuk workflow file/sandbox gunakan /workspace/shared/{filename}. "
+            f"Jika mendelegasikan ke subagent, sebutkan path input /workspace/data/incoming/{filename}"
         )
 
         if media_type == "image":

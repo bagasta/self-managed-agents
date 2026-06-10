@@ -546,6 +546,34 @@ def test_prompt_requires_brief_and_memory_provenance_for_underspecified_landing_
     assert "Jika recall kosong" in prompt
 
 
+def test_subagent_task_context_requires_uploaded_file_paths():
+    prompt = build_system_prompt(
+        agent_model=_agent(instructions="Kamu adalah assistant yang bisa analisis data."),
+        session=_session(channel_type="whatsapp"),
+        active_groups=["memory", "subagents(1)", "whatsapp_media"],
+        saved_custom_tools=[],
+        subagent_list=[{"name": "sys_analyst", "description": "Olah data di sandbox."}],
+        sender_name="Bagas",
+        context_summary="",
+        memory_block="",
+        layered_memory=None,
+        rag_context="",
+        escalation_user_jid=None,
+        escalation_context=None,
+        is_operator_message=False,
+        user_message=(
+            "Buatkan visualisasi berdasarkan data ini\n"
+            "[Dokumen diterima: titanic.txt, tersimpan di /workspace/titanic.txt. "
+            "Untuk workflow file/sandbox gunakan /workspace/shared/titanic.txt]"
+        ),
+    )
+
+    assert "task string WAJIB menyebut path input eksplisit" in prompt
+    assert "/workspace/data/incoming/<filename>" in prompt
+    assert "Jangan hanya menyebut nama file" in prompt
+    assert "simpan hasil final ke `/workspace/shared/<output>`" in prompt
+
+
 @pytest.mark.asyncio
 async def test_process_wa_media_saves_document_to_shared_workspace(tmp_path, monkeypatch):
     from app.api.wa_helpers import process_wa_media
@@ -573,7 +601,8 @@ async def test_process_wa_media_saves_document_to_shared_workspace(tmp_path, mon
     assert media_meta["filename"] == "Titanic.xlsx"
     assert media_context
     assert "/workspace/shared/Titanic.xlsx" in media_context
-    assert "workflow file/sandbox/subagent" in media_context
+    assert "/workspace/data/incoming/Titanic.xlsx" in media_context
+    assert "workflow file/sandbox" in media_context
 
     root_path = media_meta["workspace_path"]
     shared_path = media_meta["shared_workspace_path"]

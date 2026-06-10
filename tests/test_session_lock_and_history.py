@@ -614,6 +614,26 @@ class TestGeneralPurposeSubagentSpec:
             assert "system_prompt" in spec, f"Missing 'system_prompt' in spec: {spec}"
             assert "model" in spec, f"Missing 'model' in spec: {spec}"
 
+    def test_sys_analyst_knows_whatsapp_upload_input_path(self):
+        from app.core.engine.subagent_builder import _SYSTEM_SUBAGENTS
+
+        spec = next(s for s in _SYSTEM_SUBAGENTS if s["name"] == "sys_analyst")
+        prompt = spec["system_prompt"]
+
+        assert "/workspace/data/incoming/<filename>" in prompt
+        assert "/workspace/shared/<filename>" in prompt
+        assert "Jangan mencari file hanya dari nama file" in prompt
+
+    def test_sys_coder_knows_whatsapp_upload_input_path(self):
+        from app.core.engine.subagent_builder import _SYSTEM_SUBAGENTS
+
+        spec = next(s for s in _SYSTEM_SUBAGENTS if s["name"] == "sys_coder")
+        prompt = spec["system_prompt"]
+
+        assert "/workspace/data/incoming/<filename>" in prompt
+        assert "/workspace/shared/<filename>" in prompt
+        assert "Jangan mencari file upload hanya dari nama file" in prompt
+
     def test_sys_researcher_exists_as_named_specialist(self):
         """sys_researcher remains available as a specialist, not as GP override."""
         from app.core.engine.subagent_builder import _SYSTEM_SUBAGENTS
