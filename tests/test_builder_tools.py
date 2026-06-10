@@ -3202,10 +3202,69 @@ def test_fallback_manual_forced_needs_review():
     assert m["owner_review_required"] is True
 
 
+def test_file_workflow_fallback_manual_can_remain_usable():
+    m = mark_manual_needs_review_if_fallback(
+        {"maturity": "needs_review", "owner_review_required": True},
+        used_fallback=True,
+        allow_usable_fallback=True,
+    )
+    assert m["maturity"] == "usable"
+    assert m["owner_review_required"] is False
+
+
 def test_non_fallback_unchanged():
     m = mark_manual_needs_review_if_fallback({"maturity": "usable", "owner_review_required": False}, used_fallback=False)
     assert m["maturity"] == "usable"
     assert m["owner_review_required"] is False
+
+
+def test_create_file_agent_writer_fallback_keeps_media_tools_unlocked():
+    from app.core.tools.builder_tools import build_builder_tools
+
+    db = _make_mock_db()
+    with patch("app.core.tools.builder_tools.Agent") as MockAgent:
+        captured_kwargs = {}
+
+        def capture(**kwargs):
+            captured_kwargs.update(kwargs)
+            return _make_mock_agent(
+                name=kwargs.get("name", "Visual Agent"),
+                tools_config=kwargs.get("tools_config"),
+                created_by_type=kwargs.get("created_by_type"),
+                created_by_agent_name=kwargs.get("created_by_agent_name"),
+            )
+
+        MockAgent.side_effect = capture
+
+        with patch(
+            "app.core.tools.builder_tools._call_instruction_writer",
+            new=AsyncMock(return_value=""),
+        ):
+            tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+            tool = next(t for t in tools if t.name == "create_agent")
+            result = _run(tool.ainvoke({
+                "name": "Visual Agent",
+                "description": "Agent untuk membaca file user dan membuat visualisasi data.",
+                "instructions": (
+                    "Baca file PDF/DOCX/CSV/XLSX dari user, analisa datanya, lalu buat grafik. "
+                    "Subagent wajib menyimpan hasil ke /workspace/shared/<file> dan return "
+                    "SIAP_DIKIRIM_PARENT. Parent wajib memanggil send_whatsapp_document atau "
+                    "send_whatsapp_image setelah artifact kembali."
+                ),
+                "business_context": "Agent personal untuk visualisasi data dari dokumen yang user kirim.",
+                "file_capability": "enabled",
+                "tools_config": '{"memory": true, "skills": true}',
+                "channel_type": "whatsapp",
+            }))
+
+    data = json.loads(result)
+    manual = captured_kwargs["tools_config"]["operating_manual"]
+    assert data["success"] is True
+    assert manual["maturity"] == "usable"
+    assert manual["owner_review_required"] is False
+    assert captured_kwargs["tools_config"]["whatsapp_media"] is True
+    assert captured_kwargs["tools_config"]["sandbox"] is True
+    assert captured_kwargs["tools_config"]["subagents"]["enabled"] is True
 
 
 # ---------------------------------------------------------------------------

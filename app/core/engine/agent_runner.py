@@ -510,13 +510,44 @@ def _shared_artifact_paths_from_session(session: Session) -> list[str]:
 def _shared_artifact_paths_from_history(history_rows: list[Any]) -> list[str]:
     paths: list[str] = []
     for row in reversed(history_rows or []):
-        path = _extract_shared_workspace_file_path(
-            getattr(row, "tool_result", None),
-            getattr(row, "content", None),
-        )
+        values = [getattr(row, "tool_result", None)]
+        if getattr(row, "role", None) != "user":
+            values.append(getattr(row, "content", None))
+        path = _extract_shared_workspace_file_path(*values)
         if path and path not in paths:
             paths.append(path)
     return paths
+
+
+def _shared_path_filename(path: str | None) -> str:
+    return str(path or "").strip().rsplit("/", 1)[-1]
+
+
+def _incoming_media_paths_from_session(session: Session) -> list[str]:
+    meta = session.metadata_ if isinstance(getattr(session, "metadata_", None), dict) else {}
+    incoming = meta.get("last_incoming_media")
+    if not isinstance(incoming, dict):
+        return []
+
+    paths: list[str] = []
+    for key in ("shared_workspace_path", "workspace_path"):
+        raw_path = incoming.get(key)
+        if raw_path:
+            path = str(raw_path)
+            paths.append(path)
+            filename = _shared_path_filename(path)
+            if filename:
+                paths.append(f"/workspace/shared/{filename}")
+
+    filename = str(incoming.get("filename") or "").strip()
+    if filename:
+        paths.append(f"/workspace/shared/{filename}")
+
+    deduped: list[str] = []
+    for path in paths:
+        if path and path not in deduped:
+            deduped.append(path)
+    return deduped
 
 
 def _requested_shared_file_exts(user_message: str) -> set[str]:
@@ -616,6 +647,19 @@ def _latest_shared_artifact_path_for_delivery(
         _shared_artifact_paths_from_session(session)
         + _shared_artifact_paths_from_history(history_rows)
     )
+    incoming_paths = set(_incoming_media_paths_from_session(session))
+    incoming_filenames = {
+        filename
+        for filename in (_shared_path_filename(path) for path in incoming_paths)
+        if filename
+    }
+    if incoming_paths or incoming_filenames:
+        candidates = [
+            path
+            for path in candidates
+            if path not in incoming_paths
+            and _shared_path_filename(path) not in incoming_filenames
+        ]
     for path in candidates:
         if _shared_file_matches_request(path, user_message):
             return path
@@ -1328,6 +1372,7 @@ async def run_agent(
             and _is_enabled(tools_config, "whatsapp_media", default=True)
             and not direct_wa_text_send_context
             and not runtime_policy.is_builder
+            and not current_attachment_name
             else None
         )
         if direct_wa_file_delivery_path:
@@ -1349,7 +1394,8 @@ async def run_agent(
                 log=log,
             )
             steps = parsed["steps"]
-            _remember_shared_artifact_path(session, direct_wa_file_delivery_path, sent=_sent)
+            if _sent:
+                _remember_shared_artifact_path(session, direct_wa_file_delivery_path, sent=True)
             for _msg_record in parsed["db_messages"]:
                 db.add(_msg_record)
             agent_step_index = tool_step_index + len(parsed["db_messages"])
@@ -1374,7 +1420,7 @@ async def run_agent(
                     user_message=execution_user_message,
                     final_reply=final_reply,
                     current_attachment_name=current_attachment_name,
-                    generated_artifact_path=direct_wa_file_delivery_path,
+                    generated_artifact_path=direct_wa_file_delivery_path if _sent else None,
                     log=log,
                 )
             await db.flush()

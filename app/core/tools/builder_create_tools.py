@@ -342,34 +342,6 @@ def build_builder_create_tools(
                 tools_config=tc,
             )
             used_fallback = True
-        operating_manual_input = mark_manual_needs_review_if_fallback(
-            operating_manual_input, used_fallback=used_fallback
-        )
-        tc, generated_operating_manual = ensure_operating_manual_in_tools_config(
-            tc,
-            name=name,
-            description=description,
-            instructions=instructions,
-            business_context=business_context or blueprint or soul,
-            domain=domain,
-            operating_manual=operating_manual_input,
-        )
-        if _has_google_workspace_tools(tc):
-            instructions, _ = _append_google_workspace_instruction(instructions)
-        instructions, business_name_sanitized = _sanitize_unverified_business_name(
-            instructions,
-            business_context=business_context or description,
-        )
-        if soul:
-            soul, soul_business_name_sanitized = _sanitize_unverified_business_name(
-                soul,
-                business_context=business_context or description,
-            )
-        else:
-            soul_business_name_sanitized = False
-        platform_identity_added = False
-
-        critical_errors: list[str] = []
         approval_gated_service = _looks_like_approval_gated_service(
             name,
             description,
@@ -402,12 +374,48 @@ def build_builder_create_tools(
             soul,
             blueprint,
         )
+        file_decision = str(file_capability or "").strip().lower()
+        fallback_file_workflow_is_safe_to_run = (
+            used_fallback
+            and channel_type == "whatsapp"
+            and not payment_approval_workflow
+            and (file_decision == "enabled" or file_delivery_workflow or generated_file_workflow)
+        )
+        operating_manual_input = mark_manual_needs_review_if_fallback(
+            operating_manual_input,
+            used_fallback=used_fallback,
+            allow_usable_fallback=fallback_file_workflow_is_safe_to_run,
+        )
+        tc, generated_operating_manual = ensure_operating_manual_in_tools_config(
+            tc,
+            name=name,
+            description=description,
+            instructions=instructions,
+            business_context=business_context or blueprint or soul,
+            domain=domain,
+            operating_manual=operating_manual_input,
+        )
+        if _has_google_workspace_tools(tc):
+            instructions, _ = _append_google_workspace_instruction(instructions)
+        instructions, business_name_sanitized = _sanitize_unverified_business_name(
+            instructions,
+            business_context=business_context or description,
+        )
+        if soul:
+            soul, soul_business_name_sanitized = _sanitize_unverified_business_name(
+                soul,
+                business_context=business_context or description,
+            )
+        else:
+            soul_business_name_sanitized = False
+        platform_identity_added = False
+
+        critical_errors: list[str] = []
         # Fix #3: gerbang keras keputusan kemampuan file. Heuristik file_delivery/generated
         # bisa meleset untuk agent yang baru diminta file saat RUNTIME (mis. user kirim CSV
         # lalu minta visualisasi). Kalau sinyal file ambigu — tidak terdeteksi, tidak dinegasikan
         # user, dan config belum file-ready (sandbox+whatsapp_media) — Arthur WAJIB memutuskan
         # eksplisit via file_capability, bukan menebak diam-diam lalu mengirim agent cacat.
-        file_decision = str(file_capability or "").strip().lower()
         if file_decision == "enabled":
             tc["whatsapp_media"] = True
             tc["sandbox"] = True

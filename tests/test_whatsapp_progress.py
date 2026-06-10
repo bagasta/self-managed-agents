@@ -327,6 +327,88 @@ def test_shared_artifact_can_be_recovered_from_history_for_file_request():
     assert resend_path == "/workspace/shared/Laporan_Titanic_Bagas.pdf"
 
 
+def test_user_uploaded_shared_file_is_not_reused_as_delivery_artifact():
+    from app.core.engine.agent_runner import _latest_shared_artifact_path_for_delivery
+
+    session = SimpleNamespace(metadata_={})
+    history_rows = [
+        SimpleNamespace(
+            role="user",
+            content=(
+                "[Dokumen diterima: 2024_Annual_Report.docx, tersimpan di /workspace/2024_Annual_Report.docx. "
+                "Untuk workflow file/sandbox gunakan /workspace/shared/2024_Annual_Report.docx]"
+            ),
+            tool_result="",
+        )
+    ]
+
+    resend_path = _latest_shared_artifact_path_for_delivery(
+        session=session,
+        history_rows=history_rows,
+        user_message="Kirim file",
+    )
+
+    assert resend_path is None
+
+
+def test_latest_shared_artifact_ignores_current_incoming_media_file():
+    from app.core.engine.agent_runner import _latest_shared_artifact_path_for_delivery
+
+    session = SimpleNamespace(
+        metadata_={
+            "last_incoming_media": {
+                "filename": "2024_Annual_Report.docx",
+                "shared_workspace_path": (
+                    "/tmp/agent-sandboxes/session-id/shared/2024_Annual_Report.docx"
+                ),
+            },
+            "latest_shared_artifact": {
+                "path": "/workspace/shared/2024_Annual_Report.docx",
+                "filename": "2024_Annual_Report.docx",
+                "extension": "docx",
+                "sent": False,
+            },
+        }
+    )
+
+    resend_path = _latest_shared_artifact_path_for_delivery(
+        session=session,
+        history_rows=[],
+        user_message="Kirim dokumen",
+    )
+
+    assert resend_path is None
+
+
+def test_latest_shared_artifact_keeps_generated_file_after_incoming_media():
+    from app.core.engine.agent_runner import _latest_shared_artifact_path_for_delivery
+
+    session = SimpleNamespace(
+        metadata_={
+            "last_incoming_media": {
+                "filename": "2024_Annual_Report.docx",
+                "shared_workspace_path": (
+                    "/tmp/agent-sandboxes/session-id/shared/2024_Annual_Report.docx"
+                ),
+            },
+            "latest_shared_artifact": {
+                "path": "/workspace/shared/annual_report_chart.png",
+                "filename": "annual_report_chart.png",
+                "extension": "png",
+                "sent": False,
+            },
+        }
+    )
+
+    resend_path = _latest_shared_artifact_path_for_delivery(
+        session=session,
+        history_rows=[],
+        user_message="Kirim gambar",
+    )
+
+    assert resend_path == "/workspace/shared/annual_report_chart.png"
+
+
 def test_shared_artifact_is_not_reused_for_capability_question():
     from app.core.engine.agent_runner import (
         _latest_shared_artifact_path_for_delivery,

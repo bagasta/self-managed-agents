@@ -57,11 +57,20 @@ def _enabled_tool_plan(tools_config: dict[str, Any]) -> list[dict[str, str]]:
     return plans
 
 
-def mark_manual_needs_review_if_fallback(manual: dict, *, used_fallback: bool) -> dict:
+def mark_manual_needs_review_if_fallback(
+    manual: dict,
+    *,
+    used_fallback: bool,
+    allow_usable_fallback: bool = False,
+) -> dict:
     """Saat SOP dibuat lewat jalur fallback generik (writer LLM gagal),
     paksa maturity=needs_review + owner_review_required=True agar tidak go-live diam-diam."""
     if used_fallback and isinstance(manual, dict):
         manual = dict(manual)
+        if allow_usable_fallback:
+            manual["maturity"] = "usable"
+            manual["owner_review_required"] = False
+            return manual
         manual["maturity"] = "needs_review"
         manual["owner_review_required"] = True
     return manual
