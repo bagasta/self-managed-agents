@@ -88,6 +88,7 @@ def build_escalation_tools(
     db_factory: async_sessionmaker,
     user_jid: str | None = None,
     sender_name: str | None = None,
+    user_message: str = "",
 ) -> list:
 
     @tool
@@ -334,6 +335,31 @@ def build_escalation_tools(
             if session:
                 channel_type_val = session.channel_type
                 channel_config_val = session.channel_config if isinstance(session.channel_config, dict) else {}
+
+            if channel_type_val == "whatsapp":
+                from app.core.engine.wa_outbound_guard import (
+                    check_wa_outbound_direct_window,
+                    looks_like_outbound_wa_spam_request,
+                    wa_outbound_block_reply,
+                )
+
+                if looks_like_outbound_wa_spam_request(user_message):
+                    logger.warning(
+                        "escalation_tool.send_to_number.blocked_spam_request",
+                        target=phone_or_target,
+                    )
+                    return f"[send_to_number blocked] {wa_outbound_block_reply('spam_request')}"
+                allowed, count = await check_wa_outbound_direct_window(
+                    device_id=str(channel_config_val.get("device_id", "") or ""),
+                    target=phone_or_target,
+                )
+                if not allowed:
+                    logger.warning(
+                        "escalation_tool.send_to_number.blocked_rate_limit",
+                        target=phone_or_target,
+                        count=count,
+                    )
+                    return f"[send_to_number blocked] {wa_outbound_block_reply('rate_limit')}"
 
             db.add(Msg(
                 session_id=session_id,

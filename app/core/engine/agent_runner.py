@@ -1548,21 +1548,57 @@ async def run_agent(
                 }
             ]
             _wa_send_failed = False
+            _raw_cfg = session.channel_config
+            _channel_cfg = _raw_cfg if isinstance(_raw_cfg, dict) else {}
+            _should_send_direct_wa = False
             try:
-                from app.core.infra.channel_service import send_message as _channel_send_message
-
-                _raw_cfg = session.channel_config
-                _channel_cfg = _raw_cfg if isinstance(_raw_cfg, dict) else {}
-                await _channel_send_message(
-                    channel_type=session.channel_type,
-                    channel_config=_channel_cfg,
-                    text=draft_message,
-                    to_override=target_phone,
+                from app.core.engine.wa_outbound_guard import (
+                    check_wa_outbound_direct_window,
+                    looks_like_outbound_wa_spam_request,
+                    wa_outbound_block_reply,
                 )
-                tool_result = f"[SENT_TO_NUMBER:{target_phone}] {draft_message}"
-                steps[0]["result"] = tool_result
-                final_reply = f"Pesan WhatsApp ke {target_phone} sudah saya kirim."
-                log.info("agent_run.direct_wa_confirmation_sent", target=target_phone)
+
+                _recent_direct_wa_context = "\n".join(
+                    _operator_message_payload(getattr(row, "content", "") or "")
+                    for row in (history_rows or [])[-12:]
+                )
+                if looks_like_outbound_wa_spam_request(
+                    f"{execution_user_message}\n{_recent_direct_wa_context}"
+                ):
+                    _wa_send_failed = True
+                    tool_result = f"[send_to_number blocked] {wa_outbound_block_reply('spam_request')}"
+                    steps[0]["result"] = tool_result
+                    final_reply = wa_outbound_block_reply("spam_request")
+                    log.warning("agent_run.direct_wa_confirmation_blocked_spam_request", target=target_phone)
+                else:
+                    allowed, count = await check_wa_outbound_direct_window(
+                        device_id=str(_channel_cfg.get("device_id", "") or ""),
+                        target=target_phone,
+                    )
+                    if not allowed:
+                        _wa_send_failed = True
+                        tool_result = f"[send_to_number blocked] {wa_outbound_block_reply('rate_limit')}"
+                        steps[0]["result"] = tool_result
+                        final_reply = wa_outbound_block_reply("rate_limit")
+                        log.warning(
+                            "agent_run.direct_wa_confirmation_blocked_rate_limit",
+                            target=target_phone,
+                            count=count,
+                        )
+                    else:
+                        _should_send_direct_wa = True
+                if _should_send_direct_wa:
+                    from app.core.infra.channel_service import send_message as _channel_send_message
+                    await _channel_send_message(
+                        channel_type=session.channel_type,
+                        channel_config=_channel_cfg,
+                        text=draft_message,
+                        to_override=target_phone,
+                    )
+                    tool_result = f"[SENT_TO_NUMBER:{target_phone}] {draft_message}"
+                    steps[0]["result"] = tool_result
+                    final_reply = f"Pesan WhatsApp ke {target_phone} sudah saya kirim."
+                    log.info("agent_run.direct_wa_confirmation_sent", target=target_phone)
             except Exception as exc:
                 _wa_send_failed = True
                 tool_result = f"[error] Gagal kirim WhatsApp ke {target_phone}: {exc}"

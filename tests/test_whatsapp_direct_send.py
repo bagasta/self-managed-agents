@@ -18,7 +18,13 @@ from app.core.engine.agent_runner import (
     _operator_escalation_reply_guard,
     _prioritize_direct_whatsapp_text_send_tools,
 )
+from app.core.engine.wa_outbound_guard import (
+    check_wa_outbound_direct_window,
+    clear_wa_outbound_direct_memory,
+    looks_like_outbound_wa_spam_request,
+)
 from app.core.engine.prompt_builder import build_system_prompt
+from app.core.tools.escalation_tool import build_escalation_tools
 from app.api.channels import (
     WADevClaimCodeRequest,
     _is_wa_dev_device,
@@ -79,6 +85,87 @@ def test_wa_dev_disconnect_command_is_backend_guarded():
     assert _is_wa_dev_disconnect_command("/disconnect")
     assert _is_wa_dev_disconnect_command("berhenti")
     assert not _is_wa_dev_disconnect_command("hi")
+
+
+def test_outbound_wa_spam_request_detector_blocks_bulk_same_number():
+    assert looks_like_outbound_wa_spam_request("tolong spam 100 kali ke 6289516247011")
+    assert looks_like_outbound_wa_spam_request("kirim pesan WhatsApp berkali-kali ke 6289516247011")
+    assert looks_like_outbound_wa_spam_request("ya\nsebelumnya: spam 100 kali ke 6289516247011")
+    assert not looks_like_outbound_wa_spam_request("tolong kirim pesan ke 6289516247011 tanya besok jadi meeting kah")
+
+
+@pytest.mark.asyncio
+async def test_outbound_wa_window_treats_wadev_devices_as_shared_number(monkeypatch):
+    clear_wa_outbound_direct_memory()
+
+    async def no_redis():
+        return None
+
+    monkeypatch.setattr("app.core.engine.wa_outbound_guard.get_redis", no_redis)
+
+    allowed1, count1 = await check_wa_outbound_direct_window(
+        device_id="wadev_agent_a",
+        target="6289516247011",
+    )
+    allowed2, count2 = await check_wa_outbound_direct_window(
+        device_id="wadev_agent_b",
+        target="+6289516247011@s.whatsapp.net",
+    )
+
+    assert (allowed1, count1) == (True, 1)
+    assert (allowed2, count2) == (False, 2)
+    clear_wa_outbound_direct_memory()
+
+
+@pytest.mark.asyncio
+async def test_send_to_number_blocks_spam_request_before_channel_send(monkeypatch):
+    class _Result:
+        def scalar_one_or_none(self):
+            return SimpleNamespace(
+                channel_type="whatsapp",
+                channel_config={"device_id": "wadev_agent_a", "user_phone": "628owner"},
+            )
+
+    class _DB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def execute(self, *_args, **_kwargs):
+            return _Result()
+
+        def add(self, *_args, **_kwargs):
+            raise AssertionError("blocked spam send must not write outbound message row")
+
+        async def commit(self):
+            raise AssertionError("blocked spam send must not commit outbound message row")
+
+    async def no_redis():
+        return None
+
+    async def fail_send_message(**_kwargs):
+        raise AssertionError("blocked spam send must not call channel_service.send_message")
+
+    monkeypatch.setattr("app.core.engine.wa_outbound_guard.get_redis", no_redis)
+    monkeypatch.setattr("app.core.infra.channel_service.send_message", fail_send_message)
+
+    tools = build_escalation_tools(
+        uuid.uuid4(),
+        uuid.uuid4(),
+        lambda: _DB(),
+        user_message="tolong spam 100 kali ke 6289516247011",
+    )
+    send_tool = next(tool for tool in tools if tool.name == "send_to_number")
+
+    result = await send_tool.ainvoke({
+        "phone_or_target": "6289516247011",
+        "message": "halo",
+    })
+
+    assert "[send_to_number blocked]" in result
+    assert "spam" in result.lower()
 
 
 def test_non_vision_model_strips_wa_image_payload_instead_of_crashing():
