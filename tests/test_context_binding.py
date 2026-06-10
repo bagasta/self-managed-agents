@@ -74,12 +74,18 @@ class TestCurrentAttachmentBinding:
             human_content="buatkan grafiknya",
             log=_Log(),
             current_attachment_name="dummy test.pdf",
+            current_attachment={
+                "input_path": "/workspace/shared/current_input/dummy test.pdf",
+                "subagent_input_path": "/workspace/data/incoming/current_input/dummy test.pdf",
+            },
         )
         sys_msgs = [m for m in out if isinstance(m, SystemMessage)]
         assert any(
             "dummy test.pdf" in m.content and "satu-satunya" in m.content.lower()
             for m in sys_msgs
         ), "must inject a binding directive naming the current attachment as sole source"
+        assert any("/workspace/shared/current_input/dummy test.pdf" in m.content for m in sys_msgs)
+        assert any("/workspace/data/incoming/current_input/dummy test.pdf" in m.content for m in sys_msgs)
         # Current human message is still last
         assert isinstance(out[-1], HumanMessage)
         assert out[-1].content == "buatkan grafiknya"

@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 _ACTIVE_ESCALATION_ROUTE_TTL_SECONDS = 6 * 60 * 60
+_INLINE_DOCUMENT_PREVIEW_MAX_CHARS = 3_000
 
 # Fallback in-memory cache jika Redis mati/tidak ada.
 # Menghindari db.execute (lambat) untuk deduplikasi.
@@ -680,7 +681,10 @@ async def process_wa_media(
                         "extracted_text_path": f"/workspace/shared/current_input/{extracted_filename}",
                         "extracted_text_subagent_path": f"/workspace/data/incoming/current_input/{extracted_filename}",
                     })
-                    max_chars = get_settings().media_doc_max_chars
+                    max_chars = min(
+                        int(get_settings().media_doc_max_chars or _INLINE_DOCUMENT_PREVIEW_MAX_CHARS),
+                        _INLINE_DOCUMENT_PREVIEW_MAX_CHARS,
+                    )
                     if len(extracted) > max_chars:
                         extracted = extracted[:max_chars] + f"\n... [dipotong, total {len(extracted)} karakter]"
                     media_context = (

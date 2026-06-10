@@ -32,6 +32,11 @@ if TYPE_CHECKING:
 
 _DEFAULT_TEXT_READ_LIMIT = 300
 _MAX_TEXT_READ_LIMIT = 500
+_MAX_EXECUTE_OUTPUT_CHARS = 8_000
+_EXECUTE_TRUNCATION_NOTICE = (
+    "\n\n[output truncated by runtime; write large outputs to /workspace/shared or "
+    "/workspace/tmp and print only a concise summary]"
+)
 
 
 def _now() -> str:
@@ -115,13 +120,17 @@ class DockerBackend(SandboxBackendProtocol):
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         output, exit_code = self._sandbox.bash_result(command, timeout=timeout)
-        truncated = len(output) > 50_000
-        return ExecuteResponse(output=output[:50_000], exit_code=exit_code, truncated=truncated)
+        truncated = len(output) > _MAX_EXECUTE_OUTPUT_CHARS
+        if truncated:
+            output = output[:_MAX_EXECUTE_OUTPUT_CHARS] + _EXECUTE_TRUNCATION_NOTICE
+        return ExecuteResponse(output=output, exit_code=exit_code, truncated=truncated)
 
     async def aexecute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         output, exit_code = await self._sandbox.abash_result(command, timeout=timeout)
-        truncated = len(output) > 50_000
-        return ExecuteResponse(output=output[:50_000], exit_code=exit_code, truncated=truncated)
+        truncated = len(output) > _MAX_EXECUTE_OUTPUT_CHARS
+        if truncated:
+            output = output[:_MAX_EXECUTE_OUTPUT_CHARS] + _EXECUTE_TRUNCATION_NOTICE
+        return ExecuteResponse(output=output, exit_code=exit_code, truncated=truncated)
 
     # ------------------------------------------------------------------
     # read

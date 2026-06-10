@@ -19,6 +19,7 @@ def build_input_messages(
     human_content: Any,
     log: Any,
     current_attachment_name: str | None = None,
+    current_attachment: dict[str, Any] | None = None,
 ) -> list[BaseMessage]:
     sanitized_prior = sanitize_input_messages(prior_messages)
     if len(sanitized_prior) != len(prior_messages):
@@ -79,11 +80,25 @@ def build_input_messages(
 
     attachment_note: list[BaseMessage] = []
     if current_attachment_name:
+        current_attachment = current_attachment if isinstance(current_attachment, dict) else {}
+        input_path = str(current_attachment.get("input_path") or "").strip()
+        subagent_input_path = str(current_attachment.get("subagent_input_path") or "").strip()
+        extracted_text_path = str(current_attachment.get("extracted_text_path") or "").strip()
+        extracted_text_subagent_path = str(current_attachment.get("extracted_text_subagent_path") or "").strip()
+        path_note = ""
+        if input_path or subagent_input_path or extracted_text_path or extracted_text_subagent_path:
+            path_note = (
+                f" Parent path: {input_path or '-'}."
+                f" Subagent path: {subagent_input_path or '-'}."
+                f" Extracted text parent path: {extracted_text_path or '-'}."
+                f" Extracted text subagent path: {extracted_text_subagent_path or '-'}."
+            )
         attachment_note = [SystemMessage(content=(
             f"[SISTEM — LAMPIRAN AKTIF] File yang BARU dikirim user di turn ini: "
             f"'{current_attachment_name}'. Ini SATU-SATUNYA sumber data/berkas untuk "
             f"permintaan saat ini. JANGAN memakai, membaca, atau merujuk file/lampiran "
             f"dari turn sebelumnya kecuali user secara eksplisit menyebut nama file lama itu."
+            f"{path_note}"
         ))]
 
     return sanitized_prior + interrupt_note + attachment_note + [HumanMessage(content=human_content)]

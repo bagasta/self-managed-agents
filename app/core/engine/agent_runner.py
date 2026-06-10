@@ -1273,6 +1273,11 @@ async def run_agent(
             human_content=human_content,
             log=log,
             current_attachment_name=current_attachment_name,
+            current_attachment=(
+                session.metadata_.get("current_attachment")
+                if isinstance(getattr(session, "metadata_", None), dict)
+                else None
+            ),
         )
         step_counter = step_base + 1
 

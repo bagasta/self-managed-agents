@@ -741,6 +741,39 @@ async def test_process_wa_media_writes_specific_current_extracted_text(tmp_path,
     assert open(media_meta["extracted_text_shared_workspace_path"], encoding="utf-8").read() == "Revenue 2024: 100\nRevenue 2023: 80"
 
 
+@pytest.mark.asyncio
+async def test_process_wa_media_inlines_only_short_document_preview(tmp_path, monkeypatch):
+    from app.api.wa_helpers import process_wa_media
+
+    settings = SimpleNamespace(
+        sandbox_base_dir=str(tmp_path),
+        media_doc_max_chars=12000,
+        mistral_api_key="",
+    )
+    monkeypatch.setattr("app.config.get_settings", lambda: settings)
+    monkeypatch.setattr("app.core.infra.sandbox.get_settings", lambda: settings)
+
+    long_text = "A" * 9000
+
+    async def fake_extract_text(*_args, **_kwargs):
+        return long_text
+
+    monkeypatch.setattr("app.core.domain.file_processor.extract_text", fake_extract_text)
+
+    media_context, _, _, media_meta = await process_wa_media(
+        media_type="document",
+        media_data=base64.b64encode(b"doc bytes").decode("ascii"),
+        media_filename="big.docx",
+        session_id=uuid.uuid4(),
+        logger=SimpleNamespace(info=lambda *args, **kwargs: None, warning=lambda *args, **kwargs: None),
+    )
+
+    assert media_meta is not None
+    assert len(media_context) < 4500
+    assert "dipotong" in media_context
+    assert open(media_meta["extracted_text_shared_workspace_path"], encoding="utf-8").read() == long_text
+
+
 def test_runtime_tool_contract_lists_only_actual_tools_and_disabled_risks():
     prompt = build_system_prompt(
         agent_model=_agent(

@@ -436,6 +436,15 @@ class TestDockerBackendWriteCreateOnly:
         assert result.file_data is not None
         assert len(result.file_data["content"].splitlines()) == 500
 
+    def test_execute_output_is_bounded(self, tmp_path):
+        backend = self._make_backend(tmp_path)
+        backend._sandbox.bash_result.return_value = ("x" * 20_000, 0)
+        result = backend.execute("print huge")
+        assert result.exit_code == 0
+        assert result.truncated is True
+        assert len(result.output) < 9_000
+        assert "output truncated by runtime" in result.output
+
 
 # ============================================================================
 # Interrupted run — partial messages from last run stripped from history
