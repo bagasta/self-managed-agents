@@ -16,6 +16,11 @@ from app.core.domain.agent_sop_service import (
     summarize_operating_manual,
     upsert_agent_operating_manual,
 )
+from app.core.launch_safety import (
+    SANDBOX_DISABLED_NOTICE,
+    disable_sandbox_subagent_tools_config,
+    sandbox_subagents_enabled,
+)
 from app.core.tools.builder_fallbacks import (
     _blueprint_needs_semantic_operating_manual,
     _fallback_agent_blueprint,
@@ -416,6 +421,7 @@ def build_builder_create_tools(
         # lalu minta visualisasi). Kalau sinyal file ambigu — tidak terdeteksi, tidak dinegasikan
         # user, dan config belum file-ready (sandbox+whatsapp_media) — Arthur WAJIB memutuskan
         # eksplisit via file_capability, bukan menebak diam-diam lalu mengirim agent cacat.
+        disabled_launch_features: list[str] = []
         if file_decision == "enabled":
             tc["whatsapp_media"] = True
             tc["sandbox"] = True
@@ -424,6 +430,51 @@ def build_builder_create_tools(
                 _subc["enabled"] = True
             else:
                 tc["subagents"] = {"enabled": True}
+        if not sandbox_subagents_enabled():
+            tc, disabled_launch_features = disable_sandbox_subagent_tools_config(tc)
+            launch_blocked_workflow = (
+                generated_file_workflow
+                or bool(disabled_launch_features and file_decision == "enabled")
+                or bool(disabled_launch_features and any(
+                    key in disabled_launch_features
+                    for key in ("sandbox", "deploy", "tool_creator", "subagents")
+                ) and _looks_like_generated_file_workflow(
+                    name, description, instructions, tools_config, soul, blueprint
+                ))
+            )
+            if launch_blocked_workflow:
+                return json.dumps({
+                    "error": "Fitur sandbox/subagent sementara dinonaktifkan untuk launch.",
+                    "validation_errors": [
+                        "Agent yang membutuhkan coding, deploy, analisis/generate file, atau subagent belum boleh dibuat sementara."
+                    ],
+                    "hint": (
+                        "Tanyakan user apakah mau dibuat versi agent chat/CS/escalation dulu tanpa analisis/generate file, "
+                        "atau tunda fitur sandbox/subagent sampai stabilisasi selesai."
+                    ),
+                    "launch_safety": {
+                        "sandbox_subagents_enabled": False,
+                        "disabled_features": disabled_launch_features,
+                        "message": SANDBOX_DISABLED_NOTICE,
+                    },
+                }, ensure_ascii=False, indent=2)
+        if payment_approval_workflow:
+            if len((instructions or "").strip()) < 1200:
+                critical_errors.append("Instructions terlalu pendek untuk workflow pembayaran/admin approval.")
+            if not _has_approval_state_contract(instructions):
+                critical_errors.append(
+                    "Instructions wajib memuat state intake, waiting_payment, payment_review, approved, delivery, dan aftercare."
+                )
+            if not tc.get("escalation"):
+                critical_errors.append("Workflow pembayaran/admin approval wajib escalation=true.")
+            if "escalate_to_human" not in instructions:
+                critical_errors.append("Instructions wajib menyebut escalate_to_human untuk bukti transfer/admin approval.")
+        if critical_errors:
+            return json.dumps({
+                "error": "Konfigurasi agent belum aman untuk dibuat.",
+                "validation_errors": critical_errors,
+                "hint": "Panggil compose_agent_blueprint dan compose_agent_instructions ulang, lalu validate_agent_config sebelum create_agent.",
+            }, ensure_ascii=False, indent=2)
         file_ready = bool(tc.get("sandbox")) and bool(tc.get("whatsapp_media"))
         file_signal = file_delivery_workflow or generated_file_workflow
         file_negated = _file_capability_negated(
@@ -450,17 +501,6 @@ def build_builder_create_tools(
                     "Jika TIDAK → create_agent lagi dengan file_capability='text_only'."
                 ),
             }, ensure_ascii=False, indent=2)
-        if payment_approval_workflow:
-            if len((instructions or "").strip()) < 1200:
-                critical_errors.append("Instructions terlalu pendek untuk workflow pembayaran/admin approval.")
-            if not _has_approval_state_contract(instructions):
-                critical_errors.append(
-                    "Instructions wajib memuat state intake, waiting_payment, payment_review, approved, delivery, dan aftercare."
-                )
-            if not tc.get("escalation"):
-                critical_errors.append("Workflow pembayaran/admin approval wajib escalation=true.")
-            if "escalate_to_human" not in instructions:
-                critical_errors.append("Instructions wajib menyebut escalate_to_human untuk bukti transfer/admin approval.")
         if file_delivery_workflow:
             if not tc.get("whatsapp_media"):
                 critical_errors.append("Workflow delivery file wajib whatsapp_media=true.")
@@ -692,6 +732,13 @@ def build_builder_create_tools(
                 "active_until": agent.active_until.isoformat() if agent.active_until else None,
                 "memory_keys_seeded": memory_keys_seeded,
                 "builder_memory_updated": builder_memory_updated,
+                **({
+                    "launch_safety": {
+                        "sandbox_subagents_enabled": False,
+                        "disabled_features": disabled_launch_features,
+                        "message": SANDBOX_DISABLED_NOTICE,
+                    }
+                } if disabled_launch_features else {}),
                 "message": (
                     f"Agent '{agent.name}' berhasil dibuat dengan ID: {agent.id}. "
                     "Simpan agent_id ini sebagai target utama untuk aksi lanjutan pada percakapan ini. "

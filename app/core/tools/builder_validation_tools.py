@@ -6,6 +6,11 @@ from typing import Any
 
 from langchain_core.tools import tool
 
+from app.core.launch_safety import (
+    SANDBOX_DISABLED_NOTICE,
+    disable_sandbox_subagent_tools_config,
+    sandbox_subagents_enabled,
+)
 from app.core.tools.builder_catalog import AGENT_PRESETS, _DEFAULT_MODEL, _RECOMMENDED_MODELS
 from app.core.tools.builder_identity import blocked_agent_policy_reason as _blocked_agent_policy_reason
 from app.core.tools.builder_intent import (
@@ -91,8 +96,10 @@ def build_builder_validation_tools() -> dict[str, Any]:
         except json.JSONDecodeError:
             errors.append("tools_config bukan JSON yang valid")
             tc = {}
-        if isinstance(tc, dict):
-            tc.setdefault("tavily", True)
+        if not isinstance(tc, dict):
+            errors.append("tools_config harus berupa JSON object")
+            tc = {}
+        tc.setdefault("tavily", True)
 
         approval_gated_service = _looks_like_approval_gated_service(
             name,
@@ -118,6 +125,26 @@ def build_builder_validation_tools() -> dict[str, Any]:
             tools_config,
             preset_id,
         )
+        launch_disabled_features: list[str] = []
+        if not sandbox_subagents_enabled():
+            tc, launch_disabled_features = disable_sandbox_subagent_tools_config(tc)
+            if launch_disabled_features:
+                errors.append(
+                    "tools_config meminta fitur yang sementara dinonaktifkan untuk launch: "
+                    + ", ".join(launch_disabled_features)
+                    + ". Buat versi agent tanpa sandbox/subagent dulu."
+                )
+                warnings.append(SANDBOX_DISABLED_NOTICE)
+            if generated_file_workflow or preset_id in {
+                "coding_deploy_agent",
+                "data_analyst_agent",
+                "social_media_agent",
+                "research_agent",
+            }:
+                errors.append(
+                    "Workflow coding/deploy/analisis atau generate file sementara tidak bisa dibuat "
+                    "karena sandbox dan subagent dinonaktifkan untuk launch."
+                )
         if payment_approval_workflow:
             if instruction_len < 1200:
                 errors.append(
@@ -142,14 +169,14 @@ def build_builder_validation_tools() -> dict[str, Any]:
             subagents_enabled = bool(
                 subagents_cfg.get("enabled") if isinstance(subagents_cfg, dict) else subagents_cfg
             )
-            if not tc.get("sandbox") or not subagents_enabled:
+            if sandbox_subagents_enabled() and (not tc.get("sandbox") or not subagents_enabled):
                 errors.append("Workflow pembuatan file final wajib mengaktifkan sandbox dan subagents.")
 
         # Dependency checks — machine-enforced
-        if tc.get("tool_creator") and not tc.get("sandbox"):
+        if sandbox_subagents_enabled() and tc.get("tool_creator") and not tc.get("sandbox"):
             errors.append("tool_creator membutuhkan sandbox: true — aktifkan sandbox juga")
 
-        if tc.get("deploy") and not tc.get("sandbox"):
+        if sandbox_subagents_enabled() and tc.get("deploy") and not tc.get("sandbox"):
             errors.append("deploy membutuhkan sandbox: true — agent deploy tidak akan bisa deploy tanpa sandbox aktif")
 
         # Coding/deploy-specific: enforce output contract in instructions

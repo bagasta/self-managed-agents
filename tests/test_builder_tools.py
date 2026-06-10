@@ -329,7 +329,7 @@ class TestBuilderToolsReturnsList:
         assert tools_config["mcp"]["enabled"] is True
         assert "google_workspace" in tools_config["mcp"]["servers"]
 
-    def test_personal_assistant_generate_file_enables_sandbox_and_google_workspace(self):
+    def test_personal_assistant_generate_file_is_blocked_during_launch_safety_but_keeps_google_workspace(self):
         from app.core.tools.builder_tools import build_builder_tools
 
         db = _make_mock_db()
@@ -346,12 +346,13 @@ class TestBuilderToolsReturnsList:
         tools_config = payload["recommended_config"]["tools_config"]
 
         assert payload["detected_preset"] == "personal_assistant"
-        assert payload["plan_status"] == "ready"
-        assert tools_config["sandbox"] is True
+        assert payload["plan_status"] == "has_errors"
+        assert tools_config["sandbox"] is False
         assert tools_config["whatsapp_media"] is True
-        assert tools_config["subagents"]["enabled"] is True
+        assert tools_config["subagents"]["enabled"] is False
         assert tools_config["mcp"]["enabled"] is True
         assert "google_workspace" in tools_config["mcp"]["servers"]
+        assert any("generate file" in error for error in payload["validation_errors"])
 
     def test_existing_google_form_order_link_does_not_enable_workspace(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -397,10 +398,12 @@ class TestBuilderToolsReturnsList:
         tools_config = payload["recommended_config"]["tools_config"]
 
         assert payload["detected_preset"] == "approval_gated_service_agent"
-        assert tools_config["sandbox"] is True
+        assert payload["plan_status"] == "has_errors"
+        assert tools_config["sandbox"] is False
         assert tools_config["escalation"] is True
         assert tools_config["whatsapp_media"] is True
-        assert tools_config["subagents"]["enabled"] is True
+        assert tools_config["subagents"]["enabled"] is False
+        assert any("generate file" in error for error in payload["validation_errors"])
 
     def test_approval_gated_service_without_file_does_not_force_sandbox(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -543,10 +546,10 @@ class TestBuilderToolsReturnsList:
 
         payload = json.loads(result)
 
-        assert payload["plan_status"] == "blocked_by_subscription"
+        assert payload["plan_status"] == "has_errors"
         assert payload["creation_entitlement_check"]["plan_code"] == "trial"
-        assert any("sub-agent" in error for error in payload["validation_errors"])
-        assert payload["recommended_config"]["tools_config"]["subagents"]["enabled"] is True
+        assert any("sandbox/subagent" in error for error in payload["validation_errors"])
+        assert payload["recommended_config"]["tools_config"]["subagents"]["enabled"] is False
 
 
 class TestBuilderOwnershipHelpers:
@@ -3258,13 +3261,9 @@ def test_create_file_agent_writer_fallback_keeps_media_tools_unlocked():
             }))
 
     data = json.loads(result)
-    manual = captured_kwargs["tools_config"]["operating_manual"]
-    assert data["success"] is True
-    assert manual["maturity"] == "usable"
-    assert manual["owner_review_required"] is False
-    assert captured_kwargs["tools_config"]["whatsapp_media"] is True
-    assert captured_kwargs["tools_config"]["sandbox"] is True
-    assert captured_kwargs["tools_config"]["subagents"]["enabled"] is True
+    assert data["error"] == "Fitur sandbox/subagent sementara dinonaktifkan untuk launch."
+    assert "launch_safety" in data
+    assert captured_kwargs == {}
 
 
 # ---------------------------------------------------------------------------

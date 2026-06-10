@@ -17,6 +17,11 @@ from app.core.domain.agent_sop_service import (
     summarize_operating_manual,
     upsert_agent_operating_manual,
 )
+from app.core.launch_safety import (
+    SANDBOX_DISABLED_NOTICE,
+    disable_sandbox_subagent_tools_config,
+    sandbox_subagents_enabled,
+)
 from app.core.tools.builder_google import (
     enable_google_workspace_tools as _enable_google_workspace_tools,
     has_google_workspace_tools as _has_google_workspace_tools,
@@ -206,6 +211,7 @@ def build_builder_update_tools(
             return f"[error] agent_id tidak valid: {agent_id}"
 
         google_workspace_enabled = False
+        launch_disabled_features: list[str] = []
         normalized_refresh_memory_mode = _normalize_refresh_memory_mode(refresh_memory_mode)
         memory_refresh_result: dict[str, Any] = {"mode": normalized_refresh_memory_mode, "updated": False, "keys": []}
         operating_manual_result: dict[str, Any] = {"updated": False}
@@ -336,6 +342,15 @@ def build_builder_update_tools(
                 if changed_instructions:
                     agent.instructions = updated_instructions
                     updated_fields.append("instructions+google_workspace")
+
+            if not sandbox_subagents_enabled():
+                current_tc = agent.tools_config if isinstance(agent.tools_config, dict) else {}
+                sanitized_tc, launch_disabled_features = disable_sandbox_subagent_tools_config(current_tc)
+                if launch_disabled_features:
+                    agent.tools_config = sanitized_tc
+                    if "tools_config" not in updated_fields:
+                        updated_fields.append("tools_config")
+                    updated_fields.append("launch_safety_sandbox_subagents_disabled")
 
             if _has_google_workspace_tools(agent.tools_config if isinstance(agent.tools_config, dict) else {}):
                 google_workspace_enabled = True
@@ -542,6 +557,12 @@ def build_builder_update_tools(
                 "dan kirim link otentikasi Google ke user jika tersedia. "
                 "Saat menjelaskan ke user, sebut 'integrasi Google/Google Docs', jangan sebut istilah teknis internal/protokol tool."
             )
+        if launch_disabled_features:
+            response["launch_safety"] = {
+                "sandbox_subagents_enabled": False,
+                "disabled_features": launch_disabled_features,
+                "message": SANDBOX_DISABLED_NOTICE,
+            }
         return json.dumps(response, ensure_ascii=False, indent=2)
 
     return {"update_agent": update_agent}

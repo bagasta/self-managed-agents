@@ -7,6 +7,11 @@ from typing import Any, Awaitable, Callable
 from langchain_core.tools import tool
 
 from app.core.engine.google_mcp_support import _is_plain_google_form_link_reference
+from app.core.launch_safety import (
+    SANDBOX_DISABLED_NOTICE,
+    disable_sandbox_subagent_tools_config,
+    sandbox_subagents_enabled,
+)
 from app.core.tools.builder_catalog import AGENT_PRESETS, RUNTIME_LIMITATIONS, _DEFAULT_MODEL
 from app.core.tools.builder_google import (
     enable_google_workspace_tools as _enable_google_workspace_tools,
@@ -352,6 +357,20 @@ def build_builder_planning_tools(
         if tools_config.get("tool_creator") and not tools_config.get("sandbox"):
             tools_config["sandbox"] = True
             validation_warnings.append("tool_creator membutuhkan sandbox — sandbox otomatis diaktifkan")
+
+        if not sandbox_subagents_enabled():
+            tools_config, disabled_launch_features = disable_sandbox_subagent_tools_config(tools_config)
+            if disabled_launch_features:
+                validation_warnings.append(SANDBOX_DISABLED_NOTICE)
+            if wants_coding or wants_generated_files:
+                validation_errors.append(
+                    "Request coding/deploy/generate file tidak bisa dibuat dengan sandbox/subagent untuk sementara. "
+                    "Tawarkan versi agent chat/escalation dulu, atau tunda fitur file/deploy sampai stabilisasi selesai."
+                )
+            if detected_preset in {"coding_deploy_agent", "social_media_agent", "data_analyst_agent", "research_agent"}:
+                validation_errors.append(
+                    f"Preset {detected_preset} membutuhkan sandbox/subagent, jadi sementara tidak boleh dibuat."
+                )
 
         # Channel validation. Arthur only offers user-facing WhatsApp onboarding.
         requested_channel = str(channel or "").strip().lower()

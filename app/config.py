@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     sandbox_base_dir: str = "/tmp/agent-sandboxes"
     docker_sandbox_image: str = "managed-agents-sandbox:latest"
     docker_host: str = "unix:///run/docker.sock"
+    sandbox_subagents_enabled: bool = False  # launch-safe kill switch; re-enable after sandbox/subagent stabilization
 
     # Agent limits
     agent_max_steps: int = 12

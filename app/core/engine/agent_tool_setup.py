@@ -9,6 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.database import AsyncSessionLocal
 from app.core.domain.custom_tool_service import list_custom_tools
+from app.core.launch_safety import (
+    SANDBOX_DISABLED_NOTICE,
+    disable_sandbox_subagent_tools_config,
+)
 from app.core.engine.agent_policy import (
     build_agent_runtime_policy,
     should_use_google_workspace_parent_only,
@@ -88,6 +92,14 @@ async def build_agent_tool_setup(
     operating_manual: dict[str, Any] | None = None,
 ) -> AgentToolSetup:
     settings = get_settings()
+    if not settings.sandbox_subagents_enabled:
+        tools_config, _disabled_launch_features = disable_sandbox_subagent_tools_config(tools_config)
+        if _disabled_launch_features:
+            log.warning(
+                "agent_run.sandbox_subagents_disabled_for_launch",
+                disabled=_disabled_launch_features,
+                reason=SANDBOX_DISABLED_NOTICE,
+            )
     agent_id = session.agent_id
     tools: list = []
     active_groups: list[str] = []
