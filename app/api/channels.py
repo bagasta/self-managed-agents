@@ -1800,6 +1800,12 @@ async def wa_incoming(
         unregister_active_task,
     )
 
+    # Bind the file uploaded in THIS turn as the single source of truth so the
+    # agent cannot fall back to a previously uploaded file (see audit fix B).
+    current_attachment_name: str | None = None
+    if body.media_type in ("document", "image") and body.media_data:
+        current_attachment_name = sanitize_user_input(body.media_filename or "").strip() or None
+
     # Cancel any in-progress run for this session (human interrupt).
     # Operator messages are never interrupted — they're short command turns.
     _prior_interrupted = False
@@ -1828,6 +1834,7 @@ async def wa_incoming(
                 escalation_context=escalation_context,
                 media_image_b64=media_image_b64,
                 media_image_mime=media_image_mime,
+                current_attachment_name=current_attachment_name,
                 sender_name=sender_name,
                 prior_run_was_interrupted=_prior_interrupted,
             )

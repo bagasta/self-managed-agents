@@ -18,6 +18,7 @@ def build_input_messages(
     history_rows: list[Any],
     human_content: Any,
     log: Any,
+    current_attachment_name: str | None = None,
 ) -> list[BaseMessage]:
     sanitized_prior = sanitize_input_messages(prior_messages)
     if len(sanitized_prior) != len(prior_messages):
@@ -76,4 +77,13 @@ def build_input_messages(
             "lanjut delegasi atau tool call apapun yang berkaitan dengan task lama."
         ))]
 
-    return sanitized_prior + interrupt_note + [HumanMessage(content=human_content)]
+    attachment_note: list[BaseMessage] = []
+    if current_attachment_name:
+        attachment_note = [SystemMessage(content=(
+            f"[SISTEM — LAMPIRAN AKTIF] File yang BARU dikirim user di turn ini: "
+            f"'{current_attachment_name}'. Ini SATU-SATUNYA sumber data/berkas untuk "
+            f"permintaan saat ini. JANGAN memakai, membaca, atau merujuk file/lampiran "
+            f"dari turn sebelumnya kecuali user secara eksplisit menyebut nama file lama itu."
+        ))]
+
+    return sanitized_prior + interrupt_note + attachment_note + [HumanMessage(content=human_content)]

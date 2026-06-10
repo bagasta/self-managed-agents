@@ -23,7 +23,12 @@ from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.core.engine.context_service import count_user_messages, db_messages_to_lc, load_history
+from app.core.engine.context_service import (
+    DELIVERY_STATUS_TAG,
+    count_user_messages,
+    db_messages_to_lc,
+    load_history,
+)
 from app.core.domain.agent_sop_service import get_latest_agent_operating_manual
 from app.core.domain.memory_service import build_memory_context, extract_long_term_memory, load_layered_memory
 from app.core.engine.prompt_builder import (
@@ -571,6 +576,7 @@ async def run_agent(
     escalation_context: str | None = None,
     media_image_b64: str | None = None,
     media_image_mime: str | None = None,
+    current_attachment_name: str | None = None,
     sender_name: str | None = None,
     prior_run_was_interrupted: bool = False,
 ) -> AgentRunResult:
@@ -1132,6 +1138,7 @@ async def run_agent(
             history_rows=history_rows,
             human_content=human_content,
             log=log,
+            current_attachment_name=current_attachment_name,
         )
         step_counter = step_base + 1
 
@@ -1295,6 +1302,9 @@ async def run_agent(
                 content=final_reply,
                 step_index=agent_step_index,
                 run_id=run_id,
+                # A failed delivery notice is transient status, not dialogue —
+                # tag it so it is never replayed as history (see context_service).
+                tool_name=None if _sent else DELIVERY_STATUS_TAG,
             ))
             run_record.status = "completed"
             run_record.completed_at = datetime.now(timezone.utc)
@@ -1324,6 +1334,7 @@ async def run_agent(
                     "result": "",
                 }
             ]
+            _wa_send_failed = False
             try:
                 from app.core.infra.channel_service import send_message as _channel_send_message
 
@@ -1340,6 +1351,7 @@ async def run_agent(
                 final_reply = f"Pesan WhatsApp ke {target_phone} sudah saya kirim."
                 log.info("agent_run.direct_wa_confirmation_sent", target=target_phone)
             except Exception as exc:
+                _wa_send_failed = True
                 tool_result = f"[error] Gagal kirim WhatsApp ke {target_phone}: {exc}"
                 steps[0]["result"] = tool_result
                 final_reply = f"Gagal mengirim pesan WhatsApp ke {target_phone}: {exc}"
@@ -1360,6 +1372,8 @@ async def run_agent(
                 content=final_reply,
                 step_index=step_counter + 1,
                 run_id=run_id,
+                # Tag a failed send so it is not replayed as history next turn.
+                tool_name=DELIVERY_STATUS_TAG if _wa_send_failed else None,
             ))
             run_record.status = "completed"
             run_record.completed_at = datetime.now(timezone.utc)
