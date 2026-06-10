@@ -6,6 +6,7 @@ import pytest
 from langchain_core.messages import ToolMessage
 
 from app.core.engine.agent_runner import (
+    _build_human_content_for_model,
     _direct_whatsapp_send_guard_reply,
     _extract_direct_whatsapp_confirmation_payload,
     _filter_whatsapp_unsafe_mcp_tools,
@@ -13,6 +14,7 @@ from app.core.engine.agent_runner import (
     _is_direct_whatsapp_text_send_context,
     _is_google_chat_intent,
     _is_operator_envelope,
+    _model_supports_image_input,
     _operator_escalation_reply_guard,
     _prioritize_direct_whatsapp_text_send_tools,
 )
@@ -77,6 +79,39 @@ def test_wa_dev_disconnect_command_is_backend_guarded():
     assert _is_wa_dev_disconnect_command("/disconnect")
     assert _is_wa_dev_disconnect_command("berhenti")
     assert not _is_wa_dev_disconnect_command("hi")
+
+
+def test_non_vision_model_strips_wa_image_payload_instead_of_crashing():
+    warnings: list[tuple[str, dict]] = []
+    content = _build_human_content_for_model(
+        user_message="ini gambar untuk agent saya",
+        model="deepseek/deepseek-v4-flash",
+        media_image_b64=base64.b64encode(b"fake-image").decode(),
+        media_image_mime="image/jpeg",
+        google_auth_recovery_followup=False,
+        google_auth_recovery_request=None,
+        log=SimpleNamespace(warning=lambda event, **kwargs: warnings.append((event, kwargs))),
+    )
+
+    assert _model_supports_image_input("deepseek/deepseek-v4-flash") is False
+    assert isinstance(content, str)
+    assert "tidak mendukung input gambar" in content
+    assert warnings[0][0] == "agent_run.image_input_stripped_for_non_vision_model"
+
+
+def test_vision_model_keeps_wa_image_payload():
+    content = _build_human_content_for_model(
+        user_message="tolong lihat gambar ini",
+        model="openai/gpt-4.1-mini",
+        media_image_b64=base64.b64encode(b"fake-image").decode(),
+        media_image_mime="image/jpeg",
+        google_auth_recovery_followup=False,
+        google_auth_recovery_request=None,
+    )
+
+    assert _model_supports_image_input("openai/gpt-4.1-mini") is True
+    assert isinstance(content, list)
+    assert content[1]["type"] == "image_url"
 
 
 def test_wa_dev_disconnect_lookup_candidates_cover_phone_lid_and_group():
@@ -272,6 +307,8 @@ def test_runtime_injects_created_by_arthur_from_metadata():
     assert f"Created By Agent ID: {arthur_id}" in prompt
     assert "Kamu dibuat/dikonfigurasi lewat Arthur" in prompt
     assert "arahkan Owner bicara ke Arthur" in prompt
+    assert "jangan mengklaim sudah mengedit dari chat agent ini" in prompt
+    assert "minta Owner membuka chat Arthur" in prompt
 
 
 def test_customer_session_does_not_become_owner():
@@ -433,6 +470,9 @@ def test_builder_prompt_blocks_repeated_continue_questions():
     assert "Workspace/App Connectors" in prompt
     assert "sampai user tahu langkah berikutnya" in prompt
     assert "cara test, cara connect Google, cara pasang WhatsApp" in prompt
+    assert "brief minimal sudah jelas" in prompt
+    assert "Wawancara singkat dulu" in prompt
+    assert "maksimal 3 hal paling penting" in prompt
     assert "minta pembayaran, bukti apa yang diminta" in prompt
     assert "Jangan berhenti hanya untuk menampilkan rencana" in prompt
     assert "Jangan mengunci preset hanya dari satu kata kunci" in prompt
@@ -453,13 +493,16 @@ def test_builder_prompt_blocks_repeated_continue_questions():
     assert "jangan menjawab `langsung aku betulin`" in prompt
     assert "DILARANG memakai task, subagent, sandbox, read_file, edit_file, atau write_file" in prompt
     assert "get_agent_detail(include_instructions=true)" in prompt
+    assert "Arthur Launch-Safe Temporary Limits" in prompt
+    assert "DILARANG membuat atau mengupdate agent menjadi agent coding" in prompt
     assert "refresh_memory_mode" in prompt
     assert "sistem menyimpan versi lama sebagai arsip" in prompt
     assert "Jangan menyebut `subagent`, `placeholder`, `database`, `sistem file`" in prompt
     assert "setup_status_for_owner" in prompt
     assert "summary_for_owner" in prompt
     assert "Jangan menyebut blockers/warnings/raw JSON ke user" in prompt
-    assert "whatsapp_media=true, sandbox=true" in prompt
+    assert "whatsapp_media=true" in prompt
+    assert "sandbox/subagent sedang dinonaktifkan" in prompt
     assert "link Google Form yang sudah ada sebagai link order pelanggan" in prompt
     assert "DILARANG menawarkan webchat" in prompt
     assert "WhatsApp/webchat/API" not in prompt

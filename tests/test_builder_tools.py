@@ -276,6 +276,24 @@ class TestBuilderToolsReturnsList:
         assert payload["capability_clarifications"][0]["topic"] == "agent_purpose"
         assert "JANGAN create_agent dulu" in payload["next_action"]
 
+    def test_plan_agent_interviews_for_shallow_business_agent_brief(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        plan = next(t for t in tools if t.name == "plan_agent")
+
+        result = _run(plan.ainvoke({
+            "user_goal": "Customer service WhatsApp",
+            "agent_name": "CS Bot",
+            "channel": "whatsapp",
+        }))
+        payload = json.loads(result)
+
+        assert payload["plan_status"] == "needs_clarification"
+        assert any(item["topic"] == "agent_brief" for item in payload["capability_clarifications"])
+        assert "maksimal 3 pertanyaan" in payload["next_action"]
+
     def test_plan_agent_defaults_unspecified_channel_to_whatsapp(self):
         from app.core.tools.builder_tools import build_builder_tools
 

@@ -108,6 +108,47 @@ def _needs_agent_purpose_clarification(
     return len(meaningful_words) < 2
 
 
+def _missing_agent_brief_clarifications(
+    *,
+    user_goal: str,
+    requested_features: str,
+    persona: str,
+    business_context: str,
+    detected_preset: str,
+) -> list[dict[str, str]]:
+    """Ask for a real brief when the request is too shallow to build a useful agent."""
+    if any(str(value or "").strip() for value in (persona, business_context)):
+        return []
+    text = _combined_context_text(user_goal, requested_features)
+    words = [word for word in text.split() if len(word) > 2]
+    if len(words) >= 16:
+        return []
+    if detected_preset in {"coding_deploy_agent", "social_media_agent", "data_analyst_agent", "research_agent"}:
+        return []
+    if any(marker in text for marker in ("google calendar", "gmail", "google docs", "google sheets", "google drive")):
+        return []
+    question = (
+        "Agar agentnya tidak generik, jawab singkat 3 hal ini: agent ini untuk bisnis/kebutuhan apa, "
+        "siapa yang akan chat dengan agent, dan alur kerja utamanya harus bagaimana?"
+    )
+    if detected_preset in {"cs_whatsapp_basic", "ecommerce_cs", "approval_gated_service_agent"}:
+        question = (
+            "Agar agent CS-nya tepat, jawab singkat 3 hal ini: bisnisnya jual/layani apa, "
+            "data apa yang harus ditanyakan ke customer, dan kapan harus diteruskan ke admin/Owner?"
+        )
+    elif detected_preset == "personal_assistant":
+        question = (
+            "Agar assistant-nya tidak generik, jawab singkat 3 hal ini: tugas utama yang harus dibantu, "
+            "data/preferensi apa yang perlu diingat, dan output akhirnya berupa apa?"
+        )
+    return [
+        {
+            "topic": "agent_brief",
+            "question": question,
+        }
+    ]
+
+
 def re_sub_word(word: str, replacement: str, text: str) -> str:
     import re
 
@@ -328,6 +369,15 @@ def build_builder_planning_tools(
         file_capability_negated = _file_capability_negated(feature_text)
         file_ready = bool(tools_config.get("sandbox")) and bool(tools_config.get("whatsapp_media"))
         capability_clarifications: list[dict] = []
+        capability_clarifications.extend(
+            _missing_agent_brief_clarifications(
+                user_goal=user_goal,
+                requested_features=requested_features,
+                persona=persona,
+                business_context=business_context,
+                detected_preset=detected_preset,
+            )
+        )
         if not file_capability_signal and not file_capability_negated and not file_ready:
             capability_clarifications.append(
                 {
@@ -452,10 +502,10 @@ def build_builder_planning_tools(
         elif capability_clarifications:
             next_action = (
                 "JANGAN create_agent dulu — PAHAMI kebutuhan user, jangan menebak. "
-                "Tanyakan ke user (bahasa awam) pertanyaan di capability_clarifications[].question "
-                "untuk memastikan apakah agent perlu menerima/membuat file atau visualisasi data. "
-                "Kalau user jawab YA → ikuti if_yes (panggil plan_agent ulang dengan fitur file). "
-                "Kalau user jawab TIDAK → ikuti if_no, lalu lanjut compose_agent_blueprint/compose_agent_instructions."
+                "Tanyakan ke user (bahasa awam) pertanyaan di capability_clarifications[].question. "
+                "Jika ada beberapa klarifikasi, gabungkan maksimal 3 pertanyaan paling penting dalam satu pesan. "
+                "Kalau klarifikasi file dijawab YA → ikuti if_yes (panggil plan_agent ulang dengan fitur file). "
+                "Kalau dijawab TIDAK → ikuti if_no, lalu lanjut compose_agent_blueprint/compose_agent_instructions setelah brief cukup."
             )
         elif google_workspace_option.get("should_offer"):
             next_action = (

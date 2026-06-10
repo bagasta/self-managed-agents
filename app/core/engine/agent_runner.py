@@ -212,6 +212,70 @@ class AgentRunResult(TypedDict):
     usage: dict[str, Any]
 
 
+def _model_supports_image_input(model: str | None) -> bool:
+    """Best-effort guard for provider endpoints that reject multimodal messages."""
+    name = str(model or "").lower()
+    if not name:
+        return False
+    if any(marker in name for marker in ("deepseek/", "moonshotai/", "kimi-")):
+        return False
+    if "qwen3" in name and "vl" not in name:
+        return False
+    return any(
+        marker in name
+        for marker in (
+            "gpt-4o",
+            "gpt-4.1",
+            "o4-mini",
+            "gemini",
+            "claude-3",
+            "claude-sonnet-4",
+            "pixtral",
+            "llava",
+            "vision",
+            "-vl",
+            "qwen-vl",
+        )
+    )
+
+
+def _build_human_content_for_model(
+    *,
+    user_message: str,
+    model: str | None,
+    media_image_b64: str | None,
+    media_image_mime: str | None,
+    google_auth_recovery_followup: bool,
+    google_auth_recovery_request: str | None,
+    log: Any | None = None,
+) -> Any:
+    if google_auth_recovery_followup and google_auth_recovery_request:
+        return (
+            "Saya sudah menyelesaikan OAuth/reconnect Google. "
+            "Lanjutkan request Google Workspace sebelumnya sekarang dengan tool Google Workspace langsung:\n"
+            f"{google_auth_recovery_request}"
+        )
+    if media_image_b64 and media_image_mime:
+        if _model_supports_image_input(model):
+            return [
+                {"type": "text", "text": user_message},
+                {"type": "image_url", "image_url": {"url": f"data:{media_image_mime};base64,{media_image_b64}"}},
+            ]
+        if log is not None:
+            log.warning(
+                "agent_run.image_input_stripped_for_non_vision_model",
+                model=model,
+                media_mime=media_image_mime,
+            )
+        note = (
+            "\n\n[Catatan sistem: user mengirim gambar, tetapi model run ini tidak mendukung input gambar. "
+            "Jangan mengklaim melihat isi gambar. Jika isi gambar penting untuk tugas, minta user menjelaskan "
+            "detail pentingnya dalam teks.]"
+        )
+        return (user_message or "").strip() + note
+    return user_message
+
+
 # Re-exported from agent_middleware (moved there to keep agent_runner as facade)
 from app.core.engine.agent_middleware import (  # noqa: E402
     BlockTaskToolMiddleware,
@@ -1253,19 +1317,15 @@ async def run_agent(
                 checkpointer=_checkpointer,
             )
 
-        if media_image_b64 and media_image_mime:
-            human_content: Any = [
-                {"type": "text", "text": user_message},
-                {"type": "image_url", "image_url": {"url": f"data:{media_image_mime};base64,{media_image_b64}"}},
-            ]
-        else:
-            human_content = user_message
-            if google_auth_recovery_followup and google_auth_recovery_request:
-                human_content = (
-                    "Saya sudah menyelesaikan OAuth/reconnect Google. "
-                    "Lanjutkan request Google Workspace sebelumnya sekarang dengan tool Google Workspace langsung:\n"
-                    f"{google_auth_recovery_request}"
-                )
+        human_content: Any = _build_human_content_for_model(
+            user_message=user_message,
+            model=getattr(agent_model, "model", None),
+            media_image_b64=media_image_b64,
+            media_image_mime=media_image_mime,
+            google_auth_recovery_followup=google_auth_recovery_followup,
+            google_auth_recovery_request=google_auth_recovery_request,
+            log=log,
+        )
 
         input_messages: list[BaseMessage] = build_input_messages(
             prior_messages=prior_messages,
