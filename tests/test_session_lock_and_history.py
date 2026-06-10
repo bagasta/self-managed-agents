@@ -420,6 +420,22 @@ class TestDockerBackendWriteCreateOnly:
         assert result.file_data is not None
         assert "print" in result.file_data["content"]
 
+    def test_read_text_file_default_limit_is_bounded(self, tmp_path):
+        backend = self._make_backend(tmp_path)
+        (tmp_path / "long.txt").write_text("\n".join(f"line {i}" for i in range(1000)))
+        result = backend.read("long.txt")
+        assert result.error is None
+        assert result.file_data is not None
+        assert len(result.file_data["content"].splitlines()) == 300
+
+    def test_read_text_file_large_limit_is_clamped(self, tmp_path):
+        backend = self._make_backend(tmp_path)
+        (tmp_path / "long.txt").write_text("\n".join(f"line {i}" for i in range(1000)))
+        result = backend.read("long.txt", limit=2000)
+        assert result.error is None
+        assert result.file_data is not None
+        assert len(result.file_data["content"].splitlines()) == 500
+
 
 # ============================================================================
 # Interrupted run — partial messages from last run stripped from history

@@ -198,8 +198,11 @@ _SYSTEM_SUBAGENTS: list[dict] = [
             "ATURAN HANDOFF — file kerjamu HARUS sampai ke parent agent:\n"
             "- Workspace-mu terisolasi dari parent. File di /workspace/src/, /workspace/output/, atau folder\n"
             "  custom seperti /workspace/portfolio/ TIDAK bisa dibaca parent agent.\n"
-            "- Jika parent menyebut file WhatsApp `/workspace/shared/<filename>`, di subagent file input yang sama bisa dibaca dari `/workspace/data/incoming/<filename>`.\n"
+            "- Jika parent menyebut Current Attachment, gunakan path `Current Attachment Subagent Path` dari task sebagai input utama.\n"
+            "- Jika parent menyebut file WhatsApp `/workspace/shared/current_input/<filename>`, di subagent file input yang sama bisa dibaca dari `/workspace/data/incoming/current_input/<filename>`.\n"
+            "- Kompatibilitas lama: jika task hanya menyebut `/workspace/shared/<filename>`, file biasanya bisa dibaca dari `/workspace/data/incoming/<filename>`.\n"
             "- Jangan mencari file upload hanya dari nama file di current directory; gunakan path eksplisit dari task parent.\n"
+            "- Jangan mencari file upload dari `ls /workspace/shared`; folder shared bisa berisi file lama. Gunakan path eksplisit dari task parent.\n"
             "- Untuk website/app yang perlu diakses user → WAJIB deploy_app() supaya hasilkan URL public.\n"
             "- Untuk file deliverable (tanpa deploy) → tulis ke /workspace/shared/ supaya parent bisa baca.\n"
             "- JANGAN PERNAH selesai task tanpa deploy_app() ATAU file di /workspace/shared/.\n\n"
@@ -236,7 +239,8 @@ _SYSTEM_SUBAGENTS: list[dict] = [
             "✅ content_plan_minggu1.pdf dibuat di /workspace/shared/content_plan_minggu1.pdf — SIAP_DIKIRIM_PARENT.\n"
             "✅ chart_penjualan.png dibuat di /workspace/shared/chart_penjualan.png — SIAP_DIKIRIM_PARENT.\n"
             "Tanpa path /workspace/shared, parent agent tidak bisa mengirim file ke user.\n\n"
-            "Install dependency hanya untuk backend/API non-web jika benar-benar perlu: execute('pip install <package>') atau execute('npm install <package>'). "
+            "Install dependency hanya jika import check gagal. Coba dulu `python3 -c \"import <module>\"`; jangan `pip install` paket yang sudah tersedia. "
+            "Untuk backend/API non-web jika benar-benar perlu: execute('pip install <package>') atau execute('npm install <package>'). "
             "Untuk website/frontend, jangan install dependency."
         ),
         "model": "moonshotai/kimi-k2.6",
@@ -336,8 +340,12 @@ _SYSTEM_SUBAGENTS: list[dict] = [
             "                          jika sub-agent lain perlu memakainya dalam session yang sama)\n\n"
             "Cara kerja:\n"
             "1. Terima data dalam bentuk teks, CSV, JSON, atau format lain\n"
-            "   - Jika parent menyebut file WhatsApp `/workspace/shared/<filename>`, di subagent file yang sama bisa dibaca dari `/workspace/data/incoming/<filename>`.\n"
+            "   - Jika parent menyebut Current Attachment, gunakan path eksplisit dari task sebagai input utama.\n"
+            "   - Jika parent menyebut file WhatsApp `/workspace/shared/current_input/<filename>`, di subagent file yang sama bisa dibaca dari `/workspace/data/incoming/current_input/<filename>`.\n"
+            "   - Kompatibilitas lama: jika task hanya menyebut `/workspace/shared/<filename>`, file biasanya bisa dibaca dari `/workspace/data/incoming/<filename>`.\n"
             "   - Jangan mencari file hanya dari nama file di current directory; gunakan path eksplisit yang diberikan parent.\n"
+            "   - Jangan mencari file dengan `ls /workspace/shared`; folder itu bisa berisi file lama. Gunakan path eksplisit yang diberikan parent.\n"
+            "   - Untuk DOCX/PDF/laporan besar, ekstrak tabel/angka menjadi JSON/CSV ringkas dulu; jangan membaca seluruh extracted text ke konteks.\n"
             "2. Tulis kode Python dengan pandas/numpy/matplotlib ke /workspace/src/ menggunakan write_file\n"
             "3. Jalankan analisis di sandbox menggunakan execute\n"
             "4. Simpan output internal ke /workspace/output/\n"
@@ -345,7 +353,7 @@ _SYSTEM_SUBAGENTS: list[dict] = [
             "   - salin file final ke /workspace/shared/<filename>\n"
             "   - output akhir wajib menyebut path /workspace/shared/<filename> dan SIAP_DIKIRIM_PARENT\n"
             "6. Buat ringkasan temuan dan insight yang actionable\n\n"
-            "Install library: execute('pip install pandas numpy matplotlib seaborn')"
+            "Install library hanya jika import check gagal. Coba dulu: execute('python3 -c \"import pandas, matplotlib\"')."
         ),
         "model": "openai/gpt-4o-mini",
         "max_tokens": 1024,

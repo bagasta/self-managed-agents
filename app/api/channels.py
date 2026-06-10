@@ -188,14 +188,14 @@ async def _resolve_wa_incoming_agent(body: object, db: AsyncSession, log: struct
     device_id = str(getattr(body, "device_id", "") or "")
     if _is_wa_dev_device(device_id):
         from app.core.domain.wa_dev_trial_service import (
+            extract_wa_dev_trial_code,
             find_agent_by_wa_dev_trial_code,
-            looks_like_wa_dev_trial_code,
             normalize_wa_dev_trial_code,
         )
 
         code = normalize_wa_dev_trial_code(trial_code)
-        if len(code) != 6 and looks_like_wa_dev_trial_code(message):
-            code = normalize_wa_dev_trial_code(message)
+        if len(code) != 6:
+            code = extract_wa_dev_trial_code(message)
         if len(code) == 6:
             agent = await find_agent_by_wa_dev_trial_code(db, code)
             if agent:
@@ -1822,6 +1822,21 @@ async def wa_incoming(
             sess_meta = dict(session.metadata_ or {})
             sess_meta["last_incoming_media"] = {
                 **media_meta,
+                "saved_at": int(_time.time()),
+                "from_operator": _is_operator,
+            }
+            sess_meta["current_attachment"] = {
+                "media_type": media_meta.get("media_type"),
+                "filename": media_meta.get("filename"),
+                "input_path": media_meta.get("current_input_path") or media_meta.get("shared_alias"),
+                "subagent_input_path": (
+                    media_meta.get("subagent_current_input_path")
+                    or media_meta.get("incoming_alias")
+                ),
+                "shared_path": media_meta.get("current_input_path") or media_meta.get("shared_alias"),
+                "legacy_shared_path": media_meta.get("shared_alias"),
+                "extracted_text_path": media_meta.get("extracted_text_path"),
+                "extracted_text_subagent_path": media_meta.get("extracted_text_subagent_path"),
                 "saved_at": int(_time.time()),
                 "from_operator": _is_operator,
             }

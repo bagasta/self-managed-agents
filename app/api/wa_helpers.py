@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import re
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -30,6 +31,16 @@ _ACTIVE_ESCALATION_ROUTE_TTL_SECONDS = 6 * 60 * 60
 # Menghindari db.execute (lambat) untuk deduplikasi.
 _mem_dedup_cache: dict[str, float] = {}
 _mem_spam_windows: dict[str, list[float]] = {}
+
+
+def _reset_current_media_dir(path: Path) -> None:
+    """Keep per-turn media aliases single-source without clearing history files."""
+    path.mkdir(parents=True, exist_ok=True)
+    for child in path.iterdir():
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink(missing_ok=True)
 
 
 def extract_escalation_case_id(text: str | None) -> str | None:
@@ -577,27 +588,54 @@ async def process_wa_media(
             ext_map = {"image": ".jpg", "document": ".bin", "sticker": ".webp"}
             filename += ext_map.get(media_type, ".bin")
         target_path = workspace / filename
+        incoming_path = workspace / "data" / "incoming" / filename
+        current_incoming_dir = workspace / "data" / "incoming" / "current_input"
+        current_shared_dir = workspace / "shared" / "current_input"
+        _reset_current_media_dir(current_incoming_dir)
+        _reset_current_media_dir(current_shared_dir)
+        current_incoming_path = current_incoming_dir / filename
         shared_path = workspace / "shared" / filename
+        current_shared_path = current_shared_dir / filename
         target_path.write_bytes(raw_bytes)
+        incoming_path.parent.mkdir(parents=True, exist_ok=True)
+        incoming_path.write_bytes(raw_bytes)
         shared_path.parent.mkdir(parents=True, exist_ok=True)
         shared_path.write_bytes(raw_bytes)
+        current_incoming_path.write_bytes(raw_bytes)
+        current_shared_path.write_bytes(raw_bytes)
+        workspace_alias = f"/workspace/{filename}"
+        incoming_alias = f"/workspace/data/incoming/{filename}"
+        current_incoming_alias = f"/workspace/data/incoming/current_input/{filename}"
+        shared_alias = f"/workspace/shared/{filename}"
+        current_shared_alias = f"/workspace/shared/current_input/{filename}"
         logger.info(
             "wa_incoming.media_saved",
             media_type=media_type,
             filename=filename,
             shared_workspace_path=str(shared_path),
+            current_shared_workspace_path=str(current_shared_path),
         )
         media_meta = {
             "media_type": media_type,
             "filename": filename,
             "workspace_path": str(target_path),
+            "incoming_workspace_path": str(incoming_path),
+            "current_workspace_path": str(current_incoming_path),
             "shared_workspace_path": str(shared_path),
+            "current_shared_workspace_path": str(current_shared_path),
+            "workspace_alias": workspace_alias,
+            "incoming_alias": incoming_alias,
+            "current_input_path": current_shared_alias,
+            "subagent_current_input_path": current_incoming_alias,
+            "shared_alias": shared_alias,
             "size_bytes": len(raw_bytes),
         }
         workspace_hint = (
-            f"tersimpan di /workspace/{filename}. "
-            f"Untuk workflow file/sandbox gunakan /workspace/shared/{filename}. "
-            f"Jika mendelegasikan ke subagent, sebutkan path input /workspace/data/incoming/{filename}"
+            f"tersimpan di {workspace_alias}. "
+            f"Untuk workflow file/sandbox gunakan CURRENT_ATTACHMENT input utama parent: {current_shared_alias}. "
+            f"CURRENT_ATTACHMENT input utama subagent: {current_incoming_alias}. "
+            f"Alias lama: {shared_alias} dan {incoming_alias}. "
+            "Jangan memilih input dari hasil ls /workspace/shared karena folder itu bisa berisi file lama."
         )
 
         if media_type == "image":
@@ -629,11 +667,26 @@ async def process_wa_media(
                         content_type=None,
                         mistral_api_key=get_settings().mistral_api_key,
                     )
+                    extract_stem = Path(filename).stem or "incoming_document"
+                    extracted_filename = f"{extract_stem}.extracted.txt"
+                    current_extracted_path = current_shared_dir / extracted_filename
+                    current_incoming_extracted_path = current_incoming_dir / extracted_filename
+                    current_extracted_path.write_text(extracted, encoding="utf-8")
+                    current_incoming_extracted_path.write_text(extracted, encoding="utf-8")
+                    media_meta.update({
+                        "extracted_text_filename": extracted_filename,
+                        "extracted_text_shared_workspace_path": str(current_extracted_path),
+                        "extracted_text_workspace_path": str(current_incoming_extracted_path),
+                        "extracted_text_path": f"/workspace/shared/current_input/{extracted_filename}",
+                        "extracted_text_subagent_path": f"/workspace/data/incoming/current_input/{extracted_filename}",
+                    })
                     max_chars = get_settings().media_doc_max_chars
                     if len(extracted) > max_chars:
                         extracted = extracted[:max_chars] + f"\n... [dipotong, total {len(extracted)} karakter]"
                     media_context = (
                         f"\n[Dokumen diterima: {filename}, {workspace_hint}]\n"
+                        f"[Extracted text current: /workspace/shared/current_input/{extracted_filename}; "
+                        f"subagent: /workspace/data/incoming/current_input/{extracted_filename}]\n"
                         f"Isi dokumen:\n```\n{extracted}\n```"
                     )
                 except Exception as exc:

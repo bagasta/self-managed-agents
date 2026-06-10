@@ -22,8 +22,17 @@ def normalize_wa_dev_trial_code(code: str | None) -> str:
     return raw[:_CODE_LENGTH]
 
 
+def extract_wa_dev_trial_code(text: str | None) -> str:
+    """Extract a standalone 6-char trial code from free-form WhatsApp text."""
+    for token in str(text or "").upper().split():
+        raw = "".join(ch for ch in token if ch.isalnum())
+        if len(raw) == _CODE_LENGTH and any(ch.isdigit() for ch in raw):
+            return raw
+    return ""
+
+
 def looks_like_wa_dev_trial_code(text: str | None) -> bool:
-    return len(normalize_wa_dev_trial_code(text)) == _CODE_LENGTH
+    return bool(extract_wa_dev_trial_code(text))
 
 
 def _new_code() -> str:

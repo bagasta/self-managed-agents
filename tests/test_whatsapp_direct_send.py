@@ -620,6 +620,42 @@ def test_subagent_task_context_requires_uploaded_file_paths():
     assert "simpan hasil final ke `/workspace/shared/<output>`" in prompt
 
 
+def test_prompt_injects_current_attachment_paths():
+    prompt = build_system_prompt(
+        agent_model=_agent(instructions="Kamu adalah assistant yang bisa analisis data."),
+        session=_session(
+            channel_type="whatsapp",
+            metadata_={
+                "current_attachment": {
+                    "filename": "2024_Annual_Report.docx",
+                    "input_path": "/workspace/shared/current_input/2024_Annual_Report.docx",
+                    "subagent_input_path": "/workspace/data/incoming/current_input/2024_Annual_Report.docx",
+                    "extracted_text_path": "/workspace/shared/current_input/2024_Annual_Report.extracted.txt",
+                    "extracted_text_subagent_path": "/workspace/data/incoming/current_input/2024_Annual_Report.extracted.txt",
+                }
+            },
+        ),
+        active_groups=["memory", "subagents(1)", "whatsapp_media"],
+        saved_custom_tools=[],
+        subagent_list=[{"name": "sys_analyst", "description": "Olah data di sandbox."}],
+        sender_name="Bagas",
+        context_summary="",
+        memory_block="",
+        layered_memory=None,
+        rag_context="",
+        escalation_user_jid=None,
+        escalation_context=None,
+        is_operator_message=False,
+        user_message="Visualisasikan data ini",
+    )
+
+    assert "## Current Attachment" in prompt
+    assert "/workspace/shared/current_input/2024_Annual_Report.docx" in prompt
+    assert "/workspace/data/incoming/current_input/2024_Annual_Report.docx" in prompt
+    assert "/workspace/shared/current_input/2024_Annual_Report.extracted.txt" in prompt
+    assert "Jangan memilih input dari `ls /workspace/shared`" in prompt
+
+
 @pytest.mark.asyncio
 async def test_process_wa_media_saves_document_to_shared_workspace(tmp_path, monkeypatch):
     from app.api.wa_helpers import process_wa_media
@@ -646,16 +682,63 @@ async def test_process_wa_media_saves_document_to_shared_workspace(tmp_path, mon
     assert media_meta is not None
     assert media_meta["filename"] == "Titanic.xlsx"
     assert media_context
+    assert "/workspace/shared/current_input/Titanic.xlsx" in media_context
+    assert "/workspace/data/incoming/current_input/Titanic.xlsx" in media_context
     assert "/workspace/shared/Titanic.xlsx" in media_context
-    assert "/workspace/data/incoming/Titanic.xlsx" in media_context
     assert "workflow file/sandbox" in media_context
 
     root_path = media_meta["workspace_path"]
+    incoming_path = media_meta["incoming_workspace_path"]
+    current_path = media_meta["current_workspace_path"]
     shared_path = media_meta["shared_workspace_path"]
+    current_shared_path = media_meta["current_shared_workspace_path"]
     assert root_path.endswith("/Titanic.xlsx")
+    assert incoming_path.endswith("/data/incoming/Titanic.xlsx")
+    assert current_path.endswith("/data/incoming/current_input/Titanic.xlsx")
     assert shared_path.endswith("/shared/Titanic.xlsx")
+    assert current_shared_path.endswith("/shared/current_input/Titanic.xlsx")
+    assert media_meta["current_input_path"] == "/workspace/shared/current_input/Titanic.xlsx"
+    assert media_meta["subagent_current_input_path"] == "/workspace/data/incoming/current_input/Titanic.xlsx"
     assert open(root_path, "rb").read() == raw
+    assert open(incoming_path, "rb").read() == raw
+    assert open(current_path, "rb").read() == raw
     assert open(shared_path, "rb").read() == raw
+    assert open(current_shared_path, "rb").read() == raw
+
+
+@pytest.mark.asyncio
+async def test_process_wa_media_writes_specific_current_extracted_text(tmp_path, monkeypatch):
+    from app.api.wa_helpers import process_wa_media
+
+    settings = SimpleNamespace(
+        sandbox_base_dir=str(tmp_path),
+        media_doc_max_chars=1000,
+        mistral_api_key="",
+    )
+    monkeypatch.setattr("app.config.get_settings", lambda: settings)
+    monkeypatch.setattr("app.core.infra.sandbox.get_settings", lambda: settings)
+
+    async def fake_extract_text(*_args, **_kwargs):
+        return "Revenue 2024: 100\nRevenue 2023: 80"
+
+    monkeypatch.setattr("app.core.domain.file_processor.extract_text", fake_extract_text)
+
+    media_context, image_b64, image_mime, media_meta = await process_wa_media(
+        media_type="document",
+        media_data=base64.b64encode(b"doc bytes").decode("ascii"),
+        media_filename="2024_Annual_Report.docx",
+        session_id=uuid.uuid4(),
+        logger=SimpleNamespace(info=lambda *args, **kwargs: None, warning=lambda *args, **kwargs: None),
+    )
+
+    assert image_b64 is None
+    assert image_mime is None
+    assert media_meta is not None
+    assert media_meta["extracted_text_path"] == "/workspace/shared/current_input/2024_Annual_Report.extracted.txt"
+    assert media_meta["extracted_text_subagent_path"] == "/workspace/data/incoming/current_input/2024_Annual_Report.extracted.txt"
+    assert "2024_Annual_Report.extracted.txt" in media_context
+    assert "extracted_text.txt" not in media_context
+    assert open(media_meta["extracted_text_shared_workspace_path"], encoding="utf-8").read() == "Revenue 2024: 100\nRevenue 2023: 80"
 
 
 def test_runtime_tool_contract_lists_only_actual_tools_and_disabled_risks():

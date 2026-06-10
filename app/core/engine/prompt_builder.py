@@ -348,6 +348,29 @@ def build_agent_context_block(
         )
     lines.append(f"- Session ID: {session.id}")
 
+    _session_meta = getattr(session, "metadata_", None)
+    _session_meta = _session_meta if isinstance(_session_meta, dict) else {}
+    _current_attachment = _session_meta.get("current_attachment")
+    if isinstance(_current_attachment, dict) and _current_attachment.get("filename"):
+        _input_path = str(_current_attachment.get("input_path") or "").strip()
+        _subagent_input_path = str(_current_attachment.get("subagent_input_path") or "").strip()
+        _extracted_path = str(_current_attachment.get("extracted_text_path") or "").strip()
+        _extracted_subagent_path = str(_current_attachment.get("extracted_text_subagent_path") or "").strip()
+        lines.append("\n## Current Attachment")
+        lines.append(f"- Current Attachment Filename: {_current_attachment.get('filename')}")
+        if _input_path:
+            lines.append(f"- Current Attachment Parent Path: {_input_path}")
+        if _subagent_input_path:
+            lines.append(f"- Current Attachment Subagent Path: {_subagent_input_path}")
+        if _extracted_path:
+            lines.append(f"- Current Attachment Extracted Text Parent Path: {_extracted_path}")
+        if _extracted_subagent_path:
+            lines.append(f"- Current Attachment Extracted Text Subagent Path: {_extracted_subagent_path}")
+        lines.append(
+            "- File ini adalah input utama untuk turn sekarang. Jangan memilih input dari `ls /workspace/shared`; "
+            "folder shared dapat berisi file lama dari turn sebelumnya."
+        )
+
 
     if subagent_list:
         lines.append("\n## Available Subagents")
@@ -368,6 +391,8 @@ def build_agent_context_block(
             + (f"- Nama user: {sender_name}\n" if sender_name else "")
             + (f"- User phone: {user_phone}\n" if user_phone else "")
             + "- Sertakan konteks singkat dari request user agar subagent tidak buta\n"
+            "- Jika blok `Current Attachment` tersedia, task string WAJIB menyebut `Current Attachment Subagent Path` "
+            "sebagai input utama. JANGAN minta subagent memilih file dari `ls /workspace/shared`.\n"
             "- Jika pesan user mengandung `[Dokumen diterima: ... /workspace/shared/<filename>]`, "
             "task string WAJIB menyebut path input eksplisit untuk subagent: `/workspace/data/incoming/<filename>` "
             "dan alias parent `/workspace/shared/<filename>`. Jangan hanya menyebut nama file.\n"
@@ -796,7 +821,9 @@ def build_system_prompt(
         "- `write_file` hanya untuk membuat file baru. Tool ini akan gagal jika path sudah ada.\n"
         "- Jika `write_file` gagal karena file sudah ada, JANGAN panggil `write_file` lagi dengan path yang sama.\n"
         "- Untuk memperbarui file yang sudah ada: panggil `read_file` dulu, lalu `edit_file`; atau gunakan nama file baru yang jelas jika memang butuh versi baru.\n"
+        "- Jika blok `Current Attachment` tersedia, gunakan path current attachment dari Platform Context sebagai input utama. Jangan menjalankan `ls /workspace/shared` untuk memilih file input, karena folder itu menyimpan history.\n"
         "- Jika user mengirim file WhatsApp, sistem akan menyebut path `/workspace/shared/<filename>`; gunakan path itu sebagai input utama. Untuk subagent, file yang sama juga terlihat di `/workspace/data/incoming/<filename>`. JANGAN pakai dataset contoh/built-in sebelum mengecek file user di path tersebut.\n"
+        "- Untuk DOCX/PDF/laporan besar, jangan membaca seluruh extracted text ke konteks. Gunakan `execute()` untuk mengekstrak tabel/angka menjadi JSON/CSV ringkas, lalu buat chart dari data ringkas itu.\n"
         "- Jika user meminta ASCII art, plain text, teks saja, text form, atau jawaban langsung di chat, BALAS sebagai teks chat. Jangan membuat file .txt/.md dan jangan mencoba mengirimnya sebagai dokumen WhatsApp kecuali user eksplisit minta file.\n"
         "- Untuk riset, ringkasan, FAQ, catatan, atau knowledge yang perlu diingat, default-nya balas user di chat dan simpan inti informasi ke memory. "
         "Jangan membuat file laporan kecuali user meminta ekspor/file atau output terlalu panjang untuk chat.\n"

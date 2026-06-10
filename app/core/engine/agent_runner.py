@@ -526,22 +526,56 @@ def _shared_path_filename(path: str | None) -> str:
 def _incoming_media_paths_from_session(session: Session) -> list[str]:
     meta = session.metadata_ if isinstance(getattr(session, "metadata_", None), dict) else {}
     incoming = meta.get("last_incoming_media")
-    if not isinstance(incoming, dict):
-        return []
+    current_attachment = meta.get("current_attachment")
 
     paths: list[str] = []
-    for key in ("shared_workspace_path", "workspace_path"):
-        raw_path = incoming.get(key)
-        if raw_path:
-            path = str(raw_path)
-            paths.append(path)
-            filename = _shared_path_filename(path)
-            if filename:
-                paths.append(f"/workspace/shared/{filename}")
+    if isinstance(incoming, dict):
+        for key in (
+            "shared_workspace_path",
+            "current_shared_workspace_path",
+            "workspace_path",
+            "incoming_workspace_path",
+            "current_workspace_path",
+            "extracted_text_shared_workspace_path",
+            "extracted_text_workspace_path",
+            "current_input_path",
+            "subagent_current_input_path",
+            "shared_alias",
+            "incoming_alias",
+            "extracted_text_path",
+            "extracted_text_subagent_path",
+        ):
+            raw_path = incoming.get(key)
+            if raw_path:
+                path = str(raw_path)
+                paths.append(path)
+                filename = _shared_path_filename(path)
+                if filename:
+                    paths.append(f"/workspace/shared/{filename}")
+                    paths.append(f"/workspace/shared/current_input/{filename}")
 
-    filename = str(incoming.get("filename") or "").strip()
-    if filename:
-        paths.append(f"/workspace/shared/{filename}")
+        filename = str(incoming.get("filename") or "").strip()
+        if filename:
+            paths.append(f"/workspace/shared/{filename}")
+            paths.append(f"/workspace/shared/current_input/{filename}")
+
+    if isinstance(current_attachment, dict):
+        for key in (
+            "input_path",
+            "subagent_input_path",
+            "shared_path",
+            "legacy_shared_path",
+            "extracted_text_path",
+            "extracted_text_subagent_path",
+        ):
+            raw_path = current_attachment.get(key)
+            if raw_path:
+                path = str(raw_path)
+                paths.append(path)
+                filename = _shared_path_filename(path)
+                if filename:
+                    paths.append(f"/workspace/shared/{filename}")
+                    paths.append(f"/workspace/shared/current_input/{filename}")
 
     deduped: list[str] = []
     for path in paths:

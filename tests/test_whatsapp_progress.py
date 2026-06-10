@@ -380,6 +380,36 @@ def test_latest_shared_artifact_ignores_current_incoming_media_file():
     assert resend_path is None
 
 
+def test_latest_shared_artifact_ignores_current_attachment_paths():
+    from app.core.engine.agent_runner import _latest_shared_artifact_path_for_delivery
+
+    session = SimpleNamespace(
+        metadata_={
+            "current_attachment": {
+                "filename": "2024_Annual_Report.docx",
+                "input_path": "/workspace/shared/current_input/2024_Annual_Report.docx",
+                "subagent_input_path": "/workspace/data/incoming/current_input/2024_Annual_Report.docx",
+                "extracted_text_path": "/workspace/shared/current_input/2024_Annual_Report.extracted.txt",
+                "extracted_text_subagent_path": "/workspace/data/incoming/current_input/2024_Annual_Report.extracted.txt",
+            },
+            "latest_shared_artifact": {
+                "path": "/workspace/shared/current_input/2024_Annual_Report.extracted.txt",
+                "filename": "2024_Annual_Report.extracted.txt",
+                "extension": "txt",
+                "sent": False,
+            },
+        }
+    )
+
+    resend_path = _latest_shared_artifact_path_for_delivery(
+        session=session,
+        history_rows=[],
+        user_message="Kirim file",
+    )
+
+    assert resend_path is None
+
+
 def test_latest_shared_artifact_keeps_generated_file_after_incoming_media():
     from app.core.engine.agent_runner import _latest_shared_artifact_path_for_delivery
 

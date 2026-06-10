@@ -30,6 +30,9 @@ from deepagents.backends.protocol import FileData  # TypedDict
 if TYPE_CHECKING:
     from app.core.infra.sandbox import DockerSandbox
 
+_DEFAULT_TEXT_READ_LIMIT = 300
+_MAX_TEXT_READ_LIMIT = 500
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -136,7 +139,7 @@ class DockerBackend(SandboxBackendProtocol):
         ".zip", ".tar", ".gz", ".bin", ".exe",
     })
 
-    def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
+    def read(self, file_path: str, offset: int = 0, limit: int = _DEFAULT_TEXT_READ_LIMIT) -> ReadResult:
         try:
             p = self._resolve(file_path)
         except ValueError as e:
@@ -155,6 +158,9 @@ class DockerBackend(SandboxBackendProtocol):
                 )
             )
         try:
+            if limit <= 0:
+                limit = _DEFAULT_TEXT_READ_LIMIT
+            limit = min(limit, _MAX_TEXT_READ_LIMIT)
             lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
             if offset >= len(lines) and len(lines) > 0:
                 return ReadResult(error=f"Line offset {offset} exceeds file length ({len(lines)} lines)")
@@ -163,7 +169,7 @@ class DockerBackend(SandboxBackendProtocol):
         except Exception as exc:
             return ReadResult(error=f"Error reading file '{file_path}': {exc}")
 
-    async def aread(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
+    async def aread(self, file_path: str, offset: int = 0, limit: int = _DEFAULT_TEXT_READ_LIMIT) -> ReadResult:
         return self.read(file_path, offset, limit)
 
     # ------------------------------------------------------------------
