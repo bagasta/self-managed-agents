@@ -1271,6 +1271,7 @@ async def run_agent(
             if getattr(session, "channel_type", None) == "whatsapp"
             and _is_enabled(tools_config, "whatsapp_media", default=True)
             and not direct_wa_text_send_context
+            and not runtime_policy.is_builder
             else None
         )
         if direct_wa_file_delivery_path:
