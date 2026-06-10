@@ -258,6 +258,24 @@ class TestBuilderToolsReturnsList:
         assert "Google Calendar" in payload["google_workspace_option"]["suggested_apps"]
         assert "Google Docs" in payload["google_workspace_option"]["suggested_apps"]
 
+    def test_plan_agent_requires_purpose_for_generic_new_agent_request(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        plan = next(t for t in tools if t.name == "plan_agent")
+
+        result = _run(plan.ainvoke({
+            "user_goal": "buat agent baru",
+            "agent_name": "",
+            "channel": "whatsapp",
+        }))
+        payload = json.loads(result)
+
+        assert payload["plan_status"] == "needs_clarification"
+        assert payload["capability_clarifications"][0]["topic"] == "agent_purpose"
+        assert "JANGAN create_agent dulu" in payload["next_action"]
+
     def test_plan_agent_defaults_unspecified_channel_to_whatsapp(self):
         from app.core.tools.builder_tools import build_builder_tools
 

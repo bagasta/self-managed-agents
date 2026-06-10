@@ -58,7 +58,43 @@ def _extract_shared_workspace_file_from_steps(
     return _extract_shared_workspace_file_path(*values)
 
 
+def _user_requested_inline_text_output(user_message: str) -> bool:
+    text = (user_message or "").strip().lower()
+    if not text:
+        return False
+    explicit_file_markers = (
+        "kirim file",
+        "send file",
+        "attachment",
+        "lampiran",
+        "file txt",
+        "txt file",
+        ".txt",
+    )
+    if any(marker in text for marker in explicit_file_markers):
+        return False
+    inline_markers = (
+        "ascii",
+        "ascii art",
+        "teks saja",
+        "text only",
+        "plain text",
+        "in text form",
+        "text form",
+        "send it all in text",
+        "kirim sebagai teks",
+        "di chat aja",
+        "langsung di chat",
+        "jangan file",
+        "tanpa file",
+        "not a file",
+    )
+    return any(marker in text for marker in inline_markers)
+
+
 def _is_whatsapp_file_delivery_request(user_message: str, steps: list[dict[str, Any]], final_reply: str) -> bool:
+    if _user_requested_inline_text_output(user_message):
+        return False
     text = "\n".join([user_message or "", final_reply or ""] + [_step_text(step) for step in steps or []]).lower()
     markers = (
         "siap_dikirim_parent",
@@ -88,6 +124,8 @@ def _needs_whatsapp_file_delivery_followup(
     final_reply: str,
 ) -> tuple[bool, str | None]:
     """Detect subagent-created shared files that still need parent WA delivery."""
+    if _user_requested_inline_text_output(user_message):
+        return False, None
     if not _is_enabled(tools_config, "whatsapp_media", default=True):
         return False, None
     if _has_whatsapp_media_send_step(steps):

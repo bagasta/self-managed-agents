@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -24,6 +25,8 @@ if TYPE_CHECKING:
     from langchain_openai import ChatOpenAI
 
 logger = structlog.get_logger(__name__)
+
+_WIB = timezone(timedelta(hours=7), name="WIB")
 
 _BUSINESS_DOMAIN_MARKERS = (
     "customer service",
@@ -69,6 +72,17 @@ def _is_personal_profile_memory_key(key: str) -> bool:
         or "resume" in clean
         or "portfolio" in clean
     )
+
+
+def memory_today() -> str:
+    """Return the memory-layer local date used for daily:* keys."""
+    return datetime.now(_WIB).date().isoformat()
+
+
+def memory_yesterday() -> str:
+    """Return yesterday relative to the memory-layer local date."""
+    today = datetime.now(_WIB).date()
+    return (today - timedelta(days=1)).isoformat()
 
 
 async def upsert_memory(
@@ -162,7 +176,16 @@ async def delete_memory(
     return result.rowcount > 0
 
 
-_LAYERED_KEYS = {"soul", "user_profile", "longterm", "agent_context_version"}
+_LAYERED_KEYS = {
+    "soul",
+    "user_profile",
+    "longterm",
+    "agent_context_version",
+    "active_context",
+    "last_turn",
+    "last_attachment",
+    "last_generated_artifact",
+}
 
 
 def _parse_active_context_version(value: str | None) -> int | None:
@@ -234,16 +257,21 @@ async def load_layered_memory(
 ) -> dict[str, str]:
     """Load OpenClaw-style memory layers for system prompt injection.
 
-    Returns dict with keys: soul, user_profile, daily_today, daily_yesterday, today_date, yesterday_date.
-    soul is global per agent (scope=None); others are scoped to external_user_id.
+    soul is global per agent (scope=None); user/runtime layers are scoped to
+    external_user_id. Runtime layers are intentionally loaded separately from
+    generic memories so the prompt can make "latest context wins" explicit.
     """
-    import datetime as _dt
-    today = _dt.date.today().isoformat()
-    yesterday = (_dt.date.today() - _dt.timedelta(days=1)).isoformat()
+    today = memory_today()
+    yesterday = memory_yesterday()
 
     active_version = await get_active_context_version(agent_id, db)
     soul_mem = await get_versioned_memory(agent_id, "soul", db, active_version=active_version, scope=None)
     user_profile_mem = await get_memory(agent_id, "user_profile", db, scope=scope)
+    longterm_mem = await get_memory(agent_id, "longterm", db, scope=scope)
+    active_context_mem = await get_memory(agent_id, "active_context", db, scope=scope)
+    last_turn_mem = await get_memory(agent_id, "last_turn", db, scope=scope)
+    last_attachment_mem = await get_memory(agent_id, "last_attachment", db, scope=scope)
+    last_generated_artifact_mem = await get_memory(agent_id, "last_generated_artifact", db, scope=scope)
     daily_today_mem = await get_memory(agent_id, f"daily:{today}", db, scope=scope)
     daily_yesterday_mem = await get_memory(agent_id, f"daily:{yesterday}", db, scope=scope)
 
@@ -251,11 +279,171 @@ async def load_layered_memory(
         "soul": soul_mem.value_data if soul_mem else "",
         "agent_context_version": str(active_version or ""),
         "user_profile": user_profile_mem.value_data if user_profile_mem else "",
+        "longterm": longterm_mem.value_data if longterm_mem else "",
+        "active_context": active_context_mem.value_data if active_context_mem else "",
+        "last_turn": last_turn_mem.value_data if last_turn_mem else "",
+        "last_attachment": last_attachment_mem.value_data if last_attachment_mem else "",
+        "last_generated_artifact": last_generated_artifact_mem.value_data if last_generated_artifact_mem else "",
         "daily_today": daily_today_mem.value_data if daily_today_mem else "",
         "daily_yesterday": daily_yesterday_mem.value_data if daily_yesterday_mem else "",
         "today_date": today,
         "yesterday_date": yesterday,
     }
+
+
+def _compact_memory_text(value: str | None, *, max_chars: int = 420) -> str:
+    """Compact a chat payload before persisting it into durable memory."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(
+        r"(?is)(Isi dokumen:\s*)```.*?```",
+        r"\1[konten dokumen dipangkas; gunakan file terbaru yang disebut user]",
+        text,
+    )
+    text = re.sub(
+        r"(?is)```.*?```",
+        "[blok panjang dipangkas]",
+        text,
+    )
+    text = re.sub(
+        r"data:[^;\s]+;base64,[A-Za-z0-9+/=\s]+",
+        "[base64 media dipangkas]",
+        text,
+    )
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 3].rstrip() + "..."
+
+
+def _append_memory_line(
+    existing: str | None,
+    line: str,
+    *,
+    max_lines: int = 80,
+    max_chars: int = 6000,
+) -> str:
+    clean_line = line.strip()
+    lines = [item.rstrip() for item in str(existing or "").splitlines() if item.strip()]
+    if clean_line and (not lines or lines[-1] != clean_line):
+        lines.append(clean_line)
+    lines = lines[-max_lines:]
+    value = "\n".join(lines)
+    if len(value) <= max_chars:
+        return value
+    return value[-max_chars:].lstrip()
+
+
+async def record_runtime_memory(
+    *,
+    agent_id: uuid.UUID,
+    db: AsyncSession,
+    scope: str | None,
+    user_message: str,
+    final_reply: str,
+    current_attachment_name: str | None = None,
+    generated_artifact_path: str | None = None,
+    log: Any = None,
+) -> None:
+    """Persist deterministic scoped memory after a completed run.
+
+    This does not replace LLM-curated memory tools. It guarantees every
+    completed turn has a fresh active_context/daily anchor even when the model
+    forgot to call update_daily/update_longterm itself.
+    """
+    if log is None:
+        log = logger
+
+    if str(user_message or "").lstrip().startswith("[HEARTBEAT]"):
+        return
+
+    try:
+        today = memory_today()
+        user_summary = _compact_memory_text(user_message, max_chars=360)
+        reply_summary = _compact_memory_text(final_reply, max_chars=360)
+        attachment = _compact_memory_text(current_attachment_name, max_chars=180)
+        artifact = _compact_memory_text(generated_artifact_path, max_chars=220)
+
+        daily_parts = [f"- {today}: User: {user_summary or '(kosong)'}"]
+        if attachment:
+            daily_parts.append(f"Lampiran terbaru: {attachment}")
+        if artifact:
+            daily_parts.append(f"Artifact: {artifact}")
+        if reply_summary:
+            daily_parts.append(f"Agent: {reply_summary}")
+        daily_line = " | ".join(daily_parts)
+
+        daily_key = f"daily:{today}"
+        daily_existing = await get_memory(agent_id, daily_key, db, scope=scope)
+        await upsert_memory(
+            agent_id,
+            daily_key,
+            _append_memory_line(
+                daily_existing.value_data if daily_existing else "",
+                daily_line,
+                max_lines=120,
+                max_chars=9000,
+            ),
+            db,
+            scope=scope,
+        )
+
+        active_lines = [
+            f"Tanggal: {today}",
+            f"Pesan terbaru user: {user_summary or '(kosong)'}",
+        ]
+        if attachment:
+            active_lines.append(f"Lampiran terbaru: {attachment}")
+        if artifact:
+            active_lines.append(f"Artifact terakhir: {artifact}")
+        if reply_summary:
+            active_lines.append(f"Jawaban final agent: {reply_summary}")
+        active_lines.append(
+            "Prioritas: konteks runtime ini adalah konteks terbaru dan mengalahkan history, daily, atau longterm lama jika bertentangan."
+        )
+        await upsert_memory(
+            agent_id,
+            "active_context",
+            "\n".join(active_lines),
+            db,
+            scope=scope,
+        )
+
+        await upsert_memory(
+            agent_id,
+            "last_turn",
+            f"User: {user_summary or '(kosong)'}\nAgent: {reply_summary or '(kosong)'}",
+            db,
+            scope=scope,
+        )
+        if attachment:
+            await upsert_memory(agent_id, "last_attachment", attachment, db, scope=scope)
+        if artifact:
+            await upsert_memory(agent_id, "last_generated_artifact", artifact, db, scope=scope)
+
+        longterm_existing = await get_memory(agent_id, "longterm", db, scope=scope)
+        longterm_parts = [f"- {today}: Latest completed user turn: {user_summary or '(kosong)'}"]
+        if attachment:
+            longterm_parts.append(f"latest attachment={attachment}")
+        if artifact:
+            longterm_parts.append(f"latest artifact={artifact}")
+        if reply_summary:
+            longterm_parts.append(f"result={reply_summary}")
+        await upsert_memory(
+            agent_id,
+            "longterm",
+            _append_memory_line(
+                longterm_existing.value_data if longterm_existing else "",
+                " | ".join(longterm_parts),
+                max_lines=80,
+                max_chars=8000,
+            ),
+            db,
+            scope=scope,
+        )
+    except Exception as exc:
+        log.warning("memory.runtime_record_failed", error=str(exc))
 
 
 # ---------------------------------------------------------------------------

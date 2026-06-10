@@ -18,11 +18,14 @@ from app.core.engine.agent_runner import (
 )
 from app.core.engine.prompt_builder import build_system_prompt
 from app.api.channels import (
+    WADevClaimCodeRequest,
     _is_wa_dev_device,
     _is_wa_dev_disconnect_command,
+    _resolve_wa_incoming_agent,
     _is_wa_owner_sender,
     _label_owner_wa_message,
     _wa_dev_session_lookup_candidates,
+    wa_dev_claim_code,
 )
 
 
@@ -68,6 +71,7 @@ def test_wa_owner_sender_detects_resolved_phone_and_jid():
 
 def test_wa_dev_disconnect_command_is_backend_guarded():
     assert _is_wa_dev_device("wadev_123")
+    assert _is_wa_dev_device("wa-dev-service")
     assert not _is_wa_dev_device("real-device")
     assert _is_wa_dev_disconnect_command("/stop")
     assert _is_wa_dev_disconnect_command("/disconnect")
@@ -86,6 +90,48 @@ def test_wa_dev_disconnect_lookup_candidates_cover_phone_lid_and_group():
         "120363000000000000",
         "120363000000000000@g.us",
     ]
+
+
+@pytest.mark.asyncio
+async def test_wa_dev_shared_incoming_requires_explicit_agent_or_code():
+    body = SimpleNamespace(
+        device_id="wa-dev-service",
+        agent_id=None,
+        trial_code=None,
+        message="hello",
+    )
+    warnings: list[tuple] = []
+    agent = await _resolve_wa_incoming_agent(
+        body,
+        db=SimpleNamespace(),
+        log=SimpleNamespace(warning=lambda *args, **kwargs: warnings.append((args, kwargs))),
+    )
+
+    assert agent is None
+    assert warnings
+
+
+@pytest.mark.asyncio
+async def test_wa_dev_claim_code_returns_virtual_device_id(monkeypatch):
+    agent_id = uuid.uuid4()
+    agent = SimpleNamespace(id=agent_id, name="Demo Agent")
+
+    async def fake_find_agent(_db, _code):
+        return agent
+
+    monkeypatch.setattr(
+        "app.core.domain.wa_dev_trial_service.find_agent_by_wa_dev_trial_code",
+        fake_find_agent,
+    )
+
+    result = await wa_dev_claim_code(
+        WADevClaimCodeRequest(code="AB12C3"),
+        db=SimpleNamespace(),
+    )
+
+    assert result["agent_id"] == str(agent_id)
+    assert result["device_id"] == f"wadev_{agent_id}"
+    assert result["routing"]["agent_id"] == str(agent_id)
 
 
 def test_wa_owner_message_gets_explicit_owner_label():

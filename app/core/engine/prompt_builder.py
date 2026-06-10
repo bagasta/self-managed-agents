@@ -374,6 +374,8 @@ def build_agent_context_block(
             "- Untuk analisis/visualisasi dari file WhatsApp, delegate ke sys_analyst/sys_coder dengan instruksi: "
             "cek file di `/workspace/data/incoming/<filename>`, olah data di sandbox, simpan hasil final ke "
             "`/workspace/shared/<output>`, lalu output path + SIAP_DIKIRIM_PARENT.\n"
+            "- Jika user meminta output `ASCII`, `plain text`, `text form`, `teks saja`, atau `langsung di chat`, "
+            "JANGAN jadikan hasil sebagai file .txt untuk dikirim dokumen. Minta subagent mengembalikan isi teks final di output task, lalu balas user dengan teks itu di chat.\n"
             "- Contoh BENAR (format saja): task('sys_coder', task='<ringkas tujuan + SEMUA detail dari request user saat ini, dalam bahasa user>. Jangan menambah detail yang tidak diminta.')\n"
             "- Contoh SALAH: task('sys_coder', task='buat web') — terlalu kabur.\n"
             "- Placeholder di atas WAJIB diisi dari request user yang nyata. DILARANG menyalin contoh ini apa adanya sebagai task.\n\n"
@@ -611,12 +613,27 @@ def build_system_prompt(
     _lm = layered_memory or {}
     _soul = _lm.get("soul", "").strip()
     _user_profile = _lm.get("user_profile", "").strip()
+    _longterm = _lm.get("longterm", "").strip()
+    _active_context = _lm.get("active_context", "").strip()
+    _last_turn = _lm.get("last_turn", "").strip()
+    _last_attachment = _lm.get("last_attachment", "").strip()
+    _last_generated_artifact = _lm.get("last_generated_artifact", "").strip()
     _daily_today = _lm.get("daily_today", "").strip()
     _daily_yesterday = _lm.get("daily_yesterday", "").strip()
     _today_date = _lm.get("today_date", "")
     _yesterday_date = _lm.get("yesterday_date", "")
 
-    if _soul or _user_profile or _daily_today or _daily_yesterday:
+    if (
+        _soul
+        or _user_profile
+        or _longterm
+        or _active_context
+        or _last_turn
+        or _last_attachment
+        or _last_generated_artifact
+        or _daily_today
+        or _daily_yesterday
+    ):
         p = []
 
         p.append("# Panduan Operasional")
@@ -641,6 +658,22 @@ def build_system_prompt(
                 "Ini akan di-load otomatis di sesi berikutnya."
             )
 
+        # --- Runtime terbaru ---
+        if _active_context or _last_turn or _last_attachment or _last_generated_artifact:
+            p.append("\n## Konteks Aktif Runtime")
+            p.append(
+                "Ini adalah konteks durable paling baru untuk user ini. "
+                "Jika bagian ini bertentangan dengan history, daily lama, atau longterm lama, ikuti Konteks Aktif Runtime."
+            )
+            if _active_context:
+                p.append(_active_context)
+            if _last_turn:
+                p.append(f"\nLast turn:\n{_last_turn}")
+            if _last_attachment:
+                p.append(f"\nLampiran terakhir yang valid: {_last_attachment}")
+            if _last_generated_artifact:
+                p.append(f"\nArtifact terakhir yang dibuat/dikirim: {_last_generated_artifact}")
+
         # --- Konteks hari ini ---
         p.append("\n## Konteks Hari Ini")
         if _daily_today:
@@ -650,6 +683,10 @@ def build_system_prompt(
         if _daily_yesterday:
             p.append(f"\nCatatan kemarin ({_yesterday_date}):\n{_daily_yesterday}")
 
+        if _longterm:
+            p.append("\n## Long-Term Curated Context")
+            p.append(_longterm)
+
         # --- Memory ---
         p.append(
             "\n## Memory — Cara Kerjanya\n"
@@ -657,18 +694,21 @@ def build_system_prompt(
             "### Layer memory yang kamu punya:\n"
             "- **soul** — identitasmu. Di-load otomatis setiap sesi. Edit dengan `remember('soul', '...')`\n"
             "- **user_profile** — profil user ini. Di-load otomatis. Edit dengan `remember('user_profile', '...')`\n"
+            "- **active_context** — konteks runtime terbaru. Di-load otomatis dan harus menang jika bertentangan dengan memory lama.\n"
+            "- **last_turn / last_attachment / last_generated_artifact** — anchor terbaru untuk percakapan, lampiran, dan file hasil kerja. Di-load otomatis.\n"
             f"- **daily:{_today_date}** — catatan hari ini. Di-load otomatis. Tambah dengan `update_daily('...')`\n"
-            "- **longterm** — curated memory lintas waktu. Lazy load: `recall('longterm')`. Tambah dengan `update_longterm('...')`\n"
+            "- **longterm** — curated memory lintas waktu. Di-load otomatis; gunakan `recall('longterm')` hanya jika perlu detail tambahan. Tambah dengan `update_longterm('...')`\n"
             f"- **daily:YYYY-MM-DD** — catatan hari lain. Akses manual: `recall('daily:YYYY-MM-DD')`\n\n"
             "### Aturan menulis memory — WAJIB:\n"
             "- 'Mental notes' tidak survive restart. Kalau penting → simpan ke memory dengan `remember`, `update_daily`, atau `update_longterm`.\n"
             "- JANGAN memakai `write_file` hanya untuk menyimpan ingatan. `write_file` hanya untuk dokumen/artifact yang memang perlu menjadi file.\n"
             "- Segera tulis setelah event terjadi, bukan nanti.\n"
+            "- Jika user mengirim file/lampiran baru, perlakukan lampiran terbaru sebagai sumber utama untuk request saat ini dan jangan memakai file lama kecuali user eksplisit memintanya.\n"
             "- `update_daily(...)` → log singkat apa yang terjadi hari ini (keputusan, task selesai, info penting)\n"
             "- `update_longterm(...)` → insight, preferensi user, pola yang perlu diingat jangka panjang\n"
             "- `remember('user_profile', ...)` → update profil user jika ada info baru\n\n"
             "### Kapan harus recall:\n"
-            "- User tanya sesuatu yang mungkin pernah dibahas → `recall('longterm')` dulu\n"
+            "- User tanya sesuatu yang mungkin pernah dibahas dan belum cukup dari konteks yang di-load → `recall('longterm')`\n"
             "- User minta lanjutkan task dari sesi lalu → cek `recall('daily:YYYY-MM-DD')`\n"
             "- Jangan mulai dari nol kalau konteks mungkin sudah tersimpan\n\n"
             "### Aturan klaim memory:\n"
@@ -757,6 +797,7 @@ def build_system_prompt(
         "- Jika `write_file` gagal karena file sudah ada, JANGAN panggil `write_file` lagi dengan path yang sama.\n"
         "- Untuk memperbarui file yang sudah ada: panggil `read_file` dulu, lalu `edit_file`; atau gunakan nama file baru yang jelas jika memang butuh versi baru.\n"
         "- Jika user mengirim file WhatsApp, sistem akan menyebut path `/workspace/shared/<filename>`; gunakan path itu sebagai input utama. Untuk subagent, file yang sama juga terlihat di `/workspace/data/incoming/<filename>`. JANGAN pakai dataset contoh/built-in sebelum mengecek file user di path tersebut.\n"
+        "- Jika user meminta ASCII art, plain text, teks saja, text form, atau jawaban langsung di chat, BALAS sebagai teks chat. Jangan membuat file .txt/.md dan jangan mencoba mengirimnya sebagai dokumen WhatsApp kecuali user eksplisit minta file.\n"
         "- Untuk riset, ringkasan, FAQ, catatan, atau knowledge yang perlu diingat, default-nya balas user di chat dan simpan inti informasi ke memory. "
         "Jangan membuat file laporan kecuali user meminta ekspor/file atau output terlalu panjang untuk chat.\n"
         "- Setelah file final berhasil dibuat atau isi final sudah cukup di chat, hentikan tool call dan beri jawaban final. "
@@ -771,6 +812,8 @@ def build_system_prompt(
             "Aturan kerja wajib:\n"
             "- Selalu tentukan kategori request secara internal sebelum tool call: User Management, Plan & Billing, Agent Builder, Agent Management, Channel Management, Workspace/App Connectors, atau Runtime Support.\n"
             "- Tolak pembuatan atau update agent untuk buzzer, kampanye politik, propaganda politik, atau manipulasi opini publik. Jangan bantu menyusun blueprint, instruksi, soul, atau strategi untuk tujuan itu.\n"
+            "- Untuk membuat agent BARU, konteks cukup berarti pesan user saat ini atau dokumen yang baru dikirim sudah menjelaskan fungsi agent, siapa yang akan dilayani, dan hasil akhir yang diharapkan. Kalau user hanya bilang `buat agent`, `bikin agent baru`, `ok buat`, `lanjut buat`, atau sejenisnya tanpa tujuan jelas, JANGAN memakai kebutuhan agent lama/history sebagai asumsi. Tanya 1 pertanyaan singkat: agentnya mau dipakai untuk apa dan siapa usernya?\n"
+            "- Jika user sudah punya beberapa agent atau baru saja membuat beberapa agent, jangan menganggap agent baru berikutnya sama dengan agent terakhir. Agent terakhir hanya boleh dipakai untuk permintaan `kode trial/link coba/nomor demo` atau update yang eksplisit menyebut agent itu.\n"
             "- Jika user sudah meminta dibuatkan agent dan konteksnya cukup, langsung jalankan tool berurutan: plan_agent -> compose_agent_blueprint -> compose_agent_operating_manual -> compose_agent_instructions -> validate_agent_config -> compose_agent_soul -> create_agent -> verify_agent.\n"
             "- Kamu bertindak sebagai builder yang menyiapkan agent sampai user tahu langkah berikutnya. Jangan membuat user menebak cara pakai, cara test, cara connect Google, cara pasang WhatsApp, atau apa yang masih kurang.\n"
             "- DILARANG menawarkan webchat, embed website, API, atau kelola web sebagai channel/produk agent. Channel user-facing yang tersedia hanya WhatsApp: nomor demo Arthur atau nomor WhatsApp milik user yang dipasang dengan scan sekali dari WhatsApp.\n"

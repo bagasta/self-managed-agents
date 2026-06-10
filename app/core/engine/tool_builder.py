@@ -38,6 +38,7 @@ from app.core.domain.memory_service import (
     extract_long_term_memory,
     get_memory,
     list_memories,
+    memory_today,
     upsert_memory,
 )
 from app.core.infra.sandbox import DockerSandbox
@@ -119,8 +120,7 @@ def build_memory_tools(agent_id: uuid.UUID, db_factory: async_sessionmaker, scop
     async def update_daily(content: str) -> str:
         """Append a note to today's daily memory. Use this to record important events from this session.
         Args: content (the note to append, one fact or event per call)."""
-        import datetime as _dt
-        today = _dt.date.today().isoformat()
+        today = memory_today()
         key = f"daily:{today}"
         async with db_factory() as db:
             existing = await get_memory(agent_id, key, db, scope=scope)

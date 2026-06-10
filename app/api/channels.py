@@ -139,11 +139,86 @@ def _label_owner_wa_message(
 
 
 def _is_wa_dev_device(device_id: str | None) -> bool:
-    return str(device_id or "").startswith("wadev_")
+    text = str(device_id or "")
+    return text.startswith("wadev_") or text in {"wa-dev-service", "wa_dev_service"} or text.startswith("wa-dev-")
+
+
+def _wa_dev_virtual_device_id(agent_id: uuid.UUID | str) -> str:
+    return f"wadev_{agent_id}"
 
 
 def _is_wa_dev_disconnect_command(message: str | None) -> bool:
     return str(message or "").strip().lower() in _WA_DEV_DISCONNECT_COMMANDS
+
+
+async def _load_agent_by_id(agent_id: uuid.UUID | str | None, db: AsyncSession) -> Agent | None:
+    if not agent_id:
+        return None
+    try:
+        parsed = uuid.UUID(str(agent_id))
+    except ValueError:
+        return None
+    result = await db.execute(
+        select(Agent).where(
+            Agent.id == parsed,
+            Agent.is_deleted.is_(False),
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def _resolve_wa_incoming_agent(body: object, db: AsyncSession, log: structlog.BoundLogger) -> Agent | None:
+    """Resolve the target agent for a WhatsApp webhook.
+
+    wa-dev-service uses one shared WhatsApp number for many agents, so its
+    gateway should pass an explicit agent_id or virtual device id. Falling back
+    to a physical shared device id is unsafe because many users can switch
+    demo-agent bindings concurrently.
+    """
+    explicit_agent_id = getattr(body, "agent_id", None)
+    if explicit_agent_id:
+        agent = await _load_agent_by_id(explicit_agent_id, db)
+        if agent:
+            return agent
+        log.warning("wa_incoming.explicit_agent_not_found", agent_id=str(explicit_agent_id))
+        return None
+
+    trial_code = str(getattr(body, "trial_code", "") or "").strip()
+    message = str(getattr(body, "message", "") or "").strip()
+    device_id = str(getattr(body, "device_id", "") or "")
+    if _is_wa_dev_device(device_id):
+        from app.core.domain.wa_dev_trial_service import (
+            find_agent_by_wa_dev_trial_code,
+            looks_like_wa_dev_trial_code,
+            normalize_wa_dev_trial_code,
+        )
+
+        code = normalize_wa_dev_trial_code(trial_code)
+        if len(code) != 6 and looks_like_wa_dev_trial_code(message):
+            code = normalize_wa_dev_trial_code(message)
+        if len(code) == 6:
+            agent = await find_agent_by_wa_dev_trial_code(db, code)
+            if agent:
+                return agent
+
+    if _is_wa_dev_device(device_id) and not device_id.startswith("wadev_"):
+        log.warning(
+            "wa_incoming.wa_dev_shared_route_missing_explicit_agent",
+            device_id=device_id,
+            has_explicit_agent=bool(explicit_agent_id),
+            has_trial_code=bool(trial_code),
+        )
+        return None
+
+    agent = await find_agent_by_device(device_id, db)
+    if _is_wa_dev_device(device_id) and not agent:
+        log.warning(
+            "wa_incoming.wa_dev_route_missing_agent",
+            device_id=device_id,
+            has_explicit_agent=bool(explicit_agent_id),
+            has_trial_code=bool(trial_code),
+        )
+    return agent
 
 
 def _wa_dev_session_lookup_candidates(*values: str | None) -> list[str]:
@@ -1135,10 +1210,40 @@ async def wa_dev_claim_code(
     if not agent:
         raise HTTPException(status_code=404, detail="Kode tidak ditemukan atau sudah tidak aktif")
 
+    virtual_device_id = _wa_dev_virtual_device_id(agent.id)
+    if body.phone or body.chat_id:
+        reply_target = body.chat_id or body.phone or ""
+        lookup_user_id = body.phone or body.chat_id or ""
+        session, _ = await find_or_create_wa_session(
+            agent=agent,
+            lookup_user_id=lookup_user_id,
+            effective_reply_target=reply_target,
+            device_id=virtual_device_id,
+            db=db,
+            is_operator=False,
+            phone_number=normalize_phone(body.phone) if body.phone else None,
+            sender_name=body.push_name or None,
+        )
+        meta = dict(session.metadata_ or {})
+        meta["wa_dev_trial_code"] = code
+        meta["wa_dev_claimed_at"] = int(time.time())
+        meta["wa_dev_virtual_device_id"] = virtual_device_id
+        session.metadata_ = meta
+        db.add(session)
+        await db.commit()
+
     return {
         "agent_id": str(agent.id),
         "agent_name": agent.name,
         "code": code,
+        "device_id": virtual_device_id,
+        "virtual_device_id": virtual_device_id,
+        "routing": {
+            "agent_id": str(agent.id),
+            "device_id": virtual_device_id,
+            "phone": normalize_phone(body.phone) if body.phone else "",
+            "chat_id": body.chat_id or "",
+        },
     }
 
 
@@ -1178,6 +1283,8 @@ class IncomingMessage(BaseModel):
 
 class WAIncomingMessage(BaseModel):
     device_id: str
+    agent_id: uuid.UUID | None = None  # wa-dev-service should pass resolved target agent for shared demo number
+    trial_code: str | None = None      # optional first-message code fallback for wa-dev-service
     from_: str = Field(..., alias="from")
     phone_from: str | None = None      # resolved phone number from Go (LID → phone); fallback ke from_
     chat_id: str | None = None  # group JID (xxx@g.us) atau nomor DM; kalau None fallback ke from_
@@ -1386,7 +1493,7 @@ async def wa_incoming(
     log = logger.bind(device_id=body.device_id, from_phone=body.from_)
 
     # 1. Find agent
-    agent = await find_agent_by_device(body.device_id, db)
+    agent = await _resolve_wa_incoming_agent(body, db, log)
     if not agent:
         log.warning("wa_incoming.agent_not_found")
         raise HTTPException(status_code=404, detail="No agent found for this WhatsApp device")

@@ -161,6 +161,27 @@ def test_media_delivery_claim_is_kept_after_media_send_step():
     assert _whatsapp_media_delivery_guard_reply(reply, steps) == reply
 
 
+def test_ascii_text_request_does_not_trigger_file_delivery_followup():
+    from app.core.engine.agent_followups import _needs_whatsapp_file_delivery_followup
+
+    steps = [
+        {
+            "tool": "task",
+            "result": "Selesai: /workspace/shared/bite_radar_ascii.txt SIAP_DIKIRIM_PARENT",
+        }
+    ]
+
+    needs_delivery, path = _needs_whatsapp_file_delivery_followup(
+        "I said recreate it in ascii, send it all in text form",
+        {"whatsapp_media": True},
+        steps,
+        "ASCII siap di /workspace/shared/bite_radar_ascii.txt",
+    )
+
+    assert needs_delivery is False
+    assert path is None
+
+
 @pytest.mark.asyncio
 async def test_shared_pdf_followup_invokes_document_tool_directly():
     from app.core.engine.agent_runner import _deliver_shared_whatsapp_file_via_tool
@@ -210,6 +231,42 @@ async def test_shared_pdf_followup_invokes_document_tool_directly():
     ]
     assert parsed["steps"][-1]["tool"] == "send_whatsapp_document"
     assert parsed["db_messages"][-1].tool_name == "send_whatsapp_document"
+
+
+@pytest.mark.asyncio
+async def test_shared_text_artifact_falls_back_to_inline_reply_when_media_tool_missing(tmp_path, monkeypatch):
+    from app.core.engine.agent_runner import _deliver_shared_whatsapp_file_via_tool
+    from app.core.infra.sandbox import get_shared_dir
+
+    session_id = uuid.uuid4()
+    monkeypatch.setattr(
+        "app.core.infra.sandbox.get_settings",
+        lambda: SimpleNamespace(sandbox_base_dir=str(tmp_path)),
+    )
+    shared_dir = get_shared_dir(session_id)
+    (shared_dir / "bite_radar_ascii.txt").write_text("  /\\_/\\\\\n ( ASCII )\n", encoding="utf-8")
+
+    parsed = {
+        "final_reply": "ASCII siap di /workspace/shared/bite_radar_ascii.txt",
+        "steps": [],
+        "total_tokens_used": 0,
+        "db_messages": [],
+        "has_output": True,
+    }
+
+    sent, reply = await _deliver_shared_whatsapp_file_via_tool(
+        tools=[],
+        shared_path="/workspace/shared/bite_radar_ascii.txt",
+        parsed=parsed,
+        session_id=session_id,
+        run_id=uuid.uuid4(),
+        step_index=10,
+        log=SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None),
+    )
+
+    assert sent is True
+    assert "ASCII" in reply
+    assert "Tool send_whatsapp_document" not in reply
 
 
 def test_shared_artifact_is_remembered_for_later_whatsapp_delivery():

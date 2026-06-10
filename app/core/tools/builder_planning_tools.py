@@ -41,6 +41,74 @@ def _get_post_create_steps(preset_id: str, channel: str, tc: dict) -> list[str]:
 PreviewEntitlement = Callable[..., Awaitable[dict[str, Any]]]
 
 
+def _needs_agent_purpose_clarification(
+    *,
+    user_goal: str,
+    requested_features: str,
+    persona: str,
+    business_context: str,
+) -> bool:
+    """Return True when the user only asked to create an agent without a job brief."""
+    if any(str(value or "").strip() for value in (requested_features, persona, business_context)):
+        return False
+
+    text = " ".join(str(user_goal or "").lower().split())
+    if not text:
+        return True
+
+    generic_markers = (
+        "buat agent",
+        "bikin agent",
+        "buatkan agent",
+        "bikinkan agent",
+        "agent baru",
+        "new agent",
+        "create agent",
+        "make agent",
+        "ok buat",
+        "oke buat",
+        "iya buat",
+        "lanjut buat",
+        "gas buat",
+    )
+    if not any(marker in text for marker in generic_markers):
+        return False
+
+    remainder = text
+    for token in (
+        "tolong",
+        "dong",
+        "ya",
+        "aja",
+        "agent",
+        "agen",
+        "baru",
+        "buatkan",
+        "buat",
+        "bikin",
+        "bikinkan",
+        "create",
+        "make",
+        "new",
+        "ok",
+        "oke",
+        "iya",
+        "lanjut",
+        "gas",
+        "untuk",
+        "yang",
+    ):
+        remainder = re_sub_word(token, "", remainder)
+    meaningful_words = [word for word in remainder.split() if len(word) > 2]
+    return len(meaningful_words) < 2
+
+
+def re_sub_word(word: str, replacement: str, text: str) -> str:
+    import re
+
+    return re.sub(rf"\b{re.escape(word)}\b", replacement, text).strip()
+
+
 def build_builder_planning_tools(
     *,
     preview_agent_creation_entitlement: PreviewEntitlement,
@@ -94,6 +162,31 @@ def build_builder_planning_tools(
                 "plan_status": "blocked_by_policy",
                 "validation_errors": [policy_reason],
                 "next_action": "Tolak permintaan ini dengan singkat dan tawarkan jenis agent non-politik/non-buzzer.",
+            }, ensure_ascii=False, indent=2)
+
+        if _needs_agent_purpose_clarification(
+            user_goal=user_goal,
+            requested_features=requested_features,
+            persona=persona,
+            business_context=business_context,
+        ):
+            return json.dumps({
+                "plan_status": "needs_clarification",
+                "detected_preset": "",
+                "capability_clarifications": [
+                    {
+                        "topic": "agent_purpose",
+                        "question": (
+                            "Agent barunya mau dipakai untuk apa, siapa yang akan chat dengan agent itu, "
+                            "dan hasil akhir apa yang harus agent lakukan?"
+                        ),
+                    }
+                ],
+                "next_action": (
+                    "JANGAN create_agent dulu. User baru meminta dibuatkan agent tanpa brief tujuan. "
+                    "Tanyakan 1 pertanyaan singkat tentang fungsi agent, target pengguna, dan hasil akhir. "
+                    "Jangan memakai kebutuhan agent lama/history sebagai asumsi untuk agent baru."
+                ),
             }, ensure_ascii=False, indent=2)
 
         features = [f.strip().lower() for f in requested_features.split(",") if f.strip()]

@@ -30,7 +30,12 @@ from app.core.engine.context_service import (
     load_history,
 )
 from app.core.domain.agent_sop_service import get_latest_agent_operating_manual
-from app.core.domain.memory_service import build_memory_context, extract_long_term_memory, load_layered_memory
+from app.core.domain.memory_service import (
+    build_memory_context,
+    extract_long_term_memory,
+    load_layered_memory,
+    record_runtime_memory,
+)
 from app.core.engine.prompt_builder import (
     build_mcp_tool_priority_notice,
     build_rag_context,
@@ -150,6 +155,7 @@ from app.core.engine.agent_followups import (
     _needs_whatsapp_file_delivery_followup,
     _SHARED_WORKSPACE_FILE_RE,
     _step_text,
+    _user_requested_inline_text_output,
 )
 
 
@@ -306,6 +312,48 @@ async def _persist_run_failure(
     await db.commit()
 
 
+_INLINE_TEXT_ARTIFACT_EXTS = {"txt", "md", "markdown", "csv", "json", "log", "asc"}
+
+
+def _shared_text_artifact_inline_reply(
+    *,
+    shared_path: str,
+    session_id: uuid.UUID,
+) -> str | None:
+    filename = (shared_path or "").rsplit("/", 1)[-1] or "file"
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext not in _INLINE_TEXT_ARTIFACT_EXTS:
+        return None
+    if not shared_path.startswith("/workspace/shared/"):
+        return None
+
+    relative = shared_path.removeprefix("/workspace/shared/").strip("/")
+    if not relative or any(part in {"", ".", ".."} for part in relative.split("/")):
+        return None
+
+    try:
+        from app.core.infra.sandbox import get_shared_dir
+
+        host_path = (get_shared_dir(session_id) / relative).resolve()
+        shared_root = get_shared_dir(session_id).resolve()
+        host_path.relative_to(shared_root)
+        if not host_path.is_file():
+            return None
+        raw = host_path.read_bytes()[:12000]
+        text = raw.decode("utf-8", errors="replace").strip()
+    except Exception:
+        return None
+
+    if not text:
+        return None
+    text = text.replace("```", "'''")
+    truncated = len(text) > 3500
+    if truncated:
+        text = text[:3500].rstrip()
+    suffix = "\n\n[Terpotong karena terlalu panjang untuk chat.]" if truncated else ""
+    return f"Berikut isi {filename} dalam bentuk teks:\n```text\n{text}\n```{suffix}"
+
+
 async def _deliver_shared_whatsapp_file_via_tool(
     *,
     tools: list[Any],
@@ -323,6 +371,12 @@ async def _deliver_shared_whatsapp_file_via_tool(
     tool_name = "send_whatsapp_image" if ext in image_exts else "send_whatsapp_document"
     send_tool = next((tool for tool in tools if getattr(tool, "name", "") == tool_name), None)
     if send_tool is None:
+        inline_reply = _shared_text_artifact_inline_reply(
+            shared_path=shared_path,
+            session_id=session_id,
+        )
+        if inline_reply:
+            return True, inline_reply
         return (
             False,
             f"Belum saya kirim. Tool {tool_name} tidak tersedia di run ini, jadi saya tidak bisa mengirim {filename} sebagai file WhatsApp.",
@@ -517,6 +571,8 @@ def _is_explicit_shared_file_delivery_command(user_message: str) -> bool:
 
 
 def _is_whatsapp_file_delivery_turn(user_message: str, history_rows: list[Any]) -> bool:
+    if _user_requested_inline_text_output(user_message):
+        return False
     if _is_explicit_shared_file_delivery_command(user_message):
         return True
     text = _operator_message_payload(user_message).strip().lower()
@@ -1310,6 +1366,17 @@ async def run_agent(
             run_record.status = "completed"
             run_record.completed_at = datetime.now(timezone.utc)
             _apply_run_usage(0)
+            if _is_enabled(tools_config, "memory", default=True):
+                await record_runtime_memory(
+                    agent_id=agent_id,
+                    db=db,
+                    scope=_memory_scope,
+                    user_message=execution_user_message,
+                    final_reply=final_reply,
+                    current_attachment_name=current_attachment_name,
+                    generated_artifact_path=direct_wa_file_delivery_path,
+                    log=log,
+                )
             await db.flush()
             await _cleanup_sandboxes()
             log.info(
@@ -1379,6 +1446,16 @@ async def run_agent(
             run_record.status = "completed"
             run_record.completed_at = datetime.now(timezone.utc)
             _apply_run_usage(0)
+            if _is_enabled(tools_config, "memory", default=True):
+                await record_runtime_memory(
+                    agent_id=agent_id,
+                    db=db,
+                    scope=_memory_scope,
+                    user_message=execution_user_message,
+                    final_reply=final_reply,
+                    current_attachment_name=current_attachment_name,
+                    log=log,
+                )
             await db.flush()
             await _cleanup_sandboxes()
             return AgentRunResult(
@@ -1393,6 +1470,7 @@ async def run_agent(
         final_reply: str = ""
         steps: list = []
         total_tokens_used: int = 0
+        _current_shared_artifact_path: str | None = None
         _graph_output: Any | None = None
         parsed: dict = {"final_reply": "", "steps": [], "total_tokens_used": 0, "has_output": False, "db_messages": []}
 
@@ -2070,6 +2148,7 @@ async def run_agent(
             final_reply = _delivery_reply
             steps = parsed["steps"]
             _remember_shared_artifact_path(session, _wa_shared_file_path, sent=_sent)
+            _current_shared_artifact_path = _wa_shared_file_path
             log.info(
                 "agent_run.whatsapp_file_delivery_followup_ok",
                 sent=_sent,
@@ -2359,6 +2438,24 @@ async def run_agent(
             after_len=len(final_reply or ""),
             before_preview=(_reply_before_google_auth_guard or "")[:220],
             after_preview=(final_reply or "")[:220],
+        )
+
+    if _is_enabled(tools_config, "memory", default=True):
+        _memory_artifact_path = _current_shared_artifact_path or _remember_latest_shared_artifact(
+            session,
+            steps,
+            final_reply,
+            sent=False,
+        )
+        await record_runtime_memory(
+            agent_id=agent_id,
+            db=db,
+            scope=_memory_scope,
+            user_message=execution_user_message,
+            final_reply=final_reply,
+            current_attachment_name=current_attachment_name,
+            generated_artifact_path=_memory_artifact_path,
+            log=log,
         )
 
     log.info(
