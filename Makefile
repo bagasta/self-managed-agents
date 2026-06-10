@@ -1,4 +1,4 @@
-.PHONY: help install dev db-up migrate upgrade downgrade lint format wa wa-build dev-all wa-dev-build wa-dev seed-agents mcp-smoke-live mcp-smoke-live-strict mcp-smoke-live-reauth mcp-smoke-live-onboard
+.PHONY: help install dev db-up migrate upgrade downgrade lint format wa wa-build dev-all wa-dev-build wa-dev sandbox-build sandbox-check seed-agents mcp-smoke-live mcp-smoke-live-strict mcp-smoke-live-reauth mcp-smoke-live-onboard
 
 help:
 	@echo "Managed Agent Platform"
@@ -9,6 +9,8 @@ help:
 	@echo "  make wa-build               Build wa-service binary"
 	@echo "  make wa-dev-build           Build wa-dev-service binary"
 	@echo "  make wa-dev                 Run WA dev number service (port 8081) + dashboard"
+	@echo "  make sandbox-build          Build Docker sandbox image for file/subagent tools"
+	@echo "  make sandbox-check          Verify Docker sandbox image exists locally"
 	@echo "  make dev-all                Run API + wa-service (2 terminals needed)"
 	@echo "  make db-up                  Start PostgreSQL via docker-compose"
 	@echo "  make migrate                Generate migration  (MSG='description')"
@@ -39,6 +41,12 @@ wa-dev-build:
 
 wa-dev: wa-dev-build
 	cd wa-dev-service && set -a && . ../.env && set +a && MAIN_API_KEY=$$API_KEY MAIN_API_URL=http://localhost:8000 ./wa-dev-service
+
+sandbox-build:
+	docker build -f sandbox.Dockerfile -t $${DOCKER_SANDBOX_IMAGE:-managed-agents-sandbox:latest} .
+
+sandbox-check:
+	docker image inspect $${DOCKER_SANDBOX_IMAGE:-managed-agents-sandbox:latest} >/dev/null
 
 dev-all:
 	@echo "=== Jalankan di 2 terminal terpisah ==="

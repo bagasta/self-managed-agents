@@ -69,7 +69,7 @@ MISTRAL_API_KEY=                        # opsional — hanya untuk PDF OCR
 
 # Sandbox
 SANDBOX_BASE_DIR=/tmp/agent-sandboxes
-DOCKER_SANDBOX_IMAGE=python:3.12        # full image (bukan slim) agar curl tersedia
+DOCKER_SANDBOX_IMAGE=managed-agents-sandbox:latest
 DOCKER_HOST=unix:///run/docker.sock
 
 # Agent limits
@@ -82,6 +82,13 @@ WA_SERVICE_URL=http://localhost:8080
 WA_DEV_SERVICE_URL=http://localhost:8081
 WA_DEV_PUBLIC_PHONE=628xxxxxxxxxx
 WA_DEV_PUBLIC_NAME=Demo Agent
+```
+
+Build image sandbox sebelum menjalankan agent yang butuh file/subagent:
+
+```bash
+make sandbox-build
+make sandbox-check
 ```
 
 ### 3. Jalankan PostgreSQL
