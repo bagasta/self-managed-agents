@@ -424,12 +424,20 @@ async def test_builder_policy_is_not_redirected_by_google_mcp_intent(monkeypatch
         user_message="buatkan presentasi google slide dengan mcp",
     )
 
-    assert subagents_called is True
-    assert setup.sandbox is fake_sandbox
+    # Builder agents update platform records directly and must NOT delegate to
+    # sub-agents (agent_tool_setup: builder_subagents_skipped policy). The google_mcp
+    # intent likewise does not redirect the builder (asserted below).
+    assert subagents_called is False
+    # Builder agents use internal platform tools directly — no filesystem sandbox
+    # (agent_tool_setup: builder_sandbox_skipped policy).
+    assert setup.sandbox is None
+    # Crucially, the google_mcp intent does NOT redirect the builder into the
+    # google-workspace parent-only path.
     assert "google_mcp_parent_only" not in setup.active_groups
-    assert "sandbox" in setup.active_groups
+    assert "sandbox" not in setup.active_groups
     assert "builder" in setup.active_groups
-    assert "subagents(1)" in setup.active_groups
+    # Builder agents do not spin up sub-agents at all (builder_subagents_skipped).
+    assert "subagents(1)" not in setup.active_groups
     assert ("agent_run.policy_selected", {"policy_class": "builder"}) in log.events
     assert ("agent_run.google_mcp_subagents_skipped", {"reason": "google_workspace_mcp_parent_only"}) not in log.events
 

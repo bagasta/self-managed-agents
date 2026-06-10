@@ -230,6 +230,7 @@ class TestBuilderPipelineFlow:
             result = _run(create.ainvoke({
                 "name": "CS Toko Baju Indah",
                 "instructions": "Kamu adalah Sari, CS dari Toko Baju Indah.",
+                "file_capability": "text_only",
                 "tools_config": '{"memory": true, "escalation": true}',
                 "channel_type": "whatsapp",
             }))

@@ -311,6 +311,30 @@ class TestBuilderToolsReturnsList:
         assert tools_config["mcp"]["enabled"] is True
         assert "google_workspace" in tools_config["mcp"]["servers"]
 
+    def test_personal_assistant_generate_file_enables_sandbox_and_google_workspace(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        plan = next(t for t in tools if t.name == "plan_agent")
+
+        result = _run(plan.ainvoke({
+            "user_goal": "Bikinin personal assistant yang bisa generate file dan terhubung ke Google Workspace",
+            "agent_name": "Baas",
+            "channel": "whatsapp",
+            "requested_features": "google",
+        }))
+        payload = json.loads(result)
+        tools_config = payload["recommended_config"]["tools_config"]
+
+        assert payload["detected_preset"] == "personal_assistant"
+        assert payload["plan_status"] == "ready"
+        assert tools_config["sandbox"] is True
+        assert tools_config["whatsapp_media"] is True
+        assert tools_config["subagents"]["enabled"] is True
+        assert tools_config["mcp"]["enabled"] is True
+        assert "google_workspace" in tools_config["mcp"]["servers"]
+
     def test_existing_google_form_order_link_does_not_enable_workspace(self):
         from app.core.tools.builder_tools import build_builder_tools
 
@@ -413,7 +437,7 @@ class TestBuilderToolsReturnsList:
         assert tools_config["escalation"] is True
         assert tools_config.get("sandbox") is False
         assert tools_config.get("subagents", {}).get("enabled") is False
-        assert tools_config["whatsapp_media"] is False
+        assert tools_config["whatsapp_media"] is True
         assert "mcp" not in tools_config
         assert payload["google_workspace_option"]["should_offer"] is False
         assert payload["google_workspace_option"]["enabled"] is False
@@ -1294,6 +1318,7 @@ class TestCreateAgent:
             result = _run(tool.ainvoke({
                 "name": "CS Agent",
                 "instructions": "Kamu adalah CS yang membantu pelanggan.",
+                "file_capability": "text_only",
                 "tools_config": '{"memory": true, "escalation": true}',
             }))
 
@@ -1322,6 +1347,7 @@ class TestCreateAgent:
             result = _run(tool.ainvoke({
                 "name": "FAQ Agent",
                 "instructions": "Kamu adalah FAQ agent yang membantu pelanggan.",
+                "file_capability": "text_only",
                 "tools_config": '{"memory": true, "escalation": true}',
                 "channel_type": "webchat",
             }))
@@ -1391,6 +1417,7 @@ class TestCreateAgent:
                     "name": "Toko Sari Agent",
                     "description": "Agent CS untuk toko online yang menjawab produk, stok, checkout, dan refund.",
                     "instructions": "Kamu adalah CS Toko Sari. Bicara singkat, ramah, dan bantu customer belanja.",
+                    "file_capability": "text_only",
                     "business_context": (
                         "Toko Sari menjual produk fashion online. Customer biasanya bertanya katalog, stok, ukuran, "
                         "alamat pengiriman, checkout, pembayaran manual, dan refund. Agent harus mengumpulkan nama, "
@@ -1496,6 +1523,7 @@ class TestCreateAgent:
                     "name": "RentalPro",
                     "description": "Agent WhatsApp rental alat pesta.",
                     "instructions": "Kamu adalah RentalPro, bantu customer rental alat pesta dengan ramah.",
+                    "file_capability": "text_only",
                     "business_context": (
                         "Bisnis menyewakan tenda, kursi, meja, sound system, dan dekorasi untuk acara. "
                         "Customer perlu memberi tanggal, lokasi, item, jumlah tamu, pengiriman, DP, dan pelunasan."
@@ -1538,6 +1566,7 @@ class TestCreateAgent:
             result = _run(tool.ainvoke({
                 "name": "Agent Minim",
                 "instructions": "Bantu customer.",
+                "file_capability": "text_only",
                 "tools_config": '{"memory": true}',
             }))
             data = json.loads(result)
@@ -1620,6 +1649,7 @@ class TestCreateAgent:
                     "name": "Event Helper",
                     "description": "Agent WhatsApp untuk bantu orang menyiapkan acara.",
                     "instructions": "Kamu membantu calon pelanggan dengan ramah dan mengumpulkan kebutuhan mereka.",
+                    "file_capability": "text_only",
                     "business_context": (
                         "Kami membantu orang menyiapkan acara. Pelanggan biasanya memberi tanggal, tempat, jenis acara, "
                         "perkiraan jumlah tamu, barang yang dibutuhkan, kebutuhan antar-pasang, aturan uang muka, "
@@ -1714,6 +1744,7 @@ class TestCreateAgent:
                     "name": "Event Helper",
                     "description": "Agent WhatsApp untuk bantu pelanggan persiapan acara.",
                     "instructions": "Kamu membantu pelanggan mengumpulkan kebutuhan acara dan eskalasi kepastian biaya ke pemilik.",
+                    "file_capability": "text_only",
                     "business_context": "Pelanggan memberi tanggal acara, lokasi, jumlah tamu, dan barang. Biaya akhir dicek pemilik.",
                     "tools_config": '{"memory": true, "escalation": true}',
                     "channel_type": "whatsapp",
@@ -1769,6 +1800,7 @@ class TestCreateAgent:
             _run(tool.ainvoke({
                 "name": "Test Agent",
                 "instructions": "Test instructions",
+                "file_capability": "text_only",
             }))
 
             assert "+62811xxx" in captured_kwargs.get("operator_ids", []), \
@@ -1805,6 +1837,7 @@ class TestCreateAgent:
             result = _run(tool.ainvoke({
                 "name": "CS Agent",
                 "instructions": "Kamu adalah CS yang membantu pelanggan.",
+                "file_capability": "text_only",
             }))
             data = json.loads(result)
 
@@ -1833,6 +1866,7 @@ class TestCreateAgent:
             result = _run(tool.ainvoke({
                 "name": "Research Google",
                 "instructions": "Kamu adalah agent riset.",
+                "file_capability": "text_only",
                 "tools_config": json.dumps({
                     "memory": True,
                     "mcp": {
@@ -3126,6 +3160,13 @@ def test_parent_delivery_contract_image_only():
 
 def test_data_visualization_pdf_counts_as_generated_file_workflow():
     text = "Agent visualisasi data Titanic, buat grafik, lalu kirim laporan PDF ke WhatsApp."
+
+    assert _looks_like_file_delivery_workflow(text) is True
+    assert _looks_like_generated_file_workflow(text) is True
+
+
+def test_generic_generate_file_counts_as_generated_file_workflow():
+    text = "Bikinin personal assistant yang bisa generate file dan terhubung ke Google Workspace."
 
     assert _looks_like_file_delivery_workflow(text) is True
     assert _looks_like_generated_file_workflow(text) is True

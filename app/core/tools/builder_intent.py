@@ -216,6 +216,14 @@ def _looks_like_approval_gated_service(*parts: Any) -> bool:
 def _looks_like_file_delivery_workflow(*parts: Any) -> bool:
     text = _combined_context_text(*parts)
     file_markers = (
+        "generate file",
+        "generate dokumen",
+        "generate document",
+        "buat file",
+        "bikin file",
+        "membuat file",
+        "susun file",
+        "export file",
         "file final",
         "hasil berupa file",
         "output file",
@@ -243,6 +251,18 @@ def _looks_like_file_delivery_workflow(*parts: Any) -> bool:
 
 def _looks_like_generated_file_workflow(*parts: Any) -> bool:
     text = _combined_context_text(*parts)
+    generated_file_phrases = (
+        "generate file",
+        "generate dokumen",
+        "generate document",
+        "buat file",
+        "bikin file",
+        "membuat file",
+        "susun file",
+        "export file",
+    )
+    if any(marker in text for marker in generated_file_phrases):
+        return True
     generation_markers = (
         "bikin",
         "buat",
