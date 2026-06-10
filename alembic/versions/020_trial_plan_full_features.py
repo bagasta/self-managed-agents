@@ -33,10 +33,10 @@ def upgrade() -> None:
         f"""
         UPDATE subscription_plans
         SET
-            max_agents        = NULL,
+            max_agents        = 1,
             token_quota       = {NEW_TOKEN_QUOTA},
             period_days       = {NEW_PERIOD_DAYS},
-            allowed_models    = '[]'::jsonb,
+            allowed_models    = '["openai/gpt-4.1-mini"]'::jsonb,
             subagents_allowed = true
         WHERE id = '{TRIAL_ID}' OR code = 'trial'
         """

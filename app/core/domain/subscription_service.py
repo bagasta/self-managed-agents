@@ -52,11 +52,11 @@ DEFAULT_SUBSCRIPTION_PLANS: list[dict[str, Any]] = [
         "id": SubscriptionPlan.TRIAL_ID,
         "code": "trial",
         "label": "Trial",
-        "max_agents": None,
+        "max_agents": 1,
         "token_quota": 5_000_000,
         "period_days": 14,
         "grace_period_days": 3,
-        "allowed_models": [],
+        "allowed_models": ["openai/gpt-4.1-mini"],
         "subagents_allowed": True,
         "wa_connect": True,
         "is_trial": True,
@@ -128,10 +128,10 @@ async def ensure_default_subscription_plans(db: AsyncSession) -> None:
             existing.max_agents = None
             existing.token_quota = TIER_3_TOKEN_QUOTA
         if existing.id == SubscriptionPlan.TRIAL_ID:
-            existing.max_agents = None
+            existing.max_agents = 1
             existing.token_quota = 5_000_000
             existing.period_days = 14
-            existing.allowed_models = []
+            existing.allowed_models = ["openai/gpt-4.1-mini"]
             existing.subagents_allowed = True
     await db.flush()
 
