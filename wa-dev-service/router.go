@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 )
@@ -20,6 +21,7 @@ type Router struct {
 	autoAgentID string // if set, all messages auto-route to this agent (test mode)
 	store       *ConnectionStore
 	wa          *WhatsAppClient
+	senderMu    sync.Map // chatID -> *sync.Mutex; serialises per-sender forwards to Python
 }
 
 func NewRouter(mainAPIURL, mainAPIKey string, store *ConnectionStore, webhookURL, autoAgentID string) *Router {
@@ -164,7 +166,7 @@ func (r *Router) HandleMessage(msg IncomingMessage) {
 	// TEST MODE: auto-route messages only after disconnect suppression has had
 	// a chance to win. Otherwise /stop would be forwarded to the agent as chat.
 	if r.autoAgentID != "" {
-		r.forwardToAgent(r.autoAgentID, msg)
+		r.forwardToAgentSerial(r.autoAgentID, msg)
 		return
 	}
 
@@ -207,7 +209,7 @@ func (r *Router) HandleMessage(msg IncomingMessage) {
 		if hasOperatorRouteContext(msg) {
 			if agentID, ok := r.lookupOperatorAgent(msg.From, msg.PhoneFrom); ok {
 				log.Printf("[dev-router] operator %s auto-routed to agent %s", msg.From, agentID)
-				r.forwardToAgent(agentID, msg)
+				r.forwardToAgentSerial(agentID, msg)
 				return
 			}
 		}
@@ -216,7 +218,7 @@ func (r *Router) HandleMessage(msg IncomingMessage) {
 	}
 
 	// Forward to Python via /v1/channels/wa/incoming with virtual device_id
-	r.forwardToAgent(conn.AgentID, msg)
+	r.forwardToAgentSerial(conn.AgentID, msg)
 }
 
 func (r *Router) saveConnection(keys []string, chatID, agentID string) {
@@ -245,6 +247,9 @@ func (r *Router) handleConnect(from, chatID, agentID string) {
 	_, _ = r.wa.SendText(chatID, fmt.Sprintf("✅ Berhasil terhubung ke agent *%s*!\n\nSekarang kamu bisa chat langsung di sini.\nKirim *berhenti* atau */stop* untuk disconnect.", agentName))
 	log.Printf("[dev-router] %s connected to agent %s", from, agentID)
 }
+
+// handleConnect uses forwardToAgent directly (not serialised) because the
+// connection setup message is fire-and-forget and does not carry user context.
 
 func (r *Router) claimTrialCode(codeText, from, phoneFrom, chatID, pushName string) (string, string, bool) {
 	claimPhone := from
@@ -288,6 +293,24 @@ func (r *Router) claimTrialCode(codeText, from, phoneFrom, chatID, pushName stri
 		return "", "", false
 	}
 	return result.AgentID, result.AgentName, result.AgentID != ""
+}
+
+// getSenderMu returns a per-ChatID mutex so that messages from the same sender
+// are forwarded to Python one at a time.  This prevents cancel_active_run from
+// being triggered (the previous HTTP call always completes before the next one
+// starts), which in turn prevents context loss in the agent's history.
+func (r *Router) getSenderMu(chatID string) *sync.Mutex {
+	mu, _ := r.senderMu.LoadOrStore(chatID, &sync.Mutex{})
+	return mu.(*sync.Mutex)
+}
+
+// forwardToAgentSerial serialises forwarding for a single ChatID so that at
+// most one request per sender is in-flight to Python at any time.
+func (r *Router) forwardToAgentSerial(agentID string, msg IncomingMessage) {
+	mu := r.getSenderMu(msg.ChatID)
+	mu.Lock()
+	defer mu.Unlock()
+	r.forwardToAgent(agentID, msg)
 }
 
 // forwardToAgent POSTs the message to Python /v1/channels/wa/incoming using a

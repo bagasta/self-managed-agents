@@ -37,20 +37,28 @@ def filter_dead_run_messages(
     rows: list[Message],
     run_status: dict,
 ) -> list[Message]:
-    """Drop user AND agent rows that belong to a dead (failed/abandoned/...) run.
+    """Drop rows belonging to dead runs, with one exception for cancelled runs.
 
-    Prevents a crashed or cancelled run from leaving orphaned, misleading text in
-    the history replayed to the model.
+    - failed / timed_out / abandoned: drop both user and agent rows — the run
+      produced nothing useful and should be invisible to the model.
+    - cancelled (human interrupt): keep the user row so the model can see what
+      the user asked even though no response was delivered.  The agent row is
+      still dropped (it may be partial or empty).  This prevents context loss
+      when a user sends a follow-up before the previous run finishes.
     """
-    return [
-        row
-        for row in rows
-        if not (
-            row.role in ("user", "agent")
-            and row.run_id
-            and run_status.get(row.run_id) in DEAD_RUN_STATUSES
-        )
-    ]
+    result = []
+    for row in rows:
+        if row.role not in ("user", "agent") or not row.run_id:
+            result.append(row)
+            continue
+        status = run_status.get(row.run_id)
+        if status not in DEAD_RUN_STATUSES:
+            result.append(row)
+            continue
+        # Cancelled run: preserve the user's message; discard the agent's partial reply.
+        if status == "cancelled" and row.role == "user":
+            result.append(row)
+    return result
 
 
 def _elide_stale_attachment_body(content: str) -> str:
