@@ -52,12 +52,12 @@ DEFAULT_SUBSCRIPTION_PLANS: list[dict[str, Any]] = [
         "id": SubscriptionPlan.TRIAL_ID,
         "code": "trial",
         "label": "Trial",
-        "max_agents": 1,
-        "token_quota": 2_000_000,
-        "period_days": None,
+        "max_agents": None,
+        "token_quota": 5_000_000,
+        "period_days": 14,
         "grace_period_days": 3,
-        "allowed_models": ["openai/gpt-4.1-mini"],
-        "subagents_allowed": False,
+        "allowed_models": [],
+        "subagents_allowed": True,
         "wa_connect": True,
         "is_trial": True,
         "is_active": True,
@@ -127,6 +127,12 @@ async def ensure_default_subscription_plans(db: AsyncSession) -> None:
         if existing.id == SubscriptionPlan.TIER_3_ID:
             existing.max_agents = None
             existing.token_quota = TIER_3_TOKEN_QUOTA
+        if existing.id == SubscriptionPlan.TRIAL_ID:
+            existing.max_agents = None
+            existing.token_quota = 5_000_000
+            existing.period_days = 14
+            existing.allowed_models = []
+            existing.subagents_allowed = True
     await db.flush()
 
 
@@ -210,6 +216,9 @@ async def _create_trial_subscription(
     ).scalar_one()
 
     now = datetime.now(timezone.utc)
+    period = plan.period_days or 14
+    expires_at = now + timedelta(days=period)
+    grace_until = expires_at + timedelta(days=plan.grace_period_days)
     sub = UserSubscription(
         user_id=user_id,
         plan_id=plan.id,
@@ -217,8 +226,8 @@ async def _create_trial_subscription(
         token_quota=plan.token_quota,
         tokens_used=0,
         started_at=now,
-        expires_at=None,
-        grace_until=None,
+        expires_at=expires_at,
+        grace_until=grace_until,
     )
     db.add(sub)
     await db.flush()
