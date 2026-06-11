@@ -21,7 +21,9 @@ Daftar fungsi:
 from __future__ import annotations
 
 import ast
+import base64
 import json
+from pathlib import Path
 import sys
 import uuid
 from typing import Any, Optional
@@ -565,6 +567,144 @@ def build_wa_notify_tool(session: Any) -> list:
 # WhatsApp media tools
 # ---------------------------------------------------------------------------
 
+def _basename(path: str | None) -> str:
+    return str(path or "").strip().rsplit("/", 1)[-1]
+
+
+def _session_media_file_candidates(session: Any) -> list[dict[str, str]]:
+    """Return host-readable media files that belong to the current session.
+
+    The model sees /workspace aliases, while wa_helpers stores the actual file
+    on the host session workspace. This intentionally only exposes files already
+    registered in session metadata so disabling sandbox does not become arbitrary
+    filesystem read access.
+    """
+    meta = getattr(session, "metadata_", None)
+    meta = meta if isinstance(meta, dict) else {}
+    incoming = meta.get("last_incoming_media")
+    current = meta.get("current_attachment")
+
+    entries: list[dict[str, str]] = []
+
+    def add_entry(host_path: Any, *, media_type: Any, filename: Any, mimetype: Any, aliases: set[str]) -> None:
+        host = str(host_path or "").strip()
+        if not host:
+            return
+        try:
+            path_obj = Path(host)
+        except Exception:
+            return
+        if not path_obj.is_file():
+            return
+        name = str(filename or path_obj.name or "").strip()
+        alias_values = {str(alias or "").strip() for alias in aliases if str(alias or "").strip()}
+        alias_values.add(host)
+        if name:
+            alias_values.update({
+                name,
+                f"/workspace/{name}",
+                f"/workspace/shared/{name}",
+                f"/workspace/shared/current_input/{name}",
+                f"/workspace/data/incoming/{name}",
+                f"/workspace/data/incoming/current_input/{name}",
+            })
+        entries.append(
+            {
+                "host_path": host,
+                "media_type": str(media_type or "").strip(),
+                "filename": name,
+                "mimetype": str(mimetype or "").strip(),
+                "aliases": "\n".join(sorted(alias_values)),
+            }
+        )
+
+    current_aliases: set[str] = set()
+    current_filename = ""
+    if isinstance(current, dict):
+        current_filename = str(current.get("filename") or "").strip()
+        for key in (
+            "input_path",
+            "subagent_input_path",
+            "shared_path",
+            "legacy_shared_path",
+            "extracted_text_path",
+            "extracted_text_subagent_path",
+        ):
+            value = str(current.get(key) or "").strip()
+            if value:
+                current_aliases.add(value)
+
+    if isinstance(incoming, dict):
+        filename = str(incoming.get("filename") or current_filename or "").strip()
+        aliases = set(current_aliases)
+        for key in (
+            "workspace_alias",
+            "incoming_alias",
+            "current_input_path",
+            "subagent_current_input_path",
+            "shared_alias",
+        ):
+            value = str(incoming.get(key) or "").strip()
+            if value:
+                aliases.add(value)
+        for key in (
+            "current_shared_workspace_path",
+            "shared_workspace_path",
+            "workspace_path",
+            "current_workspace_path",
+            "incoming_workspace_path",
+        ):
+            add_entry(
+                incoming.get(key),
+                media_type=incoming.get("media_type"),
+                filename=filename,
+                mimetype=incoming.get("mimetype"),
+                aliases=aliases,
+            )
+
+    deduped: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in entries:
+        key = item["host_path"]
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
+def _resolve_session_media_file(
+    session: Any,
+    requested_path: str,
+    *,
+    allowed_media_types: set[str] | None = None,
+) -> dict[str, str] | None:
+    requested = str(requested_path or "").strip()
+    if not requested or session is None:
+        return None
+    requested_name = _basename(requested)
+    candidates = _session_media_file_candidates(session)
+    if allowed_media_types:
+        candidates = [
+            item for item in candidates
+            if str(item.get("media_type") or "").strip() in allowed_media_types
+        ]
+    if not candidates:
+        return None
+
+    for item in candidates:
+        aliases = set(str(item.get("aliases") or "").splitlines())
+        if requested in aliases:
+            return item
+
+    if requested_name:
+        name_matches = [item for item in candidates if _basename(item.get("filename")) == requested_name]
+        if len(name_matches) == 1:
+            return name_matches[0]
+    if len(candidates) == 1 and requested_name and requested_name == _basename(candidates[0].get("host_path")):
+        return candidates[0]
+    return None
+
 def build_whatsapp_media_tools(
     session: Any,
     sandbox: DockerSandbox | None,
@@ -608,7 +748,7 @@ def build_whatsapp_media_tools(
         if not device_id:
             return "[error] Tidak ada device_id WhatsApp pada session ini"
 
-        import base64 as _b64, re as _re
+        import re as _re
 
         def _looks_like_base64(s: str) -> bool:
             return len(s) >= 50 and bool(_re.fullmatch(r'[A-Za-z0-9+/]+=*', s))
@@ -616,15 +756,29 @@ def build_whatsapp_media_tools(
         if _looks_like_base64(image_path_or_base64):
             image_b64 = image_path_or_base64.strip()
         else:
-            if sandbox is None:
-                return "[error] Tool send_whatsapp_image membutuhkan sandbox aktif untuk membaca file. Gunakan base64 langsung atau aktifkan sandbox."
-            path = image_path_or_base64 if image_path_or_base64.startswith("/workspace/") else f"/workspace/{image_path_or_base64}"
-            import shlex as _shlex
+            resolved = _resolve_session_media_file(
+                session,
+                image_path_or_base64,
+                allowed_media_types={"image", "sticker"},
+            )
+            if resolved is not None:
+                try:
+                    image_b64 = base64.b64encode(Path(resolved["host_path"]).read_bytes()).decode("ascii")
+                except Exception as exc:
+                    return f"[error] Gagal membaca file sesi: {exc}"
+                resolved_mimetype = str(resolved.get("mimetype") or "").strip()
+                if resolved_mimetype and (not mimetype or mimetype == "image/jpeg"):
+                    mimetype = resolved_mimetype
+            else:
+                if sandbox is None:
+                    return "[error] Tool send_whatsapp_image membutuhkan sandbox aktif untuk membaca file. Gunakan base64 langsung atau attachment WA terbaru."
+                path = image_path_or_base64 if image_path_or_base64.startswith("/workspace/") else f"/workspace/{image_path_or_base64}"
+                import shlex as _shlex
 
-            b64_output = sandbox.bash(f"base64 -w 0 {_shlex.quote(path)} 2>&1")
-            if b64_output.startswith("[") or "No such file" in b64_output:
-                return f"[error] Gagal membaca file: {b64_output}"
-            image_b64 = b64_output.strip()
+                b64_output = sandbox.bash(f"base64 -w 0 {_shlex.quote(path)} 2>&1")
+                if b64_output.startswith("[") or "No such file" in b64_output:
+                    return f"[error] Gagal membaca file: {b64_output}"
+                image_b64 = b64_output.strip()
 
         try:
             from app.core.infra.wa_client import send_wa_image
@@ -664,24 +818,36 @@ def build_whatsapp_media_tools(
         elif not mimetype:
             mimetype = "application/octet-stream"
 
-        import base64 as _b64, re as _re
+        import re as _re
 
         def _looks_like_base64(s: str) -> bool:
             return len(s) >= 50 and bool(_re.fullmatch(r'[A-Za-z0-9+/]+=*', s))
 
         if not _looks_like_base64(file_path_or_base64):
-            if sandbox is None:
-                return "[error] Tool send_whatsapp_document membutuhkan sandbox aktif untuk membaca file."
-            path = file_path_or_base64 if file_path_or_base64.startswith("/workspace/") else f"/workspace/{file_path_or_base64}"
-            import shlex as _shlex
+            resolved = _resolve_session_media_file(session, file_path_or_base64)
+            if resolved is not None:
+                try:
+                    doc_b64 = base64.b64encode(Path(resolved["host_path"]).read_bytes()).decode("ascii")
+                except Exception as exc:
+                    return f"[error] Gagal membaca file sesi: {exc}"
+                if not filename or filename == "file":
+                    filename = resolved.get("filename") or _basename(file_path_or_base64) or "file"
+                resolved_mimetype = str(resolved.get("mimetype") or "").strip()
+                if resolved_mimetype and (not mimetype or mimetype == "application/octet-stream"):
+                    mimetype = resolved_mimetype
+            else:
+                if sandbox is None:
+                    return "[error] Tool send_whatsapp_document membutuhkan sandbox aktif untuk membaca file."
+                path = file_path_or_base64 if file_path_or_base64.startswith("/workspace/") else f"/workspace/{file_path_or_base64}"
+                import shlex as _shlex
 
-            b64_output = sandbox.bash(f"base64 -w 0 {_shlex.quote(path)} 2>&1")
-            if b64_output.startswith("[") or "No such file" in b64_output:
-                return f"[error] Gagal membaca file: {b64_output}"
-            doc_b64 = b64_output.strip()
-            if not filename or filename == "file":
-                import os as _os
-                filename = _os.path.basename(path)
+                b64_output = sandbox.bash(f"base64 -w 0 {_shlex.quote(path)} 2>&1")
+                if b64_output.startswith("[") or "No such file" in b64_output:
+                    return f"[error] Gagal membaca file: {b64_output}"
+                doc_b64 = b64_output.strip()
+                if not filename or filename == "file":
+                    import os as _os
+                    filename = _os.path.basename(path)
         else:
             doc_b64 = file_path_or_base64.strip()
 

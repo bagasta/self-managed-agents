@@ -216,6 +216,49 @@ def build_builder_planning_tools(
             persona=persona,
             business_context=business_context,
         ):
+            early_channel = str(channel or "").strip().lower() or "whatsapp"
+            if early_channel != "whatsapp":
+                early_channel = "whatsapp"
+            early_entitlement_check = await _preview_agent_creation_entitlement(
+                tools_config={
+                    "memory": True,
+                    "skills": True,
+                    "escalation": True,
+                    "tavily": True,
+                    "whatsapp_media": True,
+                },
+                model=_DEFAULT_MODEL,
+                channel_type=early_channel,
+            )
+            early_entitlement_blocked = bool(
+                early_entitlement_check.get("checked")
+                and not early_entitlement_check.get("allowed", True)
+            )
+            if early_entitlement_blocked:
+                entitlement_message = (
+                    early_entitlement_check.get("user_message")
+                    or early_entitlement_check.get("reason")
+                    or "Paket kamu belum bisa membuat agent ini."
+                )
+                agent_count_block = bool(
+                    early_entitlement_check.get("max_agents") is not None
+                    and early_entitlement_check.get("agents_used", 0)
+                    >= early_entitlement_check.get("max_agents", 0)
+                )
+                next_action = (
+                    "User SUDAH punya agent dan sedang di batas jumlah agent paketnya. "
+                    "Kalau user ingin MENGUBAH/MEMPERBAIKI agent yang sudah ada, pakai "
+                    "list_my_agents lalu update_agent. Tawarkan upgrade hanya kalau user "
+                    "benar-benar ingin membuat agent baru tambahan."
+                    if agent_count_block
+                    else "Jelaskan limit paket dengan bahasa sederhana dan tawarkan upgrade/top up sebelum lanjut membuat agent."
+                )
+                return json.dumps({
+                    "plan_status": "blocked_by_subscription",
+                    "validation_errors": [entitlement_message],
+                    "creation_entitlement_check": early_entitlement_check,
+                    "next_action": next_action,
+                }, ensure_ascii=False, indent=2)
             return json.dumps({
                 "plan_status": "needs_clarification",
                 "detected_preset": "",

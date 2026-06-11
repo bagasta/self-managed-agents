@@ -53,8 +53,10 @@ from app.core.engine.agent_google_routing import (
     _builder_google_auth_agent_id,
     _extract_auth_url_from_builder_steps,
     _google_workspace_customer_blocker_reply,
+    _google_workspace_mcp_unauthorized_reply,
     _google_workspace_server_has_auth,
     _is_google_chat_intent,
+    _is_google_workspace_mcp_authorized_for_session,
     _remove_google_workspace_mcp_server,
     _route_google_workspace_blocker_to_owner_if_customer,
 )
@@ -122,6 +124,7 @@ from app.core.engine.google_mcp_support import (
     google_sheets_followup_directive,
     find_last_google_workspace_user_request,
     is_google_auth_recovery_followup,
+    is_google_workspace_mcp_configured,
     prepare_google_mcp_runtime,
     sanitize_google_forms_tools,
     google_slides_dimension_retry_directive,
@@ -276,6 +279,70 @@ def _build_human_content_for_model(
     return user_message
 
 
+def _extract_requested_image_caption(user_message: str) -> str:
+    payload = _operator_message_payload(user_message).strip()
+    for pattern in (
+        r"(?:dengan\s+caption|with\s+caption|caption(?:nya)?)\s*[:=\-]?\s*(.+)$",
+        r"(?:beri|kasih|tambahkan)\s+caption\s*[:=\-]?\s*(.+)$",
+    ):
+        match = re.search(pattern, payload, flags=re.IGNORECASE | re.DOTALL)
+        if not match:
+            continue
+        caption = match.group(1).strip()
+        return caption.strip(" \t\r\n\"'`")
+    return ""
+
+
+def _has_explicit_external_wa_target(user_message: str) -> bool:
+    payload = _operator_message_payload(user_message)
+    if re.search(r"(?:@s\.whatsapp\.net|@c\.us|@lid)\b", payload, flags=re.IGNORECASE):
+        return True
+    return bool(re.search(r"(?:\+?\d[\d\s().-]{7,}\d)", payload))
+
+
+def _current_image_attachment_delivery_request(
+    *,
+    session: Session,
+    current_attachment_name: str | None,
+    user_message: str,
+) -> tuple[str, str] | None:
+    """Detect explicit "send this image with caption" requests for the latest WA attachment."""
+    if not current_attachment_name:
+        return None
+    payload = _operator_message_payload(user_message).strip()
+    text = payload.lower()
+    if not text or _has_explicit_external_wa_target(payload):
+        return None
+    if not any(marker in text for marker in ("kirim", "send", "forward", "teruskan", "bagikan")):
+        return None
+    if not any(marker in text for marker in ("gambar", "foto", "image", "lampiran", "attachment", "caption")):
+        return None
+
+    meta = session.metadata_ if isinstance(getattr(session, "metadata_", None), dict) else {}
+    current = meta.get("current_attachment")
+    incoming = meta.get("last_incoming_media")
+    current = current if isinstance(current, dict) else {}
+    incoming = incoming if isinstance(incoming, dict) else {}
+
+    filename = str(current.get("filename") or incoming.get("filename") or current_attachment_name or "").strip()
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    media_type = str(current.get("media_type") or incoming.get("media_type") or "").strip()
+    if media_type and media_type not in {"image", "sticker"}:
+        return None
+    if not media_type and ext not in {"jpg", "jpeg", "png", "webp"}:
+        return None
+
+    path = (
+        str(current.get("input_path") or "").strip()
+        or str(current.get("shared_path") or "").strip()
+        or str(incoming.get("current_input_path") or "").strip()
+        or str(incoming.get("shared_alias") or "").strip()
+    )
+    if not path:
+        return None
+    return path, _extract_requested_image_caption(payload)
+
+
 # Re-exported from agent_middleware (moved there to keep agent_runner as facade)
 from app.core.engine.agent_middleware import (  # noqa: E402
     BlockTaskToolMiddleware,
@@ -427,12 +494,14 @@ async def _deliver_shared_whatsapp_file_via_tool(
     run_id: uuid.UUID,
     step_index: int,
     log: Any,
+    caption: str | None = None,
 ) -> tuple[bool, str]:
     """Send a known /workspace/shared file via the parent WA media tool without an LLM pass."""
     filename = (shared_path or "").rsplit("/", 1)[-1] or "file"
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     image_exts = {"jpg", "jpeg", "png", "webp"}
     tool_name = "send_whatsapp_image" if ext in image_exts else "send_whatsapp_document"
+    media_caption = caption if caption is not None else f"Berikut file {filename}."
     send_tool = next((tool for tool in tools if getattr(tool, "name", "") == tool_name), None)
     if send_tool is None:
         inline_reply = _shared_text_artifact_inline_reply(
@@ -449,13 +518,13 @@ async def _deliver_shared_whatsapp_file_via_tool(
     if tool_name == "send_whatsapp_image":
         args = {
             "image_path_or_base64": shared_path,
-            "caption": f"Berikut file {filename}.",
+            "caption": media_caption,
         }
     else:
         args = {
             "file_path_or_base64": shared_path,
             "filename": filename,
-            "caption": f"Berikut file {filename}.",
+            "caption": media_caption,
         }
 
     try:
@@ -497,6 +566,8 @@ async def _deliver_shared_whatsapp_file_via_tool(
         return False, f"Gagal mengirim {filename} lewat WhatsApp: {result_text or 'tool tidak mengembalikan hasil sukses'}"
 
     log.info("agent_run.whatsapp_file_direct_delivery_sent", tool=tool_name, filename=filename)
+    if tool_name == "send_whatsapp_image":
+        return True, f"Gambar {filename} sudah saya kirim ke WhatsApp."
     return True, f"File {filename} sudah saya kirim ke WhatsApp."
 
 
@@ -1050,6 +1121,58 @@ async def run_agent(
             log.warning("agent_run.wa_typing_stop_failed", error=str(exc)[:200])
 
     await _start_wa_run_typing()
+    google_mcp_tools_config = tools_config
+    google_mcp_role_denied = (
+        is_google_workspace_mcp_configured(tools_config)
+        and not _is_google_workspace_mcp_authorized_for_session(session, agent_model)
+    )
+    if google_mcp_role_denied:
+        google_mcp_tools_config = _remove_google_workspace_mcp_server(tools_config)
+        log.warning(
+            "agent_run.google_mcp_denied_for_non_operator",
+            sender=_session_sender_phone(session),
+            reason="google_workspace_mcp_requires_owner_or_operator",
+        )
+        if _is_google_mcp_intent(execution_user_message) or google_auth_recovery_followup:
+            final_reply = _google_workspace_mcp_unauthorized_reply()
+            run_record.status = "completed"
+            run_record.completed_at = datetime.now(timezone.utc)
+            run_record.error_message = "google_workspace_mcp_denied_for_non_operator"
+            run_record.tokens_used = 0
+            run_record.prompt_tokens = 0
+            run_record.completion_tokens = 0
+            run_record.reasoning_tokens = 0
+            run_record.cached_tokens = 0
+            run_record.openrouter_cost_usd = Decimal("0")
+            run_record.usage_details = None
+            db.add(Message(
+                session_id=session.id,
+                role="assistant",
+                content=final_reply,
+                step_index=step_base + 1,
+                run_id=run_id,
+            ))
+            await db.flush()
+            await _stop_wa_run_typing()
+            if sandbox:
+                await sandbox.aclose()
+            for _ssb in sub_sandboxes:
+                await _ssb.aclose()
+            return AgentRunResult(
+                reply=final_reply,
+                steps=[],
+                run_id=run_id,
+                tokens_used=0,
+                usage={
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "cached_tokens": 0,
+                    "total_tokens": 0,
+                    "openrouter_cost_usd": 0,
+                    "details": None,
+                },
+            )
     _google_fallback_external_user_id = getattr(agent_model, "owner_external_id", None)
     if not _google_fallback_external_user_id:
         _operator_ids = getattr(agent_model, "operator_ids", None)
@@ -1057,7 +1180,7 @@ async def run_agent(
             _google_fallback_external_user_id = str(_operator_ids[0])
 
     google_mcp = await prepare_google_mcp_runtime(
-        tools_config=tools_config,
+        tools_config=google_mcp_tools_config,
         tools=tools,
         active_groups=active_groups,
         session=session,
@@ -1071,13 +1194,13 @@ async def run_agent(
     )
     system_prompt = google_mcp.system_prompt
     _google_mcp_auth_url = google_mcp.auth_url
-    mcp_tools_config = tools_config
+    mcp_tools_config = google_mcp_tools_config
     if (
         google_mcp.enabled
         and google_mcp.workspace_server
         and not _google_workspace_server_has_auth(google_mcp)
     ):
-        mcp_tools_config = _remove_google_workspace_mcp_server(tools_config)
+        mcp_tools_config = _remove_google_workspace_mcp_server(google_mcp_tools_config)
         log.info(
             "agent_run.google_mcp_client_skipped_until_auth",
             reason="missing_per_user_bearer",
@@ -1456,25 +1579,13 @@ async def run_agent(
             for _ssb in sub_sandboxes:
                 await _ssb.aclose()
 
-        direct_wa_confirmation_payload = (
-            _extract_direct_whatsapp_confirmation_payload(user_message, history_rows)
-            if direct_wa_text_send_context
-            else None
-        )
-        direct_wa_file_delivery_path = (
-            _latest_shared_artifact_path_for_delivery(
-                session=session,
-                history_rows=history_rows,
-                user_message=execution_user_message,
-            )
-            if getattr(session, "channel_type", None) == "whatsapp"
-            and _is_enabled(tools_config, "whatsapp_media", default=True)
-            and not direct_wa_text_send_context
-            and not runtime_policy.is_builder
-            and not current_attachment_name
-            else None
-        )
-        if direct_wa_file_delivery_path:
+        async def _complete_direct_whatsapp_file_delivery(
+            *,
+            path: str,
+            caption: str | None,
+            remember_sent_artifact: bool,
+            log_event: str,
+        ) -> AgentRunResult:
             parsed = ParsedResult(
                 final_reply="",
                 steps=[],
@@ -1485,16 +1596,17 @@ async def run_agent(
             tool_step_index = step_counter
             _sent, final_reply = await _deliver_shared_whatsapp_file_via_tool(
                 tools=tools,
-                shared_path=direct_wa_file_delivery_path,
+                shared_path=path,
                 parsed=parsed,
                 session_id=session.id,
                 run_id=run_id,
                 step_index=tool_step_index,
                 log=log,
+                caption=caption,
             )
             steps = parsed["steps"]
-            if _sent:
-                _remember_shared_artifact_path(session, direct_wa_file_delivery_path, sent=True)
+            if _sent and remember_sent_artifact:
+                _remember_shared_artifact_path(session, path, sent=True)
             for _msg_record in parsed["db_messages"]:
                 db.add(_msg_record)
             agent_step_index = tool_step_index + len(parsed["db_messages"])
@@ -1519,22 +1631,64 @@ async def run_agent(
                     user_message=execution_user_message,
                     final_reply=final_reply,
                     current_attachment_name=current_attachment_name,
-                    generated_artifact_path=direct_wa_file_delivery_path if _sent else None,
+                    generated_artifact_path=path if (_sent and remember_sent_artifact) else None,
                     log=log,
                 )
             await db.flush()
             await _cleanup_sandboxes()
-            log.info(
-                "agent_run.whatsapp_file_direct_delivery_from_history",
-                sent=_sent,
-                path=direct_wa_file_delivery_path,
-            )
+            log.info(log_event, sent=_sent, path=path)
             return AgentRunResult(
                 reply=final_reply,
                 steps=steps,
                 run_id=run_id,
                 tokens_used=0,
                 usage=_usage_summary(),
+            )
+
+        direct_wa_confirmation_payload = (
+            _extract_direct_whatsapp_confirmation_payload(user_message, history_rows)
+            if direct_wa_text_send_context
+            else None
+        )
+        direct_current_image_delivery = (
+            _current_image_attachment_delivery_request(
+                session=session,
+                current_attachment_name=current_attachment_name,
+                user_message=execution_user_message,
+            )
+            if getattr(session, "channel_type", None) == "whatsapp"
+            and _is_enabled(tools_config, "whatsapp_media", default=True)
+            and not direct_wa_text_send_context
+            and not runtime_policy.is_builder
+            else None
+        )
+        direct_wa_file_delivery_path = (
+            _latest_shared_artifact_path_for_delivery(
+                session=session,
+                history_rows=history_rows,
+                user_message=execution_user_message,
+            )
+            if getattr(session, "channel_type", None) == "whatsapp"
+            and _is_enabled(tools_config, "whatsapp_media", default=True)
+            and not direct_wa_text_send_context
+            and not runtime_policy.is_builder
+            and not current_attachment_name
+            else None
+        )
+        if direct_current_image_delivery:
+            path, caption = direct_current_image_delivery
+            return await _complete_direct_whatsapp_file_delivery(
+                path=path,
+                caption=caption,
+                remember_sent_artifact=False,
+                log_event="agent_run.whatsapp_current_image_direct_delivery",
+            )
+        if direct_wa_file_delivery_path:
+            return await _complete_direct_whatsapp_file_delivery(
+                path=direct_wa_file_delivery_path,
+                caption=None,
+                remember_sent_artifact=True,
+                log_event="agent_run.whatsapp_file_direct_delivery_from_history",
             )
 
         if direct_wa_confirmation_payload:

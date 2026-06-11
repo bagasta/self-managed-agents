@@ -35,6 +35,12 @@ class _Log:
         self.events.append((event, kwargs))
 
 
+@pytest.fixture(autouse=True)
+def _enable_sandbox_subagents_for_routing_tests(monkeypatch):
+    # These tests cover the non-launch-safe routing semantics explicitly.
+    monkeypatch.setattr(agent_tool_setup.get_settings(), "sandbox_subagents_enabled", True)
+
+
 def _agent():
     return SimpleNamespace(id=uuid4(), capabilities=[])
 

@@ -7,6 +7,7 @@ from langchain_core.messages import ToolMessage
 
 from app.core.engine.agent_runner import (
     _build_human_content_for_model,
+    _current_image_attachment_delivery_request,
     _direct_whatsapp_send_guard_reply,
     _extract_direct_whatsapp_confirmation_payload,
     _filter_whatsapp_unsafe_mcp_tools,
@@ -834,6 +835,112 @@ async def test_process_wa_media_saves_document_to_shared_workspace(tmp_path, mon
     assert open(current_path, "rb").read() == raw
     assert open(shared_path, "rb").read() == raw
     assert open(current_shared_path, "rb").read() == raw
+
+
+@pytest.mark.asyncio
+async def test_send_whatsapp_image_uses_current_attachment_without_sandbox(tmp_path, monkeypatch):
+    from app.core.engine.tool_builder import build_whatsapp_media_tools
+
+    raw = b"\x89PNG\r\nfake-image"
+    host_path = tmp_path / "image.png"
+    host_path.write_bytes(raw)
+
+    session = SimpleNamespace(
+        channel_config={"device_id": "wa-dev-1", "user_phone": "628123@s.whatsapp.net"},
+        metadata_={
+            "last_incoming_media": {
+                "media_type": "image",
+                "filename": "image.png",
+                "current_shared_workspace_path": str(host_path),
+                "current_input_path": "/workspace/shared/current_input/image.png",
+                "shared_alias": "/workspace/shared/image.png",
+                "mimetype": "image/png",
+            },
+            "current_attachment": {
+                "media_type": "image",
+                "filename": "image.png",
+                "input_path": "/workspace/shared/current_input/image.png",
+                "shared_path": "/workspace/shared/current_input/image.png",
+                "legacy_shared_path": "/workspace/shared/image.png",
+            },
+        },
+    )
+    sent = {}
+
+    async def fake_send_wa_image(device_id, target, image_b64, caption, mimetype):
+        sent.update(
+            {
+                "device_id": device_id,
+                "target": target,
+                "image_b64": image_b64,
+                "caption": caption,
+                "mimetype": mimetype,
+            }
+        )
+        return {"status": "ok"}
+
+    monkeypatch.setattr("app.core.infra.wa_client.send_wa_image", fake_send_wa_image)
+
+    tools = build_whatsapp_media_tools(session, sandbox=None)
+    tool = next(item for item in tools if item.name == "send_whatsapp_image")
+    result = await tool.ainvoke(
+        {
+            "image_path_or_base64": "/workspace/shared/current_input/image.png",
+            "caption": "Promo hari ini",
+        }
+    )
+
+    assert "[IMAGE_SENT]" in result
+    assert sent["device_id"] == "wa-dev-1"
+    assert sent["target"] == "628123@s.whatsapp.net"
+    assert base64.b64decode(sent["image_b64"]) == raw
+    assert sent["caption"] == "Promo hari ini"
+    assert sent["mimetype"] == "image/png"
+
+
+def test_current_image_attachment_delivery_request_extracts_caption():
+    session = SimpleNamespace(
+        metadata_={
+            "last_incoming_media": {
+                "media_type": "image",
+                "filename": "image.jpg",
+                "current_input_path": "/workspace/shared/current_input/image.jpg",
+            },
+            "current_attachment": {
+                "media_type": "image",
+                "filename": "image.jpg",
+                "input_path": "/workspace/shared/current_input/image.jpg",
+            },
+        }
+    )
+
+    result = _current_image_attachment_delivery_request(
+        session=session,
+        current_attachment_name="image.jpg",
+        user_message="Kirim gambar ini dengan caption: Promo hari ini",
+    )
+
+    assert result == ("/workspace/shared/current_input/image.jpg", "Promo hari ini")
+
+
+def test_current_image_attachment_delivery_request_does_not_hijack_caption_writing():
+    session = SimpleNamespace(
+        metadata_={
+            "current_attachment": {
+                "media_type": "image",
+                "filename": "image.jpg",
+                "input_path": "/workspace/shared/current_input/image.jpg",
+            },
+        }
+    )
+
+    result = _current_image_attachment_delivery_request(
+        session=session,
+        current_attachment_name="image.jpg",
+        user_message="Buatkan caption untuk gambar ini",
+    )
+
+    assert result is None
 
 
 @pytest.mark.asyncio

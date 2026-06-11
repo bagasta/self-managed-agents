@@ -321,6 +321,7 @@ async def test_parent_deploy_tools_require_deploy_enabled(monkeypatch):
     monkeypatch.setattr(agent_tool_setup, "DockerSandbox", lambda sid: fake_sandbox)
     monkeypatch.setattr(agent_tool_setup, "build_sandbox_binary_tool", lambda sandbox: [SimpleNamespace(name="sandbox_write_binary_file")])
     monkeypatch.setattr(agent_tool_setup, "build_deployment_tools", fake_build_deployment_tools)
+    monkeypatch.setattr(agent_tool_setup.get_settings(), "sandbox_subagents_enabled", True)
 
     agent = SimpleNamespace(id=uuid.uuid4(), capabilities=[])
     session = SimpleNamespace(

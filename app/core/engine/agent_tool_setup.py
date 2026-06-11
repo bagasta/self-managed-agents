@@ -92,7 +92,7 @@ async def build_agent_tool_setup(
     operating_manual: dict[str, Any] | None = None,
 ) -> AgentToolSetup:
     settings = get_settings()
-    if not settings.sandbox_subagents_enabled:
+    if not getattr(settings, "sandbox_subagents_enabled", True):
         tools_config, _disabled_launch_features = disable_sandbox_subagent_tools_config(tools_config)
         if _disabled_launch_features:
             log.warning(
