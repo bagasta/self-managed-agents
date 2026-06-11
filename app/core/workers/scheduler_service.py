@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from typing import Any
 
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -24,6 +25,44 @@ _scheduler: AsyncIOScheduler | None = None
 # Concurrency limit: max parallel scheduler jobs to prevent resource exhaustion
 _MAX_CONCURRENT_JOBS = 5
 _job_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_JOBS)
+
+
+def _scheduled_channel_config(session: Any, agent_model: Any) -> dict[str, Any]:
+    """Return channel config with safe WhatsApp fallbacks for proactive sends."""
+    raw_cfg = getattr(session, "channel_config", None)
+    cfg: dict[str, Any] = dict(raw_cfg) if isinstance(raw_cfg, dict) else {}
+    if getattr(session, "channel_type", None) != "whatsapp":
+        return cfg
+
+    if not cfg.get("device_id"):
+        agent_device_id = str(getattr(agent_model, "wa_device_id", "") or "").strip()
+        cfg["device_id"] = agent_device_id or f"wadev_{getattr(agent_model, 'id', getattr(session, 'agent_id', ''))}"
+
+    if not cfg.get("user_phone"):
+        cfg["user_phone"] = str(getattr(session, "external_user_id", "") or "")
+
+    return cfg
+
+
+async def _send_scheduled_channel_message(session: Any, agent_model: Any, text: str, log: Any) -> None:
+    from app.core.infra.channel_service import send_message
+
+    cfg = _scheduled_channel_config(session, agent_model)
+    device_id = cfg.get("device_id", "")
+    log.info(
+        "scheduler_service.sending_reply",
+        channel=session.channel_type,
+        device_id=device_id,
+        is_wadev=str(device_id).startswith("wadev_"),
+    )
+    result = await send_message(
+        channel_type=session.channel_type,
+        channel_config=cfg,
+        text=text,
+    )
+    if session.channel_type == "whatsapp" and result is None:
+        raise RuntimeError("WhatsApp reminder send returned no result")
+    log.info("scheduler_service.reply_sent", channel=session.channel_type, device_id=device_id)
 
 
 async def _tick() -> None:
@@ -67,7 +106,6 @@ async def _run_job_guarded(job_id) -> None:
 async def _run_heartbeat_job(job, agent_model, db) -> None:
     """Jalankan heartbeat job: find last active session, run checklist, kirim jika perlu."""
     from app.core.engine.agent_runner import run_agent
-    from app.core.infra.channel_service import send_message
     from app.core.domain.memory_service import get_memory
     from app.models.session import Session
     import json as _json
@@ -143,9 +181,8 @@ async def _run_heartbeat_job(job, agent_model, db) -> None:
 
     # Kirim notifikasi via channel
     if session.channel_type:
-        cfg = session.channel_config if isinstance(session.channel_config, dict) else {}
         try:
-            await send_message(channel_type=session.channel_type, channel_config=cfg, text=reply)
+            await _send_scheduled_channel_message(session, agent_model, reply, log)
             log.info("heartbeat.sent", channel=session.channel_type)
         except Exception as send_exc:
             log.error("heartbeat.send_failed", error=str(send_exc))
@@ -221,6 +258,7 @@ async def _run_job(job_id) -> None:
 
         log = logger.bind(job_id=str(job_id), label=job.label, session_id=str(job.session_id))
         log.info("scheduler_service.running_job")
+        delivery_failed = False
 
         try:
             result = await run_agent(
@@ -256,29 +294,15 @@ async def _run_job(job_id) -> None:
             except Exception as bus_exc:
                 log.warning("scheduler_service.event_bus_failed", error=str(bus_exc))
 
-            # Kirim reply ke channel eksternal (WhatsApp / wa-dev / dll)
-            # channel_config harus punya device_id agar wa_client bisa routing yang benar
+            # Kirim reply ke channel eksternal (WhatsApp / wa-dev / dll).
             if session.channel_type:
-                cfg = session.channel_config if isinstance(session.channel_config, dict) else {}
-                device_id = cfg.get("device_id", "")
-                log.info(
-                    "scheduler_service.sending_reply",
-                    channel=session.channel_type,
-                    device_id=device_id,
-                    is_wadev=device_id.startswith("wadev_"),
-                )
                 try:
-                    await send_message(
-                        channel_type=session.channel_type,
-                        channel_config=cfg,
-                        text=reply,
-                    )
-                    log.info("scheduler_service.reply_sent", channel=session.channel_type, device_id=device_id)
+                    await _send_scheduled_channel_message(session, agent_model, reply, log)
                 except Exception as send_exc:
+                    delivery_failed = True
                     log.error(
                         "scheduler_service.reply_send_failed",
                         channel=session.channel_type,
-                        device_id=device_id,
                         error=str(send_exc),
                     )
 
@@ -290,7 +314,11 @@ async def _run_job(job_id) -> None:
             now = datetime.now(timezone.utc)
             job.last_run_at = now
 
-            if job.cron_expr:
+            if delivery_failed:
+                from datetime import timedelta
+                job.next_run_at = now + timedelta(minutes=1)
+                log.warning("scheduler_service.job_retry_scheduled", next_run=str(job.next_run_at))
+            elif job.cron_expr:
                 try:
                     from datetime import timedelta
                     from croniter import croniter

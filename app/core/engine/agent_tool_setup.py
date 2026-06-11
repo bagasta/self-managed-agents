@@ -1,6 +1,7 @@
 """Tool and sub-agent setup for agent runs."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -54,6 +55,20 @@ class AgentToolSetup:
 
 def is_operator_turn(user_message: str) -> bool:
     return user_message.startswith("[OPERATOR] ") or user_message.startswith("<OPERATOR>")
+
+
+_WHATSAPP_REMINDER_INTENT_RE = re.compile(
+    r"\b(reminder|remind|pengingat|ingatkan|ingetin|alarm|follow[-\s]?up|jadwalkan|jadwalin)\b",
+    re.IGNORECASE,
+)
+
+
+def _should_self_heal_whatsapp_scheduler(session: Session, user_message: str, tools_config: dict[str, Any]) -> bool:
+    if getattr(session, "channel_type", None) != "whatsapp":
+        return False
+    if _is_enabled(tools_config, "scheduler", default=False):
+        return False
+    return bool(_WHATSAPP_REMINDER_INTENT_RE.search(user_message or ""))
 
 
 def _is_probable_lid(value: str | None) -> bool:
@@ -168,7 +183,16 @@ async def build_agent_tool_setup(
             tools.extend(build_loaded_custom_tools(saved_custom_tools, sandbox))
             active_groups.append("tool_creator")
 
-    if (not operator_turn) and _is_enabled(tools_config, "scheduler", default=False):
+    scheduler_enabled = _is_enabled(tools_config, "scheduler", default=False)
+    if (not operator_turn) and (not builder_agent) and _should_self_heal_whatsapp_scheduler(session, user_message, tools_config):
+        scheduler_enabled = True
+        log.warning(
+            "agent_run.whatsapp_scheduler_self_heal",
+            reason="scheduler_disabled_but_whatsapp_user_requested_reminder",
+            agent_id=str(agent_id),
+        )
+
+    if (not operator_turn) and scheduler_enabled:
         from app.core.tools.scheduler_tool import build_scheduler_tools
 
         tools.extend(build_scheduler_tools(session.id, agent_id, AsyncSessionLocal))
