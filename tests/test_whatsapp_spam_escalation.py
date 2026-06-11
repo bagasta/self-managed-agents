@@ -294,6 +294,20 @@ def test_operator_pending_text_revision_context_targets_current_draft():
     assert _operator_pending_text_revision_context(operator_session, "kirim") == ""
 
 
+def test_escalation_media_forward_requires_current_turn_marker():
+    from app.core.tools.escalation_tool import _is_current_turn_media
+
+    media_meta = {
+        "workspace_path": "/tmp/bukti-transfer.png",
+        "source_message_id": "OLD-MSG",
+    }
+
+    assert _is_current_turn_media(media_meta, None) is False
+    assert _is_current_turn_media(media_meta, {"workspace_path": "/tmp/other.png", "source_message_id": "OLD-MSG"}) is False
+    assert _is_current_turn_media(media_meta, {"workspace_path": "/tmp/bukti-transfer.png", "source_message_id": "NEW-MSG"}) is False
+    assert _is_current_turn_media(media_meta, {"workspace_path": "/tmp/bukti-transfer.png", "source_message_id": "OLD-MSG"}) is True
+
+
 @pytest.mark.asyncio
 async def test_operator_escalation_recap_request_is_operator_turn_without_quote():
     from app.api.channels import _should_treat_as_operator_turn

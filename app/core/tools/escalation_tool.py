@@ -82,6 +82,20 @@ def _looks_like_media_delivery_text(message: str) -> bool:
     )
 
 
+def _is_current_turn_media(media_meta: dict, current_turn_media: object) -> bool:
+    if not isinstance(current_turn_media, dict):
+        return False
+    media_path = str(media_meta.get("workspace_path") or "")
+    current_path = str(current_turn_media.get("workspace_path") or "")
+    if media_path and current_path and media_path != current_path:
+        return False
+    media_message_id = str(media_meta.get("source_message_id") or "")
+    current_message_id = str(current_turn_media.get("source_message_id") or "")
+    if media_message_id and current_message_id and media_message_id != current_message_id:
+        return False
+    return bool(media_path or media_message_id)
+
+
 def build_escalation_tools(
     session_id: uuid.UUID,
     agent_id: uuid.UUID,
@@ -202,11 +216,13 @@ def build_escalation_tools(
 
             sess_meta = dict(session.metadata_ or {})
             media_meta = sess_meta.get("last_incoming_media") if isinstance(sess_meta, dict) else None
+            current_turn_media = sess_meta.get("current_turn_media") if isinstance(sess_meta, dict) else None
             if (
                 operator_channel == "whatsapp"
                 and operator_phone
                 and isinstance(media_meta, dict)
                 and not media_meta.get("from_operator")
+                and _is_current_turn_media(media_meta, current_turn_media)
             ):
                 media_type = media_meta.get("media_type")
                 workspace_path = media_meta.get("workspace_path")

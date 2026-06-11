@@ -1941,11 +1941,19 @@ async def wa_incoming(
         )
         if media_meta:
             import time as _time
+            _saved_at = int(_time.time())
+            _source_message_id = str(body.message_id or "").strip()
             sess_meta = dict(session.metadata_ or {})
             sess_meta["last_incoming_media"] = {
                 **media_meta,
-                "saved_at": int(_time.time()),
+                "saved_at": _saved_at,
                 "from_operator": _is_operator,
+                "source_message_id": _source_message_id,
+            }
+            sess_meta["current_turn_media"] = {
+                "workspace_path": media_meta.get("workspace_path"),
+                "source_message_id": _source_message_id,
+                "saved_at": _saved_at,
             }
             sess_meta["current_attachment"] = {
                 "media_type": media_meta.get("media_type"),
@@ -1959,9 +1967,15 @@ async def wa_incoming(
                 "legacy_shared_path": media_meta.get("shared_alias"),
                 "extracted_text_path": media_meta.get("extracted_text_path"),
                 "extracted_text_subagent_path": media_meta.get("extracted_text_subagent_path"),
-                "saved_at": int(_time.time()),
+                "saved_at": _saved_at,
                 "from_operator": _is_operator,
             }
+            session.metadata_ = sess_meta
+            db.add(session)
+            await db.commit()
+    elif not body.media_type:
+        sess_meta = dict(session.metadata_ or {})
+        if sess_meta.pop("current_turn_media", None) is not None:
             session.metadata_ = sess_meta
             db.add(session)
             await db.commit()

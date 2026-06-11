@@ -1,5 +1,23 @@
 # Recap: Deep Agent SaaS Hardening — MCP, Subagent, Sandbox, Builder Entitlements
 
+## 2026-06-11 — Lampiran Eskalasi Tidak Lagi Membawa Bukti Lama
+
+Admin testing menemukan bug: setelah kasus bukti pembayaran sudah ditangani, eskalasi baru soal ongkir tetap mengirim ulang gambar bukti pembayaran lama ke operator.
+
+### Root Cause
+- `escalate_to_human()` membaca `session.metadata_["last_incoming_media"]` setiap kali eskalasi.
+- Metadata itu memang sengaja bertahan sebagai attachment terakhir untuk fitur lain, tetapi tidak berarti lampiran tersebut berasal dari pesan customer yang sedang dieskalasikan.
+- Saat eskalasi baru berupa teks biasa, media lama masih ada di metadata dan ikut diforward.
+
+### Fix
+- `channels.py`: saat pesan masuk membawa media, runtime menyimpan marker `current_turn_media` berisi path/message_id media pada turn itu.
+- `channels.py`: saat pesan masuk tanpa media, marker `current_turn_media` dibersihkan, sementara `last_incoming_media/current_attachment` tetap dibiarkan untuk fitur attachment lain.
+- `escalation_tool.py`: forward lampiran ke operator hanya jika `last_incoming_media` cocok dengan marker `current_turn_media`; media lama tanpa marker tidak ikut dikirim.
+
+### Validasi
+- `PYTHONPATH=. .venv/bin/python -m pytest tests/test_whatsapp_spam_escalation.py::test_escalation_media_forward_requires_current_turn_marker tests/test_operator_reply_draft.py -q` -> 5 passed.
+- `PYTHONPATH=. .venv/bin/python -m pytest tests/test_whatsapp_direct_send.py::test_send_whatsapp_image_uses_current_attachment_without_sandbox tests/test_whatsapp_direct_send.py::test_current_image_attachment_delivery_request_extracts_caption tests/test_whatsapp_direct_send.py::test_process_wa_media_saves_document_to_shared_workspace -q` -> 3 passed.
+
 ## 2026-06-11 — Revisi Pending Draft Eskalasi Dikunci ke Draft Saat Ini
 
 Admin testing menemukan bug lanjutan pada flow eskalasi: setelah operator membuat draft ongkir untuk customer, lalu membalas draft itu dengan "dibuat lebih sopan", agent malah merevisi topik lama "rekap eskalasi hari ini" dari history.
