@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 import uuid
 import time
 from types import SimpleNamespace
@@ -266,6 +267,94 @@ async def test_operator_revision_uses_pending_draft_without_escalation_quote():
 
     assert is_operator_turn is True
     assert db.executed == 1
+
+
+@pytest.mark.asyncio
+async def test_operator_escalation_recap_request_is_operator_turn_without_quote():
+    from app.api.channels import _should_treat_as_operator_turn
+
+    agent = _agent()
+    operator_session = _session(external_user_id="628operator", metadata_={})
+    db = _FakeDB(result=operator_session)
+
+    is_operator_turn = await _should_treat_as_operator_turn(
+        agent=agent,
+        db=db,
+        from_phone="628operator",
+        reply_target="628operator@s.whatsapp.net",
+        message="ada berapa pesan eskalasi hari ini?",
+        media_type=None,
+        quoted_text=None,
+        quoted_stanza_id=None,
+    )
+
+    assert is_operator_turn is True
+    assert db.executed == 1
+
+
+def test_format_operator_escalation_recap_counts_today_rows():
+    from app.api.channels import _format_operator_escalation_recap
+
+    row = (
+        SimpleNamespace(
+            content=(
+                "ESKALASI PESAN DARI CUSTOMER\n"
+                "ID Kasus: esc_123456_ab12cd\n"
+                "Nomor customer/user: 628customer\n"
+                "Nama customer: Wira\n"
+                "Alasan eskalasi: tanya ongkir\n"
+                "Pesan: Ongkir JNT ke Jogja berapa?"
+            ),
+            timestamp=datetime.fromisoformat("2026-06-11T04:19:00+00:00"),
+        ),
+        SimpleNamespace(external_user_id="628customer"),
+    )
+
+    recap = _format_operator_escalation_recap([row])
+
+    assert "Total eskalasi tercatat hari ini: 1." in recap
+    assert "esc_123456_ab12cd" in recap
+    assert "Wira (628customer)" in recap
+    assert "tanya ongkir" in recap
+
+
+def test_operator_prompt_includes_escalation_recap_context():
+    from app.core.engine.prompt_builder import build_system_prompt
+
+    prompt = build_system_prompt(
+        agent_model=SimpleNamespace(
+            name="Yo Besty",
+            model="gpt-4.1-mini",
+            instructions="Bantu admin menjawab customer.",
+            safety_policy=None,
+            tools_config={"memory": True, "escalation": True},
+            escalation_config={},
+            capabilities=[],
+        ),
+        session=SimpleNamespace(
+            id=uuid.uuid4(),
+            agent_id=uuid.uuid4(),
+            channel_type="whatsapp",
+            channel_config={},
+            external_user_id="628operator",
+        ),
+        active_groups=["memory", "escalation"],
+        saved_custom_tools=[],
+        subagent_list=[],
+        sender_name="Bagas",
+        context_summary="",
+        memory_block="",
+        layered_memory={},
+        rag_context="",
+        escalation_user_jid=None,
+        escalation_context="### Rekap eskalasi hari ini\nTotal eskalasi tercatat hari ini: 1.",
+        is_operator_message=True,
+        user_message="<OPERATOR>\nPesan: ada berapa pesan eskalasi hari ini?",
+    )
+
+    assert "### Konteks admin/operator yang tersedia" in prompt
+    assert "Total eskalasi tercatat hari ini: 1." in prompt
+    assert "jawab langsung berdasarkan blok konteks admin/operator" in prompt
 
 
 @pytest.mark.asyncio

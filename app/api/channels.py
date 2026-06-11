@@ -28,10 +28,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from datetime import datetime
 import re
 import time
 import uuid
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
@@ -76,6 +78,7 @@ _settings = get_settings()
 _DEVELOPER_PHONE: str = _settings.developer_phone
 _GENERIC_ERROR_MSG = "Maaf, terjadi gangguan sementara. Silakan coba lagi dalam beberapa saat."
 _WA_DEV_DISCONNECT_COMMANDS = {"/stop", "berhenti", "/disconnect", "stop"}
+_LOCAL_TZ = ZoneInfo("Asia/Jakarta")
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/v1/channels", tags=["channels"])
@@ -368,6 +371,84 @@ def _operator_session_has_pending_confirmation(operator_session: Session | None)
     return False
 
 
+def _is_operator_escalation_recap_request(message: str | None) -> bool:
+    text = sanitize_user_input(message or "").lower()
+    if "eskalasi" not in text:
+        return False
+    markers = (
+        "berapa",
+        "rekap",
+        "rangkuman",
+        "ringkasan",
+        "daftar",
+        "list",
+        "laporan",
+        "hari ini",
+        "masuk",
+        "tercatat",
+        "kasus",
+        "pesan",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _extract_escalation_field(content: str, label: str) -> str:
+    match = re.search(rf"^{re.escape(label)}\s*:\s*(.+)$", content, flags=re.IGNORECASE | re.MULTILINE)
+    return match.group(1).strip() if match else ""
+
+
+def _format_operator_escalation_recap(rows: list[tuple[Message, Session]]) -> str:
+    lines = [
+        "### Rekap eskalasi hari ini",
+        f"Total eskalasi tercatat hari ini: {len(rows)}.",
+    ]
+    if not rows:
+        lines.append("Tidak ada pesan eskalasi yang tercatat hari ini.")
+        return "\n".join(lines)
+
+    lines.append("Eskalasi terbaru:")
+    for message, session in rows[:10]:
+        content = str(message.content or "")
+        case_id = _extract_escalation_field(content, "ID Kasus") or "-"
+        customer = (
+            _extract_escalation_field(content, "Nomor customer/user")
+            or _extract_escalation_field(content, "Nomor customer")
+            or (session.external_user_id or "-")
+        )
+        name = _extract_escalation_field(content, "Nama customer")
+        reason = _extract_escalation_field(content, "Alasan eskalasi")
+        payload = _extract_escalation_field(content, "Pesan") or _extract_escalation_field(content, "Pesan terakhir")
+        summary_parts = [part for part in (reason, payload) if part]
+        summary = " | ".join(summary_parts) or content.replace("\n", " ")[:220]
+        local_time = message.timestamp.astimezone(_LOCAL_TZ) if getattr(message, "timestamp", None) else None
+        time_label = local_time.strftime("%H:%M") if local_time else "-"
+        customer_label = f"{name} ({customer})" if name else customer
+        lines.append(f"- {time_label} WIB | {case_id} | {customer_label} | {summary[:300]}")
+    return "\n".join(lines)
+
+
+async def _build_operator_escalation_recap_context(
+    *,
+    agent: Agent,
+    db: AsyncSession,
+    now: datetime | None = None,
+) -> str:
+    current = now or datetime.now(_LOCAL_TZ)
+    local_start = current.astimezone(_LOCAL_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+    result = await db.execute(
+        select(Message, Session)
+        .join(Session, Message.session_id == Session.id)
+        .where(
+            Session.agent_id == agent.id,
+            Message.role == "escalation",
+            Message.timestamp >= local_start,
+        )
+        .order_by(Message.timestamp.desc())
+    )
+    rows = list(result.all())
+    return _format_operator_escalation_recap(rows)
+
+
 async def _find_existing_operator_session(
     *,
     agent: Agent,
@@ -435,7 +516,11 @@ async def _should_treat_as_operator_turn(
             from_phone=from_phone,
             db=db,
         )
-        return _operator_session_has_pending_confirmation(operator_session)
+        if _operator_session_has_pending_confirmation(operator_session):
+            return True
+
+    if not media_type and _is_operator_escalation_recap_request(message):
+        return True
 
     return False
 
@@ -1647,7 +1732,11 @@ async def wa_incoming(
         except Exception:
             pass
 
-    if _is_operator:
+    _operator_recap_request = _is_operator and _is_operator_escalation_recap_request(body.message)
+    if _is_operator and _operator_recap_request:
+        escalation_context = await _build_operator_escalation_recap_context(agent=agent, db=db)
+        log.info("wa_incoming.operator_escalation_recap_context")
+    elif _is_operator:
         escalation_user_jid, escalation_context = await find_escalation_context(
             agent,
             db,

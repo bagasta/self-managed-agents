@@ -1027,10 +1027,15 @@ def build_system_prompt(
         _ch_cfg = _raw_cfg if isinstance(_raw_cfg, dict) else {}
         _raw_user_jid = _ch_cfg.get("user_phone") or getattr(session, "external_user_id", None) or "unknown"
         user_wa_phone = normalize_phone(_raw_user_jid) if _raw_user_jid != "unknown" else "unknown"
+        _operator_context = (
+            f"\n\n### Konteks admin/operator yang tersedia\n{escalation_context}\n"
+            if escalation_context else ""
+        )
         system_prompt += (
             f"\n\n## MODE: OPERATOR COMMAND — ALUR KONFIRMASI\n"
             f"Nomor WhatsApp user: `{user_wa_phone}`\n"
             "Pesan berikut adalah PERINTAH dari human operator.\n\n"
+            f"{_operator_context}"
             "### INSTRUKSI WAJIB\n"
             "- Alur DRAFT -> KONFIRMASI -> KIRIM:\n"
             "  1. Agent menyusun draft rapi dari pesanan operator.\n"
@@ -1048,6 +1053,7 @@ def build_system_prompt(
             "- Jika operator membalas `ya`, `ok`, `kirim`, atau `yes kirim`, langsung panggil `send_to_number` memakai nomor dan draft terakhir dari history.\n"
             "- Jika operator sejak awal bilang `langsung kirim` atau `rapihin terus kirim`, susun pesan final dan langsung panggil `send_to_number`.\n"
             "- Jangan klaim pesan sudah terkirim sebelum `send_to_number` sukses.\n"
+            "- Jika operator bertanya jumlah/daftar/rekap eskalasi, jawab langsung berdasarkan blok konteks admin/operator yang tersedia. Jangan bilang tidak ada data jika blok itu berisi total atau daftar eskalasi.\n"
         )
 
     # 6. Available capabilities

@@ -1,5 +1,22 @@
 # Recap: Deep Agent SaaS Hardening — MCP, Subagent, Sandbox, Builder Entitlements
 
+## 2026-06-11 — Rekap Eskalasi Tersedia untuk Admin/Operator
+
+Admin testing menemukan bahwa setelah beberapa eskalasi masuk, operator bertanya "ada berapa pesan eskalasi hari ini?" tetapi agent menjawab belum ada data. Ini terjadi karena eskalasi disimpan sebagai `Message(role="escalation")` di session customer, bukan sebagai memory/riwayat chat di session operator.
+
+### Root Cause
+- Operator mode hanya aktif saat operator reply notifikasi eskalasi atau mengonfirmasi pending draft.
+- Pertanyaan admin bebas seperti "ada berapa pesan eskalasi hari ini?" tidak masuk operator mode, sehingga diproses sebagai chat customer biasa.
+- Prompt operator juga belum menerima ringkasan escalation messages lintas session customer.
+
+### Fix
+- `channels.py`: mendeteksi intent rekap eskalasi dari operator (`berapa/rekap/daftar/laporan ... eskalasi`) meskipun tidak reply pesan eskalasi.
+- `channels.py`: saat intent rekap terdeteksi, query `messages.role='escalation'` untuk agent yang sama sejak awal hari Asia/Jakarta, lalu format total dan daftar eskalasi terbaru.
+- `prompt_builder.py`: operator prompt sekarang memuat "Konteks admin/operator yang tersedia" dan instruksi eksplisit untuk menjawab rekap eskalasi dari blok tersebut.
+
+### Validasi
+- `PYTHONPATH=. .venv/bin/python -m pytest tests/test_whatsapp_spam_escalation.py::test_operator_phone_without_escalation_reply_is_customer_turn tests/test_whatsapp_spam_escalation.py::test_operator_phone_with_quoted_escalation_is_operator_turn tests/test_whatsapp_spam_escalation.py::test_operator_send_confirmation_uses_pending_draft_without_quote tests/test_whatsapp_spam_escalation.py::test_operator_revision_uses_pending_draft_without_escalation_quote tests/test_whatsapp_spam_escalation.py::test_operator_escalation_recap_request_is_operator_turn_without_quote tests/test_whatsapp_spam_escalation.py::test_format_operator_escalation_recap_counts_today_rows tests/test_whatsapp_spam_escalation.py::test_operator_prompt_includes_escalation_recap_context tests/test_operator_reply_draft.py -q` -> 11 passed.
+
 ## 2026-06-11 — Revisi Draft Eskalasi Operator Menimpa Draft Lama
 
 Admin testing menemukan bug di flow eskalasi WhatsApp: operator reply notifikasi eskalasi, agent membuat draft untuk customer, operator minta "buat lebih sopan", tetapi saat operator mengetik `kirim` pesan yang terkirim masih draft pertama.
