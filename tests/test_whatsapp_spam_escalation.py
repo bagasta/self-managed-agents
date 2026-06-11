@@ -237,6 +237,38 @@ async def test_operator_send_confirmation_uses_pending_draft_without_quote():
 
 
 @pytest.mark.asyncio
+async def test_operator_revision_uses_pending_draft_without_escalation_quote():
+    from app.api.channels import _should_treat_as_operator_turn
+
+    agent = _agent()
+    operator_session = _session(
+        external_user_id="628operator",
+        metadata_={
+            "pending_operator_text_reply": {
+                "target_session_id": str(uuid.uuid4()),
+                "message": "mintain alamat lengkap pengiriman",
+                "expires_at": int(time.time()) + 60,
+            }
+        },
+    )
+    db = _FakeDB(result=operator_session)
+
+    is_operator_turn = await _should_treat_as_operator_turn(
+        agent=agent,
+        db=db,
+        from_phone="628operator",
+        reply_target="628operator@s.whatsapp.net",
+        message="buat lebih sopan",
+        media_type=None,
+        quoted_text="Draft balasan untuk customer: mintain alamat lengkap pengiriman",
+        quoted_stanza_id=None,
+    )
+
+    assert is_operator_turn is True
+    assert db.executed == 1
+
+
+@pytest.mark.asyncio
 async def test_find_or_create_wa_session_takes_advisory_lock_before_insert():
     from app.api.wa_helpers import find_or_create_wa_session
 
@@ -704,6 +736,23 @@ def test_extract_operator_text_draft_uses_corrected_separator_block():
 
     assert _extract_operator_text_draft(reply).startswith("Halo Ka Wira")
     assert "Julia" not in _extract_operator_text_draft(reply)
+
+
+def test_extract_operator_text_draft_uses_polite_revision_quote():
+    from app.api.channels import _extract_operator_text_draft
+
+    reply = (
+        "Berikut draft balasan yang lebih sopan untuk customer Wira - Pendamping Bisnis Sosial Desa:\n\n"
+        "\"Terima kasih Bapak/Ibu atas pesan dan pesanan yang telah disampaikan. "
+        "Agar kami dapat memproses pengiriman dengan lancar, mohon kesediaannya untuk "
+        "menginformasikan alamat lengkap pengiriman. Terima kasih atas kerjasamanya.\"\n\n"
+        "Ketik kirim jika sudah sesuai dan ingin saya teruskan ke customer."
+    )
+
+    draft = _extract_operator_text_draft(reply)
+
+    assert draft.startswith("Terima kasih Bapak/Ibu")
+    assert "Ketik kirim" not in draft
 
 
 @pytest.mark.asyncio

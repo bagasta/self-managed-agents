@@ -425,9 +425,11 @@ async def _should_treat_as_operator_turn(
     ):
         return True
 
-    # A bare "kirim/ok/ya" belongs to operator mode only when it confirms a
-    # pending draft created from a previous explicit escalation reply.
-    if not media_type and _is_operator_send_confirmation(message):
+    # Once a quoted escalation reply has created a pending draft, the operator's
+    # next text can be either a send confirmation ("kirim") or a revision request
+    # ("buat lebih sopan", "ganti jadi ..."). Keep that conversation in operator
+    # mode so the revised draft can overwrite the previous pending message.
+    if not media_type:
         operator_session = await _find_existing_operator_session(
             agent=agent,
             from_phone=from_phone,

@@ -1,5 +1,22 @@
 # Recap: Deep Agent SaaS Hardening — MCP, Subagent, Sandbox, Builder Entitlements
 
+## 2026-06-11 — Revisi Draft Eskalasi Operator Menimpa Draft Lama
+
+Admin testing menemukan bug di flow eskalasi WhatsApp: operator reply notifikasi eskalasi, agent membuat draft untuk customer, operator minta "buat lebih sopan", tetapi saat operator mengetik `kirim` pesan yang terkirim masih draft pertama.
+
+### Root Cause
+- Operator mode hanya aktif untuk reply langsung ke pesan eskalasi atau konfirmasi `kirim` saat ada pending draft.
+- Pesan revisi seperti "buat lebih sopan" biasanya membalas draft agent, bukan notifikasi eskalasi, sehingga sempat diperlakukan sebagai customer turn biasa.
+- Akibatnya hasil draft revisi tidak selalu tersimpan ulang ke `pending_operator_text_reply`; konfirmasi `kirim` masih mengambil pending lama.
+
+### Fix
+- `_should_treat_as_operator_turn()` sekarang menjaga percakapan tetap di operator mode selama ada pending operator draft aktif dan pesan berikutnya adalah teks biasa.
+- Draft revisi yang dihasilkan agent bisa memakai active escalation route, lalu menimpa `pending_operator_text_reply` sebelum operator mengetik `kirim`.
+- Regression test ditambahkan untuk revisi draft tanpa quote eskalasi dan format draft sopan seperti screenshot.
+
+### Validasi
+- `PYTHONPATH=. .venv/bin/python -m pytest tests/test_whatsapp_spam_escalation.py::test_operator_phone_without_escalation_reply_is_customer_turn tests/test_whatsapp_spam_escalation.py::test_operator_phone_with_quoted_escalation_is_operator_turn tests/test_whatsapp_spam_escalation.py::test_operator_send_confirmation_uses_pending_draft_without_quote tests/test_whatsapp_spam_escalation.py::test_operator_revision_uses_pending_draft_without_escalation_quote tests/test_whatsapp_spam_escalation.py::test_extract_operator_text_draft_uses_corrected_separator_block tests/test_whatsapp_spam_escalation.py::test_extract_operator_text_draft_uses_polite_revision_quote tests/test_whatsapp_spam_escalation.py::test_pending_operator_text_confirmation_sends_saved_corrected_draft tests/test_operator_reply_draft.py -q` -> 11 passed.
+
 ## 2026-06-11 — Outbound WhatsApp Anti-Spam Limit Disesuaikan ke 3 Pesan
 
 Admin testing menemukan request normal seperti "kirim pesan promo ini dengan gambar ke +62..." bisa dibalas "dibatasi sementara untuk mencegah spam" pada percobaan kedua. Ini bukan guard inbound spam customer, melainkan guard outbound saat agent diminta mengirim ke nomor lain.
