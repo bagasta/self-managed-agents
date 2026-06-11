@@ -1,5 +1,21 @@
 # Recap: Deep Agent SaaS Hardening — MCP, Subagent, Sandbox, Builder Entitlements
 
+## 2026-06-11 — Revisi Pending Draft Eskalasi Dikunci ke Draft Saat Ini
+
+Admin testing menemukan bug lanjutan pada flow eskalasi: setelah operator membuat draft ongkir untuk customer, lalu membalas draft itu dengan "dibuat lebih sopan", agent malah merevisi topik lama "rekap eskalasi hari ini" dari history.
+
+### Root Cause
+- Pending draft sudah membuat pesan revisi tetap masuk operator mode, tetapi payload yang dikirim ke LLM hanya berisi instruksi pendek seperti "dibuat lebih sopan".
+- History operator masih memuat topik admin sebelumnya, sehingga model bisa salah memilih topik lama, bukan draft pending yang sedang direvisi.
+
+### Fix
+- `channels.py`: saat operator punya `pending_operator_text_reply` aktif dan mengirim teks revisi, runtime menyisipkan blok `[OPERATOR_DRAFT_REVISION]` berisi case ID, target customer, draft pending saat ini, dan instruksi revisi operator.
+- `prompt_builder.py`: mode operator dan sesi operator kini mengutamakan blok `[OPERATOR_DRAFT_REVISION]`; model wajib merevisi hanya draft di blok itu dan mengabaikan topik/history lama.
+- Regression test memastikan draft ongkir pending menjadi sumber revisi dan prompt memprioritaskan blok revisi.
+
+### Validasi
+- `PYTHONPATH=. .venv/bin/python -m pytest tests/test_whatsapp_spam_escalation.py::test_operator_revision_uses_pending_draft_without_escalation_quote tests/test_whatsapp_spam_escalation.py::test_operator_pending_text_revision_context_targets_current_draft tests/test_whatsapp_spam_escalation.py::test_operator_prompt_prioritizes_pending_draft_revision_block tests/test_whatsapp_spam_escalation.py::test_operator_escalation_recap_request_is_operator_turn_without_quote tests/test_whatsapp_spam_escalation.py::test_operator_prompt_includes_escalation_recap_context tests/test_operator_reply_draft.py -q` -> 9 passed.
+
 ## 2026-06-11 — Rekap Eskalasi Tersedia untuk Admin/Operator
 
 Admin testing menemukan bahwa setelah beberapa eskalasi masuk, operator bertanya "ada berapa pesan eskalasi hari ini?" tetapi agent menjawab belum ada data. Ini terjadi karena eskalasi disimpan sebagai `Message(role="escalation")` di session customer, bukan sebagai memory/riwayat chat di session operator.

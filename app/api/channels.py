@@ -371,6 +371,37 @@ def _operator_session_has_pending_confirmation(operator_session: Session | None)
     return False
 
 
+def _operator_pending_text_revision_context(operator_session: Session | None, operator_message: str | None) -> str:
+    if not operator_session:
+        return ""
+    text = sanitize_user_input(operator_message or "").strip()
+    if not text or _is_operator_send_confirmation(text) or _is_operator_escalation_recap_request(text):
+        return ""
+    pending = dict(operator_session.metadata_ or {}).get("pending_operator_text_reply")
+    if not isinstance(pending, dict) or _operator_pending_is_expired(pending):
+        return ""
+    draft = sanitize_user_input(str(pending.get("message") or "")).strip()
+    if not draft:
+        return ""
+    case_id = str(pending.get("case_id") or "-")
+    target = str(pending.get("target") or "")
+    return (
+        "[OPERATOR_DRAFT_REVISION]\n"
+        "Operator sedang merevisi draft balasan customer yang MASIH pending, bukan bertanya topik lain.\n"
+        f"Case ID: {case_id}\n"
+        f"Target customer: {target or '-'}\n"
+        "Draft pending saat ini:\n"
+        "----\n"
+        f"{draft}\n"
+        "----\n"
+        f"Instruksi revisi operator: {text}\n"
+        "Tugas wajib: revisi HANYA draft pending di atas sesuai instruksi operator. "
+        "Jangan menjawab rekap eskalasi, jangan memakai topik/history lama, dan jangan kirim ke customer dulu. "
+        "Tampilkan draft revisi baru lalu minta operator ketik 'kirim' jika sudah sesuai.\n"
+        "[/OPERATOR_DRAFT_REVISION]"
+    )
+
+
 def _is_operator_escalation_recap_request(message: str | None) -> bool:
     text = sanitize_user_input(message or "").lower()
     if "eskalasi" not in text:
@@ -1944,6 +1975,9 @@ async def wa_incoming(
     if not _is_operator:
         user_message = _append_quoted_reply_context(user_message, body.quoted_text)
     if _is_operator:
+        _pending_revision_context = _operator_pending_text_revision_context(session, body.message)
+        if _pending_revision_context:
+            user_message = f"{_pending_revision_context}\n\n{user_message}".strip()
         user_message = _label_owner_wa_message(
             message=user_message,
             from_phone=from_phone,

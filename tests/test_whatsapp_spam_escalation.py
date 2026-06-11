@@ -269,6 +269,31 @@ async def test_operator_revision_uses_pending_draft_without_escalation_quote():
     assert db.executed == 1
 
 
+def test_operator_pending_text_revision_context_targets_current_draft():
+    from app.api.channels import _operator_pending_text_revision_context
+
+    operator_session = _session(
+        external_user_id="628operator",
+        metadata_={
+            "pending_operator_text_reply": {
+                "target_session_id": str(uuid.uuid4()),
+                "target": "628customer@s.whatsapp.net",
+                "case_id": "esc_123456_ab12cd",
+                "message": "Ongkirnya jadi 120 ribu ya utk 1 kardus",
+                "expires_at": int(time.time()) + 60,
+            }
+        },
+    )
+
+    context = _operator_pending_text_revision_context(operator_session, "dibuat lebih sopan")
+
+    assert "[OPERATOR_DRAFT_REVISION]" in context
+    assert "Ongkirnya jadi 120 ribu ya utk 1 kardus" in context
+    assert "Instruksi revisi operator: dibuat lebih sopan" in context
+    assert "Jangan menjawab rekap eskalasi" in context
+    assert _operator_pending_text_revision_context(operator_session, "kirim") == ""
+
+
 @pytest.mark.asyncio
 async def test_operator_escalation_recap_request_is_operator_turn_without_quote():
     from app.api.channels import _should_treat_as_operator_turn
@@ -355,6 +380,44 @@ def test_operator_prompt_includes_escalation_recap_context():
     assert "### Konteks admin/operator yang tersedia" in prompt
     assert "Total eskalasi tercatat hari ini: 1." in prompt
     assert "jawab langsung berdasarkan blok konteks admin/operator" in prompt
+
+
+def test_operator_prompt_prioritizes_pending_draft_revision_block():
+    from app.core.engine.prompt_builder import build_system_prompt
+
+    prompt = build_system_prompt(
+        agent_model=SimpleNamespace(
+            name="Yo Besty",
+            model="gpt-4.1-mini",
+            instructions="Bantu admin menjawab customer.",
+            safety_policy=None,
+            tools_config={"memory": True, "escalation": True},
+            escalation_config={},
+            capabilities=[],
+        ),
+        session=SimpleNamespace(
+            id=uuid.uuid4(),
+            agent_id=uuid.uuid4(),
+            channel_type="whatsapp",
+            channel_config={},
+            external_user_id="628operator",
+        ),
+        active_groups=["memory", "escalation"],
+        saved_custom_tools=[],
+        subagent_list=[],
+        sender_name="Bagas",
+        context_summary="",
+        memory_block="",
+        layered_memory={},
+        rag_context="",
+        escalation_user_jid="628customer@s.whatsapp.net",
+        escalation_context="ROUTING: operator_reply_quoted_escalation",
+        is_operator_message=True,
+        user_message="<OPERATOR>\nPesan: [OPERATOR_DRAFT_REVISION]\nInstruksi revisi operator: dibuat lebih sopan",
+    )
+
+    assert "Jika pesan berisi blok `[OPERATOR_DRAFT_REVISION]`" in prompt
+    assert "Revisi HANYA draft di dalam blok itu" in prompt
 
 
 @pytest.mark.asyncio
