@@ -1,5 +1,22 @@
 # Recap: Deep Agent SaaS Hardening — MCP, Subagent, Sandbox, Builder Entitlements
 
+## 2026-06-11 — SOP Gate Tidak Lagi Mencabut Tool Media WhatsApp
+
+Admin testing lewat WhatsApp menemukan regresi saat user meminta gambar/dokumen dikirim: agent menjawab "Tool send_whatsapp_image tidak tersedia di run ini" walaupun session berjalan di channel WhatsApp.
+
+### Root Cause
+- `build_agent_tool_setup()` sudah selalu menambahkan `send_whatsapp_image` dan `send_whatsapp_document` untuk session WhatsApp.
+- Setelah itu `sop_runtime_gate.filter_tools_by_sop()` masih menghapus kedua tool tersebut jika latest SOP `draft`, `needs_review`, atau hilang.
+- Akibatnya runtime prompt bisa melihat `whatsapp_media` sebagai active group, tetapi tool konkret sudah dicabut sebelum graph jalan.
+
+### Fix
+- `sop_runtime_gate.py`: SOP maturity tetap dihitung untuk readiness/launch warning, tapi runtime tidak lagi mencabut channel-level WhatsApp media delivery tools.
+- `tests/test_sop_runtime_gate.py`: regression test diperbarui agar SOP locked tetap mempertahankan `send_whatsapp_image` dan `send_whatsapp_document`.
+
+### Validasi
+- `PYTHONPATH=. .venv/bin/python -m pytest tests/test_sop_runtime_gate.py -q` -> 5 passed.
+- `PYTHONPATH=. .venv/bin/python -m pytest tests/test_whatsapp_direct_send.py::test_send_whatsapp_image_uses_current_attachment_without_sandbox tests/test_whatsapp_direct_send.py::test_disabled_whatsapp_media_prevents_file_delivery_claim tests/test_whatsapp_direct_send.py::test_direct_text_send_context_does_not_capture_media_requests -q` -> 3 passed.
+
 ## 2026-06-09 — WhatsApp PDF Delivery Loop di wa-dev-service
 
 Testing agent buatan Arthur lewat nomor demo `wa-dev-service` menemukan bug saat user minta laporan visualisasi data/PDF dikirim ke WhatsApp. Agent berhasil membuat PDF di sandbox, tapi berulang kali hanya membalas teks seperti "sudah saya kirim" tanpa attachment.
@@ -29,7 +46,7 @@ Testing agent buatan Arthur lewat nomor demo `wa-dev-service` menemukan bug saat
   - visualisasi data/laporan PDF dihitung sebagai workflow file generated.
 
 ### Catatan Operasional
-- Deploy kode saja belum cukup kalau latest `agent_operating_manuals` untuk agent terdampak masih `needs_review`; latest SOP harus direview/usable agar runtime tidak mencabut `whatsapp_media`.
+- Catatan lama: sebelumnya latest `agent_operating_manuals` yang masih `needs_review` bisa membuat runtime mencabut `whatsapp_media`. Per 2026-06-11, SOP gate tidak lagi mencabut tool media WhatsApp; SOP tetap penting untuk readiness/launch review, bukan untuk ketersediaan attachment tool.
 - Setelah deploy, test manual yang paling representatif: minta agent buat PDF, tunggu file selesai, lalu kirim "kirim file pdf" atau "kirim sekarang". Expected: ada tool media `send_whatsapp_document` dan user menerima attachment, bukan hanya teks klaim terkirim.
 - Jangan klaim "file sudah terkirim" dari layer agent kecuali ada eksekusi tool media atau deterministic delivery path yang benar-benar menghasilkan send attempt.
 

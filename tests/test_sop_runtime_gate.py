@@ -15,12 +15,12 @@ def test_locked_when_draft():
     assert is_sop_locked(None) is True
 
 
-def test_gated_tools_removed_when_locked():
+def test_locked_sop_keeps_whatsapp_media_delivery_tools_available():
     names = {"recall", "remember", "escalate_to_human", "reply_to_user",
              "send_whatsapp_document", "send_whatsapp_image"}
     kept = gated_tool_names(names, sop={"maturity": "draft"})
-    assert "send_whatsapp_document" not in kept
-    assert "send_whatsapp_image" not in kept
+    assert "send_whatsapp_document" in kept
+    assert "send_whatsapp_image" in kept
     assert "escalate_to_human" in kept
     assert "recall" in kept
 
@@ -54,10 +54,12 @@ def test_builder_caps_bypass_gating():
     result = filter_tools_by_sop(all_tools, sop=draft_sop, caps=["system"])
     assert any(t.name == "send_whatsapp_document" for t in result)
 
-    # Normal agent + draft → gated
+    # Normal agent + draft: runtime keeps WhatsApp media delivery available.
+    # SOP maturity is enforced by launch/readiness checks and reply guards, not
+    # by removing channel-level attachment tools from an active WhatsApp run.
     result = filter_tools_by_sop(all_tools, sop=draft_sop, caps=[])
-    assert not any(t.name == "send_whatsapp_document" for t in result)
-    assert not any(t.name == "send_whatsapp_image" for t in result)
+    assert any(t.name == "send_whatsapp_document" for t in result)
+    assert any(t.name == "send_whatsapp_image" for t in result)
     assert any(t.name == "recall" for t in result)
 
     # Normal agent + usable → not gated

@@ -1,12 +1,16 @@
-"""SOP-based runtime gate: removes final-action tools when agent SOP is not mature."""
+"""SOP-based runtime gate helpers.
+
+SOP maturity is still used by launch/readiness flows, but runtime tool removal
+must stay conservative. Channel-level delivery tools such as WhatsApp media are
+part of the transport contract; removing them makes agents unable to send a file
+even when the user explicitly asks for one. False delivery claims are handled by
+reply guards after tool execution.
+"""
 from __future__ import annotations
 
 from typing import Any, Iterable
 
-FINAL_ACTION_TOOLS: frozenset[str] = frozenset({
-    "send_whatsapp_document",
-    "send_whatsapp_image",
-})
+FINAL_ACTION_TOOLS: frozenset[str] = frozenset()
 
 
 def is_sop_locked(sop: dict[str, Any] | None) -> bool:
@@ -26,7 +30,7 @@ def is_sop_locked(sop: dict[str, Any] | None) -> bool:
 
 
 def gated_tool_names(tool_names: Iterable[str], *, sop: dict[str, Any] | None) -> set[str]:
-    """Return tool names with final-action tools removed when SOP is locked."""
+    """Return tool names after any SOP runtime restrictions."""
     names = {str(n) for n in tool_names}
     if not is_sop_locked(sop):
         return names
@@ -39,7 +43,7 @@ def filter_tools_by_sop(
     sop: dict[str, Any] | None,
     caps: list[str] | None,
 ) -> list:
-    """Filter tool objects, removing final-action tools when SOP is locked.
+    """Filter tool objects using SOP runtime restrictions.
 
     Args:
         tools: list of tool objects with a .name attribute.
