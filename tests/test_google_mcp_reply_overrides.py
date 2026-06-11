@@ -17,6 +17,7 @@ from app.core.engine.google_mcp_support import (
     _google_integration_runtime_url,
     _has_google_mcp_step,
     _is_google_mcp_intent,
+    _sanitize_user_facing_google_terms,
     _looks_like_google_auth_recovery_reply,
     apply_google_mcp_reply_overrides,
     build_google_mcp_runtime_state_notice,
@@ -29,6 +30,17 @@ from app.core.engine.google_mcp_support import (
 def test_google_scope_error_markers_include_google_api_scope_messages() -> None:
     err = "Request had insufficient authentication scopes. Required scope: https://www.googleapis.com/auth/presentations"
     assert _is_google_auth_or_scope_error(err) is True
+
+
+def test_google_term_sanitizer_preserves_mcp_auth_url_hostname() -> None:
+    auth_url = "https://google-workspace-mcp.chiefaiofficer.id/v1/integrations/google/start?t=abc123"
+    reply = f"Klik link ini untuk reconnect Google lewat MCP:\n{auth_url}"
+
+    sanitized = _sanitize_user_facing_google_terms(reply)
+
+    assert auth_url in sanitized
+    assert "google-workspace-integrasi Google" not in sanitized
+    assert "lewat integrasi Google" in sanitized
 
 
 def test_google_workspace_mcp_authorization_restricts_whatsapp_to_owner_or_operator() -> None:

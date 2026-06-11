@@ -436,6 +436,9 @@ def _ensure_google_auth_link_in_reply(reply_text: str, auth_url: str | None) -> 
     return f"{reply_text.rstrip()}\n\nLink otentikasi Google:\n{auth_url}"
 
 
+_URL_FRAGMENT_RE = re.compile(r"https?://[^\s<>\"]+", re.IGNORECASE)
+
+
 def _sanitize_user_facing_google_terms(reply_text: str) -> str:
     """Avoid leaking internal integration protocol terms in user-facing replies."""
     if not reply_text:
@@ -452,10 +455,21 @@ def _sanitize_user_facing_google_terms(reply_text: str) -> str:
         (r"\bvia\s+MCP\b", "via integrasi Google"),
         (r"\bMCP\b", "integrasi Google"),
     )
-    sanitized = reply_text
-    for pattern, replacement in replacements:
-        sanitized = re.sub(pattern, replacement, sanitized, flags=re.IGNORECASE)
-    return sanitized
+    parts = _URL_FRAGMENT_RE.split(reply_text)
+    urls = _URL_FRAGMENT_RE.findall(reply_text)
+    sanitized_parts: list[str] = []
+    for part in parts:
+        sanitized = part
+        for pattern, replacement in replacements:
+            sanitized = re.sub(pattern, replacement, sanitized, flags=re.IGNORECASE)
+        sanitized_parts.append(sanitized)
+
+    merged: list[str] = []
+    for idx, part in enumerate(sanitized_parts):
+        merged.append(part)
+        if idx < len(urls):
+            merged.append(urls[idx])
+    return "".join(merged)
 
 
 def _build_google_mcp_not_executed_reply(user_message: str) -> str:
