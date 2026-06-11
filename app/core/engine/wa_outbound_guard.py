@@ -15,7 +15,7 @@ log = structlog.get_logger(__name__)
 
 _mem_outbound_windows: dict[str, list[float]] = {}
 
-WA_OUTBOUND_DIRECT_LIMIT = 1
+WA_OUTBOUND_DIRECT_LIMIT = 3
 WA_OUTBOUND_DIRECT_WINDOW_SECONDS = 300
 
 
@@ -77,8 +77,8 @@ def wa_outbound_block_reply(reason: str = "rate_limit") -> str:
             "Kalau perlu, saya hanya bisa bantu susun satu pesan yang wajar."
         )
     return (
-        "Pengiriman WhatsApp ke nomor itu saya batasi sementara untuk mencegah spam. "
-        "Coba lagi nanti atau kirim satu pesan yang memang diperlukan."
+        "Pengiriman WhatsApp ke nomor itu saya batasi sementara untuk mencegah spam "
+        "(maksimal 3 pesan dalam 5 menit). Coba lagi nanti atau kirim satu pesan yang memang diperlukan."
     )
 
 

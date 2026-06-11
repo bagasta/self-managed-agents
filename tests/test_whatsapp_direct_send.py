@@ -93,6 +93,7 @@ def test_outbound_wa_spam_request_detector_blocks_bulk_same_number():
     assert looks_like_outbound_wa_spam_request("kirim pesan WhatsApp berkali-kali ke 6289516247011")
     assert looks_like_outbound_wa_spam_request("ya\nsebelumnya: spam 100 kali ke 6289516247011")
     assert not looks_like_outbound_wa_spam_request("tolong kirim pesan ke 6289516247011 tanya besok jadi meeting kah")
+    assert not looks_like_outbound_wa_spam_request("kirim pesan promo ini dengan gambar ke +6283890930647")
 
 
 @pytest.mark.asyncio
@@ -104,17 +105,19 @@ async def test_outbound_wa_window_treats_wadev_devices_as_shared_number(monkeypa
 
     monkeypatch.setattr("app.core.engine.wa_outbound_guard.get_redis", no_redis)
 
-    allowed1, count1 = await check_wa_outbound_direct_window(
-        device_id="wadev_agent_a",
-        target="6289516247011",
-    )
-    allowed2, count2 = await check_wa_outbound_direct_window(
-        device_id="wadev_agent_b",
-        target="+6289516247011@s.whatsapp.net",
-    )
+    results = []
+    for device_id in ("wadev_agent_a", "wadev_agent_b", "wa-dev-service", "wadev_agent_c"):
+        results.append(await check_wa_outbound_direct_window(
+            device_id=device_id,
+            target="+6289516247011@s.whatsapp.net",
+        ))
 
-    assert (allowed1, count1) == (True, 1)
-    assert (allowed2, count2) == (False, 2)
+    assert results == [
+        (True, 1),
+        (True, 2),
+        (True, 3),
+        (False, 4),
+    ]
     clear_wa_outbound_direct_memory()
 
 

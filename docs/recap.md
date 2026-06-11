@@ -1,5 +1,22 @@
 # Recap: Deep Agent SaaS Hardening — MCP, Subagent, Sandbox, Builder Entitlements
 
+## 2026-06-11 — Outbound WhatsApp Anti-Spam Limit Disesuaikan ke 3 Pesan
+
+Admin testing menemukan request normal seperti "kirim pesan promo ini dengan gambar ke +62..." bisa dibalas "dibatasi sementara untuk mencegah spam" pada percobaan kedua. Ini bukan guard inbound spam customer, melainkan guard outbound saat agent diminta mengirim ke nomor lain.
+
+### Root Cause
+- `wa_outbound_guard.py` memakai `WA_OUTBOUND_DIRECT_LIMIT = 1` dengan window 300 detik per device+target.
+- Untuk `wa-dev-service` dan device `wadev_*`, source dinormalisasi menjadi shared key yang sama (`wadev_shared`), jadi percobaan dari beberapa agent demo ke nomor tujuan sama ikut berbagi counter.
+- Detector spam eksplisit tetap benar: kata seperti `spam`, `berkali-kali`, `100 kali`, `flood`, dan sejenisnya diblok sebelum send.
+
+### Fix
+- Limit outbound normal dinaikkan menjadi 3 pesan per 5 menit per device+nomor tujuan.
+- Pesan rate-limit sekarang menyebut aturan konkret: maksimal 3 pesan dalam 5 menit.
+- Regression test memastikan request "kirim pesan promo ini dengan gambar..." tidak dianggap spam eksplisit, dan percobaan ke-4 baru diblok.
+
+### Validasi
+- `PYTHONPATH=. .venv/bin/python -m pytest tests/test_whatsapp_direct_send.py::test_outbound_wa_spam_request_detector_blocks_bulk_same_number tests/test_whatsapp_direct_send.py::test_outbound_wa_window_treats_wadev_devices_as_shared_number tests/test_whatsapp_direct_send.py::test_send_to_number_blocks_spam_request_before_channel_send tests/test_whatsapp_direct_send.py::test_direct_text_send_context_does_not_capture_media_requests -q` -> 4 passed.
+
 ## 2026-06-11 — SOP Gate Tidak Lagi Mencabut Tool Media WhatsApp
 
 Admin testing lewat WhatsApp menemukan regresi saat user meminta gambar/dokumen dikirim: agent menjawab "Tool send_whatsapp_image tidak tersedia di run ini" walaupun session berjalan di channel WhatsApp.
