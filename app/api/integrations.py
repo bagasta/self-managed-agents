@@ -29,16 +29,20 @@ def _integration_service_url() -> str:
 async def get_google_auth_link(
     external_user_id: str = Query(...),
     agent_id: str = Query(...),
+    scopes: str | None = Query(None, description="Comma-separated OAuth scopes. If omitted, integration service uses its defaults."),
 ) -> JSONResponse:
     """
     Generate Google OAuth auth URL untuk user tertentu.
     Arthur memanggil endpoint ini via http_get untuk dapat link auth.
     """
     try:
+        body: dict = {"external_user_id": external_user_id, "agent_id": agent_id}
+        if scopes:
+            body["scopes"] = [s.strip() for s in scopes.split(",") if s.strip()]
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
                 f"{_integration_service_url()}/v1/integrations/google/connect",
-                json={"external_user_id": external_user_id, "agent_id": agent_id},
+                json=body,
                 headers={"X-API-Key": settings.api_key},
             )
         if resp.status_code == 200:
