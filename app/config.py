@@ -24,9 +24,22 @@ class Settings(BaseSettings):
 
     # Sandbox
     sandbox_base_dir: str = "/tmp/agent-sandboxes"
+    # Host-side path of sandbox_base_dir. When the app runs inside a container and
+    # spawns sibling sandbox containers via the mounted Docker socket, bind-mount
+    # sources are resolved by the HOST daemon, not the app container filesystem.
+    # Set this to the host path that backs sandbox_base_dir so file ops (app-side)
+    # and execute()/deploy (sibling container) target the same directory.
+    # Empty string => same as sandbox_base_dir (dev / app-on-host: no translation).
+    sandbox_host_base_dir: str = ""
     docker_sandbox_image: str = "managed-agents-sandbox:latest"
     docker_host: str = "unix:///run/docker.sock"
-    sandbox_subagents_enabled: bool = False  # launch-safe kill switch; re-enable after sandbox/subagent stabilization
+    sandbox_subagents_enabled: bool = True  # re-enabled after VPS DinD path + stability fixes
+    # Per-container resource caps (env-configurable for different VPS sizes)
+    sandbox_mem_limit: str = "1g"
+    sandbox_nano_cpus: int = 1_000_000_000  # 1.0 CPU core
+    # Orphan cleanup TTLs (seconds)
+    sandbox_container_ttl_seconds: int = 900   # kill labeled containers older than this
+    sandbox_workspace_ttl_seconds: int = 86400  # remove workspace dirs idle longer than this
 
     # Agent limits
     agent_max_steps: int = 12
@@ -71,12 +84,12 @@ class Settings(BaseSettings):
     # Tunable limits
     context_summary_trigger: int = 10      # summarize after N user messages
     default_subagent_model: str = "openai/gpt-4o-mini"
-    default_subagent_max_tokens: int = 2048
+    default_subagent_max_tokens: int = 8192
     media_doc_max_chars: int = 12000
     llm_max_tokens: int = 1024
     message_max_length: int = 10_000       # max chars per user message
     media_max_length: int = 10_000_000     # max chars for base64 media payload
-    max_concurrent_sandboxes: int = 10     # max Docker sandbox containers running simultaneously
+    max_concurrent_sandboxes: int = 6      # bounded semaphore; requests queue instead of failing
 
 
 @lru_cache

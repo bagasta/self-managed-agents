@@ -158,6 +158,34 @@ class TestAgentsCRUD:
         assert agent["id"] in ids
         _delete_agent(client, agent["id"])
 
+    def test_create_and_list_agents_scoped_by_owner_external_id(self, client):
+        owner_response = client.post(
+            "/v1/agents",
+            json={"name": "owner-scoped-agent", "owner_external_id": "628111", "created_by_type": "dashboard"},
+            headers=_headers(),
+        )
+        other_response = client.post(
+            "/v1/agents",
+            json={"name": "other-scoped-agent", "owner_external_id": "628222", "created_by_type": "dashboard"},
+            headers=_headers(),
+        )
+        assert owner_response.status_code == 201
+        assert other_response.status_code == 201
+        owner_agent = owner_response.json()
+        other_agent = other_response.json()
+
+        assert owner_agent["owner_external_id"] == "628111"
+        assert owner_agent["created_by_type"] == "dashboard"
+
+        r = client.get("/v1/agents?limit=20&owner_external_id=628111", headers=_headers())
+        assert r.status_code == 200
+        ids = [a["id"] for a in r.json()["items"]]
+        assert owner_agent["id"] in ids
+        assert other_agent["id"] not in ids
+
+        _delete_agent(client, owner_agent["id"])
+        _delete_agent(client, other_agent["id"])
+
     def test_get_agent_by_id(self, client):
         agent = _create_agent(client, "get-by-id-agent")
         r = client.get(f"/v1/agents/{agent['id']}", headers=_headers())

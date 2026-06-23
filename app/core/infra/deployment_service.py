@@ -24,6 +24,8 @@ from typing import Any
 import docker
 import structlog
 
+from app.core.infra.sandbox_paths import to_host_path
+
 log = structlog.get_logger()
 
 _CF_IMAGE = "cloudflare/cloudflared:latest"
@@ -263,7 +265,10 @@ def deploy_app(
     # Mount workspace_dir directly — DockerSandbox.write_file writes here.
     # Do NOT mount a workspace/ subdirectory: if one exists it will be empty
     # because write_file never uses it, causing the container to fail on startup.
-    actual_workspace = workspace_dir
+    # Translate to the host path: bind sources are resolved by the host daemon, so
+    # under DinD (app-in-container) the app path must map to its host equivalent
+    # (no-op in dev / app-on-host).
+    actual_workspace = to_host_path(workspace_dir)
 
     app_name, cf_name, _ = _names(session_id)
     safe_command = _make_safe_command(command)

@@ -584,8 +584,7 @@ def test_builder_prompt_blocks_repeated_continue_questions():
     assert "jangan menjawab `langsung aku betulin`" in prompt
     assert "DILARANG memakai task, subagent, sandbox, read_file, edit_file, atau write_file" in prompt
     assert "get_agent_detail(include_instructions=true)" in prompt
-    assert "Arthur Launch-Safe Temporary Limits" in prompt
-    assert "DILARANG membuat atau mengupdate agent menjadi agent coding" in prompt
+    # Launch-safe temporary-limits block is only present when the kill switch is OFF.
     assert "refresh_memory_mode" in prompt
     assert "sistem menyimpan versi lama sebagai arsip" in prompt
     assert "Jangan menyebut `subagent`, `placeholder`, `database`, `sistem file`" in prompt

@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config_schema import ToolsConfig
+from app.core.tools.builder_identity import owner_filter
 from app.database import get_db
 from app.deps import verify_api_key
 from app.models.agent import Agent
@@ -62,7 +63,8 @@ async def create_agent(
         active_until=active_until,
         channel_type=payload.channel_type,
         wa_device_id=device_id,
-        created_by_type="api",
+        owner_external_id=payload.owner_external_id,
+        created_by_type=payload.created_by_type or "api",
     )
     db.add(agent)
     await db.flush()
@@ -87,19 +89,24 @@ async def create_agent(
 async def list_agents(
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    owner_external_id: str | None = Query(None, max_length=64),
     db: AsyncSession = Depends(get_db),
     _: str = Depends(verify_api_key),
 ) -> AgentListResponse:
+    filters = [Agent.is_deleted.is_(False)]
+    if owner_external_id:
+        filters.append(owner_filter(owner_external_id))
+
     total = (
         await db.execute(
-            select(func.count()).select_from(Agent).where(Agent.is_deleted.is_(False))
+            select(func.count()).select_from(Agent).where(*filters)
         )
     ).scalar_one()
 
     rows = (
         await db.execute(
             select(Agent)
-            .where(Agent.is_deleted.is_(False))
+            .where(*filters)
             .order_by(Agent.created_at.desc())
             .limit(limit)
             .offset(offset)

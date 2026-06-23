@@ -347,7 +347,8 @@ class TestBuilderToolsReturnsList:
         assert tools_config["mcp"]["enabled"] is True
         assert "google_workspace" in tools_config["mcp"]["servers"]
 
-    def test_personal_assistant_generate_file_is_blocked_during_launch_safety_but_keeps_google_workspace(self):
+    def test_personal_assistant_generate_file_enabled_with_google_workspace(self):
+        """With sandbox/subagents re-enabled, file generation is allowed (no launch-safety block)."""
         from app.core.tools.builder_tools import build_builder_tools
 
         db = _make_mock_db()
@@ -364,13 +365,13 @@ class TestBuilderToolsReturnsList:
         tools_config = payload["recommended_config"]["tools_config"]
 
         assert payload["detected_preset"] == "personal_assistant"
-        assert payload["plan_status"] == "has_errors"
-        assert tools_config["sandbox"] is False
+        assert tools_config["sandbox"] is True
         assert tools_config["whatsapp_media"] is True
-        assert tools_config["subagents"]["enabled"] is False
+        assert tools_config["subagents"]["enabled"] is True
         assert tools_config["mcp"]["enabled"] is True
         assert "google_workspace" in tools_config["mcp"]["servers"]
-        assert any("generate file" in error for error in payload["validation_errors"])
+        # File generation is no longer blocked by launch safety.
+        assert not any("generate file" in error for error in payload["validation_errors"])
 
     def test_existing_google_form_order_link_does_not_enable_workspace(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -416,12 +417,12 @@ class TestBuilderToolsReturnsList:
         tools_config = payload["recommended_config"]["tools_config"]
 
         assert payload["detected_preset"] == "approval_gated_service_agent"
-        assert payload["plan_status"] == "has_errors"
-        assert tools_config["sandbox"] is False
+        assert tools_config["sandbox"] is True
         assert tools_config["escalation"] is True
         assert tools_config["whatsapp_media"] is True
-        assert tools_config["subagents"]["enabled"] is False
-        assert any("generate file" in error for error in payload["validation_errors"])
+        assert tools_config["subagents"]["enabled"] is True
+        # File generation (PDF CV) is enabled now, not blocked.
+        assert not any("generate file" in error for error in payload["validation_errors"])
 
     def test_approval_gated_service_without_file_does_not_force_sandbox(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -564,10 +565,10 @@ class TestBuilderToolsReturnsList:
 
         payload = json.loads(result)
 
-        assert payload["plan_status"] == "has_errors"
+        # Subagents are now gated by subscription entitlement, not the launch kill switch.
+        assert payload["plan_status"] == "blocked_by_subscription"
         assert payload["creation_entitlement_check"]["plan_code"] == "trial"
-        assert any("sandbox/subagent" in error for error in payload["validation_errors"])
-        assert payload["recommended_config"]["tools_config"]["subagents"]["enabled"] is False
+        assert any("sub-agent" in error for error in payload["validation_errors"])
 
 
 class TestBuilderOwnershipHelpers:
@@ -3274,14 +3275,16 @@ def test_create_file_agent_writer_fallback_keeps_media_tools_unlocked():
                 ),
                 "business_context": "Agent personal untuk visualisasi data dari dokumen yang user kirim.",
                 "file_capability": "enabled",
-                "tools_config": '{"memory": true, "skills": true}',
+                "tools_config": '{"memory": true, "skills": true, "sandbox": true, "whatsapp_media": true, "subagents": {"enabled": true}}',
                 "channel_type": "whatsapp",
             }))
 
+    # Launch safety no longer blocks file agents — the agent is created and media tools stay unlocked.
     data = json.loads(result)
-    assert data["error"] == "Fitur sandbox/subagent sementara dinonaktifkan untuk launch."
-    assert "launch_safety" in data
-    assert captured_kwargs == {}
+    assert data.get("success") is True
+    assert captured_kwargs.get("name") == "Visual Agent"
+    assert captured_kwargs["tools_config"]["whatsapp_media"] is True
+    assert captured_kwargs["tools_config"]["sandbox"] is True
 
 
 # ---------------------------------------------------------------------------

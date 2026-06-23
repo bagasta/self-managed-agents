@@ -61,6 +61,16 @@ class AgentCreate(BaseModel):
         None,
         description="Channel to connect at creation time. Supported: 'whatsapp'",
     )
+    owner_external_id: str | None = Field(
+        None,
+        max_length=64,
+        description="External user id pemilik agent. Dipakai dashboard/Arthur untuk isolasi per user.",
+    )
+    created_by_type: str | None = Field(
+        None,
+        max_length=32,
+        description="Sumber pembuatan agent, misalnya dashboard, arthur_builder, api, atau system.",
+    )
 
 
 class AgentUpdate(BaseModel):

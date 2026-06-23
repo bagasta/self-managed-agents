@@ -454,11 +454,11 @@ def _build_system_subagent(
                 error=str(_dag_err)[:300],
                 name=spec["name"],
             )
+            # Graceful degradation: skip this sandbox subagent rather than aborting
+            # the whole run. The parent agent continues with the remaining subagents.
             if sub_sandbox is not None:
                 sub_sandbox.close()
-            raise RuntimeError(
-                f"Sandbox subagent '{spec['name']}' must compile with its own backend"
-            ) from _dag_err
+            return None, None
 
     # Non-sandbox subagent or fallback: plain SubAgent dict.
     # create_deep_agent will inject FilesystemMiddleware from parent backend.
@@ -542,6 +542,8 @@ async def build_subagents(
                 wa_target,
                 expose_wa_media_tools=expose_wa_media_tools,
             )
+            if sa is None:
+                continue  # compile failed; skip this subagent, keep the rest
             subagents.append(sa)
             if ssb:
                 sub_sandboxes.append(ssb)
@@ -640,11 +642,12 @@ async def build_subagents(
                 continue
             except (ImportError, TypeError, AttributeError) as exc:
                 log.warning("build_subagents.compile_failed", name=agent_row.name, error=str(exc))
+                # Graceful degradation: skip this subagent, keep the run alive.
                 if sub_sandbox is not None:
                     sub_sandbox.close()
-                raise RuntimeError(
-                    f"Sandbox subagent '{agent_row.name}' must compile with its own backend"
-                ) from exc
+                    if sub_sandbox in sub_sandboxes:
+                        sub_sandboxes.remove(sub_sandbox)
+                continue
 
         # Non-sandbox custom subagent or fallback: plain SubAgent dict.
         sa = {

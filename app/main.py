@@ -136,13 +136,30 @@ async def lifespan(_app: FastAPI):
 
     deployment_cleanup_task = asyncio.create_task(_deployment_cleanup_loop())
 
+    from app.core.infra.sandbox import cleanup_orphan_sandboxes
+
+    async def _sandbox_reaper_loop() -> None:
+        reaper_log = structlog.get_logger(__name__)
+        while True:
+            await asyncio.sleep(600)  # every 10 minutes
+            try:
+                result = await asyncio.to_thread(cleanup_orphan_sandboxes)
+                if result.get("containers_killed") or result.get("workspace_dirs_removed"):
+                    reaper_log.info("sandbox_reaper.cleaned", **result)
+            except Exception as exc:
+                reaper_log.warning("sandbox_reaper.error", error=str(exc))
+
+    sandbox_reaper_task = asyncio.create_task(_sandbox_reaper_loop())
+
     yield
 
     deployment_cleanup_task.cancel()
-    try:
-        await deployment_cleanup_task
-    except asyncio.CancelledError:
-        pass
+    sandbox_reaper_task.cancel()
+    for _t in (deployment_cleanup_task, sandbox_reaper_task):
+        try:
+            await _t
+        except asyncio.CancelledError:
+            pass
     stop_scheduler()
 
 
