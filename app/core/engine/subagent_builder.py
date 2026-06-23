@@ -173,7 +173,8 @@ _SYSTEM_SUBAGENTS: list[dict] = [
             "- Quick prototype/demo HTML statis → tetap pisahkan HTML, CSS, dan JS; jangan single-file inline\n\n"
             "ATURAN KUALITAS:\n"
             "- Untuk website, pisahkan index.html, styles.css, script.js tanpa dependency eksternal\n"
-            "- CSS boleh besar asal terstruktur: base, layout, components, responsive, states\n"
+            "- BATAS UKURAN FILE: index.html maks 150 baris, styles.css maks 250 baris, script.js maks 200 baris. Jangan berlebihan — clean dan concise lebih baik dari besar dan verbose.\n"
+            "- CSS harus terstruktur tapi ringkas: prioritaskan layout, spacing, typography, warna. Jangan tulis rule yang tidak dipakai.\n"
             "- JavaScript vanilla harus modular, jelas, dan tidak ditempel inline di HTML\n"
             "- Tulis kode yang clean, responsive, accessible, dan langsung bisa dijalankan. Runtime error = task belum selesai.\n\n"
             "WORKFLOW STATIC WEBSITE CEPAT:\n"
@@ -246,7 +247,7 @@ _SYSTEM_SUBAGENTS: list[dict] = [
             "Untuk website/frontend, jangan install dependency."
         ),
         "model": "moonshotai/kimi-k2.6",
-        "max_tokens": 8192,
+        "max_tokens": 32768,
         "tools_config": {"sandbox": True, "deploy": True, "http": False},
     },
     {
