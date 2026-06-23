@@ -4,9 +4,9 @@ Copy-paste blok di bawah ke Claude Code yang jalan di VPS server.
 
 ---
 
-Kamu bekerja di server produksi managed-agents-project. Branch `feat/reenable-sandbox-vps-stable`
+Kamu bekerja di server produksi managed-agents-project. Commit terbaru di `main`
 me-re-enable fitur sandbox/subagent/deploy/tool_creator dan memperbaiki akar instabilitas DinD.
-Tugasmu: deploy branch itu dengan AMAN dan verifikasi sandbox benar-benar jalan.
+Tugasmu: deploy `main` dengan AMAN dan verifikasi sandbox benar-benar jalan.
 
 ## Konteks akar masalah (WAJIB paham sebelum mengubah)
 
@@ -24,8 +24,8 @@ menerjemahkan, tapi default-nya no-op kalau `SANDBOX_HOST_BASE_DIR` kosong.
 
 ## Langkah
 
-1. **Ambil branch**
-   - `git fetch && git checkout feat/reenable-sandbox-vps-stable && git pull`
+1. **Ambil kode terbaru**
+   - `git fetch && git checkout main && git pull`
    - JANGAN commit/ubah file lain. Kalau ada konflik working-tree, lapor dulu, jangan paksa.
 
 2. **Inspeksi konfigurasi container app saat ini** (jangan asumsi)
