@@ -146,19 +146,14 @@ from app.core.engine.agent_followups import (
     _BUILD_PROGRESS_TOOLS,
     _deploy_followup_message,
     _extract_shared_workspace_file_from_steps,
-    _extract_shared_workspace_file_path,
     _has_code_creation_evidence,
     _has_external_service_fallback_blocked_step,
     _has_public_url_in_steps,
     _has_public_url_in_text,
     _is_website_or_app_request,
-    _is_whatsapp_file_delivery_request,
     _needs_builder_create_completion,
     _needs_deploy_followup,
     _needs_whatsapp_file_delivery_followup,
-    _SHARED_WORKSPACE_FILE_RE,
-    _step_text,
-    _user_requested_inline_text_output,
 )
 
 
@@ -624,215 +619,12 @@ def _remember_latest_shared_artifact(
     )
 
 
-def _shared_artifact_paths_from_session(session: Session) -> list[str]:
-    meta = session.metadata_ if isinstance(session.metadata_, dict) else {}
-    paths: list[str] = []
-    latest = meta.get("latest_shared_artifact")
-    if isinstance(latest, dict) and latest.get("path"):
-        paths.append(str(latest["path"]))
-    artifacts = meta.get("shared_artifacts")
-    if isinstance(artifacts, list):
-        for item in reversed(artifacts):
-            if isinstance(item, dict) and item.get("path"):
-                paths.append(str(item["path"]))
-    deduped: list[str] = []
-    for path in paths:
-        if path not in deduped:
-            deduped.append(path)
-    return deduped
-
-
-def _shared_artifact_paths_from_history(history_rows: list[Any]) -> list[str]:
-    paths: list[str] = []
-    for row in reversed(history_rows or []):
-        values = [getattr(row, "tool_result", None)]
-        if getattr(row, "role", None) != "user":
-            values.append(getattr(row, "content", None))
-        path = _extract_shared_workspace_file_path(*values)
-        if path and path not in paths:
-            paths.append(path)
-    return paths
-
-
-def _shared_path_filename(path: str | None) -> str:
-    return str(path or "").strip().rsplit("/", 1)[-1]
-
-
-def _incoming_media_paths_from_session(session: Session) -> list[str]:
-    meta = session.metadata_ if isinstance(getattr(session, "metadata_", None), dict) else {}
-    incoming = meta.get("last_incoming_media")
-    current_attachment = meta.get("current_attachment")
-
-    paths: list[str] = []
-    if isinstance(incoming, dict):
-        for key in (
-            "shared_workspace_path",
-            "current_shared_workspace_path",
-            "workspace_path",
-            "incoming_workspace_path",
-            "current_workspace_path",
-            "extracted_text_shared_workspace_path",
-            "extracted_text_workspace_path",
-            "current_input_path",
-            "subagent_current_input_path",
-            "shared_alias",
-            "incoming_alias",
-            "extracted_text_path",
-            "extracted_text_subagent_path",
-        ):
-            raw_path = incoming.get(key)
-            if raw_path:
-                path = str(raw_path)
-                paths.append(path)
-                filename = _shared_path_filename(path)
-                if filename:
-                    paths.append(f"/workspace/shared/{filename}")
-                    paths.append(f"/workspace/shared/current_input/{filename}")
-
-        filename = str(incoming.get("filename") or "").strip()
-        if filename:
-            paths.append(f"/workspace/shared/{filename}")
-            paths.append(f"/workspace/shared/current_input/{filename}")
-
-    if isinstance(current_attachment, dict):
-        for key in (
-            "input_path",
-            "subagent_input_path",
-            "shared_path",
-            "legacy_shared_path",
-            "extracted_text_path",
-            "extracted_text_subagent_path",
-        ):
-            raw_path = current_attachment.get(key)
-            if raw_path:
-                path = str(raw_path)
-                paths.append(path)
-                filename = _shared_path_filename(path)
-                if filename:
-                    paths.append(f"/workspace/shared/{filename}")
-                    paths.append(f"/workspace/shared/current_input/{filename}")
-
-    deduped: list[str] = []
-    for path in paths:
-        if path and path not in deduped:
-            deduped.append(path)
-    return deduped
-
-
-def _requested_shared_file_exts(user_message: str) -> set[str]:
-    text = _operator_message_payload(user_message).lower()
-    requested: set[str] = set()
-    if "pdf" in text:
-        requested.add("pdf")
-    if any(marker in text for marker in ("docx", "word")):
-        requested.add("docx")
-    if any(marker in text for marker in ("xlsx", "excel")):
-        requested.add("xlsx")
-    if "csv" in text:
-        requested.add("csv")
-    if "zip" in text:
-        requested.add("zip")
-    if any(marker in text for marker in ("gambar", "foto", "image", "png", "jpg", "jpeg", "webp")):
-        requested.update({"png", "jpg", "jpeg", "webp"})
-    return requested
-
-
-def _shared_file_matches_request(shared_path: str, user_message: str) -> bool:
-    requested = _requested_shared_file_exts(user_message)
-    if not requested:
-        return True
-    ext = shared_path.rsplit(".", 1)[-1].lower() if "." in shared_path else ""
-    return ext in requested
-
-
-def _is_explicit_shared_file_delivery_command(user_message: str) -> bool:
-    text = _operator_message_payload(user_message).strip().lower()
-    if not text:
-        return False
-    explicit_markers = (
-        "kirim file",
-        "kirim filenya",
-        "kirim file-nya",
-        "kirim pdf",
-        "kirim dokumen",
-        "kirim gambar",
-        "kirim foto",
-        "send file",
-        "send pdf",
-        "send document",
-        "send image",
-        "upload file",
-        "attachment",
-        "lampiran",
-        "filenya",
-        "file-nya",
-    )
-    return any(marker in text for marker in explicit_markers)
-
-
-def _is_whatsapp_file_delivery_turn(user_message: str, history_rows: list[Any]) -> bool:
-    if _user_requested_inline_text_output(user_message):
-        return False
-    if _is_explicit_shared_file_delivery_command(user_message):
-        return True
-    text = _operator_message_payload(user_message).strip().lower()
-    if not text:
-        return False
-    action_markers = (
-        "kirim",
-        "send",
-        "mana",
-        "ulang",
-        "sekarang",
-        "iya",
-        "ya",
-        "ok",
-        "oke",
-        "boleh",
-        "lanjut",
-    )
-    if not any(marker == text or marker in text for marker in action_markers):
-        return False
-    recent_values: list[str] = []
-    for row in (history_rows or [])[-12:]:
-        recent_values.append(str(getattr(row, "content", "") or ""))
-        recent_values.append(str(getattr(row, "tool_result", "") or ""))
-    recent_text = "\n".join(recent_values)
-    return bool(
-        _extract_shared_workspace_file_path(recent_text)
-        or _is_whatsapp_file_delivery_request("", [], recent_text)
-    )
-
-
-def _latest_shared_artifact_path_for_delivery(
-    *,
-    session: Session,
-    history_rows: list[Any],
-    user_message: str,
-) -> str | None:
-    if not _is_whatsapp_file_delivery_turn(user_message, history_rows):
-        return None
-    candidates = (
-        _shared_artifact_paths_from_session(session)
-        + _shared_artifact_paths_from_history(history_rows)
-    )
-    incoming_paths = set(_incoming_media_paths_from_session(session))
-    incoming_filenames = {
-        filename
-        for filename in (_shared_path_filename(path) for path in incoming_paths)
-        if filename
-    }
-    if incoming_paths or incoming_filenames:
-        candidates = [
-            path
-            for path in candidates
-            if path not in incoming_paths
-            and _shared_path_filename(path) not in incoming_filenames
-        ]
-    for path in candidates:
-        if _shared_file_matches_request(path, user_message):
-            return path
-    return candidates[0] if candidates else None
+# Pre-LLM "resend the latest shared file" heuristic was intentionally removed.
+# Deciding whether to send a file is the LLM's job: it calls send_whatsapp_document /
+# send_whatsapp_image when the conversation calls for it. The post-run followup
+# (_needs_whatsapp_file_delivery_followup) is the deterministic safety net for files
+# the agent promised but forgot to actually send. Intent is never inferred from
+# keyword matching against the user's message.
 
 
 async def run_agent(
@@ -1662,19 +1454,6 @@ async def run_agent(
             and not runtime_policy.is_builder
             else None
         )
-        direct_wa_file_delivery_path = (
-            _latest_shared_artifact_path_for_delivery(
-                session=session,
-                history_rows=history_rows,
-                user_message=execution_user_message,
-            )
-            if getattr(session, "channel_type", None) == "whatsapp"
-            and _is_enabled(tools_config, "whatsapp_media", default=True)
-            and not direct_wa_text_send_context
-            and not runtime_policy.is_builder
-            and not current_attachment_name
-            else None
-        )
         if direct_current_image_delivery:
             path, caption = direct_current_image_delivery
             return await _complete_direct_whatsapp_file_delivery(
@@ -1683,13 +1462,12 @@ async def run_agent(
                 remember_sent_artifact=False,
                 log_event="agent_run.whatsapp_current_image_direct_delivery",
             )
-        if direct_wa_file_delivery_path:
-            return await _complete_direct_whatsapp_file_delivery(
-                path=direct_wa_file_delivery_path,
-                caption=None,
-                remember_sent_artifact=True,
-                log_event="agent_run.whatsapp_file_direct_delivery_from_history",
-            )
+        # NOTE: No pre-LLM "resend the latest shared file" shortcut. When the user
+        # asks to send a file, the LLM decides and calls send_whatsapp_document /
+        # send_whatsapp_image itself; the post-run followup
+        # (_needs_whatsapp_file_delivery_followup) is the safety net that delivers a
+        # file the agent promised but forgot to actually send. Intent is never guessed
+        # from keywords in the user's message.
 
         if direct_wa_confirmation_payload:
             target_phone, draft_message = direct_wa_confirmation_payload
