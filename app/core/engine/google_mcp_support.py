@@ -1799,7 +1799,12 @@ def _build_google_reauth_tool(
             candidate_user_ids=candidate_user_ids,
         )
         if not auth_url:
-            return "AUTH_LINK_UNAVAILABLE"
+            return (
+                "AUTH_LINK_UNAVAILABLE: Layanan integrasi Google tidak dapat dihubungi saat ini. "
+                "JANGAN minta user login ulang — user mungkin sudah berhasil login sebelumnya. "
+                "Beritahu user bahwa ada gangguan sementara pada integrasi Google dan minta coba kirim pesan lagi "
+                "beberapa menit kemudian. Jangan mengarang link atau mengklaim aksi Google berhasil."
+            )
         return auth_url
 
     return [get_google_workspace_auth_link]
@@ -2440,6 +2445,8 @@ async def prepare_google_mcp_runtime(
                 log.info("agent_run.google_mcp_missing_external_user_id")
         except Exception as err:
             log.warning("agent_run.google_mcp_token_error", error=str(err))
+            if not jwt and not preflight_error:
+                preflight_error = "Layanan integrasi Google tidak dapat dihubungi sementara. Coba lagi beberapa saat."
 
     if mcp_enabled and workspace_server and integration_url and candidate_ids:
         tools.extend(
