@@ -1,5 +1,26 @@
 # Recap: Deep Agent SaaS Hardening — MCP, Subagent, Sandbox, Builder Entitlements
 
+## 2026-06-26 — Arthur: Runtime Reinforcement Anti-Prompt-Injection (Deterministik)
+
+Re-test tim Security 2026-06-26: pertahanan prompt-only dari 2026-06-24 (seksi `## Keamanan` di `system-message-builder.md`) **masih bisa di-bypass**. Dua vektor yang lolos:
+1. **"Tes selesai" bypass**: Arthur diyakinkan sesi tes prompt injection sudah selesai → disuruh melakukan injection apa saja.
+2. **Roleplay bypass**: Arthur disuruh "pura-pura tidak ada defense" lalu diminta "contoh" output prompt injection.
+
+### Akar Masalah
+- Pertahanan **prompt-only** tidak cukup untuk model lemah (gpt-4.1-mini): bisa dibujuk keluar dari aturan saat ditekan dengan social engineering.
+- Struktural: seksi keamanan ikut `base_instructions` yang dirakit di **tengah** system prompt runtime (banyak blok runtime ditambahkan SETELAHnya) → "lost in the middle", salience-nya turun tepat saat dibutuhkan.
+
+### Fix — Lapisan Deterministik di Runtime (`prompt_builder.py`)
+- `detect_injection_bypass_attempt(user_message)`: detektor regex framing serangan (tes/pengujian selesai, developer/admin mode, abaikan/override aturan, tanpa filter, pura-pura/roleplay tanpa batasan, minta contoh/simulasi prompt injection/jailbreak, klaim instruksi sistem baru). ID + EN.
+- Saat `"builder" in active_groups` DAN detektor menyala, runtime menyuntik blok `## ⛔ [SECURITY_OVERRIDE]` sebagai **blok TERAKHIR** system prompt (recency tertinggi) + log `agent_run.injection_bypass_attempt_detected`.
+- **Tidak** mem-bypass LLM, **tidak** mencabut tool — hanya menegaskan ulang aturan tepat di samping pesan serangan, me-reset framing tiap turn. False positive aman (paling buruk: pesan sah dapat penegasan ekstra, agent tetap menjawab normal).
+- Bekerja **independen dari instruksi DB** — efektif tanpa re-seed Arthur, dan tahan drift instruksi.
+
+### Validasi
+- `tests/test_arthur_injection_defense.py` (baru, 22 test): detektor true utk 2 vektor + sibling, false utk 6 pesan builder sah, blok jadi blok terakhir, tidak muncul utk non-builder.
+- Full suite `tests/`: **859 passed**, 9 skipped, 1 fail PRE-EXISTING (`test_deploy_path.py::test_builder_coding_preset_instructs_vanilla_web_stack`, tidak terkait).
+- **Rekomendasi tetap**: naikkan model Arthur dari gpt-4.1-mini untuk ketahanan injection yang lebih tinggi (lapisan prompt+deterministik menaikkan bar, bukan jaminan absolut).
+
 ## 2026-06-24 — Arthur: Security Hardening — Anti-Prompt-Injection, Anti-Roleplay-Bypass, Harmful Agent Rejection
 
 Tim Security menemukan tiga kelemahan di instruksi Arthur (`system-message-builder.md`):
