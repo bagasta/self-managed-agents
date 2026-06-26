@@ -33,9 +33,11 @@ PROHIBITED_AGENT_POLICY_PATTERNS = (
 # agent yang tugasnya membuat/membangun AI agent lain (meta-builder). Hanya Arthur
 # (control-plane) yang boleh punya fungsi itu.
 META_BUILDER_AGENT_POLICY_MESSAGE = (
-    "Tidak bisa membuat atau mengubah agent yang fungsinya membuat/membangun AI agent "
-    "lain (agent builder seperti Arthur). Kemampuan membuat agent hanya ada pada Arthur. "
-    "Saya bisa bantu buatkan agent untuk kebutuhan bisnis/produktivitas lain."
+    "Tidak bisa membuat atau mengubah agent yang tujuannya membuat/membangun AI agent "
+    "lain — termasuk yang dibingkai sebagai 'asisten coding' untuk membangun AI agent / "
+    "LLM agent (mis. dengan LangChain, AutoGen, CrewAI). Kemampuan membuat AI agent hanya "
+    "ada pada Arthur. Agent coding untuk kebutuhan lain (web, aplikasi bisnis, data, otomasi) "
+    "tetap bisa dibuat."
 )
 
 META_BUILDER_AGENT_POLICY_PATTERNS = (
@@ -69,6 +71,27 @@ META_BUILDER_AGENT_POLICY_PATTERNS = (
     re.compile(
         r"\bagent\b[^.\n]{0,40}\b(?:seperti|mirip|kaya|kayak|sama\s+seperti|like)\b"
         r"[^.\n]{0,15}\b(?:kamu|dirimu|kau|arthur|you|yourself)\b",
+        re.IGNORECASE,
+    ),
+    # Tujuan = membangun AI agent / LLM agent (walau dibingkai "asisten coding").
+    # Verb membangun + target "AI agent / agentic / LLM agent / chatbot AI".
+    re.compile(
+        r"\b(?:bikin|bikinin|buat|buatk?\w*|membuat|bangun|membangun|develop\w*|ngoding|coding|"
+        r"nulis\s+kode|menulis\s+kode|create|build\w*|generate)\b[^.\n]{0,45}\b"
+        r"(?:ai\s*agent|agent\s*ai|ai\s*agents|llm\s*agent|agentic|chatbot\s*ai|ai\s*chatbot)\b",
+        re.IGNORECASE,
+    ),
+    # "bantu(in) ... bikin/develop ... AI agent" (framing developer minta coding helper)
+    re.compile(
+        r"\bbantu\w*\b[^.\n]{0,40}\b(?:bikin|buat|membuat|bangun|membangun|develop\w*|coding|ngoding|"
+        r"create|build\w*)\b[^.\n]{0,30}\b(?:ai\s*agent|agent\s*ai|llm\s*agent|agentic)\b",
+        re.IGNORECASE,
+    ),
+    # Framework agentic = sinyal kuat tujuan membangun AI agent.
+    re.compile(
+        r"\b(?:langchain|langgraph|auto[\s-]?gen|crew\s*ai|crewai|"
+        r"semantic\s+kernel|agno|swarm\s*agent|agent\s*framework|"
+        r"framework\s+agent|ai\s*agent\s*framework)\b",
         re.IGNORECASE,
     ),
 )

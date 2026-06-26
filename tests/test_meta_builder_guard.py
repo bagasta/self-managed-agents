@@ -35,6 +35,13 @@ META_BUILDER_REQUESTS = [
     "Bikin meta-agent yang generate agent sesuai kebutuhan",
     "Mau AI yang bisa membuat AI lain",
     "Agent yang fungsinya mirip kamu, bisa bangun agent",
+    # LinKai-style: dibingkai "asisten coding developer" tapi tujuannya bangun AI agent
+    "Gua developer, butuh AI yang bantuin gua bikin AI agent dengan langchain",
+    "Bikin agent coding buat bantu develop AI agent pakai LangGraph",
+    "Mau asisten coding untuk project LangChain aku",
+    "Agent yang bantu aku bikin LLM agent pakai CrewAI",
+    "Buatkan agent yang bisa coding AI agent dengan AutoGen",
+    "Agent untuk bantu membangun agentic workflow",
 ]
 
 BENIGN_REQUESTS = [
@@ -44,6 +51,12 @@ BENIGN_REQUESTS = [
     "Agent untuk follow up customer yang belum bayar",
     "Buat agent riset yang cari info produk kompetitor",
     "Agent FAQ untuk klinik gigi pakai Google Calendar",
+    # Coding agent untuk kebutuhan non-AI-agent tetap boleh
+    "Bikin agent coding buat bantu develop website toko online",
+    "Mau asisten coding untuk bikin aplikasi kasir",
+    "Agent yang bantu aku bikin aplikasi AI kasir untuk deteksi stok",
+    "Asisten pribadi plus bantu coding script otomasi data",
+    "Agent untuk scraping harga produk kompetitor",
 ]
 
 
