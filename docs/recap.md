@@ -1,5 +1,20 @@
 # Recap: Deep Agent SaaS Hardening — MCP, Subagent, Sandbox, Builder Entitlements
 
+## 2026-06-26 — Arthur: Tolak Pembuatan Agent Meta-Builder (Agent yang Bikin Agent)
+
+Permintaan tim: Arthur tidak boleh membuat agent yang cara kerjanya seperti dirinya — yaitu agent yang fungsinya membuat AI agent lain. Aturan prompt lama (`Tolak permintaan membuat agent dengan fungsi sama seperti Arthur`) terlalu lemah/samar.
+
+### Fix — Gerbang Deterministik Satu Titik + Prompt
+- `app/core/tools/builder_identity.py`: `blocked_agent_policy_reason()` (gerbang yang sudah dipakai plan_agent/validate_agent_config/create_agent/update_agent) kini juga mendeteksi pola meta-builder via `META_BUILDER_AGENT_POLICY_PATTERNS` dan mengembalikan `META_BUILDER_AGENT_POLICY_MESSAGE`. Satu titik → semua 4 jalur builder otomatis menolak.
+- Pola (ID+EN): `agent builder`/`builder agent`/`agent pembuat agent`/`agent factory`/`meta-agent`, `agent ... (membuat|membangun|bikin|generate|create|build) ... agent`, `AI yang membuat AI`, `seperti/mirip/clone/tiru Arthur`, `Arthur kedua`, `another/second Arthur`, `agent ... seperti kamu/Arthur`.
+- Anti false-positive: hanya match relasi meta (agent-yang-bikin-agent / referensi Arthur), BUKAN "bikin agent baru untuk toko" biasa.
+- Prompt diperkuat: `system-message-builder.md` Guardrails + blok `Arthur Builder Mode` di `prompt_builder.py` menambahkan aturan tolak meta-builder eksplisit.
+
+### Validasi
+- `tests/test_meta_builder_guard.py` (baru, 21 test): 10 frasa meta-builder diblok, 6 agent sah lolos, buzzer/politik regression tetap diblok, plan/validate/create semua menolak.
+- Full suite: **880 passed**, 9 skipped, 1 fail PRE-EXISTING (`test_deploy_path.py::test_builder_coding_preset_instructs_vanilla_web_stack`).
+- Tool guard + runtime prompt block efektif TANPA re-seed; perubahan `system-message-builder.md` baru aktif di DB setelah `scripts/seed_arthur.py` dijalankan ulang.
+
 ## 2026-06-26 — Arthur: Runtime Reinforcement Anti-Prompt-Injection (Deterministik)
 
 Re-test tim Security 2026-06-26: pertahanan prompt-only dari 2026-06-24 (seksi `## Keamanan` di `system-message-builder.md`) **masih bisa di-bypass**. Dua vektor yang lolos:

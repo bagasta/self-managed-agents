@@ -29,6 +29,50 @@ PROHIBITED_AGENT_POLICY_PATTERNS = (
     re.compile(r"\bpropaganda\b", re.IGNORECASE),
 )
 
+# Arthur tidak boleh membuat agent yang cara kerjanya seperti dirinya — yaitu
+# agent yang tugasnya membuat/membangun AI agent lain (meta-builder). Hanya Arthur
+# (control-plane) yang boleh punya fungsi itu.
+META_BUILDER_AGENT_POLICY_MESSAGE = (
+    "Tidak bisa membuat atau mengubah agent yang fungsinya membuat/membangun AI agent "
+    "lain (agent builder seperti Arthur). Kemampuan membuat agent hanya ada pada Arthur. "
+    "Saya bisa bantu buatkan agent untuk kebutuhan bisnis/produktivitas lain."
+)
+
+META_BUILDER_AGENT_POLICY_PATTERNS = (
+    # "agent builder" / "builder agent" / "agent pembuat agent" / "pembuat agent"
+    re.compile(r"\bagent\s*builder\b", re.IGNORECASE),
+    re.compile(r"\bbuilder\s*agent\b", re.IGNORECASE),
+    re.compile(r"\b(?:pembuat|pencipta|pabrik)\s+(?:ai\s+)?agent\b", re.IGNORECASE),
+    re.compile(r"\bagent\s+(?:factory|builder|maker)\b", re.IGNORECASE),
+    re.compile(r"\bmeta[\s-]*agent\b", re.IGNORECASE),
+    # "agent yang/untuk/bisa ... (membuat|membangun|bikin|generate|create|build) ... agent"
+    re.compile(
+        r"\bagent\b[^.\n]{0,50}\b(?:membuat|membangun|bikin|menciptakan|generate|generates|"
+        r"create|creates|build|builds|spin\s*up)\b[^.\n]{0,30}\b(?:ai\s+)?agent",
+        re.IGNORECASE,
+    ),
+    # "AI yang membuat AI" / "AI pembuat AI"
+    re.compile(
+        r"\bai\b[^.\n]{0,30}\b(?:membuat|bikin|membangun|create|creates|build|builds|pembuat)\b"
+        r"[^.\n]{0,20}\bai\b",
+        re.IGNORECASE,
+    ),
+    # "seperti/mirip/kaya Arthur" / "Arthur kedua" / "another/second Arthur"
+    re.compile(
+        r"\b(?:seperti|mirip|kaya|kayak|persis|clone|kloning|tiru|meniru|duplikat|"
+        r"salin|copy|menyalin)\b[^.\n]{0,20}\barthur\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\barthur\b[^.\n]{0,15}\b(?:kedua|lain|baru|ke-?2)\b", re.IGNORECASE),
+    re.compile(r"\b(?:another|second|new|other)\s+arthur\b", re.IGNORECASE),
+    # "agent yang kerjanya/fungsinya seperti kamu (Arthur)"
+    re.compile(
+        r"\bagent\b[^.\n]{0,40}\b(?:seperti|mirip|kaya|kayak|sama\s+seperti|like)\b"
+        r"[^.\n]{0,15}\b(?:kamu|dirimu|kau|arthur|you|yourself)\b",
+        re.IGNORECASE,
+    ),
+)
+
 
 def blocked_agent_policy_reason(*parts: Any) -> str:
     text = "\n".join(str(part or "") for part in parts)
@@ -37,6 +81,9 @@ def blocked_agent_policy_reason(*parts: Any) -> str:
     for pattern in PROHIBITED_AGENT_POLICY_PATTERNS:
         if pattern.search(text):
             return PROHIBITED_AGENT_POLICY_MESSAGE
+    for pattern in META_BUILDER_AGENT_POLICY_PATTERNS:
+        if pattern.search(text):
+            return META_BUILDER_AGENT_POLICY_MESSAGE
     return ""
 
 

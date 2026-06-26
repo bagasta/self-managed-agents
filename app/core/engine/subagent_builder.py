@@ -246,7 +246,7 @@ _SYSTEM_SUBAGENTS: list[dict] = [
             "Untuk backend/API non-web jika benar-benar perlu: execute('pip install <package>') atau execute('npm install <package>'). "
             "Untuk website/frontend, jangan install dependency."
         ),
-        "model": "moonshotai/kimi-k2.6",
+        "model": "deepseek/deepseek-v4-pro",
         "max_tokens": 32768,
         "tools_config": {"sandbox": True, "deploy": True, "http": False},
     },
