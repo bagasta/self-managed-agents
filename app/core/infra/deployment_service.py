@@ -128,18 +128,26 @@ def deployment_cleanup_interval_seconds() -> int:
     return max(60, _DEPLOYMENT_CLEANUP_INTERVAL_SECONDS)
 
 
+def _force_remove(client: docker.DockerClient, name: str) -> bool:
+    """Remove a container by name, tolerating absence and transient daemon errors.
+
+    Returns True if a container was actually removed. Never raises — a failed
+    removal must not abort a deploy (the caller retries / recreates).
+    """
+    try:
+        client.containers.get(name).remove(force=True)
+        log.info("deployment.removed_container", name=name)
+        return True
+    except docker.errors.NotFound:
+        return False
+    except Exception as exc:  # noqa: BLE001 - cleanup must never crash deploy
+        log.warning("deployment.remove_failed", name=name, error=str(exc)[:200])
+        return False
+
+
 def _kill_existing(client: docker.DockerClient, session_id: str) -> int:
     app_name, cf_name, _ = _names(session_id)
-    removed = 0
-    for name in [cf_name, app_name]:
-        try:
-            c = client.containers.get(name)
-            c.remove(force=True)
-            removed += 1
-            log.info("deployment.removed_container", name=name)
-        except docker.errors.NotFound:
-            pass
-    return removed
+    return sum(_force_remove(client, name) for name in (cf_name, app_name))
 
 
 def _evict_expired(client: docker.DockerClient) -> int:
@@ -310,6 +318,11 @@ def deploy_app(
 
     # CF container shares the app container's network namespace — needs container ID
     for attempt in range(3):
+        # Clear any stale/partial CF container holding the deterministic name before
+        # each attempt. A leftover from a prior attempt or a racing same-session deploy
+        # makes containers.run fail with 409 Conflict ("name already in use"); without
+        # this, all 3 retries hit the same conflict and the deploy fails permanently.
+        _force_remove(client, cf_name)
         try:
             client.containers.run(
                 _CF_IMAGE,
@@ -328,8 +341,12 @@ def deploy_app(
             log.info("deployment.cf_started", name=cf_name, attempt=attempt)
             break
         except Exception as exc:
+            log.warning(
+                "deployment.cf_start_failed", name=cf_name, attempt=attempt, error=str(exc)[:200]
+            )
             if attempt == 2:
-                app_container.remove(force=True)
+                _force_remove(client, cf_name)
+                _force_remove(client, app_name)
                 return {"error": f"Failed to start cloudflared after 3 attempts: {exc}"}
             time.sleep(1)
 
