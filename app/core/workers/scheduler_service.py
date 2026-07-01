@@ -1,7 +1,7 @@
 """
 APScheduler service — proactive agent engine.
 
-Setiap menit, cek scheduled_jobs yang sudah waktunya dijalankan,
+Secara berkala, cek scheduled_jobs yang sudah waktunya dijalankan,
 inject payload-nya sebagai user message ke session agent yang bersangkutan,
 lalu kirim hasilnya via channel_service.
 
@@ -12,12 +12,12 @@ Lifecycle:
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from sqlalchemy import select
+from sqlalchemy import case, or_, select
 
 logger = structlog.get_logger(__name__)
 _scheduler: AsyncIOScheduler | None = None
@@ -25,6 +25,28 @@ _scheduler: AsyncIOScheduler | None = None
 # Concurrency limit: max parallel scheduler jobs to prevent resource exhaustion
 _MAX_CONCURRENT_JOBS = 5
 _job_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_JOBS)
+_TICK_INTERVAL_SECONDS = 10
+_RUNNING_JOB_STALE_AFTER = timedelta(minutes=15)
+_running_tasks: set[asyncio.Task] = set()
+
+
+def _track_task(task: asyncio.Task) -> None:
+    _running_tasks.add(task)
+
+    def _on_done(done: asyncio.Task) -> None:
+        _running_tasks.discard(done)
+        try:
+            exc = done.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is not None:
+            logger.error(
+                "scheduler_service.background_task_error",
+                error=str(exc),
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+
+    task.add_done_callback(_on_done)
 
 
 def _scheduled_channel_config(session: Any, agent_model: Any) -> dict[str, Any]:
@@ -68,33 +90,50 @@ async def _send_scheduled_channel_message(session: Any, agent_model: Any, text: 
 async def _tick() -> None:
     """Cek dan jalankan semua scheduled_jobs yang sudah waktunya."""
     from app.database import AsyncSessionLocal
-    from app.models.agent import Agent
     from app.models.scheduled_job import ScheduledJob
-    from app.models.session import Session
 
     now = datetime.now(timezone.utc)
+    stale_before = now - _RUNNING_JOB_STALE_AFTER
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(ScheduledJob).where(
-                ScheduledJob.status == "active",
                 ScheduledJob.next_run_at <= now,
+                or_(
+                    ScheduledJob.status == "active",
+                    (
+                        (ScheduledJob.status == "running")
+                        & (ScheduledJob.last_run_at <= stale_before)
+                    ),
+                ),
             )
+            .order_by(
+                case((ScheduledJob.payload == "[HEARTBEAT]", 1), else_=0),
+                ScheduledJob.next_run_at,
+                ScheduledJob.created_at,
+            )
+            .with_for_update(skip_locked=True)
         )
         jobs = list(result.scalars().all())
+
+        for job in jobs:
+            job.status = "running"
+            job.last_run_at = now
+
+        if jobs:
+            await db.commit()
 
     if not jobs:
         return
 
-    logger.info("scheduler_service.tick", due_jobs=len(jobs))
+    logger.info("scheduler_service.tick", due_jobs=len(jobs), interval_seconds=_TICK_INTERVAL_SECONDS)
 
     tasks = []
     for job in jobs:
         tasks.append(asyncio.create_task(_run_job_guarded(job.id)))
 
-    # Wait for all jobs to finish (or fail) before returning
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
+    for task in tasks:
+        _track_task(task)
 
 
 async def _run_job_guarded(job_id) -> None:
@@ -212,7 +251,7 @@ async def _run_job(job_id) -> None:
     async with AsyncSessionLocal() as db:
         job_result = await db.execute(select(ScheduledJob).where(ScheduledJob.id == job_id))
         job = job_result.scalar_one_or_none()
-        if not job or job.status != "active":
+        if not job or job.status not in {"active", "running"}:
             return
 
         agent_result = await db.execute(select(Agent).where(Agent.id == job.agent_id))
@@ -241,8 +280,10 @@ async def _run_job(job_id) -> None:
                         now_local = now.astimezone(local_tz)
                         next_local = croniter(job.cron_expr, now_local).get_next(datetime)
                         job.next_run_at = next_local.astimezone(timezone.utc)
+                        job.status = "active"
                     except Exception:
                         job.next_run_at = now + timedelta(minutes=30)
+                        job.status = "active"
                 else:
                     job.status = "done"
                 await db.commit()
@@ -300,21 +341,21 @@ async def _run_job(job_id) -> None:
             job.last_run_at = now
 
             if delivery_failed:
-                from datetime import timedelta
                 job.next_run_at = now + timedelta(minutes=1)
+                job.status = "active"
                 log.warning("scheduler_service.job_retry_scheduled", next_run=str(job.next_run_at))
             elif job.cron_expr:
                 try:
-                    from datetime import timedelta
                     from croniter import croniter
                     # Cron dievaluasi dalam WIB (UTC+7), lalu konversi ke UTC untuk disimpan
                     local_tz = timezone(timedelta(hours=7))
                     now_local = now.astimezone(local_tz)
                     next_local = croniter(job.cron_expr, now_local).get_next(datetime)
                     job.next_run_at = next_local.astimezone(timezone.utc)
+                    job.status = "active"
                 except ImportError:
-                    from datetime import timedelta
                     job.next_run_at = now + timedelta(hours=1)
+                    job.status = "active"
             else:
                 # One-time job selesai
                 job.status = "done"
@@ -327,7 +368,15 @@ async def _run_job(job_id) -> None:
 def start_scheduler() -> None:
     global _scheduler
     _scheduler = AsyncIOScheduler(timezone="UTC")
-    _scheduler.add_job(_tick, "interval", minutes=1, id="proactive_tick", replace_existing=True)
+    _scheduler.add_job(
+        _tick,
+        "interval",
+        seconds=_TICK_INTERVAL_SECONDS,
+        id="proactive_tick",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
     _scheduler.start()
     logger.info("scheduler_service.started")
 
@@ -383,7 +432,7 @@ async def run_scheduler_loop() -> None:
         except Exception as exc:
             logger.error("scheduler_worker.tick_error", error=str(exc))
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=60)
+            await asyncio.wait_for(stop_event.wait(), timeout=_TICK_INTERVAL_SECONDS)
         except asyncio.TimeoutError:
             pass
 

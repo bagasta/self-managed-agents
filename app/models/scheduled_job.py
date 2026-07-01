@@ -31,7 +31,7 @@ class ScheduledJob(Base):
     run_once_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # The message payload injected as a user message when the job fires
     payload: Mapped[str] = mapped_column(Text, nullable=False)
-    # active | paused | cancelled | done
+    # active | running | paused | cancelled | done
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
