@@ -269,14 +269,14 @@ async def _run_job(job_id) -> None:
             )
             reply = result.get("reply", "")
 
-            # Fallback: jika agent tidak menghasilkan reply teks, kirim payload langsung
-            # Ini terjadi jika LLM salah menginterpretasi [SCHEDULED] dan tidak membuat reply
-            if not reply:
+            # Fallback: agent salah membalas HEARTBEAT_OK (terpengaruh instruksi heartbeat)
+            # atau tidak menghasilkan reply — kirim payload langsung sebagai jaring pengaman.
+            if not reply or reply.upper().startswith("HEARTBEAT_OK"):
                 reply = job.payload
                 log.warning(
-                    "scheduler_service.empty_reply_fallback",
+                    "scheduler_service.reminder_fallback",
                     label=job.label,
-                    note="agent returned empty reply, sending payload directly",
+                    note="agent returned empty/HEARTBEAT_OK, sending payload directly",
                 )
 
             # Publish ke SSE event bus (in-app / UI real-time)

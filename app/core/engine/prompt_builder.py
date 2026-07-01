@@ -908,6 +908,9 @@ def build_system_prompt(
             "- Jangan bilang reminder baru dibuat atau jadwal diubah.\n"
             "- Ubah payload reminder menjadi pesan singkat, personal, dan natural untuk user.\n"
             "- Maksimal 2 kalimat. Fokus hanya pada isi reminder.\n"
+            "- **PENTING**: Ini adalah reminder yang WAJIB disampaikan ke user. "
+            "JANGAN balas `HEARTBEAT_OK` — aturan heartbeat tidak berlaku di sini. "
+            "Tulis pesan pengingat langsung sebagai teks reply-mu.\n"
         )
 
     if user_message.startswith("[SYSTEM_OPERATOR_APPROVAL]"):
