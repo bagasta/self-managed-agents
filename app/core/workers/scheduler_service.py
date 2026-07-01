@@ -261,23 +261,9 @@ async def _run_job(job_id) -> None:
         delivery_failed = False
 
         try:
-            result = await run_agent(
-                agent_model=agent_model,
-                session=session,
-                user_message=f"[SCHEDULED_REMINDER] {job.payload}",
-                db=db,
-            )
-            reply = result.get("reply", "")
-
-            # Fallback: agent salah membalas HEARTBEAT_OK (terpengaruh instruksi heartbeat)
-            # atau tidak menghasilkan reply — kirim payload langsung sebagai jaring pengaman.
-            if not reply or reply.upper().startswith("HEARTBEAT_OK"):
-                reply = job.payload
-                log.warning(
-                    "scheduler_service.reminder_fallback",
-                    label=job.label,
-                    note="agent returned empty/HEARTBEAT_OK, sending payload directly",
-                )
+            # Kirim payload reminder langsung tanpa LLM — menghilangkan latensi 2-3 menit
+            # dari full agent run. Reminder harus tepat waktu; formatting natural nomor dua.
+            reply = job.payload
 
             # Publish ke SSE event bus (in-app / UI real-time)
             # Diisolasi: error event_bus tidak boleh memblokir pengiriman ke channel eksternal
@@ -288,7 +274,6 @@ async def _run_job(job_id) -> None:
                     "type": "scheduled_message",
                     "label": job.label,
                     "reply": reply,
-                    "run_id": str(result.get("run_id", "")),
                 })
                 log.info("scheduler_service.event_published")
             except Exception as bus_exc:
