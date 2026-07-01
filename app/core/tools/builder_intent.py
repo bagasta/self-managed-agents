@@ -43,6 +43,15 @@ def _detect_preset(goal_lower: str, features: list[str], channel: str) -> str:
 
     import re
 
+    # Spaceless-input recovery: user kadang mengetik goal tanpa spasi sama sekali
+    # ("buatagentcodingdeploywebsite"). Word-boundary `\b` lalu tidak pernah cocok,
+    # sehingga preset jatuh ke fallback non-sandbox. Deteksi blob tanpa spasi lewat
+    # run alfanumerik terpanjang; hanya lalu pakai substring match untuk keyword
+    # distinktif (>=5 char, di-despace) supaya "app"/"web"/"cs" tidak ikut memicu.
+    _goal_nospace = re.sub(r"\s+", "", goal_lower)
+    _longest_run = max((len(m) for m in re.findall(r"[a-z0-9]+", goal_lower)), default=0)
+    _spaceless_blob = _longest_run > 15
+
     def has_keyword(kw_set: set) -> bool:
         for kw in kw_set:
             # Word-boundary match to avoid "app" matching "whatsapp", "web" matching "webhook"
@@ -50,6 +59,10 @@ def _detect_preset(goal_lower: str, features: list[str], channel: str) -> str:
                 return True
             if kw in features:
                 return True
+            if _spaceless_blob:
+                kw_nospace = kw.replace(" ", "")
+                if len(kw_nospace) >= 5 and kw_nospace in _goal_nospace:
+                    return True
         return False
 
     def has_data_analyst_signal() -> bool:

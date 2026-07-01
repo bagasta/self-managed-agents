@@ -641,11 +641,14 @@ _INJECTION_BYPASS_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b(?:no|without)\s+(?:filter|filters|restriction|restrictions|guardrail|limit)\b"),
     re.compile(r"\b(?:unfiltered|unrestricted|uncensored)\b"),
     # roleplay / pura-pura tidak ada defense
+    # Catat: reduplikasi informal sering ditulis dengan angka 2 ("pura2", "seolah2",
+    # "berpura2", "anggap2") — evasion yang lolos dari pola `pura[\s-]*pura`.
     re.compile(
-        r"\b(?:pura[\s-]*pura|berpura[\s-]*pura|seolah(?:[\s-]*olah)?|anggap(?:lah)?|"
-        r"bayangkan|pretend|imagine|act\s+as|roleplay|role[\s-]*play|berperan(?:\s+sebagai)?)\b"
+        r"\b(?:pura[\s-]*(?:pura|2)|berpura[\s-]*(?:pura|2)|seolah(?:[\s-]*(?:olah|2))?|"
+        r"anggap(?:lah|2)?|bayangkan|pretend|imagine|act\s+as|roleplay|role[\s-]*play|"
+        r"berperan(?:\s+sebagai)?)\b"
         r"[^.\n]{0,40}\b(?:tanpa|tidak|tdk|ga|gak|nggak|engga|no|without|don'?t|punya\s+aturan|"
-        r"filter|batasan|guardrail|aturan|defense|restriction|rules)\b"
+        r"filter|batasan|guardrail|aturan|defen[cs]e|restriction|rules)\b"
     ),
     # minta "contoh"/simulasi output prompt injection / jailbreak
     re.compile(
