@@ -11,6 +11,7 @@ load_dotenv()
 from app.database import Base
 from app.models import Agent, Document, Message, Session  # noqa: F401
 from app.models.subscription import User, SubscriptionPlan, UserSubscription, TokenTopup  # noqa: F401
+from app.models.wa_link_code import WaLinkCode  # noqa: F401
 
 config = context.config
 

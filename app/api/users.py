@@ -329,3 +329,65 @@ async def phone_login(
         created_at=user.created_at,
         subscription=subscription_dict,
     )
+
+
+# ---------------------------------------------------------------------------
+# WhatsApp linking — one-time code shown in dashboard, claimed via Arthur
+# ---------------------------------------------------------------------------
+
+class WaLinkCodeResponse(BaseModel):
+    user_id: uuid.UUID
+    code: str
+    expires_at: datetime
+
+
+class WaLinkClaimRequest(BaseModel):
+    code: str = Field(..., description="Kode link dari dashboard")
+    phone_number: str = Field(..., description="Nomor WA yang mau dihubungkan (format: 628xxx)")
+
+
+@router.post(
+    "/{user_id}/wa-link-code",
+    response_model=WaLinkCodeResponse,
+    summary="Generate kode link WhatsApp untuk user dashboard",
+    description=(
+        "Dipanggil backend website; kode ditampilkan di dashboard lalu user "
+        "mengirimkannya ke Arthur via WhatsApp untuk menghubungkan nomornya. "
+        "Kode sekali pakai, kedaluwarsa 15 menit. Admin-only (X-API-Key)."
+    ),
+)
+async def create_wa_link_code(
+    user_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(verify_api_key),
+) -> WaLinkCodeResponse:
+    from app.core.domain.wa_link_service import generate_wa_link_code
+
+    try:
+        link = await generate_wa_link_code(user_id, db)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    await db.commit()
+    return WaLinkCodeResponse(user_id=user_id, code=link.code, expires_at=link.expires_at)
+
+
+@router.post(
+    "/wa-link/claim",
+    summary="Klaim kode link WhatsApp secara manual",
+    description=(
+        "Jalur manual/support untuk menghubungkan nomor WA ke akun dashboard "
+        "tanpa lewat Arthur. Admin-only (X-API-Key)."
+    ),
+)
+async def claim_wa_link(
+    payload: WaLinkClaimRequest,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(verify_api_key),
+) -> dict:
+    from app.core.domain.wa_link_service import claim_wa_link_code
+
+    result = await claim_wa_link_code(payload.code, db, sender_ids=[payload.phone_number])
+    if result.get("error"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["error"])
+    await db.commit()
+    return result

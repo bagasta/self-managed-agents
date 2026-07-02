@@ -6,6 +6,7 @@ Hanya dimuat jika agent memiliki capability 'builder' atau 'system'.
 Tools yang di-expose:
   get_platform_capabilities()           — ringkasan kapabilitas platform
   get_user_subscription(phone)          — cek plan, slot agent, dan status subscription user
+  link_dashboard_account(code)          — hubungkan nomor WA pengirim ke akun dashboard via kode link
   get_presets()                         — katalog preset agent siap pakai
   plan_agent(...)                       — structured plan sebelum create
   compose_agent_blueprint(...)          — rancang workflow & knowledge plan custom per bisnis
@@ -387,6 +388,7 @@ def build_builder_tools(
         read_tools["get_self_config"],
         read_tools["get_platform_capabilities"],
         user_tools["get_user_subscription"],
+        user_tools["link_dashboard_account"],
         read_tools["get_presets"],
         planning_tools["plan_agent"],
         blueprint_tools["compose_agent_blueprint"],

@@ -276,7 +276,42 @@ def build_builder_user_tools(
             logger.error("builder_tools.get_user_subscription.error", error=str(exc))
             return json.dumps({"error": str(exc)}, ensure_ascii=False)
 
+    @tool
+    async def link_dashboard_account(code: str) -> str:
+        """
+        Hubungkan nomor WhatsApp pengirim sesi ini ke akun dashboard Clevio.
+
+        Pakai saat plan yang terbaca tidak sesuai klaim user (misal dashboard
+        sudah Enterprise tapi di sini terbaca Trial) atau saat status
+        identity_unlinked. Minta user generate kode dari Dashboard →
+        Settings → "Hubungkan WhatsApp", lalu kirim kodenya ke chat ini.
+
+        Identitas yang di-link SELALU nomor pengirim sesi terverifikasi —
+        bukan nomor yang disebut user di teks chat.
+
+        Args:
+            code: Kode link 6 karakter dari dashboard.
+        """
+        try:
+            from app.core.domain.wa_link_service import claim_wa_link_code
+
+            async with db_factory() as db:
+                result = await claim_wa_link_code(
+                    code,
+                    db,
+                    sender_ids=[owner_phone, default_target],
+                )
+                if result.get("success"):
+                    await db.commit()
+                else:
+                    await db.rollback()
+                return json.dumps(result, ensure_ascii=False)
+        except Exception as exc:
+            logger.error("builder_tools.link_dashboard_account.error", error=str(exc))
+            return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
     return {
         "preview_agent_creation_entitlement": preview_agent_creation_entitlement,
         "get_user_subscription": get_user_subscription,
+        "link_dashboard_account": link_dashboard_account,
     }

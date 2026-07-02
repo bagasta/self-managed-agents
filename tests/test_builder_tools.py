@@ -181,7 +181,7 @@ class TestBuilderToolsReturnsList:
         from app.core.tools.builder_tools import build_builder_tools
         db = _make_mock_db()
         tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
-        assert len(tools) == 21, f"Harus ada 21 tools, dapat {len(tools)}"
+        assert len(tools) == 22, f"Harus ada 21 tools, dapat {len(tools)}"
 
     def test_all_tools_have_name(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -206,6 +206,7 @@ class TestBuilderToolsReturnsList:
             "get_self_config",
             "get_platform_capabilities",
             "get_user_subscription",
+            "link_dashboard_account",
             "get_presets",
             "plan_agent",
             "compose_agent_blueprint",
@@ -231,7 +232,7 @@ class TestBuilderToolsReturnsList:
         from app.core.tools.builder_tools import build_builder_tools
         db = _make_mock_db()
         tools = build_builder_tools(db_factory=db, owner_phone=None)
-        assert len(tools) == 21
+        assert len(tools) == 22
 
     def test_travel_planning_request_uses_personal_assistant_not_faq(self):
         from app.core.tools.builder_tools import build_builder_tools
