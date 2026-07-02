@@ -265,6 +265,13 @@ async def update_user(
     if payload.email_verified is not None:
         user.email_verified = payload.email_verified
     if payload.phone_number is not None:
+        from app.core.tools.builder_identity import is_probable_lid
+
+        if is_probable_lid(payload.phone_number):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="phone_number harus nomor asli, bukan LID WhatsApp. LID di-link via wa-link-code.",
+            )
         user.phone_number = payload.phone_number
 
     await db.flush()
@@ -296,7 +303,7 @@ async def phone_login(
     user = (
         await db.execute(
             select(User).where(
-                or_(User.phone_number == phone, User.external_id == phone)
+                or_(User.phone_number == phone, User.external_id == phone, User.wa_lid == phone)
             )
         )
     ).scalar_one_or_none()

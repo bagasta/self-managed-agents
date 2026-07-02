@@ -156,6 +156,7 @@ async def get_or_create_wa_user(
                 or_(
                     User.external_id == external_id,
                     User.phone_number == external_id,
+                    User.wa_lid == external_id,
                 )
             )
         )
@@ -274,6 +275,7 @@ async def get_subscription_by_external_id(
                 or_(
                     User.external_id == external_id,
                     User.phone_number == external_id,
+                    User.wa_lid == external_id,
                 )
             )
         )
@@ -334,6 +336,7 @@ async def get_best_subscription_by_external_ids(
     if identifiers:
         clauses.append(User.external_id.in_(identifiers))
         clauses.append(User.phone_number.in_(identifiers))
+        clauses.append(User.wa_lid.in_(identifiers))
     if user_ids:
         clauses.append(User.id.in_(user_ids))
     if not clauses:
@@ -358,6 +361,8 @@ async def get_best_subscription_by_external_ids(
             order.get(normalize_phone(str(getattr(user, "external_id", "") or "")), 999),
             order.get(str(getattr(user, "phone_number", "") or "").strip(), 999),
             order.get(normalize_phone(str(getattr(user, "phone_number", "") or "")), 999),
+            order.get(str(getattr(user, "wa_lid", "") or "").strip(), 999),
+            order.get(normalize_phone(str(getattr(user, "wa_lid", "") or "")), 999),
         ]
         return min(matches)
 

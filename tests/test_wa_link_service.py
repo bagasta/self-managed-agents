@@ -54,6 +54,7 @@ def _dashboard_user(**overrides):
         email="bagas@clevio.co",
         full_name="Bagas",
         phone_number=None,
+        wa_lid=None,
         external_id="dashboard-bagas",
     )
     defaults.update(overrides)
@@ -164,8 +165,8 @@ async def test_claim_requires_sender_identity() -> None:
 
 
 @pytest.mark.asyncio
-async def test_claim_falls_back_to_lid_identity_when_no_real_phone() -> None:
-    lid = "1234567890123456789"  # >15 digits → probable LID
+async def test_claim_lid_only_sender_never_touches_phone_number() -> None:
+    lid = "74350933852232"
     link = _link_row("ABC234")
     dashboard = _dashboard_user(id=link.user_id)
     db = _FakeDb([
@@ -175,7 +176,33 @@ async def test_claim_falls_back_to_lid_identity_when_no_real_phone() -> None:
         _FakeResult(first=None),        # no subscription row
     ])
 
-    result = await claim_wa_link_code("ABC234", db, sender_ids=[f"{lid}@lid"])
+    # Same digits arrive both with and without @lid suffix — must be LID.
+    result = await claim_wa_link_code("ABC234", db, sender_ids=[f"+{lid}", f"{lid}@lid"])
 
     assert result["success"] is True
-    assert dashboard.phone_number == lid
+    assert dashboard.phone_number is None
+    assert dashboard.wa_lid == lid
+    assert result["linked_lid"] == lid
+    assert result["linked_phone"] is None
+
+
+@pytest.mark.asyncio
+async def test_claim_links_both_real_phone_and_lid_to_their_own_fields() -> None:
+    link = _link_row("ABC234")
+    dashboard = _dashboard_user(id=link.user_id)
+    db = _FakeDb([
+        _FakeResult(scalars_list=[link]),
+        _FakeResult(scalar=dashboard),
+        _FakeResult(scalars_list=[]),
+        _FakeResult(first=None),
+    ])
+
+    result = await claim_wa_link_code(
+        "ABC234",
+        db,
+        sender_ids=["62895626765423@s.whatsapp.net", "74350933852232@lid"],
+    )
+
+    assert result["success"] is True
+    assert dashboard.phone_number == "62895626765423"
+    assert dashboard.wa_lid == "74350933852232"

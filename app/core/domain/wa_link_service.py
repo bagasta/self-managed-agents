@@ -21,7 +21,7 @@ import structlog
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.tools.builder_identity import best_owner_identifier
+from app.core.tools.builder_identity import is_probable_lid
 from app.core.utils.phone_utils import normalize_phone
 from app.models.subscription import SubscriptionPlan, User, UserSubscription
 from app.models.wa_link_code import WaLinkCode
@@ -45,6 +45,38 @@ def normalize_wa_link_code(code: str | None) -> str:
 
 def _generate_code_value() -> str:
     return "".join(secrets.choice(_CODE_ALPHABET) for _ in range(_CODE_LENGTH))
+
+
+def _classify_sender_identity(sender_ids: list[str | None]) -> tuple[str | None, str | None]:
+    """Split sender identifiers into (real_phone, lid).
+
+    A bare numeric alias can't always be told apart from a phone number, so
+    digits that appear anywhere with an ``@lid`` suffix (or that trip the
+    length heuristic) are classified as LID even when another variant of the
+    same digits arrives without the suffix. LID must NEVER be stored as
+    phone_number.
+    """
+    lid_digits: set[str] = set()
+    normalized: list[tuple[str, str]] = []  # (raw, normalized)
+    for raw in sender_ids:
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        digits = normalize_phone(value)
+        if not digits:
+            continue
+        normalized.append((value, digits))
+        if is_probable_lid(value):
+            lid_digits.add(digits)
+
+    real_phone: str | None = None
+    lid: str | None = None
+    for _raw, digits in normalized:
+        if digits in lid_digits:
+            lid = lid or digits
+        else:
+            real_phone = real_phone or digits
+    return real_phone, lid
 
 
 async def generate_wa_link_code(
@@ -103,7 +135,8 @@ async def claim_wa_link_code(
     if len(normalized_code) != _CODE_LENGTH:
         return {"error": f"Kode harus {_CODE_LENGTH} karakter."}
 
-    identity = best_owner_identifier(*sender_ids)
+    real_phone, lid = _classify_sender_identity(sender_ids)
+    identity = real_phone or lid
     if not identity:
         return {
             "error": (
@@ -146,7 +179,11 @@ async def claim_wa_link_code(
     duplicates = (
         await db.execute(
             select(User).where(
-                or_(User.external_id.in_(variants), User.phone_number.in_(variants)),
+                or_(
+                    User.external_id.in_(variants),
+                    User.phone_number.in_(variants),
+                    User.wa_lid.in_(variants),
+                ),
                 User.id != user.id,
             )
         )
@@ -164,6 +201,7 @@ async def claim_wa_link_code(
         old_external = str(dup.external_id or "")
         dup.external_id = f"merged:{old_external}"[:64]
         dup.phone_number = None
+        dup.wa_lid = None
         archived.append(str(dup.id))
         logger.info(
             "wa_link.placeholder_user_archived",
@@ -171,7 +209,11 @@ async def claim_wa_link_code(
             merged_into=str(user.id),
         )
 
-    user.phone_number = identity
+    # phone_number hanya untuk nomor asli; LID disimpan terpisah di wa_lid.
+    if real_phone:
+        user.phone_number = real_phone
+    if lid:
+        user.wa_lid = lid
     link.used_at = now
     link.claimed_identity = identity
 
@@ -203,6 +245,8 @@ async def claim_wa_link_code(
         "email": user.email,
         "full_name": user.full_name,
         "linked_identity": identity,
+        "linked_phone": real_phone,
+        "linked_lid": lid,
         "plan_code": plan_code,
         "plan_label": plan_label,
         "subscription_status": sub_status,

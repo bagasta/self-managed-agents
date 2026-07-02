@@ -16,6 +16,9 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     phone_number: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # WhatsApp LID alias (ID internal WA, bukan nomor asli). Jangan pernah
+    # simpan LID di phone_number; lookup subscription mencocokkan kedua kolom.
+    wa_lid: Mapped[str | None] = mapped_column(String(64), nullable=True)
     external_id: Mapped[str] = mapped_column(String(64), nullable=False)
     has_used_trial: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     email_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
