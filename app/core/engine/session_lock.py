@@ -158,6 +158,25 @@ async def session_run_lock(session_id: UUID) -> AsyncIterator[None]:
 _active_tasks: dict[UUID, asyncio.Task] = {}
 _task_registry_lock = asyncio.Lock()
 
+# Monotonic per-session turn marker.  This prevents a burst of queued requests
+# from running one-by-one after the newest message has already superseded them.
+_turn_generations: dict[UUID, int] = {}
+_turn_generation_lock = asyncio.Lock()
+
+
+async def mark_latest_session_turn(session_id: UUID) -> int:
+    """Return a generation token for the newest inbound turn on this session."""
+    async with _turn_generation_lock:
+        generation = _turn_generations.get(session_id, 0) + 1
+        _turn_generations[session_id] = generation
+        return generation
+
+
+async def is_latest_session_turn(session_id: UUID, generation: int) -> bool:
+    """True if `generation` still represents the newest queued/running turn."""
+    async with _turn_generation_lock:
+        return _turn_generations.get(session_id, 0) == generation
+
 
 async def register_active_task(session_id: UUID, task: asyncio.Task) -> None:
     """Register the asyncio.Task currently handling a session run."""

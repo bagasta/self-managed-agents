@@ -10,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.engine.agent_runner import run_agent
 from app.core.engine.session_lock import (
     cancel_active_run,
+    is_latest_session_turn,
+    mark_latest_session_turn,
     register_active_task,
     session_run_lock,
     unregister_active_task,
@@ -106,6 +108,11 @@ async def send_message(
             run_id=None,
         )
 
+    # Mark this inbound message as the latest turn before cancelling/waiting.
+    # Spam bursts can otherwise queue many HTTP handlers behind the session lock
+    # and replay stale prompts/replies one-by-one after the active run ends.
+    turn_generation = await mark_latest_session_turn(session_id)
+
     # Cancel any in-progress run for this session (human interrupt).
     # This handles the case where user sends a new message while the agent
     # is still working (e.g. subagent taking too long).
@@ -113,6 +120,8 @@ async def send_message(
 
     try:
         async with session_run_lock(session_id):
+            if not await is_latest_session_turn(session_id, turn_generation):
+                return MessageResponse(reply="", steps=[], run_id=None)
             current_task = asyncio.current_task()
             if current_task:
                 await register_active_task(session_id, current_task)
@@ -123,6 +132,8 @@ async def send_message(
                 db=db,
                 prior_run_was_interrupted=_prior_interrupted,
             )
+            if not await is_latest_session_turn(session_id, turn_generation):
+                return MessageResponse(reply="", steps=[], run_id=result.get("run_id"))
     except asyncio.CancelledError:
         # This run was interrupted by a subsequent message from the same user.
         # The new request will handle the reply — nothing to return here.

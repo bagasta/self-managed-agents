@@ -1511,6 +1511,8 @@ async def incoming_message(
     # --- Jalankan agent ---
     from app.core.engine.session_lock import (
         cancel_active_run,
+        is_latest_session_turn,
+        mark_latest_session_turn,
         register_active_task,
         session_run_lock,
         unregister_active_task,
@@ -1519,11 +1521,20 @@ async def incoming_message(
 
     _prior_interrupted = False
     session_id = session.id
+    turn_generation = 0
     if not is_operator:
+        turn_generation = await mark_latest_session_turn(session_id)
         _prior_interrupted = await cancel_active_run(session_id)
 
     try:
         async with session_run_lock(session_id):
+            if not is_operator and not await is_latest_session_turn(session_id, turn_generation):
+                log.info(
+                    "channels.incoming.stale_turn_ignored",
+                    session_id=str(session_id),
+                    turn_generation=turn_generation,
+                )
+                return {"status": "stale_ignored", "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
             if not is_operator:
                 await db.refresh(session, attribute_names=["ai_disabled"])
                 if getattr(session, "ai_disabled", False):
@@ -1554,6 +1565,20 @@ async def incoming_message(
         raise HTTPException(status_code=500, detail=f"Agent error: {exc}")
     finally:
         await unregister_active_task(session_id, asyncio.current_task())
+
+    if not is_operator and not await is_latest_session_turn(session_id, turn_generation):
+        log.info(
+            "channels.incoming.stale_result_suppressed",
+            session_id=str(session_id),
+            turn_generation=turn_generation,
+        )
+        return {
+            "status": "stale_ignored",
+            "reply": "",
+            "run_id": str(result.get("run_id", "")),
+            "steps": result.get("steps", []),
+            "messages_to_user": [],
+        }
 
     _tokens_this_run = int(result.get("tokens_used", 0) or 0)
     if _tokens_this_run > 0:
@@ -2059,6 +2084,8 @@ async def wa_incoming(
     from app.core.engine.agent_runner import run_agent  # deferred to avoid circular import
     from app.core.engine.session_lock import (
         cancel_active_run,
+        is_latest_session_turn,
+        mark_latest_session_turn,
         register_active_task,
         session_run_lock,
         unregister_active_task,
@@ -2074,11 +2101,20 @@ async def wa_incoming(
     # Operator messages are never interrupted — they're short command turns.
     _prior_interrupted = False
     session_id = session.id
+    turn_generation = 0
     if not _is_operator:
+        turn_generation = await mark_latest_session_turn(session_id)
         _prior_interrupted = await cancel_active_run(session_id)
 
     try:
         async with session_run_lock(session_id):
+            if not _is_operator and not await is_latest_session_turn(session_id, turn_generation):
+                log.info(
+                    "wa_incoming.stale_turn_ignored",
+                    session_id=str(session_id),
+                    turn_generation=turn_generation,
+                )
+                return {"status": "stale_ignored", "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
             if not _is_operator:
                 await db.refresh(session, attribute_names=["ai_disabled"])
                 if getattr(session, "ai_disabled", False):
@@ -2138,6 +2174,20 @@ async def wa_incoming(
         return {"status": "error", "reply": _GENERIC_ERROR_MSG, "run_id": "", "steps": [], "messages_to_user": []}
     finally:
         await unregister_active_task(session_id, _asyncio.current_task())
+
+    if not _is_operator and not await is_latest_session_turn(session_id, turn_generation):
+        log.info(
+            "wa_incoming.stale_result_suppressed",
+            session_id=str(session_id),
+            turn_generation=turn_generation,
+        )
+        return {
+            "status": "stale_ignored",
+            "reply": "",
+            "run_id": str(result.get("run_id", "")),
+            "steps": result.get("steps", []),
+            "messages_to_user": [],
+        }
 
     reply = result.get("reply", "")
     steps = result.get("steps", [])
