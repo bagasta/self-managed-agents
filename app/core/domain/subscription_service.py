@@ -140,11 +140,17 @@ async def ensure_default_subscription_plans(db: AsyncSession) -> None:
 async def get_or_create_wa_user(
     external_id: str,
     db: AsyncSession,
+    *,
+    wa_lid: str | None = None,
 ) -> tuple[User, UserSubscription]:
     """
     Cari user berdasarkan external_id (nomor WA / JID).
     Kalau belum ada → buat User + Trial subscription + UserApiKey otomatis.
     Kalau sudah ada tapi belum punya subscription → buat Trial.
+
+    ``wa_lid``: LID pengirim, saat turn ini membawa nomor asli + LID sekaligus.
+    Mapping disimpan di users.wa_lid agar turn berikutnya yang hanya membawa
+    LID tetap bisa di-resolve ke nomor telepon user ini.
 
     Returns (user, subscription).
     """
@@ -173,6 +179,14 @@ async def get_or_create_wa_user(
         db.add(user)
         await db.flush()
         logger.info("subscription_service.user_created", external_id=external_id, user_id=str(user.id))
+
+    if wa_lid and getattr(user, "wa_lid", None) != wa_lid:
+        user.wa_lid = wa_lid
+        logger.info(
+            "subscription_service.wa_lid_learned",
+            user_id=str(user.id),
+            external_id=external_id,
+        )
 
     # Subscription
     sub = (
@@ -263,6 +277,25 @@ async def _create_tier1_subscription(
     db.add(sub)
     await db.flush()
     return sub
+
+
+async def resolve_phone_for_wa_lid(wa_lid: str, db: AsyncSession) -> str | None:
+    """Reverse-resolve a WhatsApp LID to the real phone number learned earlier.
+
+    Dipakai saat wa-service gagal me-resolve LID→PN (mapping whatsmeow belum
+    terisi): kalau LID ini pernah terlihat bersama nomor asli, kita sudah
+    menyimpannya di users.wa_lid dan bisa memakai nomornya lagi.
+    """
+    lid = str(wa_lid or "").strip()
+    if not lid:
+        return None
+    user = (
+        await db.execute(
+            select(User).where(User.wa_lid == lid, User.phone_number.isnot(None))
+        )
+    ).scalars().first()
+    phone = str(getattr(user, "phone_number", "") or "").strip()
+    return phone or None
 
 
 async def get_subscription_by_external_id(

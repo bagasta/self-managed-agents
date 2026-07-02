@@ -48,7 +48,7 @@ from app.core.domain.agent_quota_service import check_agent_quota, record_agent_
 from app.core.infra.channel_service import send_message
 from app.core.utils.input_sanitizer import sanitize_user_input
 from app.core.utils.phone_utils import normalize_phone
-from app.core.utils.wa_identity import resolve_incoming_wa_phone
+from app.core.utils.wa_identity import extract_wa_lid, resolve_incoming_wa_phone
 from app.core.utils.text_utils import markdown_to_wa
 from app.core.engine.wa_reply_delivery import should_skip_whatsapp_final_reply
 from app.core.infra.wa_client import resolve_wa_phones, send_wa_message
@@ -1744,6 +1744,25 @@ async def wa_incoming(
         or resolve_incoming_wa_phone(body.sender_alt, None)
         or resolve_incoming_wa_phone(body.chat_id, body.phone_from)
     )
+    sender_lid = extract_wa_lid(body.from_, body.sender_alt, body.chat_id)
+    if not real_from_phone and sender_lid:
+        # wa-service gagal resolve LID→PN turn ini; pakai mapping yang pernah
+        # dipelajari (users.wa_lid) supaya identitas tetap nomor telepon asli.
+        try:
+            from app.core.domain.subscription_service import resolve_phone_for_wa_lid
+
+            real_from_phone = await resolve_phone_for_wa_lid(sender_lid, db)
+            if real_from_phone:
+                log.info(
+                    "wa_incoming.lid_resolved_from_learned_mapping",
+                    lid=sender_lid,
+                )
+        except Exception as _lid_exc:
+            log.warning("wa_incoming.lid_mapping_lookup_failed", error=str(_lid_exc)[:200])
+            try:
+                await db.rollback()
+            except Exception:
+                pass
     from_phone = real_from_phone or body.from_
     reply_target = body.chat_id or body.from_
     _is_owner_sender = _is_wa_owner_sender(
@@ -1877,7 +1896,9 @@ async def wa_incoming(
         try:
             from app.core.domain.subscription_service import get_or_create_wa_user
 
-            await get_or_create_wa_user(provision_external_id, db)
+            # Simpan juga mapping LID→user saat turn ini membawa keduanya,
+            # supaya turn LID-only berikutnya tetap ter-resolve ke nomor asli.
+            await get_or_create_wa_user(provision_external_id, db, wa_lid=sender_lid)
             await db.commit()
         except Exception as _prov_exc:
             # Provisioning boleh gagal tanpa mematikan turn, tapi transaksi

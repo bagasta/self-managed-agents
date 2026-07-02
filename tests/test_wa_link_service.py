@@ -206,3 +206,21 @@ async def test_claim_links_both_real_phone_and_lid_to_their_own_fields() -> None
     assert result["success"] is True
     assert dashboard.phone_number == "62895626765423"
     assert dashboard.wa_lid == "74350933852232"
+
+
+@pytest.mark.asyncio
+async def test_resolve_phone_for_wa_lid_returns_learned_phone() -> None:
+    from app.core.domain.subscription_service import resolve_phone_for_wa_lid
+
+    user = SimpleNamespace(phone_number="62895626765423", wa_lid="74350933852232")
+    db = _FakeDb([_FakeResult(scalars_list=[user])])
+
+    assert await resolve_phone_for_wa_lid("74350933852232", db) == "62895626765423"
+
+
+@pytest.mark.asyncio
+async def test_resolve_phone_for_wa_lid_unknown_returns_none() -> None:
+    from app.core.domain.subscription_service import resolve_phone_for_wa_lid
+
+    db = _FakeDb([_FakeResult(scalars_list=[])])
+    assert await resolve_phone_for_wa_lid("74350933852232", db) is None

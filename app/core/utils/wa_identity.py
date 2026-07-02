@@ -16,6 +16,23 @@ def is_probable_whatsapp_lid(value: str | None) -> bool:
     return bool(normalized and normalized.isdigit() and len(normalized) > 15)
 
 
+def extract_wa_lid(*candidates: str | None) -> str | None:
+    """Return the sender's LID digits from any @lid-suffixed candidate.
+
+    A bare number like "+74350933852232" cannot be told apart from a phone,
+    so only identifiers explicitly marked as LID (``@lid`` suffix or the
+    >15-digit heuristic) are accepted.
+    """
+    for raw in candidates:
+        value = str(raw or "").strip()
+        if not value or not is_probable_whatsapp_lid(value):
+            continue
+        digits = normalize_phone(value)
+        if digits:
+            return digits
+    return None
+
+
 def resolve_incoming_wa_phone(from_phone: str | None, resolved_phone: str | None) -> str | None:
     """Return a real WA phone when available; reject LID-only identifiers."""
     if resolved_phone:
