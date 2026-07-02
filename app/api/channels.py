@@ -1879,8 +1879,14 @@ async def wa_incoming(
 
             await get_or_create_wa_user(provision_external_id, db)
             await db.commit()
-        except Exception:
-            pass
+        except Exception as _prov_exc:
+            # Provisioning boleh gagal tanpa mematikan turn, tapi transaksi
+            # yang aborted harus di-rollback agar query berikutnya tetap jalan.
+            log.warning("wa_incoming.user_provision_failed", error=str(_prov_exc)[:300])
+            try:
+                await db.rollback()
+            except Exception:
+                pass
 
     _operator_recap_request = _is_operator and _is_operator_escalation_recap_request(body.message)
     if _is_operator and _operator_recap_request:
