@@ -190,7 +190,7 @@ async def test_wa_incoming_stale_turn_does_not_run_agent(monkeypatch):
         **{"from": "628customer@s.whatsapp.net"},
         phone_from="628customer",
         chat_id="628customer@s.whatsapp.net",
-        message="s",
+        message="tolong cek status",
         message_id="MSG-STALE-1",
         timestamp=1,
     )
@@ -199,6 +199,102 @@ async def test_wa_incoming_stale_turn_does_not_run_agent(monkeypatch):
 
     assert result["status"] == "stale_ignored"
     run_agent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_wa_single_letter_noise_does_not_enter_agent_runner(monkeypatch):
+    from app.api.channels import WAIncomingMessage, wa_incoming
+
+    agent = SimpleNamespace(
+        id=uuid.uuid4(),
+        name="Baas",
+        allowed_senders=None,
+        escalation_config={},
+        owner_external_id="628owner",
+        operator_ids=["628owner"],
+        tools_config={},
+    )
+    session = _session(ai_disabled=False, metadata_={})
+    db = _FakeDB()
+    send_msg = AsyncMock()
+    run_agent = AsyncMock()
+
+    monkeypatch.setattr("app.api.channels._resolve_wa_incoming_agent", AsyncMock(return_value=agent))
+    monkeypatch.setattr("app.api.channels.is_duplicate_message", AsyncMock(return_value=False))
+    monkeypatch.setattr("app.api.channels.find_or_create_wa_session", AsyncMock(return_value=(session, False)))
+    monkeypatch.setattr("app.api.channels.check_agent_quota", AsyncMock(return_value=SimpleNamespace(allowed=True)))
+    monkeypatch.setattr("app.api.channels.check_wa_spam_window", AsyncMock(return_value=(False, 1)))
+    monkeypatch.setattr("app.core.engine.session_lock.cancel_active_run", AsyncMock(return_value=False))
+    monkeypatch.setattr("app.core.engine.agent_runner.run_agent", run_agent)
+    monkeypatch.setattr("app.api.channels.send_wa_message", send_msg)
+    monkeypatch.setattr("app.api.channels._stop_customer_typing", AsyncMock())
+
+    body = WAIncomingMessage(
+        device_id="dev-1",
+        **{"from": "628customer@s.whatsapp.net"},
+        phone_from="628customer",
+        chat_id="628customer@s.whatsapp.net",
+        message="w",
+        message_id="MSG-NOISE-1",
+        timestamp=1,
+    )
+
+    result = await wa_incoming(body, db=db)
+
+    assert result["status"] == "short_message_replied"
+    assert "terlalu singkat" in result["reply"]
+    assert session.metadata_["short_noise_last_text"] == "w"
+    run_agent.assert_not_awaited()
+    send_msg.assert_awaited_once_with("dev-1", "628customer@s.whatsapp.net", result["reply"])
+
+
+@pytest.mark.asyncio
+async def test_repeated_wa_single_letter_noise_is_suppressed(monkeypatch):
+    from app.api.channels import WAIncomingMessage, wa_incoming
+
+    agent = SimpleNamespace(
+        id=uuid.uuid4(),
+        name="Baas",
+        allowed_senders=None,
+        escalation_config={},
+        owner_external_id="628owner",
+        operator_ids=["628owner"],
+        tools_config={},
+    )
+    session = _session(
+        ai_disabled=False,
+        metadata_={"short_noise_reply_at": int(time.time())},
+    )
+    db = _FakeDB()
+    send_msg = AsyncMock()
+    run_agent = AsyncMock()
+
+    monkeypatch.setattr("app.api.channels._resolve_wa_incoming_agent", AsyncMock(return_value=agent))
+    monkeypatch.setattr("app.api.channels.is_duplicate_message", AsyncMock(return_value=False))
+    monkeypatch.setattr("app.api.channels.find_or_create_wa_session", AsyncMock(return_value=(session, False)))
+    monkeypatch.setattr("app.api.channels.check_agent_quota", AsyncMock(return_value=SimpleNamespace(allowed=True)))
+    monkeypatch.setattr("app.api.channels.check_wa_spam_window", AsyncMock(return_value=(False, 2)))
+    monkeypatch.setattr("app.core.engine.session_lock.cancel_active_run", AsyncMock(return_value=False))
+    monkeypatch.setattr("app.core.engine.agent_runner.run_agent", run_agent)
+    monkeypatch.setattr("app.api.channels.send_wa_message", send_msg)
+    monkeypatch.setattr("app.api.channels._stop_customer_typing", AsyncMock())
+
+    body = WAIncomingMessage(
+        device_id="dev-1",
+        **{"from": "628customer@s.whatsapp.net"},
+        phone_from="628customer",
+        chat_id="628customer@s.whatsapp.net",
+        message="w",
+        message_id="MSG-NOISE-2",
+        timestamp=2,
+    )
+
+    result = await wa_incoming(body, db=db)
+
+    assert result["status"] == "short_message_ignored"
+    assert result["reply"] == ""
+    run_agent.assert_not_awaited()
+    send_msg.assert_not_awaited()
 
 
 @pytest.mark.asyncio

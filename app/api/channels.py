@@ -963,6 +963,65 @@ async def _reactivate_disabled_session_for_owner_turn(
     log.info("wa_incoming.owner_reactivated_ai", session_id=str(session.id))
 
 
+def _is_low_information_wa_text(message: str | None) -> bool:
+    """Return True for text that should not enter LLM context at all."""
+    text = sanitize_user_input(message or "").strip()
+    if not text or text.startswith("/"):
+        return False
+    return len(text) == 1
+
+
+async def _handle_low_information_customer_message(
+    *,
+    agent: Agent,
+    session: Session,
+    db: AsyncSession,
+    device_id: str,
+    reply_target: str,
+    message: str,
+    log: structlog.BoundLogger,
+) -> dict | None:
+    """Short-circuit one-character WhatsApp noise before it reaches the LLM.
+
+    A single-letter spam burst should not cause the agent to infer intent from
+    older session history/workspace state. Send one throttled clarification,
+    cancel any active run, then ignore repeated noise.
+    """
+    if not _is_low_information_wa_text(message):
+        return None
+
+    from app.core.engine.session_lock import cancel_active_run
+
+    await cancel_active_run(session.id)
+    await _stop_customer_typing(device_id, session, log)
+
+    now = int(time.time())
+    meta = dict(session.metadata_ or {})
+    last_reply_at = int(meta.get("short_noise_reply_at") or 0)
+    reply = ""
+    status = "short_message_ignored"
+
+    if now - last_reply_at >= 45:
+        reply = "Pesan Anda terlalu singkat. Mohon kirim instruksi lengkap agar saya bisa membantu."
+        await send_wa_message(device_id, reply_target, reply)
+        meta["short_noise_reply_at"] = now
+        status = "short_message_replied"
+
+    meta["short_noise_last_text"] = sanitize_user_input(message or "").strip()
+    meta["short_noise_last_at"] = now
+    session.metadata_ = meta
+    db.add(session)
+    await db.commit()
+    log.info("wa_incoming.low_information_message_ignored", session_id=str(session.id), status=status)
+    return {
+        "status": status,
+        "reply": reply,
+        "run_id": "",
+        "steps": [],
+        "messages_to_user": [reply] if reply else [],
+    }
+
+
 async def _forward_operator_media_to_customer(
     *,
     agent: Agent,
@@ -1978,6 +2037,19 @@ async def wa_incoming(
         log.info("wa_incoming.ai_disabled", session_id=str(session.id))
         await _stop_customer_typing(body.device_id, session, log)
         return {"status": "ai_disabled"}
+
+    if not _is_operator and not body.media_type and not body.quoted_text:
+        low_info_result = await _handle_low_information_customer_message(
+            agent=agent,
+            session=session,
+            db=db,
+            device_id=body.device_id,
+            reply_target=reply_target,
+            message=body.message,
+            log=log,
+        )
+        if low_info_result is not None:
+            return low_info_result
 
     # 5. Proses media jika ada
     media_context = ""
