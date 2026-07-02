@@ -70,6 +70,35 @@ def _make_agent(owner_external_id=None, operator_ids=None):
     )
 
 
+@pytest.mark.asyncio
+async def test_get_best_subscription_prefers_active_paid_over_trial_duplicate():
+    from app.core.domain.subscription_service import get_best_subscription_by_external_ids
+
+    db = MagicMock()
+    trial_user = SimpleNamespace(id=uuid.uuid4(), external_id="74350933852232", phone_number=None)
+    trial_sub = SimpleNamespace(status="trial", is_usable=True)
+    trial_plan = SimpleNamespace(code="trial", is_trial=True)
+    paid_user = SimpleNamespace(id=uuid.uuid4(), external_id="62895619356936", phone_number="62895619356936")
+    paid_sub = SimpleNamespace(status="active", is_usable=True)
+    paid_plan = SimpleNamespace(code="tier_3", is_trial=False)
+
+    result = MagicMock()
+    result.all.return_value = [
+        (trial_user, trial_sub, trial_plan),
+        (paid_user, paid_sub, paid_plan),
+    ]
+    db.execute = AsyncMock(return_value=result)
+
+    user, sub, plan = await get_best_subscription_by_external_ids(
+        ["74350933852232", "62895619356936"],
+        db,
+    )
+
+    assert user is paid_user
+    assert sub is paid_sub
+    assert plan is paid_plan
+
+
 # ---------------------------------------------------------------------------
 # Tests: get_or_create_wa_user
 # ---------------------------------------------------------------------------

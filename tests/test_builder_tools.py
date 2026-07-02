@@ -499,9 +499,15 @@ class TestBuilderToolsReturnsList:
                 "max_agents": 1,
             }
 
+        async def _fake_get_best(_identifiers, _db):
+            return None
+
         with patch("app.core.domain.subscription_service.get_or_create_wa_user", _fake_get_or_create), patch(
             "app.core.domain.subscription_service.check_can_create_agent",
             _fake_check_can_create,
+        ), patch(
+            "app.core.domain.subscription_service.get_best_subscription_by_external_ids",
+            _fake_get_best,
         ):
             tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
             plan = next(t for t in tools if t.name == "plan_agent")
@@ -548,12 +554,18 @@ class TestBuilderToolsReturnsList:
         async def _fake_get_subscription(_phone, _db):
             return SimpleNamespace(id=uuid.uuid4()), sub, plan_obj
 
+        async def _fake_get_best(_identifiers, _db):
+            return None
+
         with patch("app.core.domain.subscription_service.get_or_create_wa_user", _fake_get_or_create), patch(
             "app.core.domain.subscription_service.check_can_create_agent",
             _fake_check_can_create,
         ), patch(
             "app.core.domain.subscription_service.get_subscription_by_external_id",
             _fake_get_subscription,
+        ), patch(
+            "app.core.domain.subscription_service.get_best_subscription_by_external_ids",
+            _fake_get_best,
         ):
             tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
             plan = next(t for t in tools if t.name == "plan_agent")
@@ -662,16 +674,14 @@ class TestGetUserSubscription:
         plan = SimpleNamespace(id=sub.plan_id, code="tier_3", label="Enterprise", max_agents=None)
         agents = [_make_mock_agent(name="Agent 1"), _make_mock_agent(name="Agent 2")]
 
-        plan_result = MagicMock()
-        plan_result.scalar_one.return_value = plan
         agents_result = MagicMock()
         agents_result.scalars.return_value.all.return_value = agents
-        db.execute = AsyncMock(side_effect=[plan_result, agents_result])
+        db.execute = AsyncMock(side_effect=[agents_result])
 
-        async def _fake_get_or_create(_phone, _db):
-            return SimpleNamespace(id=uuid.uuid4()), sub
+        async def _fake_get_best(_identifiers, _db):
+            return SimpleNamespace(id=uuid.uuid4(), external_id="62811xxx", phone_number=None), sub, plan
 
-        with patch("app.core.domain.subscription_service.get_or_create_wa_user", _fake_get_or_create):
+        with patch("app.core.domain.subscription_service.get_best_subscription_by_external_ids", _fake_get_best):
             tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
             tool = next(t for t in tools if t.name == "get_user_subscription")
             result = _run(tool.ainvoke({}))
@@ -717,19 +727,21 @@ class TestGetUserSubscription:
             expires_at=None,
         )
         plan = SimpleNamespace(id=sub.plan_id, code="tier_3", label="Enterprise", max_agents=None)
-        plan_result = MagicMock()
-        plan_result.scalar_one.return_value = plan
         agents_result = MagicMock()
         agents_result.scalars.return_value.all.return_value = []
-        db.execute = AsyncMock(side_effect=[plan_result, agents_result])
+        db.execute = AsyncMock(side_effect=[agents_result])
 
-        seen: dict[str, str] = {}
+        seen: dict[str, list[str | None]] = {}
 
-        async def _fake_get_or_create(_phone, _db):
-            seen["phone"] = _phone
-            return SimpleNamespace(id=uuid.uuid4()), sub
+        async def _fake_get_best(_identifiers, _db):
+            seen["identifiers"] = list(_identifiers)
+            return SimpleNamespace(
+                id=uuid.uuid4(),
+                external_id="62895619356936",
+                phone_number="62895619356936",
+            ), sub, plan
 
-        with patch("app.core.domain.subscription_service.get_or_create_wa_user", _fake_get_or_create):
+        with patch("app.core.domain.subscription_service.get_best_subscription_by_external_ids", _fake_get_best):
             tools = build_builder_tools(
                 db_factory=db,
                 owner_phone="62895619356936",
@@ -739,10 +751,33 @@ class TestGetUserSubscription:
             result = _run(tool.ainvoke({"phone": "6289477477238"}))
 
         # The verified session owner must win over the chat-typed phone arg.
-        assert seen.get("phone") == "62895619356936"
+        assert "62895619356936" in seen.get("identifiers", [])
+        assert "6289477477238" not in seen.get("identifiers", [])
         data = json.loads(result)
         assert data["phone"] == "62895619356936"
         assert data["plan_code"] == "tier_3"
+
+    def test_get_user_subscription_is_read_only_when_subscription_missing(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+
+        async def _fake_get_best(_identifiers, _db):
+            return None
+
+        async def _fail_create(*_args, **_kwargs):
+            raise AssertionError("get_user_subscription must not auto-provision trial users")
+
+        with patch("app.core.domain.subscription_service.get_best_subscription_by_external_ids", _fake_get_best), patch(
+            "app.core.domain.subscription_service.get_or_create_wa_user", _fail_create
+        ):
+            tools = build_builder_tools(db_factory=db, owner_phone="+74350933852232")
+            tool = next(t for t in tools if t.name == "get_user_subscription")
+            result = _run(tool.ainvoke({}))
+
+        data = json.loads(result)
+        assert data["read_only"] is True
+        assert "tidak ditemukan" in data["error"].lower()
 
 
 class TestComposeAgentBlueprint:

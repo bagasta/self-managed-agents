@@ -14,6 +14,7 @@ import structlog
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.utils.phone_utils import normalize_phone
 from app.models.subscription import SubscriptionPlan, User, UserSubscription
 from app.models.user_api_key import UserApiKey, generate_user_key, hash_user_key
 
@@ -295,6 +296,78 @@ async def get_subscription_by_external_id(
     ).scalar_one()
 
     return user, sub, plan
+
+
+def _subscription_identifier_variants(*external_ids: str | None) -> tuple[list[str], list[uuid.UUID]]:
+    identifiers: list[str] = []
+    user_ids: list[uuid.UUID] = []
+    for raw in external_ids:
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        for candidate in (value, normalize_phone(value)):
+            if candidate and candidate not in identifiers:
+                identifiers.append(candidate)
+        try:
+            parsed = uuid.UUID(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed not in user_ids:
+            user_ids.append(parsed)
+    return identifiers, user_ids
+
+
+async def get_best_subscription_by_external_ids(
+    external_ids: list[str | None] | tuple[str | None, ...],
+    db: AsyncSession,
+) -> tuple[User, UserSubscription, SubscriptionPlan] | None:
+    """Read-only subscription lookup across known WA/user identifiers.
+
+    WhatsApp can surface a sender as a phone number, JID, or LID-like numeric
+    alias across different events. When duplicate user rows exist from old
+    auto-provisioning, prefer an active paid subscription over a trial row.
+    """
+    identifiers, user_ids = _subscription_identifier_variants(*external_ids)
+    clauses = []
+    if identifiers:
+        clauses.append(User.external_id.in_(identifiers))
+        clauses.append(User.phone_number.in_(identifiers))
+    if user_ids:
+        clauses.append(User.id.in_(user_ids))
+    if not clauses:
+        return None
+
+    rows = (
+        await db.execute(
+            select(User, UserSubscription, SubscriptionPlan)
+            .join(UserSubscription, UserSubscription.user_id == User.id)
+            .join(SubscriptionPlan, SubscriptionPlan.id == UserSubscription.plan_id)
+            .where(or_(*clauses))
+        )
+    ).all()
+    if not rows:
+        return None
+
+    order = {identifier: index for index, identifier in enumerate(identifiers)}
+
+    def _match_rank(user: User) -> int:
+        matches = [
+            order.get(str(getattr(user, "external_id", "") or "").strip(), 999),
+            order.get(normalize_phone(str(getattr(user, "external_id", "") or "")), 999),
+            order.get(str(getattr(user, "phone_number", "") or "").strip(), 999),
+            order.get(normalize_phone(str(getattr(user, "phone_number", "") or "")), 999),
+        ]
+        return min(matches)
+
+    def _score(row: tuple[User, UserSubscription, SubscriptionPlan]) -> tuple[int, int, int, int]:
+        user, sub, plan = row
+        paid_score = 1 if not getattr(plan, "is_trial", False) else 0
+        usable_score = 1 if getattr(sub, "is_usable", False) else 0
+        active_score = 1 if getattr(sub, "status", "") == "active" else 0
+        return (paid_score, usable_score, active_score, -_match_rank(user))
+
+    best = max(rows, key=_score)
+    return tuple(best)  # type: ignore[return-value]
 
 
 def _tool_enabled(tools_config: dict[str, Any], key: str, default: bool = False) -> bool:

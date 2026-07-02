@@ -14,6 +14,7 @@ from app.core.tools.builder_identity import (
     is_probable_lid,
     owner_filter,
 )
+from app.core.utils.phone_utils import normalize_phone
 from app.models.agent import Agent
 
 logger = structlog.get_logger(__name__)
@@ -56,14 +57,23 @@ def build_builder_user_tools(
         try:
             from app.core.domain.subscription_service import (
                 check_can_create_agent,
+                get_best_subscription_by_external_ids,
                 get_or_create_wa_user,
                 get_subscription_by_external_id,
                 validate_agent_entitlements,
             )
 
             async with db_factory() as db:
-                sub_details = None
-                if is_probable_lid(target_phone):
+                owner_candidates = [owner_phone, default_target, target_phone]
+                sub_details = await get_best_subscription_by_external_ids(owner_candidates, db)
+                if sub_details is not None:
+                    user, _sub, _plan = sub_details
+                    target_phone = best_owner_identifier(
+                        getattr(user, "phone_number", None),
+                        getattr(user, "external_id", None),
+                        target_phone,
+                    )
+                elif is_probable_lid(target_phone):
                     sub_details = await get_subscription_by_external_id(target_phone, db)
                     if sub_details is None:
                         return {
@@ -168,12 +178,9 @@ def build_builder_user_tools(
         """
         try:
             from app.core.domain.subscription_service import (
-                get_or_create_wa_user,
+                get_best_subscription_by_external_ids,
                 get_subscription_by_external_id,
-                check_can_create_agent,
             )
-            from app.models.agent import Agent
-            from app.models.subscription import SubscriptionPlan
 
             # Owner identity sesi (nomor pengirim terverifikasi) selalu menang.
             # `phone` dari LLM hanya fallback terakhir — mencegah Arthur membaca
@@ -183,34 +190,38 @@ def build_builder_user_tools(
                 return json.dumps({"error": "phone tidak tersedia"}, ensure_ascii=False)
 
             async with db_factory() as db:
-                if is_probable_lid(target_phone):
-                    details = await get_subscription_by_external_id(target_phone, db)
-                    if details is None:
-                        return json.dumps({
-                            "error": (
-                                "Nomor WhatsApp asli belum tersedia di session ini. "
-                                "Kirim pesan dari nomor WA yang sudah ter-resolve, atau pastikan profil user punya phone_number."
-                            ),
-                            "identifier": target_phone,
-                            "identifier_type": "lid",
-                        }, ensure_ascii=False)
-                    user, sub, plan = details
-                else:
-                    # Auto-provision only for real phone identifiers, never for LID.
-                    user, sub = await get_or_create_wa_user(target_phone, db)
-                    await db.commit()
+                owner_candidates = [owner_phone, default_target, target_phone]
+                if not best_owner_identifier(owner_phone, default_target):
+                    owner_candidates.append(phone)
 
-                    plan = (
-                        await db.execute(
-                            select(SubscriptionPlan).where(SubscriptionPlan.id == sub.plan_id)
-                        )
-                    ).scalar_one()
+                details = await get_best_subscription_by_external_ids(owner_candidates, db)
+                if details is None and is_probable_lid(target_phone):
+                    details = await get_subscription_by_external_id(target_phone, db)
+                if details is None:
+                    return json.dumps({
+                        "error": "Subscription owner sesi ini tidak ditemukan.",
+                        "identifier": target_phone,
+                        "identifier_type": "lid" if is_probable_lid(target_phone) else "external_id",
+                        "lookup_identifiers": [
+                            normalize_phone(str(candidate or ""))
+                            for candidate in owner_candidates
+                            if normalize_phone(str(candidate or ""))
+                        ],
+                        "read_only": True,
+                    }, ensure_ascii=False)
+
+                user, sub, plan = details
+                owner_for_agents = best_owner_identifier(
+                    getattr(user, "phone_number", None),
+                    getattr(user, "external_id", None),
+                    target_phone,
+                )
 
                 # Hitung agent aktif
                 active_count_result = await db.execute(
                     select(Agent).where(
                         Agent.is_deleted.is_(False),
-                        owner_filter(target_phone),
+                        owner_filter(owner_for_agents),
                     )
                 )
                 active_agents = active_count_result.scalars().all()
@@ -219,7 +230,10 @@ def build_builder_user_tools(
                 remaining = None if limit is None else max(0, limit - used)
 
                 return json.dumps({
-                    "phone": target_phone,
+                    "phone": owner_for_agents,
+                    "user_id": str(getattr(user, "id", "")),
+                    "user_external_id": getattr(user, "external_id", None),
+                    "user_phone_number": getattr(user, "phone_number", None),
                     "plan_code": plan.code,
                     "plan_label": plan.label,
                     "status": sub.status,
@@ -241,4 +255,3 @@ def build_builder_user_tools(
         "preview_agent_creation_entitlement": preview_agent_creation_entitlement,
         "get_user_subscription": get_user_subscription,
     }
-

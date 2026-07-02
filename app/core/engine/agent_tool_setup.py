@@ -72,7 +72,10 @@ def _should_self_heal_whatsapp_scheduler(session: Session, user_message: str, to
 
 
 def _is_probable_lid(value: str | None) -> bool:
-    normalized = normalize_phone(value or "")
+    raw = str(value or "").strip().lower()
+    if "@lid" in raw:
+        return True
+    normalized = normalize_phone(raw)
     return bool(normalized and normalized.isdigit() and len(normalized) > 15)
 
 
@@ -86,8 +89,9 @@ def _resolve_builder_owner_phone(session: Session) -> str | None:
         channel_cfg.get("user_phone"),
     )
     for candidate in candidates:
-        normalized = normalize_phone(str(candidate or ""))
-        if normalized and not _is_probable_lid(normalized):
+        raw = str(candidate or "")
+        normalized = normalize_phone(raw)
+        if normalized and not _is_probable_lid(raw):
             return normalized
     fallback = getattr(session, "external_user_id", None)
     return normalize_phone(str(fallback or "")) or fallback

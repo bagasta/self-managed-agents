@@ -120,7 +120,10 @@ def owner_variants(owner_phone: str | None) -> list[str]:
 
 
 def is_probable_lid(value: str | None) -> bool:
-    normalized = normalize_phone(value or "")
+    raw = str(value or "").strip().lower()
+    if "@lid" in raw:
+        return True
+    normalized = normalize_phone(raw)
     return bool(normalized and normalized.isdigit() and len(normalized) > 15)
 
 
@@ -128,12 +131,13 @@ def best_owner_identifier(*candidates: str | None) -> str:
     """Prefer real phone identifiers; fall back to LID only for lookup, not provisioning."""
     fallback = ""
     for candidate in candidates:
-        normalized = normalize_phone(str(candidate or ""))
+        raw = str(candidate or "")
+        normalized = normalize_phone(raw)
         if not normalized:
             continue
         if not fallback:
             fallback = normalized
-        if not is_probable_lid(normalized):
+        if not is_probable_lid(raw):
             return normalized
     return fallback
 
