@@ -252,6 +252,71 @@ async def test_wa_incoming_stale_result_does_not_send_final_reply(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_owner_test_message_reactivates_spam_disabled_session(monkeypatch):
+    from app.api.channels import WAIncomingMessage, wa_incoming
+
+    agent = SimpleNamespace(
+        id=uuid.uuid4(),
+        name="Baas",
+        allowed_senders=None,
+        escalation_config={},
+        owner_external_id="628owner",
+        operator_ids=["628owner"],
+        tools_config={},
+    )
+    session = _session(
+        external_user_id="628owner",
+        ai_disabled=True,
+        metadata_={"spam_auto_disabled": True, "spam_count": 9, "spam_window_seconds": 60},
+        channel_config={
+            "user_phone": "628owner@s.whatsapp.net",
+            "phone_number": "628owner",
+            "device_id": "dev-1",
+        },
+    )
+    db = _FakeDB()
+    run_id = uuid.uuid4()
+    send_msg = AsyncMock()
+    reset_spam = AsyncMock()
+
+    monkeypatch.setattr("app.api.channels._resolve_wa_incoming_agent", AsyncMock(return_value=agent))
+    monkeypatch.setattr("app.api.channels.is_duplicate_message", AsyncMock(return_value=False))
+    monkeypatch.setattr("app.api.channels._should_treat_as_operator_turn", AsyncMock(return_value=False))
+    monkeypatch.setattr("app.api.channels.find_or_create_wa_session", AsyncMock(return_value=(session, False)))
+    monkeypatch.setattr("app.api.channels.check_agent_quota", AsyncMock(return_value=SimpleNamespace(allowed=True)))
+    monkeypatch.setattr("app.api.channels.check_wa_spam_window", AsyncMock(return_value=(False, 1)))
+    monkeypatch.setattr("app.api.channels.reset_wa_spam_window", reset_spam)
+    monkeypatch.setattr("app.api.channels._stop_customer_typing", AsyncMock())
+    monkeypatch.setattr("app.core.engine.session_lock.mark_latest_session_turn", AsyncMock(return_value=9))
+    monkeypatch.setattr("app.core.engine.session_lock.cancel_active_run", AsyncMock(return_value=False))
+    monkeypatch.setattr("app.core.engine.session_lock.is_latest_session_turn", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        "app.core.engine.agent_runner.run_agent",
+        AsyncMock(return_value={"reply": "Halo owner", "steps": [], "run_id": run_id, "tokens_used": 0}),
+    )
+    monkeypatch.setattr("app.api.channels.send_wa_message", send_msg)
+
+    body = WAIncomingMessage(
+        device_id="dev-1",
+        **{"from": "628owner@s.whatsapp.net"},
+        phone_from="628owner",
+        chat_id="628owner@s.whatsapp.net",
+        message="Helo",
+        message_id="MSG-OWNER-REACTIVATE-1",
+        timestamp=1,
+    )
+
+    result = await wa_incoming(body, db=db)
+
+    assert result["status"] == "ok"
+    assert session.ai_disabled is False
+    assert session.metadata_["spam_auto_disabled"] is False
+    assert "spam_count" not in session.metadata_
+    reset_spam.assert_awaited_once()
+    send_msg.assert_awaited_once_with("dev-1", "628owner@s.whatsapp.net", "Halo owner")
+
+
+@pytest.mark.asyncio
 async def test_operator_phone_without_escalation_reply_is_customer_turn():
     from app.api.channels import _should_treat_as_operator_turn
 

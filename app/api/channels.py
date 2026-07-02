@@ -31,6 +31,7 @@ import base64
 from datetime import datetime
 import re
 import time
+from typing import Annotated
 import uuid
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -931,6 +932,37 @@ async def _handle_operator_activate_command(
     return {"status": "ok", "reply": reply, "run_id": "", "steps": [], "messages_to_user": []}
 
 
+async def _reactivate_disabled_session_for_owner_turn(
+    *,
+    agent: Agent,
+    session: Session,
+    db: AsyncSession,
+    device_id: str,
+    log: structlog.BoundLogger,
+) -> None:
+    """Let owner/operator test messages resume a spam-disabled session.
+
+    Spam auto-stop is meant to protect the backend from untrusted customer
+    bursts. If the owner/operator sends a normal test message from their own
+    WhatsApp identity, do not require them to quote the escalation card first.
+    """
+    meta = dict(session.metadata_ or {})
+    meta["spam_auto_disabled"] = False
+    meta.pop("spam_count", None)
+    meta.pop("spam_window_seconds", None)
+    session.metadata_ = meta
+    session.ai_disabled = False
+    db.add(session)
+    await db.commit()
+    await reset_wa_spam_window(
+        agent_id=str(agent.id),
+        session_id=str(session.id),
+        sender_id=session.external_user_id or "",
+    )
+    await _stop_customer_typing(device_id, session, log)
+    log.info("wa_incoming.owner_reactivated_ai", session_id=str(session.id))
+
+
 async def _forward_operator_media_to_customer(
     *,
     agent: Agent,
@@ -1406,7 +1438,7 @@ class WAIncomingMessage(BaseModel):
     device_id: str
     agent_id: uuid.UUID | None = None  # wa-dev-service should pass resolved target agent for shared demo number
     trial_code: str | None = None      # optional first-message code fallback for wa-dev-service
-    from_: str = Field(..., alias="from")
+    from_: Annotated[str, Field(alias="from")]
     phone_from: str | None = None      # resolved phone number from Go (LID → phone); fallback ke from_
     chat_id: str | None = None  # group JID (xxx@g.us) atau nomor DM; kalau None fallback ke from_
     sender_alt: str | None = None      # alternate sender JID from whatsmeow; often phone@s.whatsapp.net for LID DMs
@@ -1814,6 +1846,15 @@ async def wa_incoming(
             db=db,
             log=log,
             quoted_stanza_id=body.quoted_stanza_id,
+        )
+
+    if not _is_operator and _operator_identity and getattr(session, "ai_disabled", False):
+        await _reactivate_disabled_session_for_owner_turn(
+            agent=agent,
+            session=session,
+            db=db,
+            device_id=body.device_id,
+            log=log,
         )
 
     quota_check = await check_agent_quota(agent, db)
