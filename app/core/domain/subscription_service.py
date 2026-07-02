@@ -320,6 +320,8 @@ def _subscription_identifier_variants(*external_ids: str | None) -> tuple[list[s
 async def get_best_subscription_by_external_ids(
     external_ids: list[str | None] | tuple[str | None, ...],
     db: AsyncSession,
+    *,
+    sender_name: str | None = None,
 ) -> tuple[User, UserSubscription, SubscriptionPlan] | None:
     """Read-only subscription lookup across known WA/user identifiers.
 
@@ -367,6 +369,33 @@ async def get_best_subscription_by_external_ids(
         return (paid_score, usable_score, active_score, -_match_rank(user))
 
     best = max(rows, key=_score)
+    _best_user, _best_sub, best_plan = best
+    name = str(sender_name or "").strip()
+    if getattr(best_plan, "is_trial", False) and len(name) >= 3:
+        name_matches = (
+            await db.execute(
+                select(User, UserSubscription, SubscriptionPlan)
+                .join(UserSubscription, UserSubscription.user_id == User.id)
+                .join(SubscriptionPlan, SubscriptionPlan.id == UserSubscription.plan_id)
+                .where(
+                    SubscriptionPlan.is_trial.is_(False),
+                    UserSubscription.status.in_(["active", "grace_period"]),
+                    or_(
+                        User.full_name.ilike(f"%{name}%"),
+                        User.email.ilike(f"%{name.lower()}%"),
+                    ),
+                )
+            )
+        ).all()
+        if len(name_matches) == 1:
+            logger.info(
+                "subscription.identity_inferred_by_sender_name",
+                sender_name=name,
+                trial_user_id=str(getattr(_best_user, "id", "")),
+                paid_user_id=str(getattr(name_matches[0][0], "id", "")),
+            )
+            return tuple(name_matches[0])  # type: ignore[return-value]
+
     return tuple(best)  # type: ignore[return-value]
 
 

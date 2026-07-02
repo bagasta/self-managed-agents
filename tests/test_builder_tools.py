@@ -499,7 +499,7 @@ class TestBuilderToolsReturnsList:
                 "max_agents": 1,
             }
 
-        async def _fake_get_best(_identifiers, _db):
+        async def _fake_get_best(_identifiers, _db, **_kwargs):
             return None
 
         with patch("app.core.domain.subscription_service.get_or_create_wa_user", _fake_get_or_create), patch(
@@ -554,7 +554,7 @@ class TestBuilderToolsReturnsList:
         async def _fake_get_subscription(_phone, _db):
             return SimpleNamespace(id=uuid.uuid4()), sub, plan_obj
 
-        async def _fake_get_best(_identifiers, _db):
+        async def _fake_get_best(_identifiers, _db, **_kwargs):
             return None
 
         with patch("app.core.domain.subscription_service.get_or_create_wa_user", _fake_get_or_create), patch(
@@ -678,7 +678,7 @@ class TestGetUserSubscription:
         agents_result.scalars.return_value.all.return_value = agents
         db.execute = AsyncMock(side_effect=[agents_result])
 
-        async def _fake_get_best(_identifiers, _db):
+        async def _fake_get_best(_identifiers, _db, **_kwargs):
             return SimpleNamespace(id=uuid.uuid4(), external_id="62811xxx", phone_number=None), sub, plan
 
         with patch("app.core.domain.subscription_service.get_best_subscription_by_external_ids", _fake_get_best):
@@ -733,7 +733,7 @@ class TestGetUserSubscription:
 
         seen: dict[str, list[str | None]] = {}
 
-        async def _fake_get_best(_identifiers, _db):
+        async def _fake_get_best(_identifiers, _db, **_kwargs):
             seen["identifiers"] = list(_identifiers)
             return SimpleNamespace(
                 id=uuid.uuid4(),
@@ -762,7 +762,7 @@ class TestGetUserSubscription:
 
         db = _make_mock_db()
 
-        async def _fake_get_best(_identifiers, _db):
+        async def _fake_get_best(_identifiers, _db, **_kwargs):
             return None
 
         async def _fail_create(*_args, **_kwargs):
@@ -778,6 +778,42 @@ class TestGetUserSubscription:
         data = json.loads(result)
         assert data["read_only"] is True
         assert "tidak ditemukan" in data["error"].lower()
+
+    def test_get_user_subscription_does_not_report_trial_for_unlinked_lid_identity(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        sub = SimpleNamespace(
+            status="trial",
+            is_usable=True,
+            plan_id=uuid.uuid4(),
+            token_quota=5_000_000,
+            tokens_used=5_000_000,
+            tokens_remaining=0,
+            expires_at=None,
+        )
+        plan = SimpleNamespace(id=sub.plan_id, code="trial", label="Trial", max_agents=1, is_trial=True)
+
+        async def _fake_get_best(_identifiers, _db, **_kwargs):
+            return SimpleNamespace(
+                id=uuid.uuid4(),
+                external_id="74350933852232",
+                phone_number=None,
+            ), sub, plan
+
+        with patch("app.core.domain.subscription_service.get_best_subscription_by_external_ids", _fake_get_best):
+            tools = build_builder_tools(
+                db_factory=db,
+                owner_phone="74350933852232",
+                default_target="74350933852232@lid",
+            )
+            tool = next(t for t in tools if t.name == "get_user_subscription")
+            result = _run(tool.ainvoke({}))
+
+        data = json.loads(result)
+        assert data["status"] == "identity_unlinked"
+        assert data["read_only"] is True
+        assert "LID" in data["error"]
 
 
 class TestComposeAgentBlueprint:

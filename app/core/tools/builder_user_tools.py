@@ -25,6 +25,7 @@ def build_builder_user_tools(
     *,
     owner_phone: str | None = None,
     default_target: str = "",
+    sender_name: str | None = None,
 ) -> dict[str, Any]:
     """Build user-management and billing/quota helpers used by Arthur."""
 
@@ -65,7 +66,11 @@ def build_builder_user_tools(
 
             async with db_factory() as db:
                 owner_candidates = [owner_phone, default_target, target_phone]
-                sub_details = await get_best_subscription_by_external_ids(owner_candidates, db)
+                sub_details = await get_best_subscription_by_external_ids(
+                    owner_candidates,
+                    db,
+                    sender_name=sender_name,
+                )
                 if sub_details is not None:
                     user, _sub, _plan = sub_details
                     target_phone = best_owner_identifier(
@@ -194,7 +199,11 @@ def build_builder_user_tools(
                 if not best_owner_identifier(owner_phone, default_target):
                     owner_candidates.append(phone)
 
-                details = await get_best_subscription_by_external_ids(owner_candidates, db)
+                details = await get_best_subscription_by_external_ids(
+                    owner_candidates,
+                    db,
+                    sender_name=sender_name,
+                )
                 if details is None and is_probable_lid(target_phone):
                     details = await get_subscription_by_external_id(target_phone, db)
                 if details is None:
@@ -216,6 +225,22 @@ def build_builder_user_tools(
                     getattr(user, "external_id", None),
                     target_phone,
                 )
+                if (
+                    getattr(plan, "is_trial", False)
+                    and not getattr(user, "phone_number", None)
+                    and (is_probable_lid(owner_phone) or is_probable_lid(default_target))
+                ):
+                    return json.dumps({
+                        "error": (
+                            "WhatsApp kamu masih terbaca sebagai LID dan belum terhubung "
+                            "ke akun dashboard yang punya subscription."
+                        ),
+                        "status": "identity_unlinked",
+                        "identifier": target_phone,
+                        "user_id": str(getattr(user, "id", "")),
+                        "plan_code": getattr(plan, "code", None),
+                        "read_only": True,
+                    }, ensure_ascii=False)
 
                 # Hitung agent aktif
                 active_count_result = await db.execute(

@@ -240,6 +240,7 @@ def build_builder_tools(
     device_id: str = "",
     default_target: str = "",
     session_id: str | None = None,
+    sender_name: str | None = None,
 ) -> list:
     """
     Build semua builder tools untuk system agent.
@@ -256,6 +257,7 @@ def build_builder_tools(
         db_factory,
         owner_phone=owner_phone,
         default_target=default_target,
+        sender_name=sender_name,
     )
     _preview_agent_creation_entitlement = user_tools["preview_agent_creation_entitlement"]
 

@@ -99,6 +99,35 @@ async def test_get_best_subscription_prefers_active_paid_over_trial_duplicate():
     assert plan is paid_plan
 
 
+@pytest.mark.asyncio
+async def test_get_best_subscription_can_infer_unique_paid_user_from_sender_name_after_lid_trial():
+    from app.core.domain.subscription_service import get_best_subscription_by_external_ids
+
+    db = MagicMock()
+    trial_user = SimpleNamespace(id=uuid.uuid4(), external_id="74350933852232", phone_number=None)
+    trial_sub = SimpleNamespace(status="trial", is_usable=True)
+    trial_plan = SimpleNamespace(code="trial", is_trial=True)
+    paid_user = SimpleNamespace(id=uuid.uuid4(), external_id="dashboard_user", phone_number=None)
+    paid_sub = SimpleNamespace(status="active", is_usable=True)
+    paid_plan = SimpleNamespace(code="tier_3", is_trial=False)
+
+    identifier_result = MagicMock()
+    identifier_result.all.return_value = [(trial_user, trial_sub, trial_plan)]
+    name_result = MagicMock()
+    name_result.all.return_value = [(paid_user, paid_sub, paid_plan)]
+    db.execute = AsyncMock(side_effect=[identifier_result, name_result])
+
+    user, sub, plan = await get_best_subscription_by_external_ids(
+        ["74350933852232"],
+        db,
+        sender_name="Bagas",
+    )
+
+    assert user is paid_user
+    assert sub is paid_sub
+    assert plan is paid_plan
+
+
 # ---------------------------------------------------------------------------
 # Tests: get_or_create_wa_user
 # ---------------------------------------------------------------------------
