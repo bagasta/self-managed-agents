@@ -907,3 +907,75 @@ async def test_google_mcp_success_artifact_is_not_overridden_by_stale_auth_error
 
     assert reply == final_reply
     assert len(steps) == 2
+
+
+def test_subscription_tool_step_is_not_google_mcp_error() -> None:
+    # Regression: "get_user_subscription" contains "script" as substring and its
+    # LID error contains "belum terhubung" — must not be treated as Google MCP auth error.
+    steps = [
+        {
+            "tool": "get_user_subscription",
+            "result": (
+                '{"error": "WhatsApp kamu masih terbaca sebagai LID dan belum terhubung '
+                'ke akun dashboard yang punya subscription.", "status": "identity_unlinked"}'
+            ),
+        }
+    ]
+    assert _extract_google_mcp_step_error(steps) is None
+    assert not _has_google_mcp_step(steps)
+
+
+@pytest.mark.asyncio
+async def test_builder_agent_reply_is_never_replaced_by_customer_blocker(monkeypatch) -> None:
+    async def fail_send_message(*args, **kwargs):
+        raise AssertionError("builder session should not notify owner")
+
+    monkeypatch.setattr("app.core.infra.channel_service.send_message", fail_send_message)
+
+    agent = type(
+        "Agent",
+        (),
+        {
+            "name": "Arthur",
+            "capabilities": ["builder"],
+            "tools_config": {"builder": True},
+            "owner_external_id": "6280000000000",
+            "operator_ids": [],
+            "escalation_config": {},
+            "wa_device_id": "dev-1",
+        },
+    )()
+    session = type(
+        "Session",
+        (),
+        {
+            "channel_type": "whatsapp",
+            "external_user_id": "6285798982332",
+            "channel_config": {
+                "device_id": "dev-1",
+                "user_phone": "6285798982332@s.whatsapp.net",
+                "phone_number": "6285798982332",
+            },
+        },
+    )()
+    log = type(
+        "Log",
+        (),
+        {
+            "info": lambda *args, **kwargs: None,
+            "warning": lambda *args, **kwargs: None,
+        },
+    )()
+
+    original = "Plan kamu saat ini: Free Trial, sisa slot agent 1."
+    reply = await _route_google_workspace_blocker_to_owner_if_customer(
+        reply=original,
+        session=session,
+        agent_model=agent,
+        user_message="cek plan gua yang terbaru",
+        error_text="Google Workspace belum terhubung atau token sudah expired",
+        auth_url=None,
+        log=log,
+    )
+
+    assert reply == original

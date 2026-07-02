@@ -232,9 +232,18 @@ def _is_google_mcp_tool_name(tool_name: str) -> bool:
 
     Keep this intentionally broad, but do not include generic names like
     ``task`` because Deep Agents uses that for subagent delegation.
+
+    Markers are matched as prefixes of snake_case tokens, not raw substrings:
+    ``get_user_subscription`` must not match ``script`` (Apps Script), while
+    ``list_calendar_events`` still matches ``calendar``/``event``.
     """
     name = (tool_name or "").lower()
-    return any(marker in name for marker in _GOOGLE_MCP_TOOL_NAME_MARKERS)
+    tokens = [t for t in re.split(r"[^a-z0-9]+", name) if t]
+    return any(
+        token.startswith(marker)
+        for token in tokens
+        for marker in _GOOGLE_MCP_TOOL_NAME_MARKERS
+    )
 
 
 def _google_integration_runtime_url(public_or_configured_url: str) -> str:

@@ -204,6 +204,17 @@ async def _route_google_workspace_blocker_to_owner_if_customer(
     log: Any,
 ) -> str:
     """For operational WA customers, Google blockers are internal owner incidents."""
+    from app.core.engine.agent_policy import build_agent_runtime_policy
+
+    # Builder sessions (Arthur) talk directly to their own owner; the operational
+    # customer-blocker persona ("pesanan"/"jadwal") never applies there.
+    tools_config = getattr(agent_model, "tools_config", None)
+    policy = build_agent_runtime_policy(
+        agent_model, tools_config if isinstance(tools_config, dict) else {}
+    )
+    if policy.is_builder:
+        return reply
+
     if not _is_customer_whatsapp_session(session, agent_model):
         return reply
 
