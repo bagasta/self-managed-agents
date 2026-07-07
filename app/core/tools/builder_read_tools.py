@@ -84,6 +84,7 @@ def build_builder_read_tools(
             "available_presets": list(AGENT_PRESETS.keys()),
             "important_tools": {
                 "builder": "create_agent/update_agent/delete_agent/get_agent_detail/list_my_agents/set_agent_memory",
+                "payment": "get_payment_link untuk link pembayaran Starter/tier_1, Pro/tier_2, dan Enterprise/tier_3",
                 "whatsapp": "send_agent_wa_qr untuk kirim QR agent baru",
                 "coding": "sandbox + deploy + subagents sys_coder",
                 "browsing": "tavily_search/tavily_extract untuk web search dan baca URL",

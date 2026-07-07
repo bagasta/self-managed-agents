@@ -6,6 +6,7 @@ Hanya dimuat jika agent memiliki capability 'builder' atau 'system'.
 Tools yang di-expose:
   get_platform_capabilities()           — ringkasan kapabilitas platform
   get_user_subscription(phone)          — cek plan, slot agent, dan status subscription user
+  get_payment_link(plan, phone)         — buat link pembayaran Clevio per tier
   link_dashboard_account(code)          — hubungkan nomor WA pengirim ke akun dashboard via kode link
   get_presets()                         — katalog preset agent siap pakai
   plan_agent(...)                       — structured plan sebelum create
@@ -122,6 +123,7 @@ from app.core.tools.builder_json import (
 )
 from app.core.tools.builder_management_tools import build_builder_management_tools
 from app.core.tools.builder_manual_tools import build_builder_manual_tools
+from app.core.tools.builder_payment_tools import build_builder_payment_tools
 from app.core.tools.builder_planning_tools import build_builder_planning_tools, _get_post_create_steps
 from app.core.tools.builder_read_tools import build_builder_read_tools
 from app.core.tools.builder_runtime_text import (
@@ -315,6 +317,10 @@ def build_builder_tools(
         session_id=session_id,
         get_settings=_get_builder_settings,
     )
+    payment_tools = build_builder_payment_tools(
+        owner_phone=owner_phone,
+        default_target=default_target,
+    )
     create_tools = build_builder_create_tools(
         db_factory,
         owner_phone=owner_phone,
@@ -388,6 +394,7 @@ def build_builder_tools(
         read_tools["get_self_config"],
         read_tools["get_platform_capabilities"],
         user_tools["get_user_subscription"],
+        payment_tools["get_payment_link"],
         user_tools["link_dashboard_account"],
         read_tools["get_presets"],
         planning_tools["plan_agent"],
