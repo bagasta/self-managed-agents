@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from uuid import uuid4
 from typing import Any
 from urllib.parse import urlencode
 
@@ -40,7 +41,7 @@ def resolve_payment_plan(plan: str | None) -> str | None:
 
 
 def build_payment_link(plan_code: str, phone: str) -> str:
-    query = urlencode({"plan": plan_code, "wa": phone})
+    query = urlencode({"plan": plan_code, "wa": phone, "request": uuid4().hex})
     return f"{PAYMENT_BASE_URL}?{query}"
 
 
