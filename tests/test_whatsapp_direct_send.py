@@ -900,6 +900,30 @@ async def test_send_whatsapp_image_uses_current_attachment_without_sandbox(tmp_p
     assert sent["mimetype"] == "image/png"
 
 
+@pytest.mark.asyncio
+async def test_send_whatsapp_image_hides_unverified_local_path_without_sandbox():
+    from app.core.engine.tool_builder import build_whatsapp_media_tools
+
+    session = SimpleNamespace(
+        channel_config={"device_id": "arthur-device", "user_phone": "628123@s.whatsapp.net"},
+        metadata_={},
+    )
+    tool = next(
+        item
+        for item in build_whatsapp_media_tools(
+            session,
+            sandbox=None,
+            allow_workspace_paths=False,
+        )
+        if item.name == "send_whatsapp_image"
+    )
+
+    result = await tool.ainvoke({"image_path_or_base64": "career_survey_chart.png"})
+
+    assert result.startswith("[MEDIA_SOURCE_UNAVAILABLE]")
+    assert "sandbox" not in result.lower()
+
+
 def test_current_image_attachment_delivery_request_extracts_caption():
     session = SimpleNamespace(
         metadata_={

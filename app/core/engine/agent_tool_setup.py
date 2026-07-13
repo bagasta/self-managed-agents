@@ -252,7 +252,16 @@ async def build_agent_tool_setup(
                 reason="whatsapp_media_disabled_but_channel_is_whatsapp",
                 agent_id=str(agent_id),
             )
-        tools.extend(build_whatsapp_media_tools(session, sandbox))
+        # Builder tetap perlu media untuk QR, base64, dan attachment WA saat ini,
+        # tetapi tidak boleh membaca arbitrary /workspace path. Artifact workspace
+        # hanya milik agent file-capable yang benar-benar memiliki sandbox.
+        tools.extend(
+            build_whatsapp_media_tools(
+                session,
+                sandbox,
+                allow_workspace_paths=not builder_agent,
+            )
+        )
         active_groups.append("whatsapp_media")
         if _is_enabled(tools_config, "wa_agent_manager", default=False):
             tools.extend(build_wa_agent_manager_tools(session, db_factory=AsyncSessionLocal))
