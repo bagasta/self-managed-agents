@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.core.engine.context_service import (
     DELIVERY_STATUS_TAG,
+    INVALID_TOOL_CLAIM_TAG,
     count_user_messages,
     db_messages_to_lc,
     load_history,
@@ -114,6 +115,7 @@ from app.core.engine.google_mcp_support import (
     _looks_like_progress_claim,
     _needs_google_forms_followup,
     _needs_google_sheets_followup,
+    _needs_google_sheets_verification_followup,
     _needs_google_slides_followup,
     apply_google_mcp_reply_overrides,
     apply_mcp_error_notice,
@@ -122,6 +124,7 @@ from app.core.engine.google_mcp_support import (
     google_forms_followup_retry_directive,
     google_forms_request_kind_retry_directive,
     google_sheets_followup_directive,
+    google_sheets_verification_followup_directive,
     filter_google_mcp_tools_for_service_context,
     find_last_google_workspace_user_request,
     infer_google_workspace_service_context,
@@ -2451,6 +2454,103 @@ async def run_agent(
                     spreadsheet_id=_followup_spreadsheet_id,
                 )
 
+        (
+            _needs_sheets_verification,
+            _verification_spreadsheet_id,
+            _verification_range,
+        ) = _needs_google_sheets_verification_followup(steps)
+        if _needs_sheets_verification and _verification_spreadsheet_id:
+            log.info(
+                "agent_run.sheets_verification_continue",
+                spreadsheet_id=_verification_spreadsheet_id,
+                range_name=_verification_range,
+            )
+            # The pre-verification answer is audit data, not safe dialogue.
+            # Keep it in the DB but prevent it from contaminating future turns.
+            for _msg_record in parsed["db_messages"]:
+                if _msg_record.role == "agent":
+                    _msg_record.tool_name = INVALID_TOOL_CLAIM_TAG
+
+            _verification_directive = google_sheets_verification_followup_directive(
+                _verification_spreadsheet_id,
+                _verification_range,
+            )
+            _prior_verification_steps = list(steps)
+            try:
+                from langgraph.prebuilt import create_react_agent as _cra
+
+                _verification_prompt = (
+                    (system_prompt + "\n\n" + _verification_directive)
+                    if isinstance(system_prompt, str)
+                    else system_prompt
+                )
+                _verification_graph = _cra(llm, tools=tools, prompt=_verification_prompt)
+                _verification_input = _sanitize_input_messages(input_messages)
+                async with asyncio.timeout(settings.agent_timeout_seconds):
+                    result = await _verification_graph.ainvoke(
+                        {"messages": _verification_input}, config=_graph_config
+                    )
+                _verification_parsed = parse_agent_result(
+                    result=result,
+                    input_messages=input_messages,
+                    session_id=session.id,
+                    run_id=run_id,
+                    step_start=step_counter,
+                    log=log,
+                )
+                _combined_verification_steps = (
+                    _prior_verification_steps + _verification_parsed["steps"]
+                )
+                _still_unverified, _, _ = _needs_google_sheets_verification_followup(
+                    _combined_verification_steps
+                )
+                if _still_unverified:
+                    for _msg_record in _verification_parsed["db_messages"]:
+                        if _msg_record.role == "agent":
+                            _msg_record.tool_name = INVALID_TOOL_CLAIM_TAG
+                    final_reply = (
+                        "Perubahan spreadsheet sempat dijalankan, tetapi hasil akhirnya belum "
+                        "berhasil diverifikasi dari isi sheet. Saya belum dapat menyatakan task "
+                        "selesai dengan aman."
+                    )
+                    db.add(
+                        Message(
+                            session_id=session.id,
+                            role="agent",
+                            content=final_reply,
+                            step_index=step_counter + len(_verification_parsed["db_messages"]) + 1,
+                            run_id=run_id,
+                        )
+                    )
+                else:
+                    final_reply = _verification_parsed["final_reply"] or final_reply
+                steps = _combined_verification_steps
+                total_tokens_used = (
+                    _agent_logger.total_tokens_from_callbacks
+                    or _verification_parsed["total_tokens_used"]
+                )
+                for _msg_record in _verification_parsed["db_messages"]:
+                    db.add(_msg_record)
+            except Exception as _sheets_verification_exc:
+                log.warning(
+                    "agent_run.sheets_verification_continue_failed",
+                    error=str(_sheets_verification_exc)[:300],
+                    spreadsheet_id=_verification_spreadsheet_id,
+                )
+                final_reply = (
+                    "Perubahan spreadsheet sempat dijalankan, tetapi pembacaan verifikasi gagal. "
+                    "Saya belum dapat memastikan hasil akhirnya dan tidak akan mengklaim task selesai."
+                )
+                db.add(
+                    Message(
+                        session_id=session.id,
+                        role="agent",
+                        content=final_reply,
+                        step_index=step_counter + 1,
+                        run_id=run_id,
+                    )
+                )
+
     await db.flush()
 
     # ------------------------------------------------------------------ #
@@ -2506,6 +2606,7 @@ async def run_agent(
         agent_id=agent_id,
         api_key=settings.api_key,
         log=log,
+        service_context=google_service_context,
     )
     _google_mcp_auth_err = _google_mcp_auth_err_before_override or _extract_google_mcp_step_error(steps)
     _google_mcp_has_artifact = (

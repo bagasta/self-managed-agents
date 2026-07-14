@@ -214,6 +214,40 @@ async def test_record_runtime_memory_does_not_persist_unverified_google_api_expl
     assert "klaim aksi eksternal belum terverifikasi" in values
 
 
+@pytest.mark.asyncio
+async def test_sheet_read_does_not_verify_mutation_completion_claim(monkeypatch):
+    writes: list[tuple[str, str, str | None]] = []
+
+    async def fake_get_memory(_agent_id, _key, _db, scope=None):
+        return None
+
+    async def fake_upsert_memory(_agent_id, key, value, _db, scope=None):
+        writes.append((key, value, scope))
+        return SimpleNamespace(key=key, value_data=value, scope=scope)
+
+    monkeypatch.setattr(memory_service, "get_memory", fake_get_memory)
+    monkeypatch.setattr(memory_service, "upsert_memory", fake_upsert_memory)
+
+    await memory_service.record_runtime_memory(
+        agent_id=uuid.uuid4(),
+        db=SimpleNamespace(),
+        scope="62811",
+        user_message='Isi A1:Z100 dengan "Bakmi"',
+        final_reply="Prosesnya sudah saya jalankan.",
+        tool_steps=[
+            {
+                "tool": "read_sheet_values",
+                "result": "Successfully read 10 rows from A1:Z100",
+            }
+        ],
+        external_service_context="sheets",
+    )
+
+    values = "\n".join(value for _key, value, _scope in writes)
+    assert "Prosesnya sudah saya jalankan" not in values
+    assert "klaim aksi eksternal belum terverifikasi" in values
+
+
 def test_build_system_prompt_injects_runtime_memory_as_latest_context():
     agent_id = uuid.uuid4()
     session = SimpleNamespace(

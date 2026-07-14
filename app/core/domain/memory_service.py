@@ -76,6 +76,33 @@ _EXTERNAL_STATUS_CLAIM_MARKERS = (
     "console.cloud.google.com",
 )
 
+_SHEETS_MUTATION_TOOLS = {
+    "modify_sheet_values",
+    "append_table_rows",
+    "format_sheet_range",
+    "manage_conditional_formatting",
+    "resize_sheet_dimensions",
+    "move_sheet_rows",
+}
+
+_SHEETS_MUTATION_CLAIM_MARKERS = (
+    "sudah saya isi",
+    "sudah saya hapus",
+    "sudah saya ubah",
+    "sudah saya update",
+    "sudah saya tambahkan",
+    "sudah saya catat",
+    "berhasil diisi",
+    "berhasil dihapus",
+    "berhasil diubah",
+    "berhasil diperbarui",
+    "semua sel diisi",
+    "semua cell diisi",
+    "proses selesai",
+    "task selesai",
+    "prosesnya sudah saya jalankan",
+)
+
 
 def _tool_result_indicates_failure(result: Any) -> bool:
     lowered = str(result or "").lower()
@@ -89,12 +116,19 @@ def _contains_status_claim(text: str) -> bool:
     )
 
 
-def _step_is_verified_external_success(step: dict[str, Any], service_context: str) -> bool:
+def _step_is_verified_external_success(
+    step: dict[str, Any],
+    service_context: str,
+    *,
+    require_sheet_mutation: bool = False,
+) -> bool:
     tool_name = str((step or {}).get("tool", "") or "").lower()
     result = str((step or {}).get("result", "") or "")
     if not tool_name or not result or _tool_result_indicates_failure(result):
         return False
     if service_context == "sheets":
+        if require_sheet_mutation:
+            return tool_name in _SHEETS_MUTATION_TOOLS
         return (
             "sheet" in tool_name
             or "spreadsheet" in tool_name
@@ -418,10 +452,21 @@ async def record_runtime_memory(
             _tool_result_indicates_failure((step or {}).get("result"))
             for step in tool_steps
         )
+        reply_requires_sheet_mutation = (
+            external_service_context == "sheets"
+            and any(
+                marker in str(final_reply or "").lower()
+                for marker in _SHEETS_MUTATION_CLAIM_MARKERS
+            )
+        )
         verified_external_success = bool(
             external_service_context
             and any(
-                _step_is_verified_external_success(step, external_service_context)
+                _step_is_verified_external_success(
+                    step,
+                    external_service_context,
+                    require_sheet_mutation=reply_requires_sheet_mutation,
+                )
                 for step in tool_steps
             )
         )

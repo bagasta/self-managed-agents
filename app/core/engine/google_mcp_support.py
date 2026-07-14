@@ -5,6 +5,8 @@ user-facing fallback replies out of the main orchestration flow.
 """
 from __future__ import annotations
 
+import ast
+import asyncio
 import copy
 import json
 import re
@@ -25,8 +27,23 @@ class ModifySheetValuesArgs(BaseModel):
     range_name: str | None = None
     range: str | None = None
     values: Any = None
+    fill_value: Any = Field(
+        default=None,
+        description=(
+            "Optional scalar repeated across every cell in a bounded range_name, "
+            "for example fill_value='Bakmi' with range_name='A1:Z100'."
+        ),
+    )
     value_input_option: str = "USER_ENTERED"
     clear_values: bool = False
+
+
+class InspectSpreadsheetArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    spreadsheet_id: str = Field(
+        description="ID spreadsheet existing yang akan diperiksa sebelum mutasi."
+    )
 
 
 class CreateSpreadsheetArgs(BaseModel):
@@ -160,7 +177,22 @@ _FOLLOWUP_ACTION_MARKERS = (
     "kerjakan",
     "execute it",
     "proceed",
+    "perbaiki",
+    "betulkan",
+    "koreksi",
+    "fix",
+    "fix it",
+    "correct it",
 )
+
+_GOOGLE_SHEETS_MUTATION_TOOL_NAMES = {
+    "modify_sheet_values",
+    "format_sheet_range",
+    "manage_conditional_formatting",
+    "append_table_rows",
+    "resize_sheet_dimensions",
+    "move_sheet_rows",
+}
 
 
 def _contains_phrase(text: str, markers: tuple[str, ...]) -> bool:
@@ -470,8 +502,43 @@ def _looks_like_progress_claim(reply_text: str) -> bool:
         "begitu selesai",
         "processing",
         "working on",
+        "saya akan ",
+        "akan saya ",
+        "prosesnya sudah saya jalankan",
     )
     return any(m in t for m in markers)
+
+
+def _looks_like_sheets_mutation_claim(reply_text: str) -> bool:
+    if not reply_text:
+        return False
+    text = reply_text.lower()
+    markers = (
+        "sudah saya isi",
+        "sudah saya hapus",
+        "sudah saya ubah",
+        "sudah saya update",
+        "sudah saya tambahkan",
+        "sudah saya catat",
+        "berhasil diisi",
+        "berhasil dihapus",
+        "berhasil diubah",
+        "berhasil diperbarui",
+        "semua sel diisi",
+        "semua cell diisi",
+        "prosesnya sudah saya jalankan",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _has_successful_sheets_mutation(steps: list[dict[str, Any]]) -> bool:
+    return any(
+        str((step or {}).get("tool", "") or "").lower()
+        in _GOOGLE_SHEETS_MUTATION_TOOL_NAMES
+        and bool(str((step or {}).get("result", "") or ""))
+        and not _google_mcp_text_error(str((step or {}).get("result", "") or ""))
+        for step in (steps or [])
+    )
 
 
 def _looks_like_google_mcp_success_claim(reply_text: str) -> bool:
@@ -961,6 +1028,277 @@ def _normalize_sheet_values_for_mcp(values: Any) -> Any:
             return json.dumps([values], ensure_ascii=False)
         return json.dumps(values, ensure_ascii=False)
     return json.dumps([[values]], ensure_ascii=False)
+
+
+@dataclass(frozen=True)
+class _A1RangeBounds:
+    sheet_name: str | None
+    start_column: int | None
+    end_column: int | None
+    start_row: int | None
+    end_row: int | None
+
+
+def _a1_column_index(column: str | None) -> int | None:
+    if not column:
+        return None
+    result = 0
+    for char in column.upper():
+        if not ("A" <= char <= "Z"):
+            return None
+        result = result * 26 + (ord(char) - ord("A") + 1)
+    return result
+
+
+def _a1_column_name(index: int) -> str:
+    if index < 1:
+        raise ValueError("A1 column index must be at least 1")
+    result = ""
+    while index:
+        index, remainder = divmod(index - 1, 26)
+        result = chr(ord("A") + remainder) + result
+    return result
+
+
+def _parse_a1_range(range_name: Any) -> _A1RangeBounds | None:
+    text = str(range_name or "").strip()
+    if not text:
+        return None
+    sheet_name: str | None = None
+    if "!" in text:
+        raw_sheet, text = text.rsplit("!", 1)
+        sheet_name = raw_sheet.strip().strip("'").strip('"').casefold() or None
+    text = text.replace("$", "").strip()
+    parts = text.split(":", 1)
+
+    def _cell(part: str) -> tuple[int | None, int | None] | None:
+        match = re.fullmatch(r"([A-Za-z]+)?([0-9]+)?", part.strip())
+        if not match or not (match.group(1) or match.group(2)):
+            return None
+        column = _a1_column_index(match.group(1))
+        row = int(match.group(2)) if match.group(2) else None
+        if row is not None and row < 1:
+            return None
+        return column, row
+
+    start = _cell(parts[0])
+    end = _cell(parts[1]) if len(parts) == 2 else start
+    if start is None or end is None:
+        return None
+    start_column, start_row = start
+    end_column, end_row = end
+    if (
+        start_column is not None
+        and end_column is not None
+        and end_column < start_column
+    ) or (
+        start_row is not None
+        and end_row is not None
+        and end_row < start_row
+    ):
+        return None
+    return _A1RangeBounds(
+        sheet_name=sheet_name,
+        start_column=start_column,
+        end_column=end_column,
+        start_row=start_row,
+        end_row=end_row,
+    )
+
+
+def _a1_range_contains(observed: _A1RangeBounds, target: _A1RangeBounds) -> bool:
+    if observed.sheet_name != target.sheet_name and (
+        observed.sheet_name is not None or target.sheet_name is not None
+    ):
+        return False
+
+    def _axis_contains(
+        observed_start: int | None,
+        observed_end: int | None,
+        target_start: int | None,
+        target_end: int | None,
+    ) -> bool:
+        # A missing target axis means the target only constrains the other
+        # axis, e.g. "4:4" requires row 4 but accepts any read columns.
+        if target_start is None and target_end is None:
+            return True
+        if observed_start is None and observed_end is None:
+            return True
+        if observed_start is None or observed_end is None:
+            return False
+        if target_start is None or target_end is None:
+            return False
+        return observed_start <= target_start and observed_end >= target_end
+
+    return _axis_contains(
+        observed.start_column,
+        observed.end_column,
+        target.start_column,
+        target.end_column,
+    ) and _axis_contains(
+        observed.start_row,
+        observed.end_row,
+        target.start_row,
+        target.end_row,
+    )
+
+
+def _a1_ranges_cover_target(
+    observations: list[_A1RangeBounds], target: _A1RangeBounds
+) -> bool:
+    if any(_a1_range_contains(observed, target) for observed in observations):
+        return True
+
+    matching = [
+        observed
+        for observed in observations
+        if observed.sheet_name == target.sheet_name
+    ]
+    if target.start_row is not None and target.end_row is not None:
+        row_intervals = sorted(
+            (int(observed.start_row), int(observed.end_row))
+            for observed in matching
+            if observed.start_row is not None
+            and observed.end_row is not None
+            and (
+                target.start_column is None
+                or target.end_column is None
+                or (
+                    observed.start_column is not None
+                    and observed.end_column is not None
+                    and observed.start_column <= target.start_column
+                    and observed.end_column >= target.end_column
+                )
+            )
+        )
+        cursor = target.start_row
+        for start, end in row_intervals:
+            if end < cursor:
+                continue
+            if start > cursor:
+                break
+            cursor = max(cursor, end + 1)
+            if cursor > target.end_row:
+                return True
+
+    if target.start_column is not None and target.end_column is not None:
+        column_intervals = sorted(
+            (int(observed.start_column), int(observed.end_column))
+            for observed in matching
+            if observed.start_column is not None
+            and observed.end_column is not None
+            and (
+                target.start_row is None
+                or (
+                    observed.start_row is not None
+                    and observed.end_row is not None
+                    and observed.start_row <= target.start_row
+                    and observed.end_row >= target.end_row
+                )
+            )
+        )
+        cursor = target.start_column
+        for start, end in column_intervals:
+            if end < cursor:
+                continue
+            if start > cursor:
+                break
+            cursor = max(cursor, end + 1)
+            if cursor > target.end_column:
+                return True
+    return False
+
+
+def _bounded_a1_shape(range_name: Any) -> tuple[int, int] | None:
+    text = str(range_name or "").strip()
+    if ":" not in text:
+        return None
+    bounds = _parse_a1_range(text)
+    if not bounds or None in {
+        bounds.start_column,
+        bounds.end_column,
+        bounds.start_row,
+        bounds.end_row,
+    }:
+        return None
+    return (
+        int(bounds.end_row) - int(bounds.start_row) + 1,
+        int(bounds.end_column) - int(bounds.start_column) + 1,
+    )
+
+
+def _sheet_values_matrix(values: Any) -> list[list[Any]] | None:
+    normalized = _normalize_sheet_values_for_mcp(values)
+    if normalized is None:
+        return None
+    if isinstance(normalized, str):
+        try:
+            normalized = json.loads(normalized)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(normalized, list) or not normalized:
+        return None
+    if not all(isinstance(row, list) and row for row in normalized):
+        return None
+    width = len(normalized[0])
+    if any(len(row) != width for row in normalized):
+        return None
+    return normalized
+
+
+def _sheet_mutation_target_ranges(tool_name: str, kwargs: dict[str, Any]) -> list[str]:
+    range_name = str(kwargs.get("range_name") or kwargs.get("range") or "").strip()
+    if tool_name in {
+        "modify_sheet_values",
+        "format_sheet_range",
+        "manage_conditional_formatting",
+    }:
+        return [range_name] if range_name else []
+    if tool_name == "move_sheet_rows":
+        source_sheet = str(kwargs.get("source_sheet") or "").strip()
+        start_row = kwargs.get("start_row")
+        end_row = kwargs.get("end_row")
+        if source_sheet and start_row and end_row:
+            return [f"'{source_sheet}'!{start_row}:{end_row}"]
+        return []
+    if tool_name != "resize_sheet_dimensions":
+        return []
+
+    sheet_name = str(kwargs.get("sheet_name") or "").strip()
+    prefix = f"'{sheet_name}'!" if sheet_name else ""
+    targets: list[str] = []
+    row_numbers: list[int] = []
+    for key in ("delete_rows", "hide_rows", "unhide_rows", "auto_resize_rows"):
+        value = kwargs.get(key)
+        if isinstance(value, str):
+            value = [part.strip() for part in value.split(",") if part.strip()]
+        if isinstance(value, list):
+            row_numbers.extend(int(item) for item in value if str(item).isdigit())
+    if kwargs.get("insert_rows_at"):
+        row_numbers.append(int(kwargs["insert_rows_at"]))
+    if row_numbers:
+        targets.append(f"{prefix}{min(row_numbers)}:{max(row_numbers)}")
+    if kwargs.get("delete_row_range"):
+        targets.append(f"{prefix}{kwargs['delete_row_range']}")
+
+    columns: list[str] = []
+    for key in (
+        "delete_columns",
+        "hide_columns",
+        "unhide_columns",
+        "auto_resize_columns",
+    ):
+        value = kwargs.get(key)
+        if isinstance(value, str):
+            value = [part.strip() for part in value.split(",") if part.strip()]
+        if isinstance(value, list):
+            columns.extend(str(item).upper() for item in value if str(item).isalpha())
+    if kwargs.get("insert_columns_at"):
+        columns.append(str(kwargs["insert_columns_at"]).upper())
+    if columns:
+        indices = sorted((_a1_column_index(column), column) for column in columns)
+        targets.append(f"{prefix}{indices[0][1]}:{indices[-1][1]}")
+    return targets
 
 
 def _normalize_string_list_arg(value: Any) -> Any:
@@ -1456,16 +1794,63 @@ def _needs_google_sheets_followup(user_message: str, steps: list[dict[str, Any]]
             saw_create_spreadsheet = True
             spreadsheet_id = spreadsheet_id or _extract_spreadsheet_id_from_text(result)
         elif tool_name in {"modify_sheet_values", "append_table_rows"}:
-            saw_content_write = True
+            saw_content_write = bool(result and not _google_mcp_text_error(result))
             spreadsheet_id = spreadsheet_id or _extract_spreadsheet_id_from_text(result)
         elif (
             "sheet" in tool_name
             and any(marker in tool_name for marker in ("write", "update_values", "append"))
         ):
-            saw_content_write = True
+            saw_content_write = bool(result and not _google_mcp_text_error(result))
             spreadsheet_id = spreadsheet_id or _extract_spreadsheet_id_from_text(result)
 
     return (saw_create_spreadsheet and not saw_content_write), spreadsheet_id
+
+
+def _needs_google_sheets_verification_followup(
+    steps: list[dict[str, Any]],
+) -> tuple[bool, str | None, str | None]:
+    """Require a successful read after the last successful Sheets mutation."""
+    last_mutation_index: int | None = None
+    spreadsheet_id: str | None = None
+    target_range: str | None = None
+    for index, step in enumerate(steps or []):
+        tool_name = str((step or {}).get("tool", "") or "").lower()
+        if tool_name not in _GOOGLE_SHEETS_MUTATION_TOOL_NAMES:
+            continue
+        result = str((step or {}).get("result", "") or "")
+        if not result or _google_mcp_text_error(result):
+            continue
+        args = (step or {}).get("args") or {}
+        last_mutation_index = index
+        spreadsheet_id = str(args.get("spreadsheet_id") or "").strip() or None
+        targets = _sheet_mutation_target_ranges(tool_name, args)
+        target_range = targets[0] if targets else None
+
+    if last_mutation_index is None or not spreadsheet_id:
+        return False, None, None
+
+    for step in (steps or [])[last_mutation_index + 1:]:
+        if str((step or {}).get("tool", "") or "").lower() != "read_sheet_values":
+            continue
+        result = str((step or {}).get("result", "") or "")
+        args = (step or {}).get("args") or {}
+        read_range = _parse_a1_range(args.get("range_name") or "A1:Z1000")
+        target_bounds = _parse_a1_range(target_range) if target_range else None
+        range_covered = (
+            target_bounds is None
+            or (
+                read_range is not None
+                and _a1_range_contains(read_range, target_bounds)
+            )
+        )
+        if (
+            result
+            and not _google_mcp_text_error(result)
+            and str(args.get("spreadsheet_id") or "").strip() == spreadsheet_id
+            and range_covered
+        ):
+            return False, spreadsheet_id, target_range
+    return True, spreadsheet_id, target_range
 
 
 def _needs_google_slides_followup(user_message: str, steps: list[dict[str, Any]]) -> tuple[bool, str | None]:
@@ -1635,16 +2020,21 @@ def build_google_mcp_usage_notice(
             "User meminta pembuatan atau pengeditan Google Sheets. create_spreadsheet hanya membuat file kosong; "
             "Untuk request Google Sheets/spreadsheet, JANGAN panggil manage_event karena manage_event hanya untuk Google Calendar. "
             "JANGAN panggil manage_task/manage_task_list karena keduanya hanya untuk Google Tasks; Google Tasks API tidak terkait operasi row, column, cell, atau range spreadsheet. "
-            "Untuk menghapus row/column secara struktural, baca sheet lebih dulu untuk memastikan indeks lalu panggil resize_sheet_dimensions dengan delete_rows=[nomor_baris_1_based], delete_row_range='start:end', atau delete_columns=[huruf_kolom]. "
-            "Setelah operasi destruktif, verifikasi ulang dengan read_sheet_values sebelum mengklaim berhasil. "
+            "INSPECT-THEN-READ-BEFORE-WRITE WAJIB untuk spreadsheet existing: sebelum modify_sheet_values, append_table_rows, format_sheet_range, manage_conditional_formatting, resize_sheet_dimensions, atau move_sheet_rows, pertama panggil inspect_spreadsheet_for_action untuk membaca seluruh tab, lalu panggil read_sheet_values pada spreadsheet_id dan range target yang sama atau lebih luas. "
+            "Output MCP read_sheet_values biasa dapat terpotong setelah 50 row, sehingga satu read range besar bukan bukti bahwa agent sudah melihat seluruh nilainya. Tool inspect_spreadsheet_for_action menangani chunk seluruh tab dan hanya berhasil jika semua chunk terbaca. "
+            "History, memory, screenshot, perkiraan pola, dan ucapan agent sebelumnya BUKAN bukti isi sheet saat ini. Gunakan ringkasan inspeksi seluruh workbook dan nilai aktual target pada run ini, periksa nomor row/column serta formula yang relevan, baru susun mutasi. "
+            "Snapshot inspeksi dan read menjadi stale setelah satu mutasi; inspeksi dan baca ulang sebelum mutasi berikutnya. Spreadsheet atau tab yang baru dibuat pada run yang sama diketahui kosong dan boleh langsung diisi. "
+            "Untuk menghapus row/column secara struktural, baca row/column target lebih dulu untuk memastikan indeks dan isi, lalu panggil resize_sheet_dimensions dengan delete_rows=[nomor_baris_1_based], delete_row_range='start:end', atau delete_columns=[huruf_kolom]. "
+            "modify_sheet_values tidak boleh memakai values=[] atau string '[]'. values wajib matriks 2D non-empty dengan dimensi tepat sesuai range_name. Untuk mengisi seluruh range dengan satu nilai yang sama, gunakan fill_value agar wrapper membentuk matriks lengkap tanpa terpotong limit token. "
+            "Setelah setiap mutasi, verifikasi ulang target dengan read_sheet_values dan cocokkan jumlah row, column, dan cell dari output tool sebelum mengklaim berhasil. Jangan menyimpulkan range penuh terisi jika output hanya melaporkan sebagian row/cell. "
             "JANGAN berhenti setelah create_spreadsheet jika user meminta tabel, data, laporan, tracker, edit, rumus, atau formula. "
             "Workflow wajib untuk spreadsheet baru: "
             "(1) create_spreadsheet dengan title dan sheet_names bila perlu; "
-            "(2) modify_sheet_values untuk mengisi header, baris data, dan formula dengan argumen spreadsheet_id, range_name, values, value_input_option='USER_ENTERED'; "
+            "(2) modify_sheet_values untuk mengisi header, baris data, dan formula dengan argumen spreadsheet_id, range_name, values non-empty (atau fill_value untuk fill seragam), value_input_option='USER_ENTERED'; "
             "(3) format_sheet_range untuk header/angka bila tool tersedia; "
             "(4) resize_sheet_dimensions untuk freeze header dan auto-resize kolom bila tool tersedia; "
             "(5) read_sheet_values dengan include_formulas=True untuk verifikasi. "
-            "modify_sheet_values memakai range_name, bukan range. "
+            "modify_sheet_values memakai range_name, bukan range; gunakan fill_value untuk fill seragam pada range besar. "
             "Jika perlu beberapa tab seperti Pemasukan/Pengeluaran/Ringkasan, sertakan sheet_names=['Pemasukan','Pengeluaran','Ringkasan'] saat create_spreadsheet atau panggil create_sheet sebelum menulis ke tab itu. "
             "Jangan menulis ke range bertab seperti Pemasukan!A1:C10 kecuali tab Pemasukan sudah dibuat atau sudah muncul dari get_spreadsheet_info. "
             "Untuk spreadsheet baru tanpa sheet_names eksplisit, jangan hardcode Sheet1!A1:F10 karena nama tab default bisa berbeda per locale; pakai range tanpa nama sheet seperti A1:F10, atau ambil nama tab dari get_spreadsheet_info dulu. "
@@ -1904,7 +2294,7 @@ def google_sheets_followup_directive(spreadsheet_id: str, user_message: str) -> 
         "[SYSTEM FOLLOW-UP DIRECTIVE - GOOGLE SHEETS]\n"
         f"Spreadsheet sudah dibuat dengan spreadsheet_id={spreadsheet_id}, tetapi isinya belum dibuat. "
         "Lanjutkan SEKARANG juga workflow spreadsheet sampai ada tabel/data/rumus yang benar. "
-        "WAJIB panggil modify_sheet_values dengan argumen spreadsheet_id, range_name, values, dan value_input_option='USER_ENTERED'. "
+        "WAJIB panggil modify_sheet_values dengan argumen spreadsheet_id, range_name, values non-empty (atau fill_value untuk fill seragam), dan value_input_option='USER_ENTERED'. "
         "JANGAN gunakan argumen bernama range; tool ini memakai range_name. "
         "Untuk file baru, pakai range_name tanpa nama sheet seperti A1:F10 kecuali kamu sudah tahu nama tab sebenarnya dari get_spreadsheet_info. "
         "JANGAN hardcode Sheet1!A1:F10 karena tab default bisa bernama berbeda dan memicu Unable to parse range. "
@@ -1912,9 +2302,26 @@ def google_sheets_followup_directive(spreadsheet_id: str, user_message: str) -> 
         f"{user_message[:500]}. "
         "Jika user tidak memberi data rinci, buat template praktis dengan header siap pakai, beberapa baris contoh, dan minimal satu kolom formula. "
         "Formula harus ditulis sebagai string diawali '=' agar Google Sheets menghitungnya, contoh '=SUM(B2:B10)', '=AVERAGE(C2:C10)', '=IF(D2>=80,\"OK\",\"Review\")'. "
-        "Setelah values berhasil ditulis, rapikan dengan format_sheet_range untuk header dan resize_sheet_dimensions untuk freeze header/auto-resize kolom bila tool tersedia. "
-        "Terakhir, panggil read_sheet_values dengan include_formulas=True untuk verifikasi. "
+        "Setelah values berhasil ditulis, panggil read_sheet_values untuk verifikasi. Jika perlu formatting, gunakan hasil read tersebut untuk format_sheet_range, lalu baca ulang sebelum resize_sheet_dimensions. "
+        "Terakhir, panggil read_sheet_values dengan include_formulas=True untuk verifikasi final. "
         "Balasan final HARUS berisi link spreadsheet serta ringkasan tabel dan formula yang dibuat. "
+        "[/SYSTEM FOLLOW-UP DIRECTIVE]"
+    )
+
+
+def google_sheets_verification_followup_directive(
+    spreadsheet_id: str,
+    target_range: str | None,
+) -> str:
+    range_name = target_range or "A1:Z1000"
+    return (
+        "[SYSTEM FOLLOW-UP DIRECTIVE - GOOGLE SHEETS VERIFICATION]\n"
+        "Mutasi Google Sheets berhasil dipanggil tetapi hasil akhirnya belum diverifikasi. "
+        f"Panggil read_sheet_values sekarang dengan spreadsheet_id={spreadsheet_id}, "
+        f"range_name={range_name}, dan include_formulas=True. "
+        "Periksa jumlah row/column/cell aktual dan isi target. Jika cakupan hasil tidak sesuai "
+        "permintaan user, jangan klaim selesai; koreksi payload berdasarkan hasil baca lalu baca "
+        "ulang sekali lagi. Balasan final hanya boleh menyatakan bagian yang terbukti dari output read. "
         "[/SYSTEM FOLLOW-UP DIRECTIVE]"
     )
 
@@ -2060,6 +2467,220 @@ def _google_mcp_text_error(result: Any) -> str | None:
     return clean.strip()[:1600]
 
 
+def _google_mcp_result_text(result: Any) -> str:
+    """Extract text from plain and content-block MCP results."""
+    if result is None:
+        return ""
+    if isinstance(result, str):
+        return result
+    if isinstance(result, (list, tuple)):
+        return "\n".join(
+            part for item in result if (part := _google_mcp_result_text(item))
+        )
+    if isinstance(result, dict):
+        if isinstance(result.get("text"), str):
+            return result["text"]
+        if "content" in result:
+            return _google_mcp_result_text(result["content"])
+        return str(result)
+    text_value = getattr(result, "text", None)
+    if isinstance(text_value, str):
+        return text_value
+    content_value = getattr(result, "content", None)
+    if content_value is not None:
+        return _google_mcp_result_text(content_value)
+    return str(result)
+
+
+@dataclass(frozen=True)
+class _SpreadsheetInspectionTab:
+    name: str
+    row_count: int
+    column_count: int
+
+
+def _parse_spreadsheet_info(text: str) -> tuple[str, list[_SpreadsheetInspectionTab]]:
+    title_match = re.search(r'^Spreadsheet:\s*"(.+?)"\s*\(ID:', text, re.MULTILINE)
+    title = title_match.group(1) if title_match else "Unknown"
+    tabs = [
+        _SpreadsheetInspectionTab(
+            name=match.group(1),
+            row_count=int(match.group(2)),
+            column_count=int(match.group(3)),
+        )
+        for match in re.finditer(
+            r'^\s*-\s*"(.+?)"\s*\(ID:\s*[^)]+\)\s*\|\s*Size:\s*(\d+)x(\d+)',
+            text,
+            re.MULTILINE,
+        )
+    ]
+    return title, tabs
+
+
+def _parse_sheet_chunk_rows(text: str, *, start_row: int) -> dict[int, list[Any]]:
+    rows: dict[int, list[Any]] = {}
+    for match in re.finditer(r"^Row\s+(\d+):\s*(\[.*\])\s*$", text, re.MULTILINE):
+        try:
+            value = ast.literal_eval(match.group(2))
+        except (SyntaxError, ValueError):
+            continue
+        if isinstance(value, list):
+            rows[start_row + int(match.group(1)) - 1] = value
+    return rows
+
+
+def _merge_sheet_chunk_formulas(
+    rows: dict[int, list[Any]], text: str
+) -> None:
+    for match in re.finditer(
+        r"^-\s+(?:'.*?'!)?([A-Z]+)(\d+):\s*(=.*)$",
+        text,
+        re.MULTILINE,
+    ):
+        column_index = _a1_column_index(match.group(1))
+        row_number = int(match.group(2))
+        if column_index is None:
+            continue
+        row = rows.setdefault(row_number, [])
+        while len(row) < column_index:
+            row.append("")
+        displayed_value = row[column_index - 1]
+        row[column_index - 1] = {
+            "display": displayed_value,
+            "formula": match.group(3),
+        }
+
+
+def _compact_number_ranges(numbers: list[int]) -> str:
+    if not numbers:
+        return "none"
+    ordered = sorted(set(numbers))
+    parts: list[str] = []
+    start = previous = ordered[0]
+    for number in ordered[1:]:
+        if number == previous + 1:
+            previous = number
+            continue
+        parts.append(str(start) if start == previous else f"{start}-{previous}")
+        start = previous = number
+    parts.append(str(start) if start == previous else f"{start}-{previous}")
+    return ", ".join(parts)
+
+
+def _trim_sheet_row(row: list[Any]) -> list[Any]:
+    trimmed = list(row)
+    while trimmed and trimmed[-1] in (None, ""):
+        trimmed.pop()
+    return trimmed
+
+
+def _sheet_row_preview(row: list[Any], *, max_chars: int = 800) -> str:
+    preview = json.dumps(_trim_sheet_row(row), ensure_ascii=False, default=str)
+    if len(preview) <= max_chars:
+        return preview
+    return preview[: max_chars - 3] + "..."
+
+
+def _build_sheet_inspection_summary(
+    *,
+    spreadsheet_id: str,
+    title: str,
+    tabs: list[_SpreadsheetInspectionTab],
+    rows_by_tab: dict[str, dict[int, list[Any]]],
+) -> str:
+    lines = [
+        "SPREADSHEET_INSPECTION_COMPLETE",
+        f'Spreadsheet: "{title}" (ID: {spreadsheet_id})',
+        f"All {len(tabs)} tabs were scanned from row 1 through their full grid row count.",
+    ]
+    for tab in tabs:
+        rows = rows_by_tab.get(tab.name, {})
+        nonempty_rows = {
+            row_number: _trim_sheet_row(row)
+            for row_number, row in rows.items()
+            if any(value not in (None, "") for value in row)
+        }
+        nonempty_numbers = sorted(nonempty_rows)
+        used_columns = max((len(row) for row in nonempty_rows.values()), default=0)
+        used_range = (
+            f"A{nonempty_numbers[0]}:{_a1_column_name(used_columns)}{nonempty_numbers[-1]}"
+            if nonempty_numbers and used_columns
+            else "empty"
+        )
+        empty_rows = [
+            number for number in range(1, tab.row_count + 1)
+            if number not in nonempty_rows
+        ]
+        patterns: dict[str, list[int]] = {}
+        pattern_rows: dict[str, list[Any]] = {}
+        for row_number, row in nonempty_rows.items():
+            signature = json.dumps(row, ensure_ascii=False, sort_keys=True, default=str)
+            patterns.setdefault(signature, []).append(row_number)
+            pattern_rows[signature] = row
+        duplicate_patterns = sorted(
+            (
+                (row_numbers, pattern_rows[signature])
+                for signature, row_numbers in patterns.items()
+                if len(row_numbers) > 1
+            ),
+            key=lambda item: (-len(item[0]), item[0][0]),
+        )
+
+        lines.extend(
+            [
+                "",
+                f'Tab "{tab.name}": grid {tab.row_count} rows x {tab.column_count} columns; '
+                f"scanned 1-{tab.row_count}; non-empty rows {len(nonempty_rows)}; used range {used_range}.",
+                f"Empty rows: {_compact_number_ranges(empty_rows)}",
+                f"Distinct non-empty row patterns: {len(patterns)}; duplicated patterns: {len(duplicate_patterns)}.",
+            ]
+        )
+        if nonempty_numbers:
+            sample_numbers = nonempty_numbers[:5]
+            for number in nonempty_numbers[-3:]:
+                if number not in sample_numbers:
+                    sample_numbers.append(number)
+            lines.append(
+                "Row samples: "
+                + "; ".join(
+                    f"row {number}={_sheet_row_preview(nonempty_rows[number])}"
+                    for number in sample_numbers
+                )
+            )
+        if patterns and len(patterns) <= 100:
+            lines.append("All non-empty row patterns:")
+            ordered_patterns = sorted(
+                (
+                    (row_numbers, pattern_rows[signature])
+                    for signature, row_numbers in patterns.items()
+                ),
+                key=lambda item: item[0][0],
+            )
+            for row_numbers, row in ordered_patterns:
+                lines.append(
+                    f"- rows {_compact_number_ranges(row_numbers)} ({len(row_numbers)}x): "
+                    f"{_sheet_row_preview(row)}"
+                )
+        elif duplicate_patterns:
+            lines.append("Duplicated row patterns:")
+            for row_numbers, row in duplicate_patterns[:20]:
+                lines.append(
+                    f"- rows {_compact_number_ranges(row_numbers)} ({len(row_numbers)}x): "
+                    f"{_sheet_row_preview(row)}"
+                )
+            if len(duplicate_patterns) > 20:
+                lines.append(f"- ... {len(duplicate_patterns) - 20} more duplicate patterns")
+
+    lines.extend(
+        [
+            "",
+            "Inspection authorization is valid only for the next mutation. Read the exact target range "
+            "with read_sheet_values before changing it, and inspect again after any mutation.",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _wrap_google_mcp_text_error_tool(mcp_tool: Any) -> Any:
     args_schema = getattr(mcp_tool, "args_schema", None)
     if args_schema is None:
@@ -2094,8 +2715,239 @@ def sanitize_google_forms_tools(
     sanitized_tool_names: list[str] = []
     get_events_tool = next((tool for tool in mcp_tools if getattr(tool, "name", "") == "get_events"), None)
     create_sheet_tool = next((tool for tool in mcp_tools if getattr(tool, "name", "") == "create_sheet"), None)
+    get_spreadsheet_info_tool = next(
+        (tool for tool in mcp_tools if getattr(tool, "name", "") == "get_spreadsheet_info"),
+        None,
+    )
+    read_sheet_values_tool = next(
+        (tool for tool in mcp_tools if getattr(tool, "name", "") == "read_sheet_values"),
+        None,
+    )
+    sheet_reads: dict[str, list[_A1RangeBounds]] = {}
+    inspected_spreadsheets: set[str] = set()
+    created_spreadsheets: set[str] = set()
+    created_sheets: set[tuple[str, str]] = set()
+
+    def _record_sheet_read(spreadsheet_id: Any, range_name: Any) -> None:
+        spreadsheet_key = str(spreadsheet_id or "").strip()
+        bounds = _parse_a1_range(range_name)
+        if spreadsheet_key and bounds:
+            sheet_reads.setdefault(spreadsheet_key, []).append(bounds)
+
+    def _require_sheet_read(tool_name: str, kwargs: dict[str, Any]) -> str:
+        spreadsheet_id = str(kwargs.get("spreadsheet_id") or "").strip()
+        if not spreadsheet_id:
+            raise ValueError(
+                "SHEET_ID_REQUIRED: operasi Google Sheets membutuhkan spreadsheet_id yang valid."
+            )
+        targets = _sheet_mutation_target_ranges(tool_name, kwargs)
+        parsed_targets = [target for target in (_parse_a1_range(item) for item in targets) if target]
+        if spreadsheet_id in created_spreadsheets:
+            return spreadsheet_id
+        if parsed_targets and all(
+            target.sheet_name
+            and (spreadsheet_id, target.sheet_name) in created_sheets
+            for target in parsed_targets
+        ):
+            return spreadsheet_id
+        if spreadsheet_id not in inspected_spreadsheets:
+            if get_spreadsheet_info_tool is None or read_sheet_values_tool is None:
+                raise ValueError(
+                    "SHEET_INSPECTION_UNAVAILABLE: mutasi spreadsheet existing diblokir karena "
+                    "get_spreadsheet_info atau read_sheet_values tidak tersedia. Jangan menebak isi sheet."
+                )
+            raise ValueError(
+                "SHEET_INSPECTION_REQUIRED: sebelum mengubah spreadsheet existing, panggil "
+                "inspect_spreadsheet_for_action(spreadsheet_id=...) untuk membaca seluruh tab dan "
+                "struktur workbook pada run ini. Setelah inspeksi selesai, baca juga range target "
+                "secara eksplisit dengan read_sheet_values, lalu ulangi mutasi."
+            )
+        observations = sheet_reads.get(spreadsheet_id, [])
+        covered = bool(observations) if not parsed_targets else all(
+            _a1_ranges_cover_target(observations, target)
+            for target in parsed_targets
+        )
+        if not covered:
+            target_text = ", ".join(targets) or "range/table yang akan diubah"
+            raise ValueError(
+                "SHEET_READ_REQUIRED: sebelum edit, clear, append, format, move, insert, "
+                "atau delete pada spreadsheet existing, panggil read_sheet_values terlebih "
+                f"dahulu untuk spreadsheet_id={spreadsheet_id} dan cakupan {target_text}. "
+                "Gunakan hasil baca aktual untuk menentukan row/column serta payload, lalu "
+                "ulangi operasi mutasi. History, memory, screenshot, dan klaim agent bukan "
+                "pengganti hasil read_sheet_values pada run ini."
+            )
+        return spreadsheet_id
+
+    def _invalidate_sheet_snapshot(spreadsheet_id: str) -> None:
+        sheet_reads.pop(spreadsheet_id, None)
+        inspected_spreadsheets.discard(spreadsheet_id)
+        created_spreadsheets.discard(spreadsheet_id)
+        stale_sheets = {item for item in created_sheets if item[0] == spreadsheet_id}
+        created_sheets.difference_update(stale_sheets)
+
+    if get_spreadsheet_info_tool is not None and read_sheet_values_tool is not None:
+        async def _inspect_spreadsheet_for_action(**kwargs):
+            spreadsheet_id = str(kwargs.get("spreadsheet_id") or "").strip()
+            if not spreadsheet_id:
+                raise ValueError(
+                    "SHEET_ID_REQUIRED: inspect_spreadsheet_for_action membutuhkan spreadsheet_id."
+                )
+            inspected_spreadsheets.discard(spreadsheet_id)
+            sheet_reads.pop(spreadsheet_id, None)
+
+            info_result = await get_spreadsheet_info_tool.ainvoke(
+                {"spreadsheet_id": spreadsheet_id}
+            )
+            if error_text := _google_mcp_text_error(info_result):
+                raise RuntimeError(error_text)
+            info_text = _google_mcp_result_text(info_result)
+            title, tabs = _parse_spreadsheet_info(info_text)
+            if not tabs:
+                raise RuntimeError(
+                    "SHEET_INSPECTION_FAILED: output get_spreadsheet_info tidak berisi nama "
+                    "dan ukuran tab yang dapat diverifikasi. Mutasi diblokir."
+                )
+
+            chunk_count = sum((tab.row_count + 49) // 50 for tab in tabs)
+            total_grid_cells = sum(tab.row_count * tab.column_count for tab in tabs)
+            if chunk_count > 200 or total_grid_cells > 250_000:
+                raise ValueError(
+                    "SHEET_INSPECTION_TOO_LARGE: workbook memiliki "
+                    f"{len(tabs)} tab, {chunk_count} chunk, dan {total_grid_cells} grid cells. "
+                    "Batas inspeksi aman adalah 200 chunk dan 250000 grid cells. "
+                    "Persempit workbook atau minta user menentukan tab/range; mutasi tidak dijalankan."
+                )
+
+            semaphore = asyncio.Semaphore(8)
+
+            async def _read_chunk(tab: _SpreadsheetInspectionTab, start_row: int):
+                end_row = min(start_row + 49, tab.row_count)
+                escaped_name = tab.name.replace("'", "''")
+                end_column = _a1_column_name(tab.column_count)
+                range_name = f"'{escaped_name}'!A{start_row}:{end_column}{end_row}"
+                async with semaphore:
+                    result = await read_sheet_values_tool.ainvoke(
+                        {
+                            "spreadsheet_id": spreadsheet_id,
+                            "range_name": range_name,
+                            "include_formulas": True,
+                        }
+                    )
+                if error_text := _google_mcp_text_error(result):
+                    raise RuntimeError(error_text)
+                text = _google_mcp_result_text(result)
+                if re.search(r"\.\.\. and \d+ more rows", text):
+                    raise RuntimeError(
+                        "SHEET_INSPECTION_TRUNCATED: MCP masih memotong output untuk "
+                        f"range {range_name}; mutasi diblokir."
+                    )
+                reported_match = re.search(r"Successfully read (\d+) rows", text)
+                parsed_rows = _parse_sheet_chunk_rows(text, start_row=start_row)
+                if reported_match and int(reported_match.group(1)) != len(parsed_rows):
+                    raise RuntimeError(
+                        "SHEET_INSPECTION_UNPARSEABLE: jumlah row output MCP tidak cocok untuk "
+                        f"range {range_name}; mutasi diblokir."
+                    )
+                _merge_sheet_chunk_formulas(parsed_rows, text)
+                return tab.name, parsed_rows
+
+            chunk_jobs = [
+                _read_chunk(tab, start_row)
+                for tab in tabs
+                for start_row in range(1, tab.row_count + 1, 50)
+            ]
+            chunk_results = await asyncio.gather(*chunk_jobs, return_exceptions=True)
+            failures = [result for result in chunk_results if isinstance(result, BaseException)]
+            if failures:
+                inspected_spreadsheets.discard(spreadsheet_id)
+                raise RuntimeError(
+                    "SHEET_INSPECTION_FAILED: tidak semua chunk seluruh tab berhasil dibaca; "
+                    f"mutasi diblokir. Error pertama: {str(failures[0])[:600]}"
+                )
+
+            rows_by_tab: dict[str, dict[int, list[Any]]] = {
+                tab.name: {} for tab in tabs
+            }
+            for result in chunk_results:
+                tab_name, parsed_rows = result
+                rows_by_tab[tab_name].update(parsed_rows)
+
+            inspected_spreadsheets.add(spreadsheet_id)
+            return _build_sheet_inspection_summary(
+                spreadsheet_id=spreadsheet_id,
+                title=title,
+                tabs=tabs,
+                rows_by_tab=rows_by_tab,
+            )
+
+        wrapped_tools.append(
+            StructuredTool.from_function(
+                coroutine=_inspect_spreadsheet_for_action,
+                name="inspect_spreadsheet_for_action",
+                description=(
+                    "Wajib dipanggil sebelum edit/hapus/tambah data pada spreadsheet existing. "
+                    "Membaca metadata dan seluruh grid semua tab dalam chunk 50 baris, lalu "
+                    "meringkas struktur, row kosong, duplikat, dan sampel isi. Setelah tool ini "
+                    "berhasil, panggil read_sheet_values untuk range target sebelum mutasi."
+                ),
+                args_schema=InspectSpreadsheetArgs,
+            )
+        )
+        sanitized_tool_names.append("inspect_spreadsheet_for_action")
+
     for mcp_tool in mcp_tools:
         tool_name = getattr(mcp_tool, "name", "")
+        if tool_name == "read_sheet_values":
+            def _build_read_sheet_values_guarded(tool_to_call: Any):
+                async def _read_sheet_values_guarded(**kwargs):
+                    result = await tool_to_call.ainvoke(kwargs)
+                    if not _google_mcp_text_error(result):
+                        range_name = kwargs.get("range_name") or "A1:Z1000"
+                        bounds = _parse_a1_range(range_name)
+                        output_text = _google_mcp_result_text(result)
+                        reported_match = re.search(r"Successfully read (\d+) rows", output_text)
+                        if (
+                            bounds
+                            and reported_match
+                            and int(reported_match.group(1)) > 50
+                            and bounds.start_row is not None
+                        ):
+                            visible_end = bounds.start_row + 49
+                            range_name = (
+                                f"'{bounds.sheet_name}'!" if bounds.sheet_name else ""
+                            ) + (
+                                f"{_a1_column_name(bounds.start_column)}"
+                                if bounds.start_column is not None
+                                else ""
+                            ) + str(bounds.start_row) + ":" + (
+                                f"{_a1_column_name(bounds.end_column)}"
+                                if bounds.end_column is not None
+                                else ""
+                            ) + str(visible_end)
+                        _record_sheet_read(
+                            kwargs.get("spreadsheet_id"),
+                            range_name,
+                        )
+                    return result
+
+                return _read_sheet_values_guarded
+
+            args_schema = getattr(mcp_tool, "args_schema", None)
+            if args_schema is None:
+                wrapped_tools.append(mcp_tool)
+            else:
+                wrapped_tools.append(
+                    StructuredTool.from_function(
+                        coroutine=_build_read_sheet_values_guarded(mcp_tool),
+                        name=mcp_tool.name,
+                        description=getattr(mcp_tool, "description", None),
+                        args_schema=args_schema,
+                    )
+                )
+                sanitized_tool_names.append(tool_name)
+            continue
+
         if tool_name in _GOOGLE_TASK_TOOL_NAMES:
             def _build_google_task_guarded(tool_to_call: Any):
                 async def _google_task_guarded(**kwargs):
@@ -2144,7 +2996,12 @@ def sanitize_google_forms_tools(
                         kwargs.pop("sheet_names", None)
                     elif "sheet_names" in kwargs:
                         kwargs["sheet_names"] = _normalize_string_list_arg(kwargs.get("sheet_names"))
-                    return await tool_to_call.ainvoke(kwargs)
+                    result = await tool_to_call.ainvoke(kwargs)
+                    if not _google_mcp_text_error(result):
+                        spreadsheet_id = _extract_spreadsheet_id_from_text(str(result))
+                        if spreadsheet_id:
+                            created_spreadsheets.add(spreadsheet_id)
+                    return result
 
                 return _create_spreadsheet_guarded
 
@@ -2157,6 +3014,34 @@ def sanitize_google_forms_tools(
                 )
             )
             sanitized_tool_names.append(tool_name)
+            continue
+
+        if tool_name == "create_sheet":
+            def _build_create_sheet_guarded(tool_to_call: Any):
+                async def _create_sheet_guarded(**kwargs):
+                    result = await tool_to_call.ainvoke(kwargs)
+                    if not _google_mcp_text_error(result):
+                        spreadsheet_id = str(kwargs.get("spreadsheet_id") or "").strip()
+                        sheet_name = str(kwargs.get("sheet_name") or "").strip().casefold()
+                        if spreadsheet_id and sheet_name:
+                            created_sheets.add((spreadsheet_id, sheet_name))
+                    return result
+
+                return _create_sheet_guarded
+
+            args_schema = getattr(mcp_tool, "args_schema", None)
+            if args_schema is None:
+                wrapped_tools.append(mcp_tool)
+            else:
+                wrapped_tools.append(
+                    StructuredTool.from_function(
+                        coroutine=_build_create_sheet_guarded(mcp_tool),
+                        name=mcp_tool.name,
+                        description=getattr(mcp_tool, "description", None),
+                        args_schema=args_schema,
+                    )
+                )
+                sanitized_tool_names.append(tool_name)
             continue
 
         if tool_name == "create_presentation":
@@ -2401,12 +3286,65 @@ def sanitize_google_forms_tools(
                     range_alias = kwargs.pop("range", None)
                     if not kwargs.get("range_name") and range_alias:
                         kwargs["range_name"] = range_alias
-                    if not kwargs.get("range_name") and kwargs.get("values") is not None:
+                    if not kwargs.get("range_name") and (
+                        kwargs.get("values") is not None
+                        or kwargs.get("fill_value") is not None
+                    ):
                         kwargs["range_name"] = "A1"
-                    kwargs["values"] = _normalize_sheet_values_for_mcp(kwargs.get("values"))
                     range_name = str(kwargs.get("range_name") or "")
+                    spreadsheet_id = _require_sheet_read("modify_sheet_values", kwargs)
+                    clear_values = bool(kwargs.get("clear_values"))
+                    fill_value = kwargs.pop("fill_value", None)
+                    matrix: list[list[Any]] | None = None
+                    if not clear_values and fill_value is not None:
+                        shape = _bounded_a1_shape(range_name)
+                        if not shape:
+                            raise ValueError(
+                                "SHEET_FILL_RANGE_REQUIRED: fill_value membutuhkan range_name "
+                                "berbatas jelas seperti A1:Z100."
+                            )
+                        rows, columns = shape
+                        if rows * columns > 50_000:
+                            raise ValueError(
+                                "SHEET_FILL_TOO_LARGE: fill_value dibatasi maksimal 50000 cell "
+                                "per operasi; pecah target menjadi beberapa range."
+                            )
+                        matrix = [[fill_value for _ in range(columns)] for _ in range(rows)]
+                    elif not clear_values:
+                        matrix = _sheet_values_matrix(kwargs.get("values"))
+                    if not clear_values and not matrix:
+                        raise ValueError(
+                            "SHEET_VALUES_REQUIRED: modify_sheet_values membutuhkan values berupa "
+                            "matriks 2D non-empty, atau fill_value untuk mengisi seluruh range dengan "
+                            "nilai yang sama, atau clear_values=True untuk mengosongkan range. "
+                            "Jangan kirim values=[] atau string '[]'."
+                        )
+                    expected_shape = _bounded_a1_shape(range_name)
+                    if matrix and expected_shape:
+                        actual_shape = (len(matrix), len(matrix[0]))
+                        if actual_shape != expected_shape:
+                            raise ValueError(
+                                "SHEET_VALUES_DIMENSION_MISMATCH: range "
+                                f"{range_name} membutuhkan {expected_shape[0]} rows x "
+                                f"{expected_shape[1]} columns, tetapi values hanya berisi "
+                                f"{actual_shape[0]} rows x {actual_shape[1]} columns. "
+                                "Kirim matriks dengan dimensi tepat, kecilkan range_name, atau gunakan "
+                                "fill_value untuk pengisian seragam."
+                            )
+                    kwargs["values"] = (
+                        None
+                        if clear_values
+                        else json.dumps(matrix, ensure_ascii=False)
+                    )
+
+                    async def _invoke(payload: dict[str, Any]):
+                        result = await tool_to_call.ainvoke(payload)
+                        if not _google_mcp_text_error(result):
+                            _invalidate_sheet_snapshot(spreadsheet_id)
+                        return result
+
                     try:
-                        return await tool_to_call.ainvoke(kwargs)
+                        return await _invoke(kwargs)
                     except Exception as exc:
                         err = str(exc)
                         missing_range = _split_simple_sheet_range(range_name)
@@ -2426,7 +3364,8 @@ def sanitize_google_forms_tools(
                                         sheet_name=sheet_name,
                                         range_name=range_name,
                                     )
-                                    return await tool_to_call.ainvoke(retry_kwargs)
+                                    created_sheets.add((spreadsheet_id, sheet_name.casefold()))
+                                    return await _invoke(retry_kwargs)
                                 except Exception as create_exc:
                                     create_err = str(create_exc).lower()
                                     if "already exists" not in create_err and "already exist" not in create_err:
@@ -2438,7 +3377,7 @@ def sanitize_google_forms_tools(
                                         )
                                         raise
                                     retry_kwargs = dict(kwargs)
-                                    return await tool_to_call.ainvoke(retry_kwargs)
+                                    return await _invoke(retry_kwargs)
 
                             retry_kwargs = dict(kwargs)
                             retry_kwargs["range_name"] = cell_range
@@ -2447,7 +3386,7 @@ def sanitize_google_forms_tools(
                                 original_range=range_name,
                                 retry_range=cell_range,
                             )
-                            return await tool_to_call.ainvoke(retry_kwargs)
+                            return await _invoke(retry_kwargs)
 
                         fallback_range = _fallback_unqualified_sheet_range(range_name)
                         if fallback_range and "unable to parse range" in err.lower():
@@ -2458,7 +3397,7 @@ def sanitize_google_forms_tools(
                                 original_range=range_name,
                                 retry_range=fallback_range,
                             )
-                            return await tool_to_call.ainvoke(retry_kwargs)
+                            return await _invoke(retry_kwargs)
                         raise
 
                 return _modify_sheet_values_guarded
@@ -2472,6 +3411,32 @@ def sanitize_google_forms_tools(
                 )
             )
             sanitized_tool_names.append(tool_name)
+            continue
+
+        if tool_name in _GOOGLE_SHEETS_MUTATION_TOOL_NAMES:
+            def _build_sheet_mutation_guarded(tool_to_call: Any, mutation_name: str):
+                async def _sheet_mutation_guarded(**kwargs):
+                    spreadsheet_id = _require_sheet_read(mutation_name, kwargs)
+                    result = await tool_to_call.ainvoke(kwargs)
+                    if not _google_mcp_text_error(result):
+                        _invalidate_sheet_snapshot(spreadsheet_id)
+                    return result
+
+                return _sheet_mutation_guarded
+
+            args_schema = getattr(mcp_tool, "args_schema", None)
+            if args_schema is None:
+                wrapped_tools.append(mcp_tool)
+            else:
+                wrapped_tools.append(
+                    StructuredTool.from_function(
+                        coroutine=_build_sheet_mutation_guarded(mcp_tool, tool_name),
+                        name=mcp_tool.name,
+                        description=getattr(mcp_tool, "description", None),
+                        args_schema=args_schema,
+                    )
+                )
+                sanitized_tool_names.append(tool_name)
             continue
 
         if tool_name != "create_survey_form":
@@ -2839,6 +3804,7 @@ async def apply_google_mcp_reply_overrides(
     agent_id: uuid.UUID,
     api_key: str,
     log: Any,
+    service_context: str | None = None,
 ) -> tuple[str, list, str | None]:
     google_mcp_err = mcp_errors.get("google_workspace") if isinstance(mcp_errors, dict) else None
     google_mcp_step_err = _extract_google_mcp_step_error(steps)
@@ -2905,6 +3871,36 @@ async def apply_google_mcp_reply_overrides(
         log.warning(
             "agent_run.reply_overridden_google_mcp_not_executed",
             previous_reply=previous_reply[:200],
+        )
+
+    must_override_sheets_not_mutated = (
+        service_context == "sheets"
+        and not _has_successful_sheets_mutation(steps)
+        and (
+            _looks_like_progress_claim(final_reply)
+            or _looks_like_sheets_mutation_claim(final_reply)
+        )
+    )
+    if must_override_sheets_not_mutated:
+        previous_reply = final_reply or ""
+        saw_sheet_read = any(
+            str((step or {}).get("tool", "") or "").lower()
+            == "read_sheet_values"
+            and not _google_mcp_text_error(str((step or {}).get("result", "") or ""))
+            for step in (steps or [])
+        )
+        final_reply = (
+            "Saya sudah membaca isi spreadsheet, tetapi perubahan datanya belum berhasil "
+            "dijalankan. Saya belum akan menyatakan task selesai."
+            if saw_sheet_read
+            else
+            "Perubahan spreadsheet belum berhasil dijalankan dan belum dapat diverifikasi. "
+            "Saya belum akan menyatakan task selesai."
+        )
+        log.warning(
+            "agent_run.reply_overridden_sheets_not_mutated",
+            previous_reply=previous_reply[:200],
+            saw_sheet_read=saw_sheet_read,
         )
 
     if (

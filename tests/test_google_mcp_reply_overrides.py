@@ -714,6 +714,45 @@ async def test_google_mcp_success_claim_without_google_tool_is_overridden() -> N
 
 
 @pytest.mark.asyncio
+async def test_sheet_read_cannot_support_claim_that_mutation_ran() -> None:
+    runtime = GoogleMcpRuntime(
+        enabled=True,
+        workspace_server={},
+        connected_user_id="user@example.com",
+        auth_url=None,
+        preflight_error=None,
+        integration_url="http://localhost:8002",
+        candidate_user_ids=["user@example.com"],
+        system_prompt="",
+    )
+    log = type("Log", (), {"warning": lambda *args, **kwargs: None})()
+
+    reply, _, _ = await apply_google_mcp_reply_overrides(
+        final_reply="Prosesnya sudah saya jalankan. Kalau belum muncul, kirim lanjut ya.",
+        steps=[
+            {
+                "tool": "read_sheet_values",
+                "args": {"spreadsheet_id": "sheet123", "range_name": "A1:Z100"},
+                "result": "Successfully read 10 rows",
+            }
+        ],
+        mcp_errors={},
+        runtime=runtime,
+        auth_url=None,
+        llm_raw=None,
+        user_message='lakukan lagi yang benar, isi A1:Z100 dengan "Bakmi"',
+        agent_id="00000000-0000-0000-0000-000000000000",
+        api_key="test",
+        log=log,
+        service_context="sheets",
+    )
+
+    assert "sudah membaca" in reply.lower()
+    assert "belum berhasil dijalankan" in reply.lower()
+    assert "prosesnya sudah saya jalankan" not in reply.lower()
+
+
+@pytest.mark.asyncio
 async def test_google_form_order_link_reply_is_not_overridden_without_google_step() -> None:
     runtime = GoogleMcpRuntime(
         enabled=True,

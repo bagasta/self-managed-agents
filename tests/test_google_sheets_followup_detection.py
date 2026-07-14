@@ -1,12 +1,14 @@
 from app.core.engine.agent_runner import (
     _is_google_sheets_authoring_intent,
     _needs_google_sheets_followup,
+    _needs_google_sheets_verification_followup,
 )
 from app.core.engine.google_mcp_support import (
     _fallback_unqualified_sheet_range,
     build_google_mcp_usage_notice,
     filter_google_mcp_tools_for_service_context,
     google_sheets_followup_directive,
+    google_sheets_verification_followup_directive,
     infer_google_workspace_service_context,
 )
 from types import SimpleNamespace
@@ -49,6 +51,21 @@ def test_sheets_context_survives_just_do_it_after_wrong_tasks_reply() -> None:
     ]
 
     assert infer_google_workspace_service_context("Just do it", history) == "sheets"
+
+
+def test_sheets_context_survives_generic_fix_followup() -> None:
+    history = [
+        SimpleNamespace(
+            role="agent",
+            content="Spreadsheet baru terisi sampai row 10, bukan row 100.",
+        ),
+        SimpleNamespace(role="user", content="ok, perbaiki sekarang"),
+    ]
+
+    assert infer_google_workspace_service_context(
+        "ok, perbaiki sekarang",
+        history,
+    ) == "sheets"
 
 
 def test_question_about_wrong_tasks_requirement_keeps_sheets_context() -> None:
@@ -153,6 +170,99 @@ def test_sheets_followup_not_needed_after_values_written() -> None:
     assert spreadsheet_id == "sheet123abc"
 
 
+def test_sheets_followup_still_needed_after_failed_values_write() -> None:
+    steps = [
+        {
+            "tool": "create_spreadsheet",
+            "result": "ID: sheet123abc",
+        },
+        {
+            "tool": "modify_sheet_values",
+            "result": "[tool_error] SHEET_VALUES_REQUIRED",
+        },
+    ]
+
+    assert _needs_google_sheets_followup(
+        "buat spreadsheet laporan penjualan dengan tabel",
+        steps,
+    ) == (True, "sheet123abc")
+
+
+def test_sheets_mutation_requires_post_write_read_verification() -> None:
+    steps = [
+        {
+            "tool": "read_sheet_values",
+            "args": {"spreadsheet_id": "sheet123", "range_name": "A1:Z100"},
+            "result": "Successfully read 10 rows",
+        },
+        {
+            "tool": "modify_sheet_values",
+            "args": {"spreadsheet_id": "sheet123", "range_name": "A1:Z100"},
+            "result": "Successfully updated 2600 cells",
+        },
+    ]
+
+    assert _needs_google_sheets_verification_followup(steps) == (
+        True,
+        "sheet123",
+        "A1:Z100",
+    )
+
+
+def test_sheets_post_write_read_satisfies_verification() -> None:
+    steps = [
+        {
+            "tool": "modify_sheet_values",
+            "args": {"spreadsheet_id": "sheet123", "range_name": "A1:Z100"},
+            "result": "Successfully updated 2600 cells",
+        },
+        {
+            "tool": "read_sheet_values",
+            "args": {"spreadsheet_id": "sheet123", "range_name": "A1:Z100"},
+            "result": "Successfully read 100 rows",
+        },
+    ]
+
+    assert _needs_google_sheets_verification_followup(steps) == (
+        False,
+        "sheet123",
+        "A1:Z100",
+    )
+
+
+def test_sheets_post_write_read_must_cover_mutated_range() -> None:
+    steps = [
+        {
+            "tool": "modify_sheet_values",
+            "args": {"spreadsheet_id": "sheet123", "range_name": "A1:Z100"},
+            "result": "Successfully updated 2600 cells",
+        },
+        {
+            "tool": "read_sheet_values",
+            "args": {"spreadsheet_id": "sheet123", "range_name": "A1:Z10"},
+            "result": "Successfully read 10 rows",
+        },
+    ]
+
+    assert _needs_google_sheets_verification_followup(steps) == (
+        True,
+        "sheet123",
+        "A1:Z100",
+    )
+
+
+def test_failed_sheets_mutation_does_not_trigger_success_verification() -> None:
+    steps = [
+        {
+            "tool": "modify_sheet_values",
+            "args": {"spreadsheet_id": "sheet123", "range_name": "A1:Z100"},
+            "result": "[tool_error] SHEET_VALUES_REQUIRED",
+        },
+    ]
+
+    assert _needs_google_sheets_verification_followup(steps) == (False, None, None)
+
+
 def test_sheets_followup_still_needed_after_only_creating_extra_tab() -> None:
     steps = [
         {"tool": "create_spreadsheet", "result": "ID: sheet123abc"},
@@ -188,6 +298,9 @@ def test_sheets_delete_notice_routes_to_dimension_tool_not_tasks() -> None:
     assert "resize_sheet_dimensions" in notice
     assert "delete_rows" in notice
     assert "read_sheet_values" in notice
+    assert "read-before-write wajib" in notice
+    assert "values=[]" in notice
+    assert "fill_value" in notice
 
 
 def test_sheets_notice_with_jadwal_does_not_trigger_calendar_workflow() -> None:
@@ -216,6 +329,18 @@ def test_sheets_followup_directive_populates_existing_file() -> None:
     assert "user_entered" in directive
     assert "read_sheet_values" in directive
     assert "jangan hardcode sheet1" in directive
+
+
+def test_sheets_verification_directive_requires_actual_read() -> None:
+    directive = google_sheets_verification_followup_directive(
+        "sheet123",
+        "A1:Z100",
+    ).lower()
+
+    assert "read_sheet_values" in directive
+    assert "spreadsheet_id=sheet123" in directive
+    assert "range_name=a1:z100" in directive
+    assert "jumlah row/column/cell aktual" in directive
 
 
 def test_sheet1_range_can_fallback_to_first_sheet_range() -> None:
