@@ -4,12 +4,14 @@ from app.core.engine.agent_runner import (
     _needs_google_sheets_verification_followup,
 )
 from app.core.engine.google_mcp_support import (
+    _is_builder_agent_management_request,
     _fallback_unqualified_sheet_range,
     build_google_mcp_usage_notice,
     filter_google_mcp_tools_for_service_context,
     google_sheets_followup_directive,
     google_sheets_verification_followup_directive,
     infer_google_workspace_service_context,
+    is_google_workspace_execution_intent,
 )
 from types import SimpleNamespace
 
@@ -18,6 +20,48 @@ def test_sheets_authoring_intent_detected_for_table_and_formula() -> None:
     assert _is_google_sheets_authoring_intent(
         "tolong buat google sheet laporan penjualan lengkap dengan tabel dan formula"
     ) is True
+
+
+def test_arthur_agent_brief_treats_google_as_target_capability() -> None:
+    message = (
+        'Bikin agent baru bernama "Field Interview Assistant". Tugasnya mewawancarai '
+        "penerima bantuan dan hasil wawancaranya tersimpan ke Google Spreadsheet."
+    )
+
+    assert _is_builder_agent_management_request(message) is True
+    assert is_google_workspace_execution_intent(message, is_builder=True) is False
+    assert infer_google_workspace_service_context(
+        message,
+        is_builder=True,
+    ) is None
+
+
+def test_arthur_agent_configuration_boundary_applies_across_google_services() -> None:
+    messages = (
+        "Buat agent CS yang membaca Gmail dan membuat draft balasan.",
+        "Bikin agent sales yang menyimpan lead ke Google Sheets.",
+        "Buat agent sekretaris yang menjadwalkan meeting ke Google Calendar.",
+        "Buat agent knowledge yang mengambil SOP dari Google Drive.",
+        "Update agent survey agar membuat Google Form untuk responden.",
+        "Perbaiki agent laporan supaya hasilnya tersimpan ke Google Docs.",
+        "Perbaiki Personal Assistant agar bisa menulis catatan ke Google Sheets.",
+    )
+
+    assert all(
+        not is_google_workspace_execution_intent(message, is_builder=True)
+        for message in messages
+    )
+
+
+def test_arthur_direct_google_request_remains_execution_intent() -> None:
+    message = "Arthur, buatkan Google Sheet laporan penjualan sekarang"
+
+    assert _is_builder_agent_management_request(message) is False
+    assert is_google_workspace_execution_intent(message, is_builder=True) is True
+    assert infer_google_workspace_service_context(
+        message,
+        is_builder=True,
+    ) == "sheets"
 
 
 def test_blank_spreadsheet_only_does_not_trigger_authoring() -> None:

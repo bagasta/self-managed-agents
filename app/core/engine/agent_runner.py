@@ -129,6 +129,7 @@ from app.core.engine.google_mcp_support import (
     find_last_google_workspace_user_request,
     infer_google_workspace_service_context,
     is_google_auth_recovery_followup,
+    is_google_workspace_execution_intent,
     is_google_workspace_mcp_configured,
     prepare_google_mcp_runtime,
     sanitize_google_forms_tools,
@@ -806,7 +807,27 @@ async def run_agent(
     google_service_context = infer_google_workspace_service_context(
         execution_user_message,
         history_rows,
+        is_builder=runtime_policy.is_builder,
     )
+    _direct_google_workspace_intent = is_google_workspace_execution_intent(
+        execution_user_message,
+        is_builder=runtime_policy.is_builder,
+    )
+    google_workspace_execution_intent = bool(
+        _direct_google_workspace_intent
+        or google_service_context
+        or google_auth_recovery_followup
+    )
+    google_workspace_builder_reference = bool(
+        runtime_policy.is_builder
+        and _is_google_mcp_intent(execution_user_message)
+        and not google_workspace_execution_intent
+    )
+    if google_workspace_builder_reference:
+        log.info(
+            "agent_run.builder_google_reference_only",
+            reason="workspace_service_describes_managed_agent_capability",
+        )
     if google_service_context:
         log.info(
             "agent_run.google_service_context_resolved",
@@ -926,9 +947,15 @@ async def run_agent(
             log.warning("agent_run.wa_typing_stop_failed", error=str(exc)[:200])
 
     await _start_wa_run_typing()
-    google_mcp_tools_config = tools_config
+    google_mcp_tools_config = (
+        _remove_google_workspace_mcp_server(tools_config)
+        if google_workspace_builder_reference
+        else tools_config
+    )
     google_mcp_role_denied = (
-        is_google_workspace_mcp_configured(tools_config)
+        google_workspace_execution_intent
+        and not google_workspace_builder_reference
+        and is_google_workspace_mcp_configured(tools_config)
         and not _is_google_workspace_mcp_authorized_for_session(session, agent_model)
     )
     if google_mcp_role_denied:
@@ -938,7 +965,7 @@ async def run_agent(
             sender=_session_sender_phone(session),
             reason="google_workspace_mcp_requires_owner_or_operator",
         )
-        if _is_google_mcp_intent(execution_user_message) or google_auth_recovery_followup:
+        if google_workspace_execution_intent:
             final_reply = _google_workspace_mcp_unauthorized_reply()
             run_record.status = "completed"
             run_record.completed_at = datetime.now(timezone.utc)
@@ -1083,7 +1110,7 @@ async def run_agent(
                 and not mcp_tools
                 and (
                     google_mcp_parent_only
-                    or _is_google_mcp_intent(user_message)
+                    or google_workspace_execution_intent
                     or google_auth_recovery_followup
                 )
             )
@@ -2127,7 +2154,7 @@ async def run_agent(
         _cb_tokens = _agent_logger.total_tokens_from_callbacks
         total_tokens_used = _cb_tokens if _cb_tokens > 0 else parsed["total_tokens_used"]
         if (
-            _is_google_mcp_intent(execution_user_message)
+            google_workspace_execution_intent
             and mcp_tools
             and not _has_google_mcp_step(steps)
             and _has_external_service_fallback_blocked_step(steps)
@@ -2607,6 +2634,7 @@ async def run_agent(
         api_key=settings.api_key,
         log=log,
         service_context=google_service_context,
+        workspace_execution_intent=google_workspace_execution_intent,
     )
     _google_mcp_auth_err = _google_mcp_auth_err_before_override or _extract_google_mcp_step_error(steps)
     _google_mcp_has_artifact = (

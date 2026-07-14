@@ -714,6 +714,80 @@ async def test_google_mcp_success_claim_without_google_tool_is_overridden() -> N
 
 
 @pytest.mark.asyncio
+async def test_arthur_agent_brief_reply_is_not_replaced_by_workspace_fallback() -> None:
+    runtime = GoogleMcpRuntime(
+        enabled=False,
+        workspace_server=None,
+        connected_user_id=None,
+        auth_url=None,
+        preflight_error=None,
+        integration_url="http://localhost:8002",
+        candidate_user_ids=[],
+        system_prompt="",
+    )
+    original = (
+        "Saya akan lanjut menyusun agent wawancara tersebut. Integrasi Google Spreadsheet "
+        "akan menjadi bagian dari setup agent, bukan pekerjaan spreadsheet pada chat ini."
+    )
+    steps = [{"tool": "plan_agent", "result": "blueprint ready"}]
+
+    reply, returned_steps, _ = await apply_google_mcp_reply_overrides(
+        final_reply=original,
+        steps=steps,
+        mcp_errors={},
+        runtime=runtime,
+        auth_url=None,
+        llm_raw=None,
+        user_message=(
+            "Buat agent baru untuk wawancara penerima bantuan dan simpan hasilnya "
+            "ke Google Spreadsheet"
+        ),
+        agent_id="00000000-0000-0000-0000-000000000000",
+        api_key="test",
+        log=type("Log", (), {"warning": lambda *args, **kwargs: None})(),
+        service_context=None,
+        workspace_execution_intent=False,
+    )
+
+    assert reply == original
+    assert returned_steps == steps
+
+
+@pytest.mark.asyncio
+async def test_requesting_a_spreadsheet_link_is_not_a_success_claim() -> None:
+    runtime = GoogleMcpRuntime(
+        enabled=True,
+        workspace_server={},
+        connected_user_id="user@example.com",
+        auth_url=None,
+        preflight_error=None,
+        integration_url="http://localhost:8002",
+        candidate_user_ids=["user@example.com"],
+        system_prompt="",
+    )
+    original = (
+        "Saya butuh link Google Spreadsheet tujuan agar konfigurasi penyimpanan "
+        "agent bisa dilengkapi."
+    )
+
+    reply, _, _ = await apply_google_mcp_reply_overrides(
+        final_reply=original,
+        steps=[],
+        mcp_errors={},
+        runtime=runtime,
+        auth_url=None,
+        llm_raw=None,
+        user_message="Buat agent baru yang menyimpan data ke Google Spreadsheet",
+        agent_id="00000000-0000-0000-0000-000000000000",
+        api_key="test",
+        log=type("Log", (), {"warning": lambda *args, **kwargs: None})(),
+        service_context="sheets",
+    )
+
+    assert reply == original
+
+
+@pytest.mark.asyncio
 async def test_sheet_read_cannot_support_claim_that_mutation_ran() -> None:
     runtime = GoogleMcpRuntime(
         enabled=True,

@@ -123,6 +123,43 @@ _GOOGLE_TASK_TOOL_NAMES = {
     "manage_task_list",
 }
 
+
+_BUILDER_AGENT_MANAGEMENT_PATTERNS = (
+    r"\b(?:buat(?:kan)?|bikin|create|tambah(?:kan)?|rancang|susun)\s+(?:sebuah\s+)?agent\b",
+    r"\b(?:edit|ubah|update|perbaiki|betulkan|konfigurasi(?:kan)?|atur)\s+agent\b",
+    r"\bagent\s+(?:baru|bernama|yang|untuk|ini|itu|saya|aku|gue|kami|kita)\b",
+    r"\b(?:tugas|workflow|instruksi|kemampuan|integrasi|fungsi)\s+agent\b",
+    r"\b(?:agar|supaya|biar)\s+(?:(?:agent|asisten|assistant|dia|ia)\s+)?(?:bisa|dapat|mampu)\b",
+    r"\bhasil(?:nya)?\b.{0,80}\b(?:tersimpan|disimpan|dicatat|masuk)\s+(?:ke|di|dalam)\b",
+)
+
+
+def _is_builder_agent_management_request(message: str) -> bool:
+    """Detect Arthur control-plane requests, not the agent's future side effects."""
+    text = re.sub(r"\s+", " ", str(message or "").strip().lower())
+    return bool(text) and any(
+        re.search(pattern, text) for pattern in _BUILDER_AGENT_MANAGEMENT_PATTERNS
+    )
+
+
+def is_google_workspace_execution_intent(
+    message: str,
+    *,
+    is_builder: bool = False,
+) -> bool:
+    """Return whether Google is the current action target.
+
+    Google services inside an Arthur agent brief describe future capabilities
+    of the managed agent. They are configuration inputs, not Workspace side
+    effects that Arthur must execute during the builder turn.
+    """
+    if not _is_google_mcp_intent(message):
+        return False
+    if is_builder and _is_builder_agent_management_request(message):
+        return False
+    return True
+
+
 _SHEETS_CONTEXT_MARKERS = (
     "google sheet",
     "google sheets",
@@ -153,6 +190,7 @@ _SHEETS_OBJECT_MARKERS = (
 _SHEETS_MUTATION_MARKERS = (
     "bikin",
     "buat",
+    "buatkan",
     "generate",
     "isi",
     "edit",
@@ -205,6 +243,8 @@ def _contains_phrase(text: str, markers: tuple[str, ...]) -> bool:
 def infer_google_workspace_service_context(
     user_message: str,
     history_rows: list[Any] | None = None,
+    *,
+    is_builder: bool = False,
 ) -> str | None:
     """Resolve the Google service for terse follow-ups using recent dialogue.
 
@@ -212,6 +252,12 @@ def infer_google_workspace_service_context(
     as "Just do it" commonly omit "Google Sheet" even though the preceding
     turn established the spreadsheet and row being edited.
     """
+    if (
+        is_builder
+        and _is_builder_agent_management_request(user_message)
+        and _is_google_mcp_intent(user_message)
+    ):
+        return None
     current = str(user_message or "").lower()
     explicit_tasks = _contains_phrase(
         current,
@@ -567,8 +613,6 @@ def _looks_like_google_mcp_success_claim(reply_text: str) -> bool:
         "sudah saya siapkan",
         "sudah siap",
         "siap kamu akses",
-        "link",
-        "url",
     )
     return any(s in t for s in service_markers) and any(s in t for s in success_markers)
 
@@ -3805,7 +3849,13 @@ async def apply_google_mcp_reply_overrides(
     api_key: str,
     log: Any,
     service_context: str | None = None,
+    workspace_execution_intent: bool | None = None,
 ) -> tuple[str, list, str | None]:
+    google_execution_intent = (
+        (bool(service_context) or _is_google_mcp_intent(user_message))
+        if workspace_execution_intent is None
+        else workspace_execution_intent
+    )
     google_mcp_err = mcp_errors.get("google_workspace") if isinstance(mcp_errors, dict) else None
     google_mcp_step_err = _extract_google_mcp_step_error(steps)
     google_mcp_auth_err = google_mcp_err or google_mcp_step_err
@@ -3814,7 +3864,7 @@ async def apply_google_mcp_reply_overrides(
     ) or _has_google_workspace_artifact_step(steps)
     must_override_google_auth = (
         bool(google_mcp_auth_err)
-        and _is_google_mcp_intent(user_message)
+        and google_execution_intent
         and _is_google_auth_or_scope_error(str(google_mcp_auth_err))
         and not google_mcp_has_artifact
     )
@@ -3839,7 +3889,7 @@ async def apply_google_mcp_reply_overrides(
     must_override_google_unavailable = (
         bool(google_mcp_err)
         and not must_override_google_auth
-        and _is_google_mcp_intent(user_message)
+        and google_execution_intent
         and not google_mcp_has_artifact
         and (not final_reply or _looks_like_progress_claim(final_reply))
     )
@@ -3856,7 +3906,7 @@ async def apply_google_mcp_reply_overrides(
     must_override_google_not_executed = (
         not google_mcp_err
         and not must_override_google_auth
-        and _is_google_mcp_intent(user_message)
+        and google_execution_intent
         and not _has_google_mcp_step(steps)
         and not _contains_google_workspace_artifact(final_reply)
         and not _looks_like_google_auth_recovery_reply(final_reply)
@@ -3874,7 +3924,8 @@ async def apply_google_mcp_reply_overrides(
         )
 
     must_override_sheets_not_mutated = (
-        service_context == "sheets"
+        google_execution_intent
+        and service_context == "sheets"
         and not _has_successful_sheets_mutation(steps)
         and (
             _looks_like_progress_claim(final_reply)
@@ -3909,7 +3960,7 @@ async def apply_google_mcp_reply_overrides(
         and not must_override_google_auth
         and auth_url
         and (
-            _is_google_mcp_intent(user_message)
+            google_execution_intent
             or _looks_like_google_auth_recovery_reply(final_reply)
         )
         and not _has_google_mcp_step(steps)

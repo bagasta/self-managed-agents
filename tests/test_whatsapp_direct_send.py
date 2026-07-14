@@ -567,6 +567,9 @@ def test_builder_prompt_blocks_repeated_continue_questions():
     assert "Workspace/App Connectors" in prompt
     assert "sampai user tahu langkah berikutnya" in prompt
     assert "cara test, cara connect Google, cara pasang WhatsApp" in prompt
+    assert "spesifikasi kemampuan agent target" in prompt
+    assert "setup connector berstatus pending" in prompt
+    assert "buat agent yang menyimpan hasil ke Google Sheets" in prompt
     assert "brief minimal sudah jelas" in prompt
     assert "Wawancara singkat dulu" in prompt
     assert "maksimal 3 hal paling penting" in prompt
