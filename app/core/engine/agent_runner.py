@@ -122,7 +122,9 @@ from app.core.engine.google_mcp_support import (
     google_forms_followup_retry_directive,
     google_forms_request_kind_retry_directive,
     google_sheets_followup_directive,
+    filter_google_mcp_tools_for_service_context,
     find_last_google_workspace_user_request,
+    infer_google_workspace_service_context,
     is_google_auth_recovery_followup,
     is_google_workspace_mcp_configured,
     prepare_google_mcp_runtime,
@@ -798,6 +800,15 @@ async def run_agent(
         else None
     )
     execution_user_message = google_auth_recovery_request or user_message
+    google_service_context = infer_google_workspace_service_context(
+        execution_user_message,
+        history_rows,
+    )
+    if google_service_context:
+        log.info(
+            "agent_run.google_service_context_resolved",
+            service_context=google_service_context,
+        )
     log.debug("agent_run.history_loaded", turns=len(prior_messages) // 2)
     direct_wa_text_send_context = (
         getattr(session, "channel_type", None) == "whatsapp"
@@ -979,6 +990,7 @@ async def run_agent(
         memory_scope=_memory_scope,
         api_key=settings.api_key,
         user_message=execution_user_message,
+        service_context=google_service_context,
         system_prompt=system_prompt,
         log=log,
         fallback_external_user_id=_google_fallback_external_user_id,
@@ -1003,7 +1015,16 @@ async def run_agent(
         if google_mcp.preflight_error and "google_workspace" not in mcp_errors:
             mcp_errors["google_workspace"] = google_mcp.preflight_error
         if mcp_tools:
-            mcp_tools = sanitize_google_forms_tools(mcp_tools, log)
+            mcp_tools = filter_google_mcp_tools_for_service_context(
+                mcp_tools,
+                service_context=google_service_context,
+                log=log,
+            )
+            mcp_tools = sanitize_google_forms_tools(
+                mcp_tools,
+                log,
+                service_context=google_service_context,
+            )
             if getattr(session, "channel_type", None) == "whatsapp":
                 mcp_tools = _filter_whatsapp_unsafe_mcp_tools(
                     mcp_tools,
@@ -1423,6 +1444,7 @@ async def run_agent(
                     final_reply=final_reply,
                     current_attachment_name=current_attachment_name,
                     generated_artifact_path=path if (_sent and remember_sent_artifact) else None,
+                    tool_steps=steps,
                     log=log,
                 )
             await db.flush()
@@ -1566,6 +1588,7 @@ async def run_agent(
                     user_message=execution_user_message,
                     final_reply=final_reply,
                     current_attachment_name=current_attachment_name,
+                    tool_steps=steps,
                     log=log,
                 )
             await db.flush()
@@ -2568,6 +2591,8 @@ async def run_agent(
             final_reply=final_reply,
             current_attachment_name=current_attachment_name,
             generated_artifact_path=_memory_artifact_path,
+            tool_steps=steps,
+            external_service_context=google_service_context,
             log=log,
         )
 

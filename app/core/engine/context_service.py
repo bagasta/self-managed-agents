@@ -24,10 +24,21 @@ from app.models.run import Run
 # notices (e.g. "Gagal mengirim ..."), not dialogue. They must never be replayed
 # as conversation history or the model treats its own past failure as a live fact.
 DELIVERY_STATUS_TAG = "__delivery_status__"
+INVALID_TOOL_CLAIM_TAG = "__invalid_tool_claim__"
+NON_DIALOGUE_AGENT_TAGS = {DELIVERY_STATUS_TAG, INVALID_TOOL_CLAIM_TAG}
 
 # Runs in these terminal-failure states contributed no valid turn; both their
 # user and agent rows are dropped from re-injected history.
 DEAD_RUN_STATUSES = {"abandoned", "cancelled", "timed_out", "failed"}
+
+_TOOL_FAILURE_MARKERS = (
+    "[error]",
+    "[tool_error]",
+    "error calling tool",
+    "api error in ",
+    "wrong_google_service",
+    "media_source_unavailable",
+)
 
 # Header that precedes an inlined attachment body in a user message.
 _ATTACHMENT_BODY_MARKER = "Isi dokumen:"
@@ -59,6 +70,28 @@ def filter_dead_run_messages(
         if status == "cancelled" and row.role == "user":
             result.append(row)
     return result
+
+
+def tool_result_indicates_failure(result: str | None) -> bool:
+    lowered = str(result or "").lower()
+    return any(marker in lowered for marker in _TOOL_FAILURE_MARKERS)
+
+
+def filter_failed_tool_run_agent_messages(
+    rows: list[Message],
+    failed_tool_run_ids: set[uuid.UUID],
+) -> list[Message]:
+    """Keep the user's request but drop agent claims produced after tool failure."""
+    if not failed_tool_run_ids:
+        return rows
+    return [
+        row
+        for row in rows
+        if not (
+            row.role == "agent"
+            and row.run_id in failed_tool_run_ids
+        )
+    ]
 
 
 def _elide_stale_attachment_body(content: str) -> str:
@@ -121,7 +154,20 @@ async def load_history(
         return rows
     run_result = await db.execute(select(Run.id, Run.status).where(Run.id.in_(run_ids)))
     run_status = dict(run_result.all())
-    return filter_dead_run_messages(rows, run_status)
+    rows = filter_dead_run_messages(rows, run_status)
+
+    tool_result = await db.execute(
+        select(Message.run_id, Message.tool_result).where(
+            Message.run_id.in_(run_ids),
+            Message.role == "tool",
+        )
+    )
+    failed_tool_run_ids = {
+        run_id
+        for run_id, result in tool_result.all()
+        if run_id and tool_result_indicates_failure(result)
+    }
+    return filter_failed_tool_run_agent_messages(rows, failed_tool_run_ids)
 
 
 async def count_user_messages(session_id: uuid.UUID, db: AsyncSession) -> int:
@@ -155,7 +201,7 @@ def db_messages_to_lc(db_messages: list[Message]) -> list[BaseMessage]:
         elif msg.role == "agent" and msg.content:
             # Transient delivery/status notices are not dialogue — never replay them
             # as history (prevents stale "Gagal mengirim ..." from re-surfacing).
-            if getattr(msg, "tool_name", None) == DELIVERY_STATUS_TAG:
+            if getattr(msg, "tool_name", None) in NON_DIALOGUE_AGENT_TAGS:
                 continue
             result.append(AIMessage(content=msg.content))
     return result

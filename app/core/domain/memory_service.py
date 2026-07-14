@@ -20,6 +20,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.memory import Memory
+from app.models.message import Message
 
 if TYPE_CHECKING:
     from langchain_openai import ChatOpenAI
@@ -51,6 +52,55 @@ _PERSONAL_PROFILE_MARKERS = (
     "job_title",
     "work_experience",
 )
+
+_TOOL_FAILURE_MARKERS = (
+    "[error]",
+    "[tool_error]",
+    "error calling tool",
+    "api error in ",
+    "wrong_google_service",
+    "media_source_unavailable",
+)
+
+_EXTERNAL_STATUS_CLAIM_MARKERS = (
+    "sudah",
+    "berhasil",
+    "selesai",
+    "gagal",
+    "tidak dapat",
+    "tidak bisa",
+    "memerlukan",
+    "diperlukan",
+    "aktifkan",
+    "api",
+    "console.cloud.google.com",
+)
+
+
+def _tool_result_indicates_failure(result: Any) -> bool:
+    lowered = str(result or "").lower()
+    return any(marker in lowered for marker in _TOOL_FAILURE_MARKERS)
+
+
+def _contains_status_claim(text: str) -> bool:
+    return any(
+        re.search(rf"(?<!\w){re.escape(marker)}(?!\w)", text)
+        for marker in _EXTERNAL_STATUS_CLAIM_MARKERS
+    )
+
+
+def _step_is_verified_external_success(step: dict[str, Any], service_context: str) -> bool:
+    tool_name = str((step or {}).get("tool", "") or "").lower()
+    result = str((step or {}).get("result", "") or "")
+    if not tool_name or not result or _tool_result_indicates_failure(result):
+        return False
+    if service_context == "sheets":
+        return (
+            "sheet" in tool_name
+            or "spreadsheet" in tool_name
+            or tool_name in {"resize_sheet_dimensions", "move_sheet_rows"}
+        )
+    return True
 
 
 def _is_business_agent_context(agent_text: str) -> bool:
@@ -344,6 +394,8 @@ async def record_runtime_memory(
     final_reply: str,
     current_attachment_name: str | None = None,
     generated_artifact_path: str | None = None,
+    tool_steps: list[dict[str, Any]] | None = None,
+    external_service_context: str | None = None,
     log: Any = None,
 ) -> None:
     """Persist deterministic scoped memory after a completed run.
@@ -361,7 +413,36 @@ async def record_runtime_memory(
     try:
         today = memory_today()
         user_summary = _compact_memory_text(user_message, max_chars=360)
-        reply_summary = _compact_memory_text(final_reply, max_chars=360)
+        tool_steps = tool_steps or []
+        tool_failed = any(
+            _tool_result_indicates_failure((step or {}).get("result"))
+            for step in tool_steps
+        )
+        verified_external_success = bool(
+            external_service_context
+            and any(
+                _step_is_verified_external_success(step, external_service_context)
+                for step in tool_steps
+            )
+        )
+        reply_has_external_status_claim = _contains_status_claim(
+            str(final_reply or "").lower()
+        )
+        durable_reply = not tool_failed and not (
+            external_service_context
+            and reply_has_external_status_claim
+            and not verified_external_success
+        )
+        reply_summary = (
+            _compact_memory_text(final_reply, max_chars=360)
+            if durable_reply
+            else ""
+        )
+        safe_status = ""
+        if tool_failed:
+            safe_status = "Status: aksi tool gagal dan belum selesai; jangan anggap jawaban agent sebagai fakta."
+        elif not durable_reply:
+            safe_status = "Status: klaim aksi eksternal belum terverifikasi oleh hasil tool."
         attachment = _compact_memory_text(current_attachment_name, max_chars=180)
         artifact = _compact_memory_text(generated_artifact_path, max_chars=220)
 
@@ -372,6 +453,8 @@ async def record_runtime_memory(
             daily_parts.append(f"Artifact: {artifact}")
         if reply_summary:
             daily_parts.append(f"Agent: {reply_summary}")
+        if safe_status:
+            daily_parts.append(safe_status)
         daily_line = " | ".join(daily_parts)
 
         daily_key = f"daily:{today}"
@@ -399,6 +482,8 @@ async def record_runtime_memory(
             active_lines.append(f"Artifact terakhir: {artifact}")
         if reply_summary:
             active_lines.append(f"Jawaban final agent: {reply_summary}")
+        if safe_status:
+            active_lines.append(safe_status)
         active_lines.append(
             "Prioritas: konteks runtime ini adalah konteks terbaru dan mengalahkan history, daily, atau longterm lama jika bertentangan."
         )
@@ -413,7 +498,7 @@ async def record_runtime_memory(
         await upsert_memory(
             agent_id,
             "last_turn",
-            f"User: {user_summary or '(kosong)'}\nAgent: {reply_summary or '(kosong)'}",
+            f"User: {user_summary or '(kosong)'}\nAgent: {reply_summary or safe_status or '(kosong)'}",
             db,
             scope=scope,
         )
@@ -430,6 +515,8 @@ async def record_runtime_memory(
             longterm_parts.append(f"latest artifact={artifact}")
         if reply_summary:
             longterm_parts.append(f"result={reply_summary}")
+        if safe_status:
+            longterm_parts.append(safe_status)
         await upsert_memory(
             agent_id,
             "longterm",
@@ -469,12 +556,61 @@ async def extract_long_term_memory(
     if log is None:
         log = logger
 
-    # Build plain-text conversation
+    # Assistant prose is not evidence by itself. Only assistant rows backed by
+    # a successful tool result may contribute operational facts.
+    run_ids = {
+        m.run_id
+        for m in recent_messages
+        if getattr(m, "run_id", None)
+    }
+    successful_tool_runs: set[uuid.UUID] = set()
+    failed_tool_runs: set[uuid.UUID] = set()
+    tool_evidence_candidates: list[tuple[uuid.UUID, str]] = []
+    if run_ids:
+        try:
+            tool_rows = (
+                await db.execute(
+                    select(Message.run_id, Message.tool_name, Message.tool_result).where(
+                        Message.run_id.in_(run_ids),
+                        Message.role == "tool",
+                    )
+                )
+            ).all()
+            for run_id, tool_name, tool_result in tool_rows:
+                if not run_id:
+                    continue
+                if _tool_result_indicates_failure(tool_result):
+                    failed_tool_runs.add(run_id)
+                    continue
+                if str(tool_result or "").strip():
+                    successful_tool_runs.add(run_id)
+                    tool_evidence_candidates.append(
+                        (
+                            run_id,
+                            f"Verified tool success ({tool_name or 'tool'}): "
+                            f"{_compact_memory_text(tool_result, max_chars=360)}",
+                        )
+                    )
+            successful_tool_runs -= failed_tool_runs
+        except Exception as exc:
+            log.warning("ltm.tool_provenance_load_failed", error=str(exc))
+
+    # Build plain-text conversation from user facts plus verified outcomes.
     lines: list[str] = []
     for m in recent_messages:
-        if m.role in ("user", "agent") and m.content:
-            speaker = "User" if m.role == "user" else "Assistant"
-            lines.append(f"{speaker}: {m.content[:600]}")
+        if m.role == "user" and m.content:
+            lines.append(f"User: {m.content[:600]}")
+        elif (
+            m.role == "agent"
+            and m.content
+            and getattr(m, "run_id", None) in successful_tool_runs
+        ):
+            lines.append(f"Assistant (tool-verified run): {m.content[:600]}")
+    lines.extend(
+        evidence
+        for run_id, evidence in tool_evidence_candidates[:20]
+        if run_id in successful_tool_runs
+    )
 
     if not lines:
         return
@@ -510,6 +646,8 @@ async def extract_long_term_memory(
     prompt = (
         "Analyze this conversation and extract ALL important facts worth remembering long-term. "
         "Focus on actionable context that would help an AI assistant continue work in future sessions.\n\n"
+        "Assistant statements are not facts unless explicitly labeled as a tool-verified run. "
+        "Never store tool failures, API activation requirements, error links, blockers, or unverified completion claims.\n\n"
         "Extract facts from these categories (include ALL that appear in the conversation):\n"
         "- User identity: name, job, company, phone\n"
         f"{profile_line}"

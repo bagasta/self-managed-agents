@@ -97,6 +97,183 @@ def _is_google_mcp_intent(message: str) -> bool:
     return any(k in m for k in keywords)
 
 
+_GOOGLE_TASK_TOOL_NAMES = {
+    "get_task",
+    "list_tasks",
+    "manage_task",
+    "get_task_list",
+    "list_task_lists",
+    "manage_task_list",
+}
+
+_SHEETS_CONTEXT_MARKERS = (
+    "google sheet",
+    "google sheets",
+    "spreadsheet",
+    "sheet",
+    "sheets",
+    "excel",
+    "xlsx",
+    "tabel",
+    "table",
+)
+
+_SHEETS_OBJECT_MARKERS = (
+    "row",
+    "rows",
+    "baris",
+    "column",
+    "columns",
+    "kolom",
+    "cell",
+    "cells",
+    "sel",
+    "range",
+    "duplikat",
+    "duplicate",
+)
+
+_SHEETS_MUTATION_MARKERS = (
+    "bikin",
+    "buat",
+    "generate",
+    "isi",
+    "edit",
+    "ubah",
+    "update",
+    "tambah",
+    "masukkan",
+    "hapus",
+    "hilangkan",
+    "delete",
+    "remove",
+    "bersihkan",
+    "clear",
+)
+
+_FOLLOWUP_ACTION_MARKERS = (
+    "just do it",
+    "do it",
+    "lanjut",
+    "lanjutkan",
+    "lakukan",
+    "kerjakan",
+    "execute it",
+    "proceed",
+)
+
+
+def _contains_phrase(text: str, markers: tuple[str, ...]) -> bool:
+    return any(
+        re.search(rf"(?<!\w){re.escape(marker)}(?!\w)", text)
+        for marker in markers
+    )
+
+
+def infer_google_workspace_service_context(
+    user_message: str,
+    history_rows: list[Any] | None = None,
+) -> str | None:
+    """Resolve the Google service for terse follow-ups using recent dialogue.
+
+    Tool routing cannot rely on the latest text alone: WhatsApp follow-ups such
+    as "Just do it" commonly omit "Google Sheet" even though the preceding
+    turn established the spreadsheet and row being edited.
+    """
+    current = str(user_message or "").lower()
+    explicit_tasks = _contains_phrase(
+        current,
+        (
+            "google task",
+            "google tasks",
+            "task list",
+            "daftar tugas",
+            "to-do list",
+            "todo list",
+        ),
+    )
+    explicit_sheets = _contains_phrase(current, _SHEETS_CONTEXT_MARKERS)
+    sheet_objects = _contains_phrase(current, _SHEETS_OBJECT_MARKERS)
+    sheet_mutation = _contains_phrase(current, _SHEETS_MUTATION_MARKERS)
+
+    recent_contents = [
+        str(getattr(row, "content", "") or "").lower()
+        for row in (history_rows or [])[-8:]
+        if str(getattr(row, "content", "") or "").strip()
+    ]
+    recent = "\n".join(recent_contents)
+    recent_has_sheets = _contains_phrase(recent, _SHEETS_CONTEXT_MARKERS)
+    recent_has_sheet_object = _contains_phrase(recent, _SHEETS_OBJECT_MARKERS)
+    asks_about_tasks_requirement = (
+        explicit_tasks
+        and _contains_phrase(current, ("why", "kenapa", "mengapa", "why do you need"))
+    )
+
+    # An explicit spreadsheet object wins over the generic English word
+    # "task". Explicit Google Tasks wording still wins for real Tasks requests.
+    if explicit_sheets and (sheet_objects or sheet_mutation):
+        return "sheets"
+    if (
+        explicit_tasks
+        and not explicit_sheets
+        and not (
+            asks_about_tasks_requirement
+            and recent_has_sheets
+            and recent_has_sheet_object
+        )
+    ):
+        return "tasks"
+    current_is_followup = (
+        _contains_phrase(current, _FOLLOWUP_ACTION_MARKERS)
+        or current.strip() in {"yes", "iya", "ya", "ok", "oke"}
+    )
+
+    if recent_has_sheets and (
+        sheet_objects
+        or (sheet_mutation and recent_has_sheet_object)
+        or (current_is_followup and recent_has_sheet_object)
+        or (asks_about_tasks_requirement and recent_has_sheet_object)
+    ):
+        return "sheets"
+    return None
+
+
+def filter_google_mcp_tools_for_service_context(
+    mcp_tools: list[Any],
+    *,
+    service_context: str | None,
+    log: Any,
+) -> list[Any]:
+    """Expose Google Tasks tools only for an explicitly resolved Tasks turn.
+
+    The Workspace server publishes many cross-service tools at once. Leaving
+    Tasks tools available on an unresolved or Sheets turn lets the model use
+    ``manage_task`` as a generic fallback for spreadsheet mutations.
+    """
+    if service_context == "tasks":
+        return mcp_tools
+
+    filtered = [
+        tool
+        for tool in mcp_tools
+        if str(getattr(tool, "name", "") or "") not in _GOOGLE_TASK_TOOL_NAMES
+    ]
+    removed = sorted(
+        {
+            str(getattr(tool, "name", "") or "")
+            for tool in mcp_tools
+            if str(getattr(tool, "name", "") or "") in _GOOGLE_TASK_TOOL_NAMES
+        }
+    )
+    if removed:
+        log.info(
+            "agent_run.google_mcp_conflicting_service_tools_filtered",
+            service_context=service_context or "unresolved",
+            removed=removed,
+        )
+    return filtered
+
+
 def _is_plain_google_form_link_reference(message: str) -> bool:
     """A shared Google Form URL can be business info, not a request to run Google tools."""
     if not message:
@@ -620,16 +797,7 @@ def _is_google_sheets_authoring_intent(message: str) -> bool:
         "rumus",
         "formula",
     )
-    authoring_markers = (
-        "bikin",
-        "buat",
-        "generate",
-        "isi",
-        "edit",
-        "ubah",
-        "update",
-        "tambah",
-        "masukkan",
+    authoring_markers = _SHEETS_MUTATION_MARKERS + (
         "laporan",
         "rekap",
         "budget",
@@ -641,6 +809,17 @@ def _is_google_sheets_authoring_intent(message: str) -> bool:
         "formula",
         "tabel",
         "table",
+        "row",
+        "rows",
+        "baris",
+        "column",
+        "columns",
+        "kolom",
+        "cell",
+        "cells",
+        "sel",
+        "duplikat",
+        "duplicate",
     )
     if not any(k in m for k in sheet_markers):
         return False
@@ -650,12 +829,12 @@ def _is_google_sheets_authoring_intent(message: str) -> bool:
 
 
 def _is_blank_spreadsheet_only_intent(message_lower: str) -> bool:
-    blank_markers = (
-        "kosong",
-        "blank",
-        "empty",
-        "file aja",
-        "file saja",
+    blank_object_markers = (
+        "spreadsheet kosong",
+        "sheet kosong",
+        "file kosong",
+        "blank spreadsheet",
+        "empty spreadsheet",
         "spreadsheet aja",
         "spreadsheet saja",
         "sheet aja",
@@ -663,7 +842,28 @@ def _is_blank_spreadsheet_only_intent(message_lower: str) -> bool:
         "tanpa isi",
         "tanpa tabel",
     )
-    return any(k in message_lower for k in blank_markers)
+    create_markers = ("buat", "bikin", "create", "new", "baru")
+    edit_markers = (
+        "hapus",
+        "hilangkan",
+        "delete",
+        "remove",
+        "bersihkan",
+        "clear",
+        "row",
+        "baris",
+        "column",
+        "kolom",
+        "cell",
+        "sel",
+        "duplikat",
+        "duplicate",
+    )
+    return (
+        any(marker in message_lower for marker in blank_object_markers)
+        and any(marker in message_lower for marker in create_markers)
+        and not any(marker in message_lower for marker in edit_markers)
+    )
 
 
 def _extract_form_id_from_text(text: str) -> str | None:
@@ -1377,7 +1577,11 @@ def _build_google_mcp_validation_reply(error_text: str) -> str:
     )
 
 
-def build_google_mcp_usage_notice(user_message: str) -> str:
+def build_google_mcp_usage_notice(
+    user_message: str,
+    *,
+    service_context: str | None = None,
+) -> str:
     notice = "\n\n[SYSTEM NOTICE - GOOGLE WORKSPACE TOOL USAGE]\n"
     notice += (
         "GOOGLE WORKSPACE TOOLING ADALAH PARENT-ONLY EXECUTION. "
@@ -1421,12 +1625,18 @@ def build_google_mcp_usage_notice(user_message: str) -> str:
     )
     notice += "[/SYSTEM NOTICE]\n"
 
-    sheets_intent = _is_google_sheets_authoring_intent(user_message)
+    sheets_intent = (
+        service_context == "sheets"
+        or _is_google_sheets_authoring_intent(user_message)
+    )
     if sheets_intent:
         notice += "\n\n[SYSTEM NOTICE - SHEETS WORKFLOW MODE]\n"
         notice += (
             "User meminta pembuatan atau pengeditan Google Sheets. create_spreadsheet hanya membuat file kosong; "
             "Untuk request Google Sheets/spreadsheet, JANGAN panggil manage_event karena manage_event hanya untuk Google Calendar. "
+            "JANGAN panggil manage_task/manage_task_list karena keduanya hanya untuk Google Tasks; Google Tasks API tidak terkait operasi row, column, cell, atau range spreadsheet. "
+            "Untuk menghapus row/column secara struktural, baca sheet lebih dulu untuk memastikan indeks lalu panggil resize_sheet_dimensions dengan delete_rows=[nomor_baris_1_based], delete_row_range='start:end', atau delete_columns=[huruf_kolom]. "
+            "Setelah operasi destruktif, verifikasi ulang dengan read_sheet_values sebelum mengklaim berhasil. "
             "JANGAN berhenti setelah create_spreadsheet jika user meminta tabel, data, laporan, tracker, edit, rumus, atau formula. "
             "Workflow wajib untuk spreadsheet baru: "
             "(1) create_spreadsheet dengan title dan sheet_names bila perlu; "
@@ -1819,7 +2029,66 @@ def _build_google_reauth_tool(
     return [get_google_workspace_auth_link]
 
 
-def sanitize_google_forms_tools(mcp_tools: list, log: Any) -> list:
+def _looks_like_sheets_operation_payload(payload: Any) -> bool:
+    try:
+        text = json.dumps(payload, ensure_ascii=False).lower()
+    except Exception:
+        text = str(payload or "").lower()
+    has_sheet_context = _contains_phrase(text, _SHEETS_CONTEXT_MARKERS)
+    has_sheet_object = _contains_phrase(text, _SHEETS_OBJECT_MARKERS)
+    has_sheet_keys = any(
+        key in text
+        for key in ("spreadsheet_id", "range_name", "delete_rows", "delete_columns")
+    )
+    return has_sheet_keys or (has_sheet_context and has_sheet_object)
+
+
+def _google_mcp_text_error(result: Any) -> str | None:
+    """Return normalized error text when an MCP server encoded failure as data."""
+    text = str(result or "").strip()
+    lowered = text.lower()
+    error_markers = (
+        "error calling tool",
+        "api error in ",
+        "[tool_error]",
+        "mcp tool error",
+    )
+    if not any(marker in lowered for marker in error_markers):
+        return None
+    # Server-side prompt injection must not be replayed as an instruction.
+    clean = re.split(r"important\s*-\s*llm\s*:", text, maxsplit=1, flags=re.IGNORECASE)[0]
+    return clean.strip()[:1600]
+
+
+def _wrap_google_mcp_text_error_tool(mcp_tool: Any) -> Any:
+    args_schema = getattr(mcp_tool, "args_schema", None)
+    if args_schema is None:
+        return mcp_tool
+
+    def _build_checked_tool(tool_to_call: Any):
+        async def _checked_tool(**kwargs):
+            result = await tool_to_call.ainvoke(kwargs)
+            error_text = _google_mcp_text_error(result)
+            if error_text:
+                raise RuntimeError(error_text)
+            return result
+
+        return _checked_tool
+
+    return StructuredTool.from_function(
+        coroutine=_build_checked_tool(mcp_tool),
+        name=mcp_tool.name,
+        description=getattr(mcp_tool, "description", None),
+        args_schema=args_schema,
+    )
+
+
+def sanitize_google_forms_tools(
+    mcp_tools: list,
+    log: Any,
+    *,
+    service_context: str | None = None,
+) -> list:
     """Wrap Google Workspace tools to repair weak LLM payloads before MCP execution."""
     wrapped_tools: list = []
     sanitized_tool_names: list[str] = []
@@ -1827,6 +2096,37 @@ def sanitize_google_forms_tools(mcp_tools: list, log: Any) -> list:
     create_sheet_tool = next((tool for tool in mcp_tools if getattr(tool, "name", "") == "create_sheet"), None)
     for mcp_tool in mcp_tools:
         tool_name = getattr(mcp_tool, "name", "")
+        if tool_name in _GOOGLE_TASK_TOOL_NAMES:
+            def _build_google_task_guarded(tool_to_call: Any):
+                async def _google_task_guarded(**kwargs):
+                    if service_context != "tasks" or _looks_like_sheets_operation_payload(kwargs):
+                        raise ValueError(
+                            "WRONG_GOOGLE_SERVICE: Google Tasks tool hanya boleh dipanggil saat user "
+                            "secara eksplisit meminta operasi Google Tasks. manage_task/manage_task_list "
+                            "hanya untuk objek Google Tasks, "
+                            "bukan row, column, cell, range, atau data Google Sheets. "
+                            "Gunakan read_sheet_values untuk verifikasi lalu resize_sheet_dimensions "
+                            "dengan delete_rows/delete_row_range/delete_columns untuk perubahan struktur sheet."
+                        )
+                    return await tool_to_call.ainvoke(kwargs)
+
+                return _google_task_guarded
+
+            args_schema = getattr(mcp_tool, "args_schema", None)
+            if args_schema is None:
+                wrapped_tools.append(mcp_tool)
+            else:
+                wrapped_tools.append(
+                    StructuredTool.from_function(
+                        coroutine=_build_google_task_guarded(mcp_tool),
+                        name=mcp_tool.name,
+                        description=getattr(mcp_tool, "description", None),
+                        args_schema=args_schema,
+                    )
+                )
+                sanitized_tool_names.append(tool_name)
+            continue
+
         if tool_name == "create_spreadsheet":
             def _build_create_spreadsheet_guarded(tool_to_call: Any):
                 async def _create_spreadsheet_guarded(**kwargs):
@@ -2212,7 +2512,7 @@ def sanitize_google_forms_tools(mcp_tools: list, log: Any) -> list:
             tools=sanitized_tool_names,
             total=len(sanitized_tool_names),
         )
-    return wrapped_tools
+    return [_wrap_google_mcp_text_error_tool(tool) for tool in wrapped_tools]
 
 
 def _normalize_create_shape_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -2341,6 +2641,7 @@ async def prepare_google_mcp_runtime(
     system_prompt: Any,
     log: Any,
     fallback_external_user_id: str | None = None,
+    service_context: str | None = None,
 ) -> GoogleMcpRuntime:
     mcp_cfg = tools_config.get("mcp", {})
     mcp_enabled = False
@@ -2482,7 +2783,10 @@ async def prepare_google_mcp_runtime(
     if mcp_enabled and workspace_server and isinstance(system_prompt, str):
         runtime.system_prompt = (
             system_prompt
-            + build_google_mcp_usage_notice(user_message)
+            + build_google_mcp_usage_notice(
+                user_message,
+                service_context=service_context,
+            )
             + build_google_mcp_runtime_state_notice(runtime)
         )
     return runtime

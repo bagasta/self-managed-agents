@@ -5,8 +5,11 @@ from app.core.engine.agent_runner import (
 from app.core.engine.google_mcp_support import (
     _fallback_unqualified_sheet_range,
     build_google_mcp_usage_notice,
+    filter_google_mcp_tools_for_service_context,
     google_sheets_followup_directive,
+    infer_google_workspace_service_context,
 )
+from types import SimpleNamespace
 
 
 def test_sheets_authoring_intent_detected_for_table_and_formula() -> None:
@@ -19,6 +22,103 @@ def test_blank_spreadsheet_only_does_not_trigger_authoring() -> None:
     assert _is_google_sheets_authoring_intent(
         "tolong buat spreadsheet kosong saja"
     ) is False
+
+
+def test_delete_empty_sheet_row_is_not_misclassified_as_blank_spreadsheet() -> None:
+    assert _is_google_sheets_authoring_intent(
+        "hapus row kosong yang duplikat di Google Sheet"
+    ) is True
+
+
+def test_sheets_context_resolves_terse_duplicate_row_followup() -> None:
+    history = [
+        SimpleNamespace(role="agent", content="Ada duplikasi row Rain Tomorrow di Google Sheet."),
+    ]
+
+    assert infer_google_workspace_service_context(
+        "Hilangkan row duplikat yang kosong",
+        history,
+    ) == "sheets"
+
+
+def test_sheets_context_survives_just_do_it_after_wrong_tasks_reply() -> None:
+    history = [
+        SimpleNamespace(role="agent", content="Ada duplikasi row di Google Sheet."),
+        SimpleNamespace(role="user", content="Hilangkan row duplikat yang kosong"),
+        SimpleNamespace(role="agent", content="Google Tasks API belum aktif."),
+    ]
+
+    assert infer_google_workspace_service_context("Just do it", history) == "sheets"
+
+
+def test_question_about_wrong_tasks_requirement_keeps_sheets_context() -> None:
+    history = [
+        SimpleNamespace(role="agent", content="Ada duplicate row di Google Sheet."),
+        SimpleNamespace(role="user", content="Hilangkan row duplikat yang kosong"),
+    ]
+
+    assert infer_google_workspace_service_context(
+        "Why do you need Google Tasks API?",
+        history,
+    ) == "sheets"
+
+
+def test_sheets_context_filters_google_tasks_tools() -> None:
+    tools = [
+        SimpleNamespace(name="read_sheet_values"),
+        SimpleNamespace(name="resize_sheet_dimensions"),
+        SimpleNamespace(name="manage_task"),
+        SimpleNamespace(name="list_tasks"),
+    ]
+    log = SimpleNamespace(info=lambda *args, **kwargs: None)
+
+    filtered = filter_google_mcp_tools_for_service_context(
+        tools,
+        service_context="sheets",
+        log=log,
+    )
+
+    assert [tool.name for tool in filtered] == [
+        "read_sheet_values",
+        "resize_sheet_dimensions",
+    ]
+
+
+def test_unresolved_context_filters_google_tasks_tools_by_default() -> None:
+    tools = [
+        SimpleNamespace(name="modify_sheet_values"),
+        SimpleNamespace(name="manage_task_list"),
+        SimpleNamespace(name="manage_task"),
+    ]
+    log = SimpleNamespace(info=lambda *args, **kwargs: None)
+
+    filtered = filter_google_mcp_tools_for_service_context(
+        tools,
+        service_context=None,
+        log=log,
+    )
+
+    assert [tool.name for tool in filtered] == ["modify_sheet_values"]
+
+
+def test_explicit_google_tasks_context_keeps_task_tools() -> None:
+    tools = [
+        SimpleNamespace(name="manage_task_list"),
+        SimpleNamespace(name="manage_task"),
+    ]
+    log = SimpleNamespace(info=lambda *args, **kwargs: None)
+
+    context = infer_google_workspace_service_context(
+        "Tambahkan pengingat review laporan ke Google Tasks"
+    )
+    filtered = filter_google_mcp_tools_for_service_context(
+        tools,
+        service_context=context,
+        log=log,
+    )
+
+    assert context == "tasks"
+    assert [tool.name for tool in filtered] == ["manage_task_list", "manage_task"]
 
 
 def test_sheets_followup_needed_when_only_create_spreadsheet_step() -> None:
@@ -75,6 +175,19 @@ def test_sheets_notice_requires_values_and_formulas() -> None:
     assert "user_entered" in notice
     assert "=sum" in notice
     assert "jangan hardcode sheet1" in notice
+
+
+def test_sheets_delete_notice_routes_to_dimension_tool_not_tasks() -> None:
+    notice = build_google_mcp_usage_notice(
+        "Hilangkan row duplikat yang kosong",
+        service_context="sheets",
+    ).lower()
+
+    assert "jangan panggil manage_task/manage_task_list" in notice
+    assert "google tasks api tidak terkait" in notice
+    assert "resize_sheet_dimensions" in notice
+    assert "delete_rows" in notice
+    assert "read_sheet_values" in notice
 
 
 def test_sheets_notice_with_jadwal_does_not_trigger_calendar_workflow() -> None:
