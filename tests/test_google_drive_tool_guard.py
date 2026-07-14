@@ -1,4 +1,6 @@
+from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlparse
 
 import pytest
 
@@ -89,3 +91,61 @@ async def test_create_drive_file_without_extension_points_to_folder_tool() -> No
     assert result.startswith("DRIVE_FOLDER_OR_CONTENT_REQUIRED")
     assert "create_drive_folder" in result
     assert not create_file.calls
+
+
+@pytest.mark.asyncio
+async def test_create_drive_file_rejects_untrusted_local_path() -> None:
+    create_file = FakeTool("create_drive_file", "created")
+    wrapped = sanitize_google_forms_tools([create_file], SimpleNamespace(warning=lambda *a, **k: None))
+    guarded = next(tool for tool in wrapped if tool.name == "create_drive_file")
+
+    result = await guarded.ainvoke(
+        {
+            "file_name": "report.csv",
+            "fileUrl": "/workspace/shared/current_input/report.csv",
+        }
+    )
+
+    assert result.startswith("DRIVE_LOCAL_FILE_UNAVAILABLE")
+    assert not create_file.calls
+
+
+@pytest.mark.asyncio
+async def test_create_drive_file_stages_only_active_attachment_and_cleans_up(tmp_path: Path) -> None:
+    source = tmp_path / "current_input" / "report.csv"
+    source.parent.mkdir()
+    source.write_bytes(b"name,total\nBakmi,25000\n")
+    staging_dir = tmp_path / "mcp-staging"
+
+    class InspectingTool(FakeTool):
+        staged_path: Path | None = None
+
+        async def ainvoke(self, kwargs):
+            self.calls.append(kwargs)
+            self.staged_path = Path(urlparse(kwargs["fileUrl"]).path)
+            assert self.staged_path.parent == staging_dir.resolve()
+            assert self.staged_path.read_bytes() == source.read_bytes()
+            return self.result
+
+    create_file = InspectingTool("create_drive_file", "created")
+    wrapped = sanitize_google_forms_tools(
+        [create_file],
+        SimpleNamespace(warning=lambda *a, **k: None),
+        current_attachment_path=str(source),
+        upload_staging_dir=str(staging_dir),
+    )
+    guarded = next(tool for tool in wrapped if tool.name == "create_drive_file")
+
+    result = await guarded.ainvoke(
+        {
+            "file_name": "sales-report.csv",
+            "fileUrl": "/workspace/shared/current_input/model-invented-name.csv",
+        }
+    )
+
+    assert result == "created"
+    assert create_file.calls[0]["fileUrl"].startswith("file://")
+    assert create_file.calls[0]["mime_type"] == "text/csv"
+    assert create_file.staged_path is not None
+    assert not create_file.staged_path.exists()
+    assert source.exists()

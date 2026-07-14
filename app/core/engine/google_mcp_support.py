@@ -9,10 +9,13 @@ import ast
 import asyncio
 import copy
 import json
+import mimetypes
 import re
 import os
+import shutil
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from langchain_core.tools import StructuredTool, tool
@@ -2753,6 +2756,8 @@ def sanitize_google_forms_tools(
     log: Any,
     *,
     service_context: str | None = None,
+    current_attachment_path: str | None = None,
+    upload_staging_dir: str | None = None,
 ) -> list:
     """Wrap Google Workspace tools to repair weak LLM payloads before MCP execution."""
     wrapped_tools: list = []
@@ -3130,6 +3135,47 @@ def sanitize_google_forms_tools(
                     has_content = content is not None and str(content) != ""
                     has_file_url = file_url is not None and str(file_url).strip() != ""
                     is_folder = mime_type == "application/vnd.google-apps.folder"
+
+                    staged_path: Path | None = None
+                    local_reference = has_file_url and (
+                        str(file_url).strip().startswith("/")
+                        or str(file_url).strip().lower().startswith("file://")
+                    )
+                    if not has_content and not is_folder and (local_reference or not has_file_url):
+                        source_path = Path(current_attachment_path).resolve() if current_attachment_path else None
+                        if source_path is not None and source_path.is_file():
+                            try:
+                                staging_root = Path(upload_staging_dir or "/tmp/google-mcp-uploads").resolve()
+                                await asyncio.to_thread(staging_root.mkdir, parents=True, exist_ok=True)
+                                suffix = source_path.suffix[:16]
+                                staged_path = staging_root / f"{uuid.uuid4().hex}{suffix}"
+                                await asyncio.to_thread(shutil.copyfile, source_path, staged_path)
+                                await asyncio.to_thread(os.chmod, staged_path, 0o644)
+                                kwargs["fileUrl"] = staged_path.as_uri()
+                                if mime_type == "text/plain":
+                                    guessed_mime, _ = mimetypes.guess_type(source_path.name)
+                                    if guessed_mime:
+                                        kwargs["mime_type"] = guessed_mime
+                                has_file_url = True
+                                getattr(log, "info", lambda *args, **kw: None)(
+                                    "agent_run.google_drive_attachment_staged",
+                                    source_name=source_path.name,
+                                    destination_name=file_name,
+                                )
+                            except Exception as exc:
+                                if staged_path is not None:
+                                    staged_path.unlink(missing_ok=True)
+                                return (
+                                    "DRIVE_ATTACHMENT_STAGING_FAILED: attachment aktif tidak dapat disiapkan untuk MCP Drive. "
+                                    f"Detail: {str(exc)[:200]}"
+                                )
+                        elif local_reference:
+                            return (
+                                "DRIVE_LOCAL_FILE_UNAVAILABLE: path lokal hanya boleh menunjuk ke attachment aktif "
+                                "yang dikirim user pada turn ini. Minta user mengirim ulang file, lalu panggil "
+                                "create_drive_file pada turn attachment tersebut."
+                            )
+
                     if not has_content and not has_file_url and not is_folder:
                         lower_name = file_name.lower()
                         if lower_name.endswith((".xlsx", ".xls", ".csv")) or "spreadsheet" in mime_type:
@@ -3151,7 +3197,11 @@ def sanitize_google_forms_tools(
                             "Buat/ambil konten file dulu, atau gunakan tool Google native yang sesuai seperti create_spreadsheet/create_presentation/create_doc."
                         )
 
-                    return await tool_to_call.ainvoke(kwargs)
+                    try:
+                        return await tool_to_call.ainvoke(kwargs)
+                    finally:
+                        if staged_path is not None:
+                            staged_path.unlink(missing_ok=True)
 
                 return _create_drive_file_guarded
 

@@ -191,6 +191,12 @@ async def unregister_active_task(session_id: UUID, task: asyncio.Task | None = N
             _active_tasks.pop(session_id, None)
 
 
+async def is_registered_active_task(session_id: UUID, task: asyncio.Task) -> bool:
+    """Return whether ``task`` still owns the active run for this session."""
+    async with _task_registry_lock:
+        return _active_tasks.get(session_id) is task
+
+
 async def cancel_active_run(session_id: UUID) -> bool:
     """Cancel the running task for this session, if any.
 

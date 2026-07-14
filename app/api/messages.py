@@ -8,6 +8,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.engine.agent_runner import run_agent
+from app.core.engine.arthur_admission import ArthurQueueFull, arthur_run_slot
 from app.core.engine.session_lock import (
     cancel_active_run,
     is_latest_session_turn,
@@ -118,6 +119,7 @@ async def send_message(
     # is still working (e.g. subagent taking too long).
     _prior_interrupted = await cancel_active_run(session_id)
 
+    await db.commit()
     try:
         async with session_run_lock(session_id):
             if not await is_latest_session_turn(session_id, turn_generation):
@@ -125,19 +127,28 @@ async def send_message(
             current_task = asyncio.current_task()
             if current_task:
                 await register_active_task(session_id, current_task)
-            result = await run_agent(
-                agent_model=agent,
-                session=session,
-                user_message=payload.message,
-                db=db,
-                prior_run_was_interrupted=_prior_interrupted,
-            )
+            async with arthur_run_slot(agent):
+                result = await run_agent(
+                    agent_model=agent,
+                    session=session,
+                    user_message=payload.message,
+                    db=db,
+                    prior_run_was_interrupted=_prior_interrupted,
+                )
             if not await is_latest_session_turn(session_id, turn_generation):
                 return MessageResponse(reply="", steps=[], run_id=result.get("run_id"))
     except asyncio.CancelledError:
         # This run was interrupted by a subsequent message from the same user.
         # The new request will handle the reply — nothing to return here.
+        from app.core.engine.agent_runner import persist_cancelled_run_for_task
+
+        await asyncio.shield(persist_cancelled_run_for_task(asyncio.current_task()))
         raise
+    except ArthurQueueFull as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Arthur sedang menerima terlalu banyak permintaan. Silakan coba lagi sebentar lagi.",
+        ) from exc
     finally:
         await unregister_active_task(session_id, asyncio.current_task())
 

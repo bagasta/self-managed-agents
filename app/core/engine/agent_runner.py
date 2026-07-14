@@ -15,6 +15,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, TypedDict
 
 import structlog
@@ -86,7 +87,8 @@ from app.models.agent import Agent as AgentModel
 from app.models.message import Message
 from app.models.run import Run
 from app.models.session import Session
-from sqlalchemy import select
+from app.core.model_defaults import CREATED_AGENT_DEFAULT_MODEL
+from sqlalchemy import select, update
 from app.core.engine.result_parser import (
     ParsedResult,
     sanitize_input_messages as _sanitize_input_messages,
@@ -444,6 +446,43 @@ async def _persist_run_failure(
     await db.commit()
 
 
+async def persist_cancelled_run_for_task(
+    task: asyncio.Task | None,
+    *,
+    reason: str = "Cancelled because a newer user message interrupted this run.",
+) -> None:
+    """Close a committed run when cancellation happens outside the graph call.
+
+    Follow-up graph calls and MCP retries run after the main ``graph.ainvoke``
+    cancellation handler. The request task carries its exact run ID so an outer
+    channel handler can close only that run, even if a newer turn already began.
+    """
+    run_id = getattr(task, "_managed_agent_run_id", None) if task is not None else None
+    if not isinstance(run_id, uuid.UUID):
+        return
+
+    from app.database import AsyncSessionLocal
+
+    try:
+        async with AsyncSessionLocal() as cleanup_db:
+            await cleanup_db.execute(
+                update(Run)
+                .where(Run.id == run_id, Run.status == "running")
+                .values(
+                    status="cancelled",
+                    completed_at=datetime.now(timezone.utc),
+                    error_message=reason[:2000],
+                )
+            )
+            await cleanup_db.commit()
+    except Exception as exc:
+        logger.warning(
+            "agent_run.outer_cancellation_persist_failed",
+            run_id=str(run_id),
+            error=str(exc)[:300],
+        )
+
+
 _INLINE_TEXT_ARTIFACT_EXTS = {"txt", "md", "markdown", "csv", "json", "log", "asc"}
 
 
@@ -657,6 +696,9 @@ async def run_agent(
     7. Auto-extract long-term memory (jika triggered)
     """
     run_id = uuid.uuid4()
+    _run_owner_task = asyncio.current_task()
+    if _run_owner_task is not None:
+        setattr(_run_owner_task, "_managed_agent_run_id", run_id)
     agent_id: uuid.UUID = session.agent_id
     _raw_tools_cfg = agent_model.tools_config
     tools_config: dict[str, Any] = _raw_tools_cfg if isinstance(_raw_tools_cfg, dict) else {}
@@ -792,6 +834,11 @@ async def run_agent(
         if context_summary
         else settings.short_term_memory_turns
     )
+    if runtime_policy.is_builder:
+        # Arthur's operating manual is already injected separately. Keeping a
+        # short conversational tail avoids re-sending large builder transcripts
+        # on every step while preserving the user's immediate context.
+        _history_turns = min(_history_turns, 6)
     history_rows = await load_history(session.id, db, max_turns=_history_turns)
     prior_messages = db_messages_to_lc(history_rows)
     google_auth_recovery_followup = is_google_auth_recovery_followup(
@@ -867,6 +914,14 @@ async def run_agent(
         is_operator_message=is_op_msg,
         user_message=user_message,
     )
+    if runtime_policy.is_builder:
+        system_prompt += (
+            "\n\n## Authoritative Platform Model Default\n"
+            f"Model default untuk agent baru adalah `{CREATED_AGENT_DEFAULT_MODEL}`. "
+            "Gunakan model ini ketika user tidak menyebut model secara eksplisit. "
+            "Jangan mewarisi model Arthur atau model dari contoh percakapan lama. "
+            "Jika user meminta model lain secara eksplisit, hanya gunakan bila plan user mengizinkannya."
+        )
     if abandoned_before_current is not None:
         system_prompt += (
             "\n\n## Restart Recovery\n"
@@ -1045,6 +1100,20 @@ async def run_agent(
         if google_mcp.preflight_error and "google_workspace" not in mcp_errors:
             mcp_errors["google_workspace"] = google_mcp.preflight_error
         if mcp_tools:
+            _current_attachment_path: str | None = None
+            if current_attachment_name:
+                from app.core.infra.sandbox import get_workspace_dir
+
+                _attachment_name = Path(current_attachment_name).name
+                _attachment_candidate = (
+                    get_workspace_dir(session.id) / "shared" / "current_input" / _attachment_name
+                ).resolve()
+                _attachment_root = (get_workspace_dir(session.id) / "shared" / "current_input").resolve()
+                if (
+                    _attachment_candidate.is_file()
+                    and _attachment_candidate.parent == _attachment_root
+                ):
+                    _current_attachment_path = str(_attachment_candidate)
             mcp_tools = filter_google_mcp_tools_for_service_context(
                 mcp_tools,
                 service_context=google_service_context,
@@ -1054,6 +1123,8 @@ async def run_agent(
                 mcp_tools,
                 log,
                 service_context=google_service_context,
+                current_attachment_path=_current_attachment_path,
+                upload_staging_dir=settings.google_mcp_upload_dir,
             )
             if getattr(session, "channel_type", None) == "whatsapp":
                 mcp_tools = _filter_whatsapp_unsafe_mcp_tools(
@@ -1346,6 +1417,17 @@ async def run_agent(
                 try:
                     await asyncio.sleep(_long_progress_notice_seconds)
                     if _progress_finished or _progress_notice_sent:
+                        return
+                    if (
+                        _run_owner_task is None
+                        or _run_owner_task.done()
+                        or _run_owner_task.cancelling()
+                    ):
+                        return
+                    from app.core.engine.session_lock import is_registered_active_task
+
+                    if not await is_registered_active_task(session.id, _run_owner_task):
+                        log.info("agent_run.wa_long_progress_notice_stale_suppressed")
                         return
                     from app.core.infra.wa_client import send_wa_message, start_wa_typing
 

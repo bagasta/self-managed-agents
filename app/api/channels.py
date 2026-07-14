@@ -1600,6 +1600,13 @@ async def incoming_message(
         }
 
     # --- Jalankan agent ---
+    from app.core.engine.arthur_admission import (
+        ArthurQueueFull,
+        arthur_run_slot,
+        is_arthur_builder,
+        is_arthur_capacity_saturated,
+        is_heavy_arthur_request,
+    )
     from app.core.engine.session_lock import (
         cancel_active_run,
         is_latest_session_turn,
@@ -1608,7 +1615,25 @@ async def incoming_message(
         session_run_lock,
         unregister_active_task,
     )
-    from app.core.engine.agent_runner import run_agent  # deferred to avoid circular import
+    from app.core.engine.agent_runner import (  # deferred to avoid circular import
+        persist_cancelled_run_for_task,
+        run_agent,
+    )
+
+    if (
+        not is_operator
+        and is_arthur_builder(agent)
+        and (is_heavy_arthur_request(user_message) or is_arthur_capacity_saturated(agent))
+        and session.channel_type
+    ):
+        try:
+            await send_message(
+                channel_type=session.channel_type,
+                channel_config=session.channel_config if isinstance(session.channel_config, dict) else {},
+                text="Permintaanmu sudah saya terima. Saya sedang memprosesnya dan akan mengirim hasil setelah selesai.",
+            )
+        except Exception as exc:
+            log.warning("channels.incoming.arthur_ack_failed", error=str(exc))
 
     _prior_interrupted = False
     session_id = session.id
@@ -1617,6 +1642,7 @@ async def incoming_message(
         turn_generation = await mark_latest_session_turn(session_id)
         _prior_interrupted = await cancel_active_run(session_id)
 
+    await db.commit()
     try:
         async with session_run_lock(session_id):
             if not is_operator and not await is_latest_session_turn(session_id, turn_generation):
@@ -1626,25 +1652,41 @@ async def incoming_message(
                     turn_generation=turn_generation,
                 )
                 return {"status": "stale_ignored", "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
-            if not is_operator:
-                await db.refresh(session, attribute_names=["ai_disabled"])
-                if getattr(session, "ai_disabled", False):
-                    log.info("channels.incoming.ai_disabled_after_wait", session_id=str(session_id))
-                    return {"status": "ai_disabled", "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
             current_task = asyncio.current_task()
             if current_task and not is_operator:
                 await register_active_task(session_id, current_task)
-            result = await run_agent(
-                agent_model=agent,
-                session=session,
-                user_message=user_message,
-                db=db,
-                prior_run_was_interrupted=_prior_interrupted,
-            )
+            async with arthur_run_slot(agent):
+                if not is_operator:
+                    await db.refresh(session, attribute_names=["ai_disabled"])
+                    if getattr(session, "ai_disabled", False):
+                        log.info("channels.incoming.ai_disabled_after_wait", session_id=str(session_id))
+                        return {"status": "ai_disabled", "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
+                result = await run_agent(
+                    agent_model=agent,
+                    session=session,
+                    user_message=user_message,
+                    db=db,
+                    prior_run_was_interrupted=_prior_interrupted,
+                )
     except asyncio.CancelledError:
-        await unregister_active_task(session_id, asyncio.current_task())
+        current_task = asyncio.current_task()
+        await asyncio.shield(persist_cancelled_run_for_task(current_task))
+        await unregister_active_task(session_id, current_task)
         await db.rollback()
         return {"status": "cancelled", "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
+    except ArthurQueueFull:
+        await db.rollback()
+        overload_reply = "Arthur sedang menerima terlalu banyak permintaan. Silakan coba lagi sebentar lagi."
+        if session.channel_type:
+            try:
+                await send_message(
+                    channel_type=session.channel_type,
+                    channel_config=session.channel_config if isinstance(session.channel_config, dict) else {},
+                    text=overload_reply,
+                )
+            except Exception as exc:
+                log.warning("channels.incoming.arthur_overload_reply_failed", error=str(exc))
+        return {"status": "busy", "reply": overload_reply, "run_id": "", "steps": [], "messages_to_user": []}
     except (TimeoutError, asyncio.TimeoutError):
         await unregister_active_task(session_id, asyncio.current_task())
         await db.rollback()
@@ -2221,7 +2263,17 @@ async def wa_incoming(
 
     # 6. Run agent
     import asyncio as _asyncio
-    from app.core.engine.agent_runner import run_agent  # deferred to avoid circular import
+    from app.core.engine.agent_runner import (  # deferred to avoid circular import
+        persist_cancelled_run_for_task,
+        run_agent,
+    )
+    from app.core.engine.arthur_admission import (
+        ArthurQueueFull,
+        arthur_run_slot,
+        is_arthur_builder,
+        is_arthur_capacity_saturated,
+        is_heavy_arthur_request,
+    )
     from app.core.engine.session_lock import (
         cancel_active_run,
         is_latest_session_turn,
@@ -2235,7 +2287,11 @@ async def wa_incoming(
     # agent cannot fall back to a previously uploaded file (see audit fix B).
     current_attachment_name: str | None = None
     if body.media_type in ("document", "image") and body.media_data:
-        current_attachment_name = sanitize_user_input(body.media_filename or "").strip() or None
+        current_attachment_name = (
+            str((media_meta or {}).get("filename") or "").strip()
+            or sanitize_user_input(body.media_filename or "").strip()
+            or None
+        )
 
     # Cancel any in-progress run for this session (human interrupt).
     # Operator messages are never interrupted — they're short command turns.
@@ -2246,6 +2302,21 @@ async def wa_incoming(
         turn_generation = await mark_latest_session_turn(session_id)
         _prior_interrupted = await cancel_active_run(session_id)
 
+    if (
+        not _is_operator
+        and is_arthur_builder(agent)
+        and (is_heavy_arthur_request(user_message) or is_arthur_capacity_saturated(agent))
+    ):
+        try:
+            await send_wa_message(
+                body.device_id,
+                effective_reply_target,
+                "Permintaanmu sudah saya terima. Saya sedang memprosesnya dan akan mengirim hasil setelah selesai.",
+            )
+        except Exception as exc:
+            log.warning("wa_incoming.arthur_ack_failed", error=str(exc))
+
+    await db.commit()
     try:
         async with session_run_lock(session_id):
             if not _is_operator and not await is_latest_session_turn(session_id, turn_generation):
@@ -2255,34 +2326,45 @@ async def wa_incoming(
                     turn_generation=turn_generation,
                 )
                 return {"status": "stale_ignored", "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
-            if not _is_operator:
-                await db.refresh(session, attribute_names=["ai_disabled"])
-                if getattr(session, "ai_disabled", False):
-                    log.info("wa_incoming.ai_disabled_after_wait", session_id=str(session_id))
-                    return {"status": "ai_disabled", "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
             # Register task INSIDE the lock — ensures cancel_active_run always
             # targets the task that actually holds the lock and is running.
             _current_task = _asyncio.current_task()
             if _current_task and not _is_operator:
                 await register_active_task(session_id, _current_task)
-            result = await run_agent(
-                agent_model=agent,
-                session=session,
-                user_message=user_message,
-                db=db,
-                escalation_user_jid=escalation_user_jid,
-                escalation_context=escalation_context,
-                media_image_b64=media_image_b64,
-                media_image_mime=media_image_mime,
-                current_attachment_name=current_attachment_name,
-                sender_name=sender_name,
-                prior_run_was_interrupted=_prior_interrupted,
-            )
+            async with arthur_run_slot(agent):
+                if not _is_operator:
+                    await db.refresh(session, attribute_names=["ai_disabled"])
+                    if getattr(session, "ai_disabled", False):
+                        log.info("wa_incoming.ai_disabled_after_wait", session_id=str(session_id))
+                        return {"status": "ai_disabled", "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
+                result = await run_agent(
+                    agent_model=agent,
+                    session=session,
+                    user_message=user_message,
+                    db=db,
+                    escalation_user_jid=escalation_user_jid,
+                    escalation_context=escalation_context,
+                    media_image_b64=media_image_b64,
+                    media_image_mime=media_image_mime,
+                    current_attachment_name=current_attachment_name,
+                    sender_name=sender_name,
+                    prior_run_was_interrupted=_prior_interrupted,
+                )
     except _asyncio.CancelledError:
         log.info("wa_incoming.cancelled_by_interrupt", session_id=str(session_id))
-        await unregister_active_task(session_id, _asyncio.current_task())
+        current_task = _asyncio.current_task()
+        await _asyncio.shield(persist_cancelled_run_for_task(current_task))
+        await unregister_active_task(session_id, current_task)
         await db.rollback()
         return {"status": "cancelled", "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
+    except ArthurQueueFull:
+        await db.rollback()
+        overload_reply = "Arthur sedang menerima terlalu banyak permintaan. Silakan coba lagi sebentar lagi."
+        try:
+            await send_wa_message(body.device_id, effective_reply_target, overload_reply)
+        except Exception as exc:
+            log.warning("wa_incoming.arthur_overload_reply_failed", error=str(exc))
+        return {"status": "busy", "reply": overload_reply, "run_id": "", "steps": [], "messages_to_user": [overload_reply]}
     except (TimeoutError, _asyncio.TimeoutError):
         await unregister_active_task(session_id, _asyncio.current_task())
         await db.rollback()

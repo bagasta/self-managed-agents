@@ -36,6 +36,7 @@ services:
       # Identical host:container path — NOT a named volume (a named volume would make the
       # app write into Docker-managed storage while siblings mount an empty literal host path).
       - /opt/agent-sandboxes:/opt/agent-sandboxes
+      - /tmp/google-mcp-uploads:/tmp/google-mcp-uploads
       - /var/run/docker.sock:/var/run/docker.sock  # DinD-lite: sandbox containers are siblings on host daemon
     depends_on:
       postgres:
