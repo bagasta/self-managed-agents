@@ -63,6 +63,7 @@ from app.api.wa_helpers import (
     reset_wa_spam_window,
     extract_messages_to_user,
     find_agent_by_device,
+    find_authorized_session_by_quoted_escalation,
     find_escalation_context,
     find_or_create_wa_session,
     find_session_by_operator_active_route,
@@ -511,7 +512,10 @@ async def _has_explicit_operator_escalation_reply(
     db: AsyncSession,
     quoted_text: str | None,
     quoted_stanza_id: str | None,
+    routed_target_session: Session | None = None,
 ) -> bool:
+    if routed_target_session is not None:
+        return True
     target_session, _case_id = await find_session_by_quoted_message_id(agent, db, quoted_stanza_id)
     if target_session:
         return True
@@ -529,8 +533,9 @@ async def _should_treat_as_operator_turn(
     media_type: str | None,
     quoted_text: str | None,
     quoted_stanza_id: str | None,
+    routed_target_session: Session | None = None,
 ) -> bool:
-    if not is_operator_message(from_phone, reply_target, agent):
+    if not is_operator_message(from_phone, reply_target, agent) and routed_target_session is None:
         return False
 
     if await _has_explicit_operator_escalation_reply(
@@ -538,6 +543,7 @@ async def _should_treat_as_operator_turn(
         db=db,
         quoted_text=quoted_text,
         quoted_stanza_id=quoted_stanza_id,
+        routed_target_session=routed_target_session,
     ):
         return True
 
@@ -701,6 +707,12 @@ async def _remember_pending_operator_text_reply(
     sess_meta["pending_operator_text_reply"] = {
         "target_session_id": str(target_session.id),
         "target": target,
+        "source_agent_id": str(target_session.agent_id),
+        "source_device_id": str(
+            ((target_session.channel_config or {}).get("device_id") or "")
+            if isinstance(target_session.channel_config, dict)
+            else ""
+        ),
         "case_id": case_id,
         "message": draft_message.strip(),
         "created_at": int(time.time()),
@@ -722,6 +734,8 @@ async def _maybe_stage_operator_text_draft(
     operator_reply_target: str,
     db: AsyncSession,
     log: structlog.BoundLogger,
+    routed_target_session: Session | None = None,
+    routed_case_id: str | None = None,
 ) -> dict | None:
     """Deterministically stage an operator's quoted escalation reply as a draft.
 
@@ -741,7 +755,10 @@ async def _maybe_stage_operator_text_draft(
     if "[OPERATOR_MEDIA_PENDING]" in draft_message:
         return None
 
-    target_session, case_id = await find_session_by_quoted_message_id(agent, db, quoted_stanza_id)
+    target_session = routed_target_session
+    case_id = routed_case_id
+    if target_session is None:
+        target_session, case_id = await find_session_by_quoted_message_id(agent, db, quoted_stanza_id)
     if target_session is None:
         target_session, case_id = await find_session_by_quoted_case(agent, db, quoted_text)
     if target_session is None:
@@ -894,8 +911,13 @@ async def _handle_operator_activate_command(
     db: AsyncSession,
     log: structlog.BoundLogger,
     quoted_stanza_id: str | None = None,
+    routed_target_session: Session | None = None,
+    routed_case_id: str | None = None,
 ) -> dict:
-    target_session, case_id = await find_session_by_quoted_message_id(agent, db, quoted_stanza_id)
+    target_session = routed_target_session
+    case_id = routed_case_id
+    if not target_session:
+        target_session, case_id = await find_session_by_quoted_message_id(agent, db, quoted_stanza_id)
     if not target_session:
         target_session, case_id = await find_session_by_quoted_case(agent, db, quoted_text)
     if not target_session:
@@ -1036,12 +1058,17 @@ async def _forward_operator_media_to_customer(
     db: AsyncSession,
     log: structlog.BoundLogger,
     quoted_stanza_id: str | None = None,
+    routed_target_session: Session | None = None,
+    routed_case_id: str | None = None,
 ) -> dict | None:
     """Queue operator media for draft-first flow; send only after explicit confirmation."""
     if media_type not in {"image", "sticker", "document"}:
         return None
 
-    target_session, case_id = await find_session_by_quoted_message_id(agent, db, quoted_stanza_id)
+    target_session = routed_target_session
+    case_id = routed_case_id
+    if not target_session:
+        target_session, case_id = await find_session_by_quoted_message_id(agent, db, quoted_stanza_id)
     if not target_session:
         target_session, case_id = await find_session_by_quoted_case(agent, db, quoted_text)
     if not target_session:
@@ -1075,6 +1102,12 @@ async def _forward_operator_media_to_customer(
     sess_meta["pending_operator_media"] = {
         "target_session_id": str(target_session.id),
         "target": target,
+        "source_agent_id": str(target_session.agent_id),
+        "source_device_id": str(
+            ((target_session.channel_config or {}).get("device_id") or "")
+            if isinstance(target_session.channel_config, dict)
+            else ""
+        ),
         "case_id": case_id,
         "caption_hint": sanitize_user_input(caption or "").strip(),
         "created_at": int(time.time()),
@@ -1147,18 +1180,39 @@ async def _send_pending_operator_media(
         raw_b64 = base64.b64encode(Path(workspace_path).read_bytes()).decode("ascii")
         media_type = str(pending.get("media_type") or "")
         target = str(pending.get("target") or _wa_customer_target(target_session))
+        if normalize_phone(target) == normalize_phone(operator_reply_target):
+            await _forget_pending_operator_item(operator_session, "pending_operator_media", db)
+            reply = (
+                "Target lampiran sama dengan nomor operator, jadi pengiriman diblokir. "
+                "Reply ulang notifikasi eskalasi customer lalu kirim ulang lampirannya."
+            )
+            await send_wa_message(device_id, operator_reply_target, reply)
+            log.warning(
+                "wa_incoming.operator_media_reply_blocked_self_target",
+                case_id=pending.get("case_id"),
+            )
+            return {"status": "error", "reply": reply, "run_id": "", "steps": [], "messages_to_user": []}
+        source_device_id = str(
+            pending.get("source_device_id")
+            or (
+                (target_session.channel_config or {}).get("device_id")
+                if isinstance(target_session.channel_config, dict)
+                else ""
+            )
+            or device_id
+        )
         filename = str(pending.get("filename") or "lampiran")
         mimetype = str(pending.get("mimetype") or "application/octet-stream")
 
         if media_type in {"image", "sticker"}:
             from app.core.infra.wa_client import send_wa_image
 
-            await send_wa_image(device_id, target, raw_b64, draft_message, mimetype)
+            await send_wa_image(source_device_id, target, raw_b64, draft_message, mimetype)
             tool_result = f"[IMAGE_SENT_TO_USER:{target}] {draft_message}"
         else:
             from app.core.infra.wa_client import send_wa_document
 
-            await send_wa_document(device_id, target, raw_b64, filename, draft_message, mimetype)
+            await send_wa_document(source_device_id, target, raw_b64, filename, draft_message, mimetype)
             tool_result = f"[DOCUMENT_SENT_TO_USER:{target}] {filename} | {draft_message}"
 
         db.add(Message(
@@ -1224,9 +1278,31 @@ async def _send_pending_operator_text_reply(
         reply = "Draft sebelumnya kosong atau target customer tidak ditemukan. Silakan buat draft ulang."
         await send_wa_message(device_id, operator_reply_target, reply)
         return {"status": "error", "reply": reply, "run_id": "", "steps": [], "messages_to_user": []}
+    if normalize_phone(target) == normalize_phone(operator_reply_target):
+        await _forget_pending_operator_item(operator_session, "pending_operator_text_reply", db)
+        reply = (
+            "Target draft sama dengan nomor operator, jadi pengiriman diblokir. "
+            "Reply ulang notifikasi eskalasi customer agar targetnya dapat diverifikasi."
+        )
+        await send_wa_message(device_id, operator_reply_target, reply)
+        log.warning(
+            "wa_incoming.operator_text_reply_blocked_self_target",
+            case_id=pending.get("case_id"),
+        )
+        return {"status": "error", "reply": reply, "run_id": "", "steps": [], "messages_to_user": []}
+
+    source_device_id = str(
+        pending.get("source_device_id")
+        or (
+            (target_session.channel_config or {}).get("device_id")
+            if isinstance(target_session.channel_config, dict)
+            else ""
+        )
+        or device_id
+    )
 
     try:
-        await send_wa_message(device_id, target, message)
+        await send_wa_message(source_device_id, target, message)
         tool_result = f"[SENT_TO_USER] {message}"
         db.add(Message(
             session_id=target_session.id,
@@ -1249,7 +1325,12 @@ async def _send_pending_operator_text_reply(
         await db.commit()
         reply = "Terkirim ✓"
         await send_wa_message(device_id, operator_reply_target, reply)
-        log.info("wa_incoming.operator_text_reply_sent", target=target, case_id=pending.get("case_id"))
+        log.info(
+            "wa_incoming.operator_text_reply_sent",
+            target=target,
+            source_device_id=source_device_id,
+            case_id=pending.get("case_id"),
+        )
         return {
             "status": "ok",
             "reply": reply,
@@ -1847,11 +1928,40 @@ async def wa_incoming(
             log.info("wa_incoming.duplicate_ignored")
             return {"status": "ignored", "reason": "duplicate message"}
 
+    # A shared wa-dev number can deliver an operator's quoted reply through a
+    # different virtual agent from the one that emitted the escalation. Resolve
+    # that quoted case globally, but only when this sender is an owner/operator
+    # of the source agent. The resolved session is passed through the whole
+    # draft flow so no later step falls back to the current operator chat.
+    _routed_target_session = None
+    _routed_case_id: str | None = None
+    _routed_source_agent = None
+    if body.quoted_stanza_id or body.quoted_text:
+        (
+            _routed_target_session,
+            _routed_case_id,
+            _routed_source_agent,
+        ) = await find_authorized_session_by_quoted_escalation(
+            db,
+            quoted_text=body.quoted_text,
+            quoted_stanza_id=body.quoted_stanza_id,
+            from_phone=from_phone,
+            reply_target=reply_target,
+        )
+        if _routed_target_session is not None:
+            log.info(
+                "wa_incoming.authorized_cross_agent_escalation_route",
+                source_agent_id=str(_routed_target_session.agent_id),
+                current_agent_id=str(agent.id),
+                target_session_id=str(_routed_target_session.id),
+                case_id=_routed_case_id,
+            )
+
     # 2. Cek apakah pesan ini benar-benar turn operator eskalasi.
     # Identitas admin/operator saja tidak cukup: admin sering mengetes agent
     # dari nomor yang sama. Operator mode hanya aktif saat reply ke pesan
     # eskalasi, atau saat mengonfirmasi draft pending dari reply eskalasi itu.
-    _operator_identity = is_operator_message(from_phone, reply_target, agent)
+    _operator_identity = bool(_routed_source_agent) or is_operator_message(from_phone, reply_target, agent)
     _is_operator = False
     if _operator_identity:
         _is_operator = await _should_treat_as_operator_turn(
@@ -1863,6 +1973,7 @@ async def wa_incoming(
             media_type=body.media_type,
             quoted_text=body.quoted_text,
             quoted_stanza_id=body.quoted_stanza_id,
+            routed_target_session=_routed_target_session,
         )
         if not _is_operator:
             log.info("wa_incoming.operator_identity_treated_as_customer")
@@ -1962,6 +2073,8 @@ async def wa_incoming(
             quoted_text=body.quoted_text,
             quoted_stanza_id=body.quoted_stanza_id,
             operator_session=session,
+            routed_session=_routed_target_session,
+            routed_case_id=_routed_case_id,
         )
         log.info("wa_incoming.operator_session", escalation_user_jid=escalation_user_jid)
 
@@ -1974,6 +2087,8 @@ async def wa_incoming(
             db=db,
             log=log,
             quoted_stanza_id=body.quoted_stanza_id,
+            routed_target_session=_routed_target_session,
+            routed_case_id=_routed_case_id,
         )
 
     if not _is_operator and _operator_identity and getattr(session, "ai_disabled", False):
@@ -2053,6 +2168,8 @@ async def wa_incoming(
             db=db,
             log=log,
             quoted_stanza_id=body.quoted_stanza_id,
+            routed_target_session=_routed_target_session,
+            routed_case_id=_routed_case_id,
         )
         if forwarded is not None and forwarded.get("status") == "queued":
             body.media_type = None
@@ -2227,6 +2344,8 @@ async def wa_incoming(
             operator_reply_target=reply_target,
             db=db,
             log=log,
+            routed_target_session=_routed_target_session,
+            routed_case_id=_routed_case_id,
         )
         if _staged_draft is not None:
             return _staged_draft

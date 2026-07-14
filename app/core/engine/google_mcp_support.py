@@ -8,6 +8,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import copy
+import hashlib
 import json
 import mimetypes
 import re
@@ -2793,6 +2794,32 @@ def sanitize_google_forms_tools(
     created_spreadsheets: set[str] = set()
     created_sheets: set[tuple[str, str]] = set()
     known_drive_folder_ids: set[str] = set()
+    drive_upload_results: dict[str, Any] = {}
+    drive_upload_lock = asyncio.Lock()
+
+    def _drive_upload_dedupe_key(kwargs: dict[str, Any]) -> str | None:
+        mime_type = str(kwargs.get("mime_type") or "text/plain")
+        if mime_type == "application/vnd.google-apps.folder":
+            return None
+        content = kwargs.get("content")
+        file_url = kwargs.get("fileUrl") or kwargs.get("file_url")
+        if content is not None and str(content) != "":
+            source = "content:" + hashlib.sha256(str(content).encode("utf-8")).hexdigest()
+        elif file_url:
+            source = "url:" + str(file_url).strip()
+        elif current_attachment_path:
+            source = "attachment:" + str(Path(current_attachment_path).resolve())
+        else:
+            return None
+        payload = "\0".join(
+            (
+                str(kwargs.get("file_name") or ""),
+                str(kwargs.get("folder_id") or "root"),
+                mime_type,
+                source,
+            )
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _record_sheet_read(spreadsheet_id: Any, range_name: Any) -> None:
         spreadsheet_key = str(spreadsheet_id or "").strip()
@@ -2918,26 +2945,75 @@ def sanitize_google_forms_tools(
                 _merge_sheet_chunk_formulas(parsed_rows, text)
                 return tab.name, parsed_rows
 
-            chunk_jobs = [
-                _read_chunk(tab, start_row)
-                for tab in tabs
-                for start_row in range(1, tab.row_count + 1, 50)
-            ]
-            chunk_results = await asyncio.gather(*chunk_jobs, return_exceptions=True)
-            failures = [result for result in chunk_results if isinstance(result, BaseException)]
+            async def _probe_full_tab(tab: _SpreadsheetInspectionTab):
+                """Use one read for sparse tabs; fall back to chunks if output truncates."""
+                escaped_name = tab.name.replace("'", "''")
+                end_column = _a1_column_name(tab.column_count)
+                range_name = f"'{escaped_name}'!A1:{end_column}{tab.row_count}"
+                async with semaphore:
+                    result = await read_sheet_values_tool.ainvoke(
+                        {
+                            "spreadsheet_id": spreadsheet_id,
+                            "range_name": range_name,
+                            "include_formulas": True,
+                        }
+                    )
+                if error_text := _google_mcp_text_error(result):
+                    raise RuntimeError(error_text)
+                text = _google_mcp_result_text(result)
+                parsed_rows = _parse_sheet_chunk_rows(text, start_row=1)
+                reported_match = re.search(r"Successfully read (\d+) rows", text)
+                output_truncated = bool(re.search(r"\.\.\. and \d+ more rows", text))
+                if reported_match and int(reported_match.group(1)) != len(parsed_rows):
+                    output_truncated = True
+                if output_truncated:
+                    return tab, None
+                _merge_sheet_chunk_formulas(parsed_rows, text)
+                return tab, parsed_rows
+
+            probe_results = await asyncio.gather(
+                *[_probe_full_tab(tab) for tab in tabs],
+                return_exceptions=True,
+            )
+            failures = [result for result in probe_results if isinstance(result, BaseException)]
             if failures:
                 inspected_spreadsheets.discard(spreadsheet_id)
                 raise RuntimeError(
-                    "SHEET_INSPECTION_FAILED: tidak semua chunk seluruh tab berhasil dibaca; "
+                    "SHEET_INSPECTION_FAILED: tidak semua tab berhasil dibaca; "
                     f"mutasi diblokir. Error pertama: {str(failures[0])[:600]}"
                 )
 
             rows_by_tab: dict[str, dict[int, list[Any]]] = {
                 tab.name: {} for tab in tabs
             }
-            for result in chunk_results:
-                tab_name, parsed_rows = result
-                rows_by_tab[tab_name].update(parsed_rows)
+            truncated_tabs: list[_SpreadsheetInspectionTab] = []
+            for result in probe_results:
+                tab, parsed_rows = result
+                if parsed_rows is None:
+                    truncated_tabs.append(tab)
+                else:
+                    rows_by_tab[tab.name].update(parsed_rows)
+
+            if truncated_tabs:
+                chunk_jobs = [
+                    _read_chunk(tab, start_row)
+                    for tab in truncated_tabs
+                    for start_row in range(1, tab.row_count + 1, 50)
+                ]
+                chunk_results = await asyncio.gather(*chunk_jobs, return_exceptions=True)
+                failures = [
+                    result for result in chunk_results if isinstance(result, BaseException)
+                ]
+                if failures:
+                    inspected_spreadsheets.discard(spreadsheet_id)
+                    raise RuntimeError(
+                        "SHEET_INSPECTION_FAILED: output tab terpotong dan tidak semua chunk "
+                        "berhasil dibaca; mutasi diblokir. Error pertama: "
+                        f"{str(failures[0])[:600]}"
+                    )
+                for result in chunk_results:
+                    tab_name, parsed_rows = result
+                    rows_by_tab[tab_name].update(parsed_rows)
 
             inspected_spreadsheets.add(spreadsheet_id)
             return _build_sheet_inspection_summary(
@@ -3165,7 +3241,7 @@ def sanitize_google_forms_tools(
 
         if tool_name == "create_drive_file":
             def _build_create_drive_file_guarded(tool_to_call: Any):
-                async def _create_drive_file_guarded(**kwargs):
+                async def _create_drive_file_once(**kwargs):
                     file_url_alias = kwargs.pop("file_url", None)
                     if not kwargs.get("fileUrl") and file_url_alias:
                         kwargs["fileUrl"] = file_url_alias
@@ -3294,6 +3370,28 @@ def sanitize_google_forms_tools(
                                     "agent_run.google_drive_staging_cleanup_failed",
                                     error=str(exc)[:200],
                                 )
+
+                async def _create_drive_file_guarded(**kwargs):
+                    dedupe_key = _drive_upload_dedupe_key(kwargs)
+                    if dedupe_key is None:
+                        return await _create_drive_file_once(**kwargs)
+                    async with drive_upload_lock:
+                        if dedupe_key in drive_upload_results:
+                            getattr(log, "info", lambda *args, **kw: None)(
+                                "agent_run.google_drive_duplicate_upload_reused",
+                                file_name=str(kwargs.get("file_name") or ""),
+                                folder_id=str(kwargs.get("folder_id") or "root"),
+                            )
+                            return drive_upload_results[dedupe_key]
+                        result = await _create_drive_file_once(**kwargs)
+                        result_text = _google_mcp_result_text(result).strip()
+                        if (
+                            result_text
+                            and not _google_mcp_text_error(result)
+                            and not result_text.startswith("DRIVE_")
+                        ):
+                            drive_upload_results[dedupe_key] = result
+                        return result
 
                 return _create_drive_file_guarded
 

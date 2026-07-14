@@ -133,6 +133,70 @@ async def find_session_by_quoted_message_id(
     return session, case_id
 
 
+async def find_authorized_session_by_quoted_escalation(
+    db: AsyncSession,
+    *,
+    quoted_text: str | None,
+    quoted_stanza_id: str | None,
+    from_phone: str,
+    reply_target: str | None,
+):
+    """Resolve a quoted escalation across agents without crossing owner boundaries.
+
+    The shared wa-dev number may route an operator's reply through a different
+    virtual agent than the one that emitted the escalation notification. The
+    WhatsApp message/case id is global enough to recover the source session, but
+    the result is accepted only when the sender is an operator of that source
+    agent. Ambiguous matches fail closed.
+    """
+    from app.models.agent import Agent
+    from app.models.session import Session
+
+    message_id = (quoted_stanza_id or "").strip()
+    case_id = extract_escalation_case_id(quoted_text)
+    candidates: list[Session] = []
+
+    if message_id:
+        result = await db.execute(
+            select(Session).where(
+                (Session.metadata_["escalation_message_id"].astext == message_id)
+                | (Session.metadata_.contains({"escalation_message_ids": [message_id]}))
+            )
+        )
+        candidates = list(result.scalars().all())
+
+    if not candidates and case_id:
+        result = await db.execute(
+            select(Session).where(
+                (Session.metadata_["escalation_case_id"].astext == case_id)
+                | (Session.metadata_["spam_case_id"].astext == case_id)
+            )
+        )
+        candidates = list(result.scalars().all())
+
+    authorized: list[tuple[Session, Agent]] = []
+    for session in candidates:
+        source_agent = await db.get(Agent, session.agent_id)
+        if not source_agent or getattr(source_agent, "is_deleted", False):
+            continue
+        if is_operator_message(from_phone, reply_target, source_agent):
+            authorized.append((session, source_agent))
+
+    if len(authorized) != 1:
+        if authorized:
+            log.warning(
+                "find_escalation_context.ambiguous_authorized_quote",
+                matches=len(authorized),
+                quoted_stanza_id=message_id or None,
+                case_id=case_id,
+            )
+        return None, case_id or message_id or None, None
+
+    session, source_agent = authorized[0]
+    resolved_case_id = _route_case_id(session, case_id or message_id)
+    return session, resolved_case_id, source_agent
+
+
 def _route_case_id(session, fallback: str | None = None) -> str | None:
     meta = session.metadata_ or {}
     if isinstance(meta, dict):
@@ -153,6 +217,8 @@ async def remember_operator_escalation_route(
     route = {
         "target_session_id": str(target_session.id),
         "target": target,
+        "source_agent_id": str(target_session.agent_id),
+        "source_device_id": str(ch.get("device_id") or ""),
         "case_id": case_id or _route_case_id(target_session),
         "customer_phone": normalize_phone(customer_phone) or customer_phone,
         "created_at": int(time.time()),
@@ -193,7 +259,8 @@ async def find_session_by_operator_active_route(
         target_session = await db.get(Session, uuid.UUID(str(target_session_id)))
     except (ValueError, TypeError):
         return None, route.get("case_id")
-    if not target_session or target_session.agent_id != agent.id:
+    source_agent_id = str(route.get("source_agent_id") or agent.id)
+    if not target_session or str(target_session.agent_id) != source_agent_id:
         return None, route.get("case_id")
     return target_session, route.get("case_id") or _route_case_id(target_session)
 
@@ -444,6 +511,8 @@ async def find_escalation_context(
     quoted_text: str | None = None,
     quoted_stanza_id: str | None = None,
     operator_session = None,
+    routed_session = None,
+    routed_case_id: str | None = None,
 ) -> tuple[str | None, str | None]:
     """
     Cari session user yang sedang dalam eskalasi aktif untuk agent ini.
@@ -459,15 +528,17 @@ async def find_escalation_context(
     from app.models.message import Message
     from app.models.session import Session
 
-    esc_session = None
+    esc_session = routed_session
+    case_id = routed_case_id
 
-    routed_by_quoted_case = False
+    routed_by_quoted_case = esc_session is not None
 
     # Strategy 1: operator reply (quote) pesan eskalasi → match WhatsApp message ID.
-    esc_session, case_id = await find_session_by_quoted_message_id(agent, db, quoted_stanza_id)
-    if esc_session:
-        routed_by_quoted_case = True
-        log.info("find_escalation_context.by_message_id", case_id=case_id, session_id=str(esc_session.id))
+    if not esc_session:
+        esc_session, case_id = await find_session_by_quoted_message_id(agent, db, quoted_stanza_id)
+        if esc_session:
+            routed_by_quoted_case = True
+            log.info("find_escalation_context.by_message_id", case_id=case_id, session_id=str(esc_session.id))
 
     # Strategy 2: fallback parse case_id/customer phone from quoted_text.
     if not esc_session:

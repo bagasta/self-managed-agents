@@ -125,7 +125,7 @@ def _wrap_custom_sheet_tools(get_info, read_sheet, *tools):
 
 
 @pytest.mark.asyncio
-async def test_inspector_reads_every_tab_in_fifty_row_chunks_and_compacts_duplicates() -> None:
+async def test_inspector_falls_back_to_chunks_only_for_truncated_tabs() -> None:
     get_info = FakeTool(
         "get_spreadsheet_info",
         'Spreadsheet: "Food" (ID: sheet123) | Locale: en_US\nSheets (2):\n'
@@ -149,11 +149,38 @@ async def test_inspector_reads_every_tab_in_fifty_row_chunks_and_compacts_duplic
     assert "rows 1-120 (120x)" in result
     assert 'Tab "Archive": grid 20 rows x 2 columns; scanned 1-20' in result
     assert [call["range_name"] for call in read_sheet.calls] == [
+        "'Data'!A1:C120",
+        "'Archive'!A1:B20",
         "'Data'!A1:C50",
         "'Data'!A51:C100",
         "'Data'!A101:C120",
-        "'Archive'!A1:B20",
     ]
+
+
+@pytest.mark.asyncio
+async def test_inspector_reads_sparse_thousand_row_tab_once() -> None:
+    get_info = FakeTool(
+        "get_spreadsheet_info",
+        'Spreadsheet: "Sparse" (ID: sheet123) | Locale: en_US\nSheets (1):\n'
+        '  - "Sheet1" (ID: 0) | Size: 1000x26 | Conditional formats: 0',
+        args_schema=GetSpreadsheetInfoArgs,
+    )
+    read_sheet = RangeReadTool(
+        {
+            "Sheet1": {
+                1: ["Nama", "Ringkasan", "Timestamp"],
+                2: ["Benjamin", "Ciwidey", "2026-07-14"],
+                3: ["Julia", "Bandung", "2026-07-14"],
+            }
+        }
+    )
+    wrapped = _wrap_custom_sheet_tools(get_info, read_sheet)
+    inspector = next(tool for tool in wrapped if tool.name == "inspect_spreadsheet_for_action")
+
+    result = await inspector.ainvoke({"spreadsheet_id": "sheet123"})
+
+    assert "non-empty rows 3; used range A1:C3" in result
+    assert [call["range_name"] for call in read_sheet.calls] == ["'Sheet1'!A1:Z1000"]
 
 
 @pytest.mark.asyncio

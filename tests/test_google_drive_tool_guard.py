@@ -186,6 +186,43 @@ async def test_create_drive_file_consumes_recent_pending_attachment_after_succes
 
 
 @pytest.mark.asyncio
+async def test_create_drive_file_reuses_success_for_same_attachment_in_one_run(tmp_path: Path) -> None:
+    source = tmp_path / "current_input" / "image.jpg"
+    source.parent.mkdir()
+    source.write_bytes(b"jpeg-data")
+    create_file = FakeTool(
+        "create_drive_file",
+        "Successfully created file Laporan.jpg with ID drive-file-123",
+    )
+    info_events = []
+    wrapped = sanitize_google_forms_tools(
+        [create_file],
+        SimpleNamespace(
+            warning=lambda *a, **k: None,
+            info=lambda event, **kwargs: info_events.append((event, kwargs)),
+        ),
+        current_attachment_path=str(source),
+        trusted_attachment_aliases={"/workspace/shared/current_input/image.jpg"},
+        upload_staging_dir=str(tmp_path / "staging"),
+        consume_attachment_on_success=True,
+    )
+    guarded = next(tool for tool in wrapped if tool.name == "create_drive_file")
+    payload = {
+        "file_name": "Laporan.jpg",
+        "folder_id": "folder123",
+        "mime_type": "image/jpeg",
+        "fileUrl": "/workspace/shared/current_input/image.jpg",
+    }
+
+    first = await guarded.ainvoke(dict(payload))
+    second = await guarded.ainvoke(dict(payload))
+
+    assert first == second
+    assert len(create_file.calls) == 1
+    assert any(event == "agent_run.google_drive_duplicate_upload_reused" for event, _ in info_events)
+
+
+@pytest.mark.asyncio
 async def test_create_drive_file_rejects_different_local_alias_even_with_pending_attachment(tmp_path: Path) -> None:
     source = tmp_path / "current_input" / "image.jpg"
     source.parent.mkdir()

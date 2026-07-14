@@ -27,7 +27,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.core.engine.context_service import (
     DELIVERY_STATUS_TAG,
-    INVALID_TOOL_CLAIM_TAG,
     count_user_messages,
     db_messages_to_lc,
     load_history,
@@ -111,6 +110,8 @@ from app.core.engine.google_mcp_support import (
     _is_google_mcp_intent,
     _is_google_sheets_authoring_intent,
     _is_google_slides_relayout_intent,
+    _google_mcp_result_text,
+    _google_mcp_text_error,
     _looks_like_progress_claim,
     _needs_google_forms_followup,
     _needs_google_sheets_followup,
@@ -123,7 +124,6 @@ from app.core.engine.google_mcp_support import (
     google_forms_followup_retry_directive,
     google_forms_request_kind_retry_directive,
     google_sheets_followup_directive,
-    google_sheets_verification_followup_directive,
     filter_google_mcp_tools_for_service_context,
     find_last_google_workspace_user_request,
     infer_google_workspace_service_context,
@@ -649,6 +649,33 @@ async def _deliver_shared_whatsapp_file_via_tool(
     if tool_name == "send_whatsapp_image":
         return True, f"Gambar {filename} sudah saya kirim ke WhatsApp."
     return True, f"File {filename} sudah saya kirim ke WhatsApp."
+
+
+async def _verify_google_sheet_range_once(
+    *,
+    tools: list[Any],
+    spreadsheet_id: str,
+    target_range: str | None,
+    timeout_seconds: float,
+) -> tuple[dict[str, Any], str]:
+    """Read the mutated range once without replaying the user's whole workflow."""
+    read_tool = next(
+        (tool for tool in tools if getattr(tool, "name", "") == "read_sheet_values"),
+        None,
+    )
+    if read_tool is None:
+        raise RuntimeError("read_sheet_values tidak tersedia untuk verifikasi")
+
+    args = {
+        "spreadsheet_id": spreadsheet_id,
+        "range_name": target_range or "A1:Z1000",
+        "include_formulas": True,
+    }
+    async with asyncio.timeout(timeout_seconds):
+        raw_result = await read_tool.ainvoke(args)
+    if error_text := _google_mcp_text_error(raw_result):
+        raise RuntimeError(error_text)
+    return args, _google_mcp_result_text(raw_result)
 
 
 def _shared_artifact_record(shared_path: str, *, sent: bool = False) -> dict[str, Any]:
@@ -2572,72 +2599,49 @@ async def run_agent(
                 spreadsheet_id=_verification_spreadsheet_id,
                 range_name=_verification_range,
             )
-            # The pre-verification answer is audit data, not safe dialogue.
-            # Keep it in the DB but prevent it from contaminating future turns.
-            for _msg_record in parsed["db_messages"]:
-                if _msg_record.role == "agent":
-                    _msg_record.tool_name = INVALID_TOOL_CLAIM_TAG
-
-            _verification_directive = google_sheets_verification_followup_directive(
-                _verification_spreadsheet_id,
-                _verification_range,
-            )
             _prior_verification_steps = list(steps)
             try:
-                from langgraph.prebuilt import create_react_agent as _cra
+                _verification_args, _verification_result = await _verify_google_sheet_range_once(
+                    tools=tools,
+                    spreadsheet_id=_verification_spreadsheet_id,
+                    target_range=_verification_range,
+                    timeout_seconds=settings.agent_timeout_seconds,
+                )
 
-                _verification_prompt = (
-                    (system_prompt + "\n\n" + _verification_directive)
-                    if isinstance(system_prompt, str)
-                    else system_prompt
-                )
-                _verification_graph = _cra(llm, tools=tools, prompt=_verification_prompt)
-                _verification_input = _sanitize_input_messages(input_messages)
-                async with asyncio.timeout(settings.agent_timeout_seconds):
-                    result = await _verification_graph.ainvoke(
-                        {"messages": _verification_input}, config=_graph_config
-                    )
-                _verification_parsed = parse_agent_result(
-                    result=result,
-                    input_messages=input_messages,
-                    session_id=session.id,
-                    run_id=run_id,
-                    step_start=step_counter,
-                    log=log,
-                )
-                _combined_verification_steps = (
-                    _prior_verification_steps + _verification_parsed["steps"]
-                )
+                _verification_step_no = max(
+                    [int((step or {}).get("step") or 0) for step in _prior_verification_steps]
+                    + [0]
+                ) + 1
+                _verification_step = {
+                    "step": _verification_step_no,
+                    "tool": "read_sheet_values",
+                    "args": _verification_args,
+                    "result": _verification_result[:12000],
+                    "tool_call_id": "deterministic_sheets_post_write_verification",
+                }
+                _combined_verification_steps = _prior_verification_steps + [_verification_step]
                 _still_unverified, _, _ = _needs_google_sheets_verification_followup(
                     _combined_verification_steps
                 )
                 if _still_unverified:
-                    for _msg_record in _verification_parsed["db_messages"]:
-                        if _msg_record.role == "agent":
-                            _msg_record.tool_name = INVALID_TOOL_CLAIM_TAG
-                    final_reply = (
-                        "Perubahan spreadsheet sempat dijalankan, tetapi hasil akhirnya belum "
-                        "berhasil diverifikasi dari isi sheet. Saya belum dapat menyatakan task "
-                        "selesai dengan aman."
-                    )
-                    db.add(
-                        Message(
-                            session_id=session.id,
-                            role="agent",
-                            content=final_reply,
-                            step_index=step_counter + len(_verification_parsed["db_messages"]) + 1,
-                            run_id=run_id,
-                        )
-                    )
-                else:
-                    final_reply = _verification_parsed["final_reply"] or final_reply
+                    raise RuntimeError("hasil read_sheet_values tidak mencakup range mutasi")
                 steps = _combined_verification_steps
-                total_tokens_used = (
-                    _agent_logger.total_tokens_from_callbacks
-                    or _verification_parsed["total_tokens_used"]
+                db.add(
+                    Message(
+                        session_id=session.id,
+                        role="tool",
+                        tool_name="read_sheet_values",
+                        tool_args=_verification_args,
+                        tool_result=_verification_result[:4000],
+                        step_index=step_counter + 1,
+                        run_id=run_id,
+                    )
                 )
-                for _msg_record in _verification_parsed["db_messages"]:
-                    db.add(_msg_record)
+                log.info(
+                    "agent_run.sheets_verification_succeeded",
+                    spreadsheet_id=_verification_spreadsheet_id,
+                    range_name=_verification_range,
+                )
             except Exception as _sheets_verification_exc:
                 log.warning(
                     "agent_run.sheets_verification_continue_failed",

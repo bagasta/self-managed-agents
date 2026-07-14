@@ -103,7 +103,29 @@ def build_escalation_tools(
     user_jid: str | None = None,
     sender_name: str | None = None,
     user_message: str = "",
+    allow_reply_to_user: bool = False,
 ) -> list:
+
+    async def _persist_escalation_message_ids(message_ids: list[str]) -> None:
+        if not message_ids:
+            return
+        async with db_factory() as persist_db:
+            stored_session = await persist_db.get(Session, session_id)
+            if not stored_session:
+                return
+            meta = dict(stored_session.metadata_ or {})
+            existing_ids = meta.get("escalation_message_ids")
+            if not isinstance(existing_ids, list):
+                existing_ids = []
+            for message_id in message_ids:
+                if message_id and message_id not in existing_ids:
+                    existing_ids.append(message_id)
+            meta["escalation_message_ids"] = existing_ids
+            if existing_ids:
+                meta["escalation_message_id"] = existing_ids[0]
+            stored_session.metadata_ = meta
+            persist_db.add(stored_session)
+            await persist_db.commit()
 
     @tool
     async def escalate_to_human(reason: str, summary: str = "") -> str:
@@ -208,11 +230,7 @@ def build_escalation_tools(
             sent_message_ids: list[str] = []
             if isinstance(send_result, dict) and send_result.get("message_id"):
                 sent_message_ids.append(str(send_result["message_id"]))
-                sess_meta = dict(session.metadata_ or {})
-                sess_meta["escalation_message_id"] = sent_message_ids[0]
-                sess_meta["escalation_message_ids"] = sent_message_ids.copy()
-                session.metadata_ = sess_meta
-                await db.commit()
+                await _persist_escalation_message_ids(sent_message_ids)
 
             sess_meta = dict(session.metadata_ or {})
             media_meta = sess_meta.get("last_incoming_media") if isinstance(sess_meta, dict) else None
@@ -244,18 +262,7 @@ def build_escalation_tools(
                         logger.info("escalation_tool.media_not_forwarded_type", media_type=media_type)
                     if isinstance(media_result, dict) and media_result.get("message_id"):
                         sent_message_ids.append(str(media_result["message_id"]))
-                        sess_meta = dict(session.metadata_ or {})
-                        existing_ids = sess_meta.get("escalation_message_ids")
-                        if not isinstance(existing_ids, list):
-                            existing_ids = []
-                        for message_id in sent_message_ids:
-                            if message_id not in existing_ids:
-                                existing_ids.append(message_id)
-                        sess_meta["escalation_message_ids"] = existing_ids
-                        if not sess_meta.get("escalation_message_id") and existing_ids:
-                            sess_meta["escalation_message_id"] = existing_ids[0]
-                        session.metadata_ = sess_meta
-                        await db.commit()
+                        await _persist_escalation_message_ids(sent_message_ids)
                     logger.info(
                         "escalation_tool.forwarded_media_to_operator",
                         media_type=media_type,
@@ -289,6 +296,41 @@ def build_escalation_tools(
         ch_cfg: dict = {}
 
         message = _clean_jid_from_text(message)
+        if not allow_reply_to_user or not user_jid:
+            logger.warning(
+                "escalation_tool.reply_to_user.blocked_without_route",
+                session_id=str(session_id),
+            )
+            return "[error] reply_to_user diblokir karena tidak ada route eskalasi customer yang valid."
+
+        async with db_factory() as db:
+            sess_result = await db.execute(select(Session).where(Session.id == session_id))
+            op_session = sess_result.scalar_one_or_none()
+            ch_cfg = dict(op_session.channel_config or {}) if op_session else {}
+            operator_target = ch_cfg.get("user_phone") or (op_session.external_user_id if op_session else "")
+            if _normalize_jid(str(operator_target)).lstrip("+") == _normalize_jid(user_jid).lstrip("+"):
+                logger.warning(
+                    "escalation_tool.reply_to_user.blocked_operator_target",
+                    session_id=str(session_id),
+                )
+                return "[error] Target customer sama dengan operator; pengiriman diblokir."
+            ch_cfg["user_phone"] = user_jid
+            channel_type_val = op_session.channel_type if op_session else "whatsapp"
+
+        # PENTING: gunakan user_jid langsung dari closure — JANGAN load session.channel_config
+        # karena di sesi operator, channel_config.user_phone = JID operator (bukan user).
+        try:
+            from app.core.infra.channel_service import send_message
+            await send_message(
+                channel_type=channel_type_val,
+                channel_config=ch_cfg,
+                text=message,
+            )
+            logger.info("escalation_tool.reply_to_user.sent", target=user_jid)
+        except Exception as exc:
+            logger.warning("escalation_tool.reply_channel_failed", error=str(exc))
+            return f"[error] Gagal mengirim balasan ke customer: {exc}"
+
         async with db_factory() as db:
             db.add(Msg(
                 session_id=session_id,
@@ -296,29 +338,7 @@ def build_escalation_tools(
                 content=f"[TO_USER] {message}",
                 step_index=9001,
             ))
-            if user_jid:
-                sess_result = await db.execute(select(Session).where(Session.id == session_id))
-                op_session = sess_result.scalar_one_or_none()
-                ch_cfg = dict(op_session.channel_config or {}) if op_session else {}
-                ch_cfg["user_phone"] = user_jid
-                channel_type_val = op_session.channel_type if op_session else "whatsapp"
             await db.commit()
-
-        # PENTING: gunakan user_jid langsung dari closure — JANGAN load session.channel_config
-        # karena di sesi operator, channel_config.user_phone = JID operator (bukan user).
-        if user_jid:
-            try:
-                from app.core.infra.channel_service import send_message
-                await send_message(
-                    channel_type=channel_type_val,
-                    channel_config=ch_cfg,
-                    text=message,
-                )
-                logger.info("escalation_tool.reply_to_user.sent", target=user_jid)
-            except Exception as exc:
-                logger.warning("escalation_tool.reply_channel_failed", error=str(exc))
-        else:
-            logger.info("escalation_tool.reply_to_user.no_user_jid", message_preview=message[:80])
 
         return f"[SENT_TO_USER] {message}"
 
@@ -402,4 +422,7 @@ def build_escalation_tools(
 
         return f"[SENT_TO_NUMBER:{phone_or_target}] {message}"
 
-    return [escalate_to_human, reply_to_user, send_to_number]
+    tools = [escalate_to_human, send_to_number]
+    if allow_reply_to_user and user_jid:
+        tools.insert(1, reply_to_user)
+    return tools

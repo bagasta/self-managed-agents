@@ -2,6 +2,7 @@ from app.core.engine.agent_runner import (
     _is_google_sheets_authoring_intent,
     _needs_google_sheets_followup,
     _needs_google_sheets_verification_followup,
+    _verify_google_sheet_range_once,
 )
 from app.core.engine.google_mcp_support import (
     _is_builder_agent_management_request,
@@ -14,6 +15,7 @@ from app.core.engine.google_mcp_support import (
     is_google_workspace_execution_intent,
 )
 from types import SimpleNamespace
+import pytest
 
 
 def test_sheets_authoring_intent_detected_for_table_and_formula() -> None:
@@ -272,6 +274,35 @@ def test_sheets_post_write_read_satisfies_verification() -> None:
         "sheet123",
         "A1:Z100",
     )
+
+
+@pytest.mark.asyncio
+async def test_sheets_runtime_verification_reads_only_mutated_range_once() -> None:
+    class ReadTool:
+        name = "read_sheet_values"
+
+        def __init__(self):
+            self.calls = []
+
+        async def ainvoke(self, args):
+            self.calls.append(args)
+            return "Successfully read 1 rows from range 'Sheet1!A3:C3'"
+
+    read_tool = ReadTool()
+    args, result = await _verify_google_sheet_range_once(
+        tools=[read_tool],
+        spreadsheet_id="sheet123",
+        target_range="Sheet1!A3:C3",
+        timeout_seconds=1,
+    )
+
+    assert len(read_tool.calls) == 1
+    assert args == {
+        "spreadsheet_id": "sheet123",
+        "range_name": "Sheet1!A3:C3",
+        "include_formulas": True,
+    }
+    assert "Successfully read 1 rows" in result
 
 
 def test_sheets_post_write_read_must_cover_mutated_range() -> None:

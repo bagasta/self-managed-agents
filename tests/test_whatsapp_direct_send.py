@@ -172,6 +172,28 @@ async def test_send_to_number_blocks_spam_request_before_channel_send(monkeypatc
     assert "spam" in result.lower()
 
 
+def test_reply_to_user_is_exposed_only_for_verified_operator_route():
+    session_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+
+    normal_tools = build_escalation_tools(
+        session_id,
+        agent_id,
+        lambda: None,
+        user_jid="628owner@s.whatsapp.net",
+    )
+    operator_tools = build_escalation_tools(
+        session_id,
+        agent_id,
+        lambda: None,
+        user_jid="628customer@s.whatsapp.net",
+        allow_reply_to_user=True,
+    )
+
+    assert "reply_to_user" not in {tool.name for tool in normal_tools}
+    assert "reply_to_user" in {tool.name for tool in operator_tools}
+
+
 def test_non_vision_model_strips_wa_image_payload_instead_of_crashing():
     warnings: list[tuple[str, dict]] = []
     content = _build_human_content_for_model(

@@ -220,6 +220,7 @@ async def build_agent_tool_setup(
                 user_jid=user_jid,
                 sender_name=sender_name,
                 user_message=user_message,
+                allow_reply_to_user=operator_turn and bool(escalation_user_jid),
             )
         )
         active_groups.append("escalation")
