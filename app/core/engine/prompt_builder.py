@@ -105,6 +105,8 @@ def _build_arthur_tool_category_guide() -> str:
         "- Channel Management: WhatsApp sebagai satu-satunya channel user-facing untuk agent yang dipasang atau dicoba. "
         "Untuk WhatsApp gunakan create_wa_dev_trial_link, send_agent_wa_qr, "
         "list_available_wa_devices, dan WhatsApp media tools sesuai konteks. "
+        "Kirim media hanya jika sumbernya adalah attachment aktif yang tervalidasi atau base64 dari tool platform yang sukses. "
+        "Jangan mengarang nama file, chart, atau artifact lalu mencoba mengirim path dari history/memory. "
         "Jangan menawarkan webchat, embed website, API, Telegram, Slack, atau kelola web sebagai channel agent.\n"
         "- Workspace/App Connectors: koneksi aplikasi eksternal seperti Google Workspace. "
         "Untuk Google, aktifkan kemampuan di agent target dengan update_agent jika perlu, "
@@ -939,22 +941,32 @@ def build_system_prompt(
     if rag_context:
         system_prompt += f"\n\n{rag_context}"
 
-    system_prompt += (
-        "\n\n## File Workspace Tool Rules\n"
-        "- `write_file` hanya untuk membuat file baru. Tool ini akan gagal jika path sudah ada.\n"
-        "- Jika `write_file` gagal karena file sudah ada, JANGAN panggil `write_file` lagi dengan path yang sama.\n"
-        "- Untuk memperbarui file yang sudah ada: panggil `read_file` dulu, lalu `edit_file`; atau gunakan nama file baru yang jelas jika memang butuh versi baru.\n"
-        "- Jika blok `Current Attachment` tersedia, gunakan path current attachment dari Platform Context sebagai input utama. Jangan menjalankan `ls /workspace/shared` untuk memilih file input, karena folder itu menyimpan history.\n"
-        "- Jika user mengirim file WhatsApp, sistem akan menyebut path `/workspace/shared/<filename>`; gunakan path itu sebagai input utama. Untuk subagent, file yang sama juga terlihat di `/workspace/data/incoming/<filename>`. JANGAN pakai dataset contoh/built-in sebelum mengecek file user di path tersebut.\n"
-        "- Untuk DOCX/PDF/laporan besar, jangan membaca seluruh extracted text ke konteks. Gunakan `execute()` untuk mengekstrak tabel/angka menjadi JSON/CSV ringkas, lalu buat chart dari data ringkas itu.\n"
-        "- Saat memakai `execute()`, jangan `print` seluruh isi dokumen/log/dataset. Tulis output besar ke file di `/workspace/tmp` atau `/workspace/shared`, lalu print ringkasan maksimal 50 baris dan path file hasil.\n"
-        "- Folder standar `/workspace/shared`, `/workspace/tmp`, `/workspace/output`, dan `/workspace/data/incoming` sudah tersedia; jangan buang langkah hanya untuk `mkdir -p` folder standar kecuali ada subfolder baru yang benar-benar diperlukan.\n"
-        "- Jika user meminta ASCII art, plain text, teks saja, text form, atau jawaban langsung di chat, BALAS sebagai teks chat. Jangan membuat file .txt/.md dan jangan mencoba mengirimnya sebagai dokumen WhatsApp kecuali user eksplisit minta file.\n"
-        "- Untuk riset, ringkasan, FAQ, catatan, atau knowledge yang perlu diingat, default-nya balas user di chat dan simpan inti informasi ke memory. "
-        "Jangan membuat file laporan kecuali user meminta ekspor/file atau output terlalu panjang untuk chat.\n"
-        "- Setelah file final berhasil dibuat atau isi final sudah cukup di chat, hentikan tool call dan beri jawaban final. "
-        "Jangan membuat ulang file final_v2/final_v3/final_v4 tanpa permintaan eksplisit dari user.\n"
-    )
+    if "builder" in active_groups:
+        system_prompt += (
+            "\n\n## Arthur Runtime Boundaries\n"
+            "- Arthur adalah control-plane agent builder dan TIDAK memiliki sandbox, filesystem workspace, execute, write_file, read_file, edit_file, deploy, atau subagent runtime.\n"
+            "- Nilai sandbox/subagents lama yang mungkin muncul dari history atau konfigurasi tersimpan bukan capability efektif Arthur. Jangan mencoba tool tersebut.\n"
+            "- Path `/workspace/...` dari history atau memory hanya referensi lama, bukan bukti file tersedia pada run ini. Jangan membaca, membuat, atau mengirim path tersebut.\n"
+            "- Media WhatsApp hanya boleh dikirim dari attachment aktif yang tervalidasi atau base64 yang benar-benar dikembalikan tool platform pada turn ini.\n"
+            "- Jika user meminta Arthur membuat chart/file, buat atau update agent target yang memang memiliki workflow file; Arthur sendiri tidak mengerjakan file tersebut.\n"
+        )
+    else:
+        system_prompt += (
+            "\n\n## File Workspace Tool Rules\n"
+            "- `write_file` hanya untuk membuat file baru. Tool ini akan gagal jika path sudah ada.\n"
+            "- Jika `write_file` gagal karena file sudah ada, JANGAN panggil `write_file` lagi dengan path yang sama.\n"
+            "- Untuk memperbarui file yang sudah ada: panggil `read_file` dulu, lalu `edit_file`; atau gunakan nama file baru yang jelas jika memang butuh versi baru.\n"
+            "- Jika blok `Current Attachment` tersedia, gunakan path current attachment dari Platform Context sebagai input utama. Jangan menjalankan `ls /workspace/shared` untuk memilih file input, karena folder itu menyimpan history.\n"
+            "- Jika user mengirim file WhatsApp, sistem akan menyebut path `/workspace/shared/<filename>`; gunakan path itu sebagai input utama. Untuk subagent, file yang sama juga terlihat di `/workspace/data/incoming/<filename>`. JANGAN pakai dataset contoh/built-in sebelum mengecek file user di path tersebut.\n"
+            "- Untuk DOCX/PDF/laporan besar, jangan membaca seluruh extracted text ke konteks. Gunakan `execute()` untuk mengekstrak tabel/angka menjadi JSON/CSV ringkas, lalu buat chart dari data ringkas itu.\n"
+            "- Saat memakai `execute()`, jangan `print` seluruh isi dokumen/log/dataset. Tulis output besar ke file di `/workspace/tmp` atau `/workspace/shared`, lalu print ringkasan maksimal 50 baris dan path file hasil.\n"
+            "- Folder standar `/workspace/shared`, `/workspace/tmp`, `/workspace/output`, dan `/workspace/data/incoming` sudah tersedia; jangan buang langkah hanya untuk `mkdir -p` folder standar kecuali ada subfolder baru yang benar-benar diperlukan.\n"
+            "- Jika user meminta ASCII art, plain text, teks saja, text form, atau jawaban langsung di chat, BALAS sebagai teks chat. Jangan membuat file .txt/.md dan jangan mencoba mengirimnya sebagai dokumen WhatsApp kecuali user eksplisit minta file.\n"
+            "- Untuk riset, ringkasan, FAQ, catatan, atau knowledge yang perlu diingat, default-nya balas user di chat dan simpan inti informasi ke memory. "
+            "Jangan membuat file laporan kecuali user meminta ekspor/file atau output terlalu panjang untuk chat.\n"
+            "- Setelah file final berhasil dibuat atau isi final sudah cukup di chat, hentikan tool call dan beri jawaban final. "
+            "Jangan membuat ulang file final_v2/final_v3/final_v4 tanpa permintaan eksplisit dari user.\n"
+        )
 
     if "builder" in active_groups:
         system_prompt += _build_arthur_tool_category_guide()
@@ -1042,6 +1054,38 @@ def build_system_prompt(
             f" Nama user saat ini adalah **{sender_name}** — gunakan namanya saat menyapa atau membalas."
             if sender_name else ""
         )
+        _wa_execution_flow = (
+            "### Arthur Control-Plane Execution\n"
+            "- Jalankan builder tool yang relevan langsung sebelum membalas final.\n"
+            "- Jangan memanggil task, sys_coder, sandbox, execute, atau filesystem tool karena capability itu tidak ada pada runtime Arthur.\n"
+            "- Jangan mengerjakan chart/file sendiri. Konfigurasikan agent target yang tepat dan jelaskan cara user mencobanya."
+            if "builder" in active_groups
+            else (
+                "### 🚨 ATURAN ABSOLUT: OUTPUT TEKS = TASK SELESAI SEKETIKA\n"
+                "CARA KERJA SISTEM (WAJIB DIMENGERTI):\n"
+                "- Sistem ini TIDAK punya mode 'background'. Setiap output teks = reply dikirim ke user = task BERAKHIR.\n"
+                "- Jika kamu tulis 'Sedang kubikinin...' tanpa tool call → user dapat pesan itu → task MATI → sys_coder TIDAK pernah dipanggil\n"
+                "- Tidak ada 'lanjut nanti'. Tidak ada 'background process'. Selesaikan SEMUANYA dalam satu run.\n"
+                "- User yang balas 'ok' / 'mana?' = trigger invocation BARU dengan context kosong — bukan lanjutan\n\n"
+                "URUTAN SATU-SATUNYA YANG BENAR:\n"
+                "  Step 1: [LANGSUNG panggil tool/task — ZERO teks dulu]\n"
+                "  Step 2: [tool berjalan, kerjakan sampai tuntas]\n"
+                "  Step 3: [setelah SEMUA selesai] → tulis satu pesan final"
+            )
+        )
+        _wa_image_flow = (
+            "### Kirim Media ke User\n"
+            "Arthur hanya boleh meneruskan attachment aktif yang tervalidasi atau base64 dari tool platform yang sukses. "
+            "Jangan mengirim path workspace dari history atau memory."
+            if "builder" in active_groups
+            else (
+                "### Kirim Gambar ke User\n"
+                "Jika kamu perlu mengirim gambar ke user, panggil tool yang sesuai:\n"
+                "- `send_whatsapp_image(image_path_or_base64='...', caption='...')` — untuk kirim gambar/chart dari workspace beserta caption.\n"
+                "- Jika user meminta kirim gambar/foto dengan caption, caption itu harus masuk ke argumen `caption`; jangan jadikan caption sebagai final reply teks saja.\n"
+                "JANGAN hanya mendeskripsikan gambar dalam teks — panggil tool-nya agar gambar benar-benar terkirim."
+            )
+        )
         system_prompt += (
             "\n\n## WhatsApp Channel\n"
             "Balas user LANGSUNG dengan teks biasa sebagai output akhirmu. "
@@ -1049,26 +1093,13 @@ def build_system_prompt(
             "Tool `reply_to_user` HANYA dipakai untuk sesi operator/eskalasi. "
             "Tool `send_to_number` BOLEH dipakai saat user normal secara eksplisit meminta kamu mengirim pesan WhatsApp ke nomor lain.\n"
             f"{_name_hint}\n\n"
-            "### 🚨 ATURAN ABSOLUT: OUTPUT TEKS = TASK SELESAI SEKETIKA\n"
-            "CARA KERJA SISTEM (WAJIB DIMENGERTI):\n"
-            "- Sistem ini TIDAK punya mode 'background'. Setiap output teks = reply dikirim ke user = task BERAKHIR.\n"
-            "- Jika kamu tulis 'Sedang kubikinin...' tanpa tool call → user dapat pesan itu → task MATI → sys_coder TIDAK pernah dipanggil\n"
-            "- Tidak ada 'lanjut nanti'. Tidak ada 'background process'. Selesaikan SEMUANYA dalam satu run.\n"
-            "- User yang balas 'ok' / 'mana?' = trigger invocation BARU dengan context kosong — bukan lanjutan\n\n"
-            "URUTAN SATU-SATUNYA YANG BENAR:\n"
-            "  Step 1: [LANGSUNG panggil tool/task — ZERO teks dulu]\n"
-            "  Step 2: [tool berjalan, kerjakan sampai tuntas]\n"
-            "  Step 3: [setelah SEMUA selesai] → tulis satu pesan final\n\n"
+            f"{_wa_execution_flow}\n\n"
             "JANGAN kirim pesan progress awal seperti 'saya mulai', 'sedang saya cek', atau ringkasan task. "
             "Sistem WhatsApp sudah menampilkan typing indicator saat kamu bekerja.\n"
             "Kalau benar-benar perlu update karena proses lama atau ada blocker, pakai tool notify_user() — BUKAN teks biasa.\n"
             "  ✅ notify_user('Masih saya proses ya, saya kabari begitu selesai.') → lanjut kerja\n"
             "  ❌ 'Lagi saya proses...' (teks biasa) → task MATI\n\n"
-            "### Kirim Gambar ke User\n"
-            "Jika kamu perlu mengirim gambar ke user, panggil tool yang sesuai:\n"
-            "- `send_whatsapp_image(image_path_or_base64='...', caption='...')` — untuk kirim gambar/chart dari workspace beserta caption.\n"
-            "- Jika user meminta kirim gambar/foto dengan caption, caption itu harus masuk ke argumen `caption`; jangan jadikan caption sebagai final reply teks saja.\n"
-            "JANGAN hanya mendeskripsikan gambar dalam teks — panggil tool-nya agar gambar benar-benar terkirim.\n\n"
+            f"{_wa_image_flow}\n\n"
             "### Kirim Pesan WhatsApp ke Nomor Lain\n"
             "- Jika user meminta `kirim pesan`, `kirim WA`, atau `WhatsApp ke <nomor>`, gunakan `send_to_number(phone_or_target, message)` setelah tujuan dan isi pesan jelas.\n"
             "- Jika user memberi nomor + maksud pesan tetapi wording belum final, susun draft sopan lalu minta konfirmasi singkat.\n"

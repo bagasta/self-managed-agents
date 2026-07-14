@@ -182,6 +182,83 @@ def test_ascii_text_request_does_not_trigger_file_delivery_followup():
     assert path is None
 
 
+def test_failed_execute_with_python_zip_does_not_trigger_file_delivery_or_artifact():
+    from app.core.engine.agent_followups import (
+        _extract_verified_shared_workspace_file_from_steps,
+        _needs_whatsapp_file_delivery_followup,
+    )
+
+    steps = [
+        {
+            "tool": "execute",
+            "args": {
+                "code": (
+                    "for bar, value in zip(bars, values):\n"
+                    "    pass\n"
+                    "plt.savefig('/workspace/shared/career_survey_chart.png')"
+                )
+            },
+            "result": "Error: execute is not a valid tool",
+        },
+        {
+            "tool": "send_whatsapp_image",
+            "args": {
+                "image_path_or_base64": "/workspace/shared/career_survey_chart.png",
+            },
+            "result": "[MEDIA_SOURCE_UNAVAILABLE] Tidak ada gambar tervalidasi.",
+        },
+    ]
+
+    needed, path = _needs_whatsapp_file_delivery_followup(
+        "Test",
+        {"whatsapp_media": True},
+        steps,
+        "Saya tidak bisa menjalankan pekerjaan file pada run ini.",
+    )
+
+    assert needed is False
+    assert path is None
+    assert _extract_verified_shared_workspace_file_from_steps(steps) is None
+
+
+def test_shared_path_extractor_strips_json_escape_backslash():
+    from app.core.engine.agent_followups import _extract_shared_workspace_file_path
+
+    serialized_args = (
+        '{"image_path_or_base64": '
+        '"/workspace/shared/career_survey_chart.png\\\\"}'
+    )
+
+    assert _extract_shared_workspace_file_path(serialized_args) == (
+        "/workspace/shared/career_survey_chart.png"
+    )
+
+
+def test_successful_execute_can_record_verified_artifact_without_triggering_delivery():
+    from app.core.engine.agent_followups import (
+        _extract_verified_shared_workspace_file_from_steps,
+        _needs_whatsapp_file_delivery_followup,
+    )
+
+    steps = [
+        {
+            "tool": "execute",
+            "args": {"code": "save('/workspace/shared/chart.png')"},
+            "result": "Chart saved successfully: /workspace/shared/chart.png",
+        }
+    ]
+
+    assert _extract_verified_shared_workspace_file_from_steps(steps) == (
+        "/workspace/shared/chart.png"
+    )
+    assert _needs_whatsapp_file_delivery_followup(
+        "Test",
+        {"whatsapp_media": True},
+        steps,
+        "Chart processing complete.",
+    ) == (False, None)
+
+
 @pytest.mark.asyncio
 async def test_shared_pdf_followup_invokes_document_tool_directly():
     from app.core.engine.agent_runner import _deliver_shared_whatsapp_file_via_tool

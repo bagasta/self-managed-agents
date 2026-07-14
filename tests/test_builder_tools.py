@@ -197,6 +197,38 @@ class TestBuilderToolsReturnsList:
         for t in tools:
             assert hasattr(t, "description") and t.description, f"Tool '{t.name}' harus punya description"
 
+    def test_get_self_config_reports_effective_builder_runtime_without_sandbox(self):
+        from app.core.tools.builder_read_tools import build_builder_read_tools
+
+        agent_id = uuid.uuid4()
+        agent = _make_mock_agent(
+            agent_id=agent_id,
+            name="Arthur",
+            tools_config={
+                "builder": True,
+                "sandbox": True,
+                "deploy": True,
+                "tool_creator": True,
+                "subagents": {"enabled": True},
+            },
+        )
+        db = _make_mock_db()
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = agent
+        db.execute = AsyncMock(return_value=result)
+        tool = build_builder_read_tools(
+            db,
+            self_agent_id=str(agent_id),
+        )["get_self_config"]
+
+        payload = json.loads(_run(tool.ainvoke({})))
+
+        assert payload["tools_config"]["sandbox"] is False
+        assert payload["tools_config"]["deploy"] is False
+        assert payload["tools_config"]["tool_creator"] is False
+        assert payload["tools_config"]["subagents"] == {"enabled": False}
+        assert "tidak memiliki sandbox" in payload["runtime_policy"]
+
     def test_expected_tool_names(self):
         from app.core.tools.builder_tools import build_builder_tools
         db = _make_mock_db()

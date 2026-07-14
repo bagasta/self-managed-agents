@@ -145,7 +145,7 @@ from app.core.engine.agent_followups import (
     _builder_create_completion_directive,
     _BUILD_PROGRESS_TOOLS,
     _deploy_followup_message,
-    _extract_shared_workspace_file_from_steps,
+    _extract_verified_shared_workspace_file_from_steps,
     _has_code_creation_evidence,
     _has_external_service_fallback_blocked_step,
     _has_public_url_in_steps,
@@ -607,14 +607,13 @@ def _remember_shared_artifact_path(
 def _remember_latest_shared_artifact(
     session: Session,
     steps: list[dict[str, Any]],
-    final_reply: str,
     *,
     sent: bool = False,
 ) -> str | None:
-    """Store the newest /workspace/shared artifact mentioned by this run."""
+    """Store the newest /workspace/shared artifact verified by a successful step."""
     return _remember_shared_artifact_path(
         session,
-        _extract_shared_workspace_file_from_steps(steps, final_reply),
+        _extract_verified_shared_workspace_file_from_steps(steps),
         sent=sent,
     )
 
@@ -2095,7 +2094,6 @@ async def run_agent(
         _current_shared_artifact_path = _remember_latest_shared_artifact(
             session,
             steps,
-            final_reply,
             sent=False,
         )
         # Prefer callback-based counter — it captures sub-agent LLM calls too.
@@ -2241,12 +2239,15 @@ async def run_agent(
                     error=str(_deploy_followup_exc)[:300],
                 )
 
-        _needs_wa_file_followup, _wa_shared_file_path = _needs_whatsapp_file_delivery_followup(
-            execution_user_message,
-            tools_config,
-            steps,
-            final_reply,
-        )
+        if runtime_policy.is_builder:
+            _needs_wa_file_followup, _wa_shared_file_path = False, None
+        else:
+            _needs_wa_file_followup, _wa_shared_file_path = _needs_whatsapp_file_delivery_followup(
+                execution_user_message,
+                tools_config,
+                steps,
+                final_reply,
+            )
         if _needs_wa_file_followup and _wa_shared_file_path:
             log.info("agent_run.whatsapp_file_delivery_followup", path=_wa_shared_file_path)
             _sent, _delivery_reply = await _deliver_shared_whatsapp_file_via_tool(
@@ -2557,7 +2558,6 @@ async def run_agent(
         _memory_artifact_path = _current_shared_artifact_path or _remember_latest_shared_artifact(
             session,
             steps,
-            final_reply,
             sent=False,
         )
         await record_runtime_memory(

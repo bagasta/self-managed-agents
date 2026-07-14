@@ -14,7 +14,15 @@ from app.core.engine.agent_step_utils import (
 )
 from app.core.engine.tool_builder import _is_enabled
 
-_SHARED_WORKSPACE_FILE_RE = re.compile(r"(/workspace/shared/[^\s`'\"),]+)")
+_SHARED_WORKSPACE_FILE_RE = re.compile(r"(/workspace/shared/[^\s`'\"\\),\]}]+)")
+_FAILED_STEP_MARKERS = (
+    "[error]",
+    "error:",
+    "not a valid tool",
+    "traceback",
+    "gagal",
+    "failed",
+)
 
 
 def _has_external_service_fallback_blocked_step(steps: list[dict[str, Any]]) -> bool:
@@ -42,20 +50,74 @@ def _extract_shared_workspace_file_path(*values: Any) -> str | None:
     for value in values:
         text = str(value or "")
         for match in _SHARED_WORKSPACE_FILE_RE.findall(text):
-            path = match.rstrip(".,;:)")
+            path = match.rstrip("\\.,;:)")
             name = path.rsplit("/", 1)[-1]
             if name and "." in name:
                 return path
     return None
 
 
-def _extract_shared_workspace_file_from_steps(
+def _step_failed(step: dict[str, Any]) -> bool:
+    result = str((step or {}).get("result") or "").strip().lower()
+    if not result:
+        return True
+    return any(marker in result for marker in _FAILED_STEP_MARKERS)
+
+
+def _extract_ready_shared_workspace_file_from_task_steps(
     steps: list[dict[str, Any]],
-    final_reply: str = "",
 ) -> str | None:
-    values: list[Any] = [final_reply]
-    values.extend(_step_text(step) for step in reversed(steps or []))
-    return _extract_shared_workspace_file_path(*values)
+    """Return only a subagent artifact that explicitly completed its handoff."""
+    for step in reversed(steps or []):
+        if str((step or {}).get("tool") or "") != "task":
+            continue
+        result = str((step or {}).get("result") or "")
+        if _step_failed(step) or "siap_dikirim_parent" not in result.lower():
+            continue
+        path = _extract_shared_workspace_file_path(result)
+        if path:
+            return path
+    return None
+
+
+def _extract_verified_shared_workspace_file_from_steps(
+    steps: list[dict[str, Any]],
+) -> str | None:
+    """Extract an artifact only from a successful file-producing/sending step."""
+    direct_file_tools = {
+        "write_file",
+        "edit_file",
+        "sandbox_write_binary_file",
+    }
+    for step in reversed(steps or []):
+        tool_name = str((step or {}).get("tool") or "")
+        if tool_name == "task":
+            result = str((step or {}).get("result") or "")
+            if _step_failed(step) or "siap_dikirim_parent" not in result.lower():
+                continue
+            path = _extract_shared_workspace_file_path(result)
+        elif tool_name in {"send_whatsapp_document", "send_whatsapp_image"}:
+            if not _has_whatsapp_media_send_step([step]):
+                continue
+            path = _extract_shared_workspace_file_path((step or {}).get("args"))
+        elif tool_name == "execute":
+            if _step_failed(step):
+                continue
+            # Arbitrary code may mention many input/history paths. The command
+            # must print the final artifact path before it becomes durable state.
+            path = _extract_shared_workspace_file_path((step or {}).get("result"))
+        elif tool_name in direct_file_tools:
+            if _step_failed(step):
+                continue
+            path = _extract_shared_workspace_file_path(
+                (step or {}).get("result"),
+                (step or {}).get("args"),
+            )
+        else:
+            continue
+        if path:
+            return path
+    return None
 
 
 def _user_requested_inline_text_output(user_message: str) -> bool:
@@ -95,7 +157,8 @@ def _user_requested_inline_text_output(user_message: str) -> bool:
 def _is_whatsapp_file_delivery_request(user_message: str, steps: list[dict[str, Any]], final_reply: str) -> bool:
     if _user_requested_inline_text_output(user_message):
         return False
-    text = "\n".join([user_message or "", final_reply or ""] + [_step_text(step) for step in steps or []]).lower()
+    step_results = [str((step or {}).get("result") or "") for step in steps or []]
+    text = "\n".join([user_message or "", final_reply or ""] + step_results).lower()
     markers = (
         "siap_dikirim_parent",
         "kirim file",
@@ -105,16 +168,13 @@ def _is_whatsapp_file_delivery_request(user_message: str, steps: list[dict[str, 
         "kirim dokumen",
         "kirim gambar",
         "kirim foto",
-        "pdf",
-        "docx",
-        "xlsx",
-        "csv",
-        "zip",
         "dokumen",
         "attachment",
         "lampiran",
     )
-    return any(marker in text for marker in markers)
+    return any(marker in text for marker in markers) or bool(
+        re.search(r"\.(?:pdf|docx|xlsx|csv|zip)(?:\b|$)", text)
+    )
 
 
 def _needs_whatsapp_file_delivery_followup(
@@ -130,7 +190,7 @@ def _needs_whatsapp_file_delivery_followup(
         return False, None
     if _has_whatsapp_media_send_step(steps):
         return False, None
-    path = _extract_shared_workspace_file_from_steps(steps, final_reply)
+    path = _extract_ready_shared_workspace_file_from_task_steps(steps)
     if not path:
         return False, None
     if not _is_whatsapp_file_delivery_request(user_message, steps, final_reply):

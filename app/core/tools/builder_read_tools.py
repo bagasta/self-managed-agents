@@ -54,11 +54,25 @@ def build_builder_read_tools(
                 "..." if len(agent.instructions or "") > 500 else ""
             )
 
+        # Arthur is a control-plane builder. Runtime policy always removes
+        # sandbox, deploy, tool-creator, and subagent execution even if an old
+        # database row still advertises them. Report effective capabilities so
+        # the model never attempts tools that cannot exist in its run.
+        effective_tools_config = dict(agent.tools_config or {}) if agent else {}
+        effective_tools_config["sandbox"] = False
+        effective_tools_config["deploy"] = False
+        effective_tools_config["tool_creator"] = False
+        effective_tools_config["subagents"] = {"enabled": False}
+
         return json.dumps({
             "self_agent_id": self_agent_id,
             "name": agent.name if agent else None,
             "model": agent.model if agent else None,
-            "tools_config": agent.tools_config if agent else None,
+            "tools_config": effective_tools_config,
+            "runtime_policy": (
+                "Arthur adalah control-plane builder dan tidak memiliki sandbox, "
+                "filesystem execution, deploy, atau subagent runtime."
+            ),
             "operator_ids": agent.operator_ids if agent else [],
             "instructions_preview": instructions_preview,
             "note": (
