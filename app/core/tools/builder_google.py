@@ -38,6 +38,10 @@ def enable_google_workspace_tools(tools_config: dict[str, Any] | None) -> dict[s
 
     mcp_cfg["enabled"] = True
     mcp_cfg["servers"] = servers
+    # Google data belongs to the agent owner by default. Customer-scoped OAuth
+    # must be explicitly selected for products where every end user connects
+    # their own Google account.
+    mcp_cfg.setdefault("auth_mode", "owner")
     merged["mcp"] = mcp_cfg
     merged.setdefault("tavily", True)
     return merged
@@ -120,4 +124,3 @@ def negates_google_workspace(text: str) -> bool:
         r"\b(google|workspace|gmail|calendar|drive|docs|sheets)\b.{0,32}\b(tanpa|jangan|tidak|ga|gak|nggak|enggak|belum|nanti)\b",
     )
     return any(re.search(pattern, lowered) for pattern in patterns)
-

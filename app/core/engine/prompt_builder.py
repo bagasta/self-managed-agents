@@ -1031,6 +1031,19 @@ def build_system_prompt(
             "- Saat bicara ke user, sebut `integrasi Google`, `Google Docs`, atau `Google Workspace`. JANGAN menyebut istilah teknis internal/protokol tool, server, token, atau tools_config.\n"
             "- Jawaban final harus singkat dan berbentuk hasil: nama agent, status dibuat/diupdate, ringkasan kemampuan yang baru disiapkan, serta link/kode trial atau link Google jika dibuat. Jangan tutup dengan pertanyaan approval mikro.\n"
         )
+        from app.config import get_settings
+
+        if str(get_settings().arthur_builder_pipeline_mode).strip().lower() == "optimized":
+            system_prompt += (
+                "\n\n## Optimized Agent Creation Pipeline\n"
+                "- Untuk membuat agent BARU dengan brief yang sudah lengkap, panggil create_agent_from_brief satu kali. "
+                "Tool ini mempertahankan writer blueprint, SOP, instructions, soul, validasi, create, dan readback.\n"
+                "- Jangan menjalankan plan_agent/compose_* lebih dulu jika create_agent_from_brief tersedia; itu akan mengulang pekerjaan dan memperlambat user.\n"
+                "- Jika hasilnya status needs_clarification, tanyakan hanya capability_clarifications yang dikembalikan.\n"
+                "- Jika fallback_to_legacy=true DAN creation_attempted=false, lanjutkan pipeline legacy pada giliran yang sama.\n"
+                "- Jika creation_attempted=true, jangan pernah memanggil create_agent lagi karena dapat membuat agent duplikat.\n"
+                "- Pipeline optimized hanya untuk CREATE agent baru. Update agent existing tetap memakai jalur update_agent yang ada.\n"
+            )
         if not sandbox_subagents_enabled():
             system_prompt += (
                 "\n\n## Arthur Launch-Safe Temporary Limits\n"

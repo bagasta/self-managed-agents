@@ -1243,7 +1243,7 @@ async def run_agent(
                         _google_mcp_auth_url = await _fetch_google_auth_link(
                             integration_url=google_mcp.integration_url,
                             api_key=settings.api_key,
-                            agent_id=agent_id,
+                            auth_agent_id=google_mcp.auth_agent_id,
                             candidate_user_ids=google_mcp.candidate_user_ids,
                         )
                     final_reply = await _build_google_mcp_auth_failure_reply(
@@ -1443,6 +1443,7 @@ async def run_agent(
             "compose_agent_soul",
             "validate_agent_config",
             "create_agent",
+            "create_agent_from_brief",
             "update_agent",
         }
         _progress_notice_task: asyncio.Task | None = None
@@ -2192,7 +2193,7 @@ async def run_agent(
                         _google_mcp_auth_url = await _fetch_google_auth_link(
                             integration_url=google_mcp.integration_url,
                             api_key=settings.api_key,
-                            agent_id=agent_id,
+                            auth_agent_id=google_mcp.auth_agent_id,
                             candidate_user_ids=google_mcp.candidate_user_ids,
                         )
                     _reply = await _build_google_mcp_auth_failure_reply(
@@ -2368,7 +2369,10 @@ async def run_agent(
                 total_tokens_used = _agent_logger.total_tokens_from_callbacks or parsed["total_tokens_used"]
                 log.info(
                     "agent_run.builder_create_completion_continue_ok",
-                    created=any(str(s.get("tool", "")) == "create_agent" for s in steps),
+                    created=any(
+                        str(s.get("tool", "")) in {"create_agent", "create_agent_from_brief"}
+                        for s in steps
+                    ),
                 )
             except Exception as _create_completion_exc:
                 log.warning(

@@ -127,7 +127,7 @@ async def send_message(
             current_task = asyncio.current_task()
             if current_task:
                 await register_active_task(session_id, current_task)
-            async with arthur_run_slot(agent):
+            async with arthur_run_slot(agent, payload.message):
                 result = await run_agent(
                     agent_model=agent,
                     session=session,

@@ -42,6 +42,45 @@ async def test_arthur_admission_bounds_thirty_concurrent_users(monkeypatch) -> N
     await reset_arthur_admission_for_tests()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "setting_name", "limit"),
+    [
+        ("buat agent baru untuk customer service", "arthur_max_concurrent_builder_runs", 6),
+        ("tolong tampilkan daftar agent saya", "arthur_max_concurrent_fast_runs", 12),
+    ],
+)
+async def test_arthur_admission_separates_fast_and_builder_lanes(
+    monkeypatch,
+    message: str,
+    setting_name: str,
+    limit: int,
+) -> None:
+    from app.config import get_settings
+    from app.core.engine.arthur_admission import arthur_run_slot, reset_arthur_admission_for_tests
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, setting_name, limit)
+    monkeypatch.setattr(settings, "arthur_max_queued_runs", 64)
+    await reset_arthur_admission_for_tests()
+
+    active = 0
+    max_active = 0
+
+    async def run_one() -> None:
+        nonlocal active, max_active
+        async with arthur_run_slot(_arthur(), message):
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+
+    await asyncio.gather(*(run_one() for _ in range(30)))
+
+    assert max_active == limit
+    await reset_arthur_admission_for_tests()
+
+
 def test_created_agent_default_model_is_consistent() -> None:
     import inspect
 

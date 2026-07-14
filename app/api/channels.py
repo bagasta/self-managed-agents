@@ -1623,7 +1623,7 @@ async def incoming_message(
     if (
         not is_operator
         and is_arthur_builder(agent)
-        and (is_heavy_arthur_request(user_message) or is_arthur_capacity_saturated(agent))
+        and (is_heavy_arthur_request(user_message) or is_arthur_capacity_saturated(agent, user_message))
         and session.channel_type
     ):
         try:
@@ -1655,7 +1655,7 @@ async def incoming_message(
             current_task = asyncio.current_task()
             if current_task and not is_operator:
                 await register_active_task(session_id, current_task)
-            async with arthur_run_slot(agent):
+            async with arthur_run_slot(agent, user_message):
                 if not is_operator:
                     await db.refresh(session, attribute_names=["ai_disabled"])
                     if getattr(session, "ai_disabled", False):
@@ -2305,7 +2305,7 @@ async def wa_incoming(
     if (
         not _is_operator
         and is_arthur_builder(agent)
-        and (is_heavy_arthur_request(user_message) or is_arthur_capacity_saturated(agent))
+        and (is_heavy_arthur_request(user_message) or is_arthur_capacity_saturated(agent, user_message))
     ):
         try:
             await send_wa_message(
@@ -2331,7 +2331,7 @@ async def wa_incoming(
             _current_task = _asyncio.current_task()
             if _current_task and not _is_operator:
                 await register_active_task(session_id, _current_task)
-            async with arthur_run_slot(agent):
+            async with arthur_run_slot(agent, user_message):
                 if not _is_operator:
                     await db.refresh(session, attribute_names=["ai_disabled"])
                     if getattr(session, "ai_disabled", False):

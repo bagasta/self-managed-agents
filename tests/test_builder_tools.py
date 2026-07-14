@@ -181,7 +181,7 @@ class TestBuilderToolsReturnsList:
         from app.core.tools.builder_tools import build_builder_tools
         db = _make_mock_db()
         tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
-        assert len(tools) == 22, f"Harus ada 21 tools, dapat {len(tools)}"
+        assert len(tools) == 23, f"Harus ada 23 tools, dapat {len(tools)}"
 
     def test_all_tools_have_name(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -238,6 +238,7 @@ class TestBuilderToolsReturnsList:
             "get_self_config",
             "get_platform_capabilities",
             "get_user_subscription",
+            "get_payment_link",
             "link_dashboard_account",
             "get_presets",
             "plan_agent",
@@ -264,7 +265,7 @@ class TestBuilderToolsReturnsList:
         from app.core.tools.builder_tools import build_builder_tools
         db = _make_mock_db()
         tools = build_builder_tools(db_factory=db, owner_phone=None)
-        assert len(tools) == 22
+        assert len(tools) == 23
 
     def test_travel_planning_request_uses_personal_assistant_not_faq(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -2841,6 +2842,9 @@ class TestUpdateAgent:
             async def __aexit__(self, *args):
                 return None
 
+            async def get(self, *args, **kwargs):
+                raise httpx.TimeoutException("connect timeout")
+
             async def post(self, *args, **kwargs):
                 raise httpx.TimeoutException("connect timeout")
 
@@ -2866,7 +2870,7 @@ class TestUpdateAgent:
         from app.core.tools.builder_tools import build_builder_tools
 
         db = _make_mock_db()
-        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tools = build_builder_tools(db_factory=db, owner_phone="151414827434073@lid")
         tool = next(t for t in tools if t.name == "generate_google_auth_link")
 
         settings = SimpleNamespace(

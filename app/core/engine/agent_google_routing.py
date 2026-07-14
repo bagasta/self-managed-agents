@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import copy
 import re
-import uuid
 from typing import Any
 
 import structlog
@@ -40,11 +39,17 @@ logger = structlog.get_logger(__name__)
 
 def _extract_auth_url_from_builder_steps(steps: list[dict[str, Any]]) -> str | None:
     for step in reversed(steps or []):
-        if step.get("tool") != "generate_google_auth_link":
+        if step.get("tool") not in {"generate_google_auth_link", "create_agent_from_brief"}:
             continue
         data = _parse_step_result_json(step.get("result"))
         if data:
-            auth_url = data.get("auth_url") or data.get("authorization_url")
+            google_auth = data.get("google_auth") if isinstance(data.get("google_auth"), dict) else {}
+            auth_url = (
+                data.get("auth_url")
+                or data.get("authorization_url")
+                or google_auth.get("auth_url")
+                or google_auth.get("authorization_url")
+            )
             if auth_url:
                 return str(auth_url)
         result_text = str(step.get("result") or "")
@@ -58,11 +63,14 @@ def _builder_google_auth_agent_id(steps: list[dict[str, Any]]) -> str | None:
     if any((step or {}).get("tool") == "generate_google_auth_link" for step in steps or []):
         return None
     for step in reversed(steps or []):
-        if step.get("tool") not in {"create_agent", "update_agent"}:
+        if step.get("tool") not in {"create_agent", "create_agent_from_brief", "update_agent"}:
             continue
         data = _parse_step_result_json(step.get("result"))
         if not data or data.get("success") is not True:
             continue
+        google_auth = data.get("google_auth") if isinstance(data.get("google_auth"), dict) else {}
+        if google_auth.get("connected") is True:
+            return None
         readback = data.get("readback") if isinstance(data.get("readback"), dict) else {}
         needs_auth = (
             data.get("needs_google_auth") is True
@@ -94,7 +102,7 @@ async def _append_builder_google_auth_link_if_needed(
             auth_url = await _fetch_google_auth_link(
                 integration_url=str(settings_obj.google_integration_service_url).rstrip("/"),
                 api_key=settings_obj.api_key,
-                agent_id=uuid.UUID(agent_id),
+                auth_agent_id=None,
                 candidate_user_ids=_candidate_external_user_ids(
                     session.external_user_id,
                     _session_real_phone(session),

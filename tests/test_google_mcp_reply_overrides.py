@@ -351,7 +351,7 @@ async def test_fetch_google_auth_link_accepts_short_start_url(monkeypatch) -> No
     auth_url = await _fetch_google_auth_link(
         integration_url="https://devtunnel.example",
         api_key="test",
-        agent_id="00000000-0000-0000-0000-000000000000",
+        auth_agent_id=None,
         candidate_user_ids=["628111"],
     )
 
@@ -428,6 +428,73 @@ async def test_prepare_google_mcp_runtime_uses_agent_owner_fallback_for_auth(mon
     assert "State: enabled_needs_auth" in runtime.system_prompt
     assert "Owner membuka link otentikasi" in runtime.system_prompt
     assert any(call[0] == "POST" and call[2]["json"]["external_user_id"] == "62895619356936" for call in calls)
+    assert any(call[0] == "POST" and call[2]["json"]["agent_id"] is None for call in calls)
+
+
+@pytest.mark.asyncio
+async def test_prepare_google_mcp_runtime_uses_token_promoted_during_connect(monkeypatch) -> None:
+    class FakeSettings:
+        google_integration_service_url = "https://devtunnel.example"
+
+    class FakeResponse:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+            self.text = "{}"
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, **kwargs):
+            if url.endswith("/status"):
+                return FakeResponse(200, {"connected": False})
+            if url.endswith("/token") and not kwargs.get("params", {}).get("agent_id"):
+                return FakeResponse(200, {"bearer_token": "promoted-owner-token"})
+            return FakeResponse(404, {})
+
+        async def post(self, url, **kwargs):
+            return FakeResponse(200, {"connected": True, "auth_url": ""})
+
+    monkeypatch.setattr("app.config.get_settings", lambda: FakeSettings())
+    monkeypatch.setattr("httpx.AsyncClient", FakeClient)
+
+    workspace_server = {
+        "url": "http://localhost:8002/mcp",
+        "transport": "streamable_http",
+    }
+    runtime = await prepare_google_mcp_runtime(
+        tools_config={
+            "mcp": {
+                "enabled": True,
+                "servers": {"google_workspace": workspace_server},
+            }
+        },
+        tools=[],
+        active_groups=[],
+        session=type("Session", (), {"channel_config": {}, "external_user_id": "customer"})(),
+        agent_id="00000000-0000-0000-0000-000000000000",
+        memory_scope="customer",
+        api_key="test",
+        user_message="upload laporan ke Google Drive",
+        system_prompt="",
+        log=type("Log", (), {"warning": lambda *args, **kwargs: None, "info": lambda *args, **kwargs: None})(),
+        fallback_external_user_id="owner-user",
+    )
+
+    assert runtime.connected_user_id == "owner-user"
+    assert runtime.preflight_error is None
+    assert runtime.auth_url is None
+    assert workspace_server["headers"]["Authorization"] == "Bearer promoted-owner-token"
 
 
 @pytest.mark.asyncio

@@ -104,6 +104,8 @@ class GoogleMcpRuntime:
     integration_url: str
     candidate_user_ids: list[str]
     system_prompt: Any
+    auth_mode: str = "owner"
+    auth_agent_id: str | None = None
 
 
 def _is_google_mcp_intent(message: str) -> bool:
@@ -2382,7 +2384,11 @@ def google_sheets_verification_followup_directive(
 
 
 async def _fetch_google_auth_link(
-    *, integration_url: str, api_key: str, agent_id: uuid.UUID, candidate_user_ids: list[str]
+    *,
+    integration_url: str,
+    api_key: str,
+    auth_agent_id: str | None,
+    candidate_user_ids: list[str],
 ) -> str | None:
     if not integration_url:
         return None
@@ -2393,7 +2399,7 @@ async def _fetch_google_auth_link(
             for candidate in candidate_user_ids:
                 resp = await _hc.post(
                     f"{integration_url}/v1/integrations/google/connect",
-                    json={"external_user_id": candidate, "agent_id": str(agent_id)},
+                    json={"external_user_id": candidate, "agent_id": auth_agent_id},
                     headers={"X-API-Key": api_key},
                 )
                 if resp.status_code == 200:
@@ -2464,7 +2470,7 @@ def _build_google_reauth_tool(
     *,
     integration_url: str,
     api_key: str,
-    agent_id: uuid.UUID,
+    auth_agent_id: str | None,
     candidate_user_ids: list[str],
     preferred_auth_url: str | None = None,
 ) -> list:
@@ -2476,7 +2482,7 @@ def _build_google_reauth_tool(
         auth_url = await _fetch_google_auth_link(
             integration_url=integration_url,
             api_key=api_key,
-            agent_id=agent_id,
+            auth_agent_id=auth_agent_id,
             candidate_user_ids=candidate_user_ids,
         )
         if not auth_url:
@@ -3807,10 +3813,18 @@ async def prepare_google_mcp_runtime(
         str(get_settings().google_integration_service_url).rstrip("/")
     )
     channel_cfg = session.channel_config if isinstance(session.channel_config, dict) else {}
-    candidate_ids = _candidate_external_user_ids(
-        memory_scope or getattr(session, "external_user_id", None) or fallback_external_user_id,
-        channel_cfg.get("user_phone") or fallback_external_user_id,
-    )
+    raw_auth_mode = str(mcp_cfg.get("auth_mode") or "owner").strip().lower()
+    auth_mode = raw_auth_mode if raw_auth_mode in {"owner", "end_user"} else "owner"
+    if auth_mode == "owner":
+        owner_id = fallback_external_user_id or getattr(session, "external_user_id", None)
+        candidate_ids = _candidate_external_user_ids(owner_id, fallback_external_user_id)
+        auth_agent_id: str | None = None
+    else:
+        candidate_ids = _candidate_external_user_ids(
+            memory_scope or getattr(session, "external_user_id", None),
+            channel_cfg.get("user_phone"),
+        )
+        auth_agent_id = str(agent_id)
 
     connected_user_id: str | None = None
     auth_url: str | None = None
@@ -3851,12 +3865,29 @@ async def prepare_google_mcp_runtime(
                     if not status_payload or not bool(status_payload.get("connected")):
                         connect_resp = await http_client.post(
                             f"{integration_url}/v1/integrations/google/connect",
-                            json={"external_user_id": candidate, "agent_id": str(agent_id)},
+                            json={"external_user_id": candidate, "agent_id": auth_agent_id},
                             headers={"X-API-Key": api_key},
                         )
                         if connect_resp.status_code == 200:
                             connect_data = connect_resp.json() if connect_resp.text else {}
-                            auth_url = connect_data.get("auth_url") or connect_data.get("authorization_url")
+                            if bool(connect_data.get("connected")):
+                                for agent_param in (str(agent_id), None):
+                                    params = {"external_user_id": candidate}
+                                    if agent_param:
+                                        params["agent_id"] = agent_param
+                                    token_resp = await http_client.get(
+                                        f"{integration_url}/v1/integrations/google/token",
+                                        params=params,
+                                        headers={"X-API-Key": api_key},
+                                    )
+                                    if token_resp.status_code == 200:
+                                        jwt = token_resp.json().get("bearer_token")
+                                        jwt_external_user_id = candidate
+                                        break
+                            else:
+                                auth_url = connect_data.get("auth_url") or connect_data.get("authorization_url")
+                        if jwt:
+                            break
                         preflight_error = "Google Workspace belum terhubung atau token sudah expired"
                         if connected_user_id is None:
                             connected_user_id = candidate
@@ -3880,7 +3911,7 @@ async def prepare_google_mcp_runtime(
 
                     connect_resp = await http_client.post(
                         f"{integration_url}/v1/integrations/google/connect",
-                        json={"external_user_id": candidate, "agent_id": str(agent_id)},
+                        json={"external_user_id": candidate, "agent_id": auth_agent_id},
                         headers={"X-API-Key": api_key},
                     )
                     if connect_resp.status_code == 200:
@@ -3908,7 +3939,7 @@ async def prepare_google_mcp_runtime(
             _build_google_reauth_tool(
                 integration_url=integration_url,
                 api_key=api_key,
-                agent_id=agent_id,
+                auth_agent_id=auth_agent_id,
                 candidate_user_ids=candidate_ids,
                 preferred_auth_url=auth_url,
             )
@@ -3924,6 +3955,8 @@ async def prepare_google_mcp_runtime(
         integration_url=integration_url,
         candidate_user_ids=candidate_ids,
         system_prompt=system_prompt,
+        auth_mode=auth_mode,
+        auth_agent_id=auth_agent_id,
     )
     if mcp_enabled and workspace_server and isinstance(system_prompt, str):
         runtime.system_prompt = (
@@ -3950,7 +3983,11 @@ async def apply_mcp_error_notice(
     auth_url = runtime.auth_url
     google_mcp_err = str(mcp_errors.get("google_workspace", ""))
     if google_mcp_err and ("401" in google_mcp_err or "Unauthorized" in google_mcp_err):
-        reauth_user = runtime.connected_user_id or memory_scope
+        reauth_user = (
+            runtime.connected_user_id
+            or next(iter(runtime.candidate_user_ids), None)
+            or memory_scope
+        )
         if reauth_user:
             try:
                 import httpx as _httpx
@@ -3958,7 +3995,7 @@ async def apply_mcp_error_notice(
                 async with _httpx.AsyncClient(timeout=5.0) as http_client:
                     resp = await http_client.post(
                         f"{runtime.integration_url}/v1/integrations/google/connect",
-                        json={"external_user_id": reauth_user, "agent_id": str(agent_id)},
+                        json={"external_user_id": reauth_user, "agent_id": runtime.auth_agent_id},
                         headers={"X-API-Key": api_key},
                     )
                 if resp.status_code == 200:
@@ -4010,7 +4047,7 @@ async def apply_google_mcp_reply_overrides(
             auth_url = await _fetch_google_auth_link(
                 integration_url=runtime.integration_url,
                 api_key=api_key,
-                agent_id=agent_id,
+                auth_agent_id=runtime.auth_agent_id,
                 candidate_user_ids=runtime.candidate_user_ids,
             )
         final_reply = await _build_google_mcp_auth_failure_reply(

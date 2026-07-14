@@ -23,13 +23,19 @@ class ArthurQueueFull(RuntimeError):
 class ArthurAdmission:
     queued: bool
     wait_seconds: float
+    lane: str = "legacy"
+
+
+@dataclass
+class _LaneState:
+    semaphore: asyncio.Semaphore
+    configured_limit: int
+    active_runs: int = 0
+    waiting_runs: int = 0
 
 
 _state_lock = asyncio.Lock()
-_semaphore: asyncio.Semaphore | None = None
-_configured_limit = 0
-_active_runs = 0
-_waiting_runs = 0
+_lane_states: dict[str, _LaneState] = {}
 
 
 def is_arthur_builder(agent: Agent) -> bool:
@@ -43,12 +49,29 @@ def is_arthur_builder(agent: Agent) -> bool:
     )
 
 
-def is_arthur_capacity_saturated(agent: Agent) -> bool:
+def _request_lane(message: str | None) -> str:
+    if message is None:
+        return "legacy"
+    return "builder" if is_heavy_arthur_request(message) else "fast"
+
+
+def _lane_limit(lane: str) -> int:
+    settings = get_settings()
+    if lane == "builder":
+        return max(1, int(settings.arthur_max_concurrent_builder_runs))
+    if lane == "fast":
+        return max(1, int(settings.arthur_max_concurrent_fast_runs))
+    return max(1, int(settings.arthur_max_concurrent_runs))
+
+
+def is_arthur_capacity_saturated(agent: Agent, message: str | None = None) -> bool:
     """Cheap hint used only to decide whether an immediate queue reply helps."""
     if not is_arthur_builder(agent):
         return False
-    limit = max(1, int(get_settings().arthur_max_concurrent_runs))
-    return _active_runs >= limit or bool(_semaphore and _semaphore.locked())
+    lane = _request_lane(message)
+    state = _lane_states.get(lane)
+    limit = _lane_limit(lane)
+    return bool(state and (state.active_runs >= limit or state.semaphore.locked()))
 
 
 def is_heavy_arthur_request(message: str) -> bool:
@@ -71,37 +94,43 @@ def is_heavy_arthur_request(message: str) -> bool:
     )
 
 
-async def _get_semaphore() -> asyncio.Semaphore:
-    global _semaphore, _configured_limit
-
-    limit = max(1, int(get_settings().arthur_max_concurrent_runs))
+async def _get_lane_state(lane: str) -> _LaneState:
+    limit = _lane_limit(lane)
     async with _state_lock:
-        if _semaphore is None:
-            _semaphore = asyncio.Semaphore(limit)
-            _configured_limit = limit
-        elif _configured_limit != limit and _active_runs == 0 and _waiting_runs == 0:
-            _semaphore = asyncio.Semaphore(limit)
-            _configured_limit = limit
-        return _semaphore
+        state = _lane_states.get(lane)
+        if state is None:
+            state = _LaneState(asyncio.Semaphore(limit), limit)
+            _lane_states[lane] = state
+        elif (
+            state.configured_limit != limit
+            and state.active_runs == 0
+            and state.waiting_runs == 0
+        ):
+            state = _LaneState(asyncio.Semaphore(limit), limit)
+            _lane_states[lane] = state
+        return state
 
 
 @asynccontextmanager
-async def arthur_run_slot(agent: Agent) -> AsyncIterator[ArthurAdmission]:
+async def arthur_run_slot(
+    agent: Agent,
+    message: str | None = None,
+) -> AsyncIterator[ArthurAdmission]:
     """Limit only expensive builder runs and bound how many may wait."""
-    global _active_runs, _waiting_runs
-
     if not is_arthur_builder(agent):
-        yield ArthurAdmission(queued=False, wait_seconds=0.0)
+        yield ArthurAdmission(queued=False, wait_seconds=0.0, lane="managed_agent")
         return
 
-    semaphore = await _get_semaphore()
+    lane = _request_lane(message)
+    state = await _get_lane_state(lane)
+    semaphore = state.semaphore
     max_queue = max(0, int(get_settings().arthur_max_queued_runs))
     queued = semaphore.locked()
 
     async with _state_lock:
-        if queued and _waiting_runs >= max_queue:
+        if queued and state.waiting_runs >= max_queue:
             raise ArthurQueueFull("Arthur queue capacity reached")
-        _waiting_runs += 1
+        state.waiting_runs += 1
 
     started_waiting = time.monotonic()
     try:
@@ -109,36 +138,33 @@ async def arthur_run_slot(agent: Agent) -> AsyncIterator[ArthurAdmission]:
     finally:
         # No await here: cancellation after acquiring a permit must not leak it
         # before the context manager reaches its release block.
-        _waiting_runs = max(0, _waiting_runs - 1)
+        state.waiting_runs = max(0, state.waiting_runs - 1)
 
     wait_seconds = time.monotonic() - started_waiting
-    _active_runs += 1
-    active = _active_runs
-    waiting = _waiting_runs
+    state.active_runs += 1
+    active = state.active_runs
+    waiting = state.waiting_runs
     logger.info(
         "arthur_admission.acquired",
+        lane=lane,
         active=active,
         waiting=waiting,
         wait_seconds=round(wait_seconds, 3),
     )
 
     try:
-        yield ArthurAdmission(queued=queued, wait_seconds=wait_seconds)
+        yield ArthurAdmission(queued=queued, wait_seconds=wait_seconds, lane=lane)
     finally:
-        _active_runs = max(0, _active_runs - 1)
-        active = _active_runs
-        waiting = _waiting_runs
+        state.active_runs = max(0, state.active_runs - 1)
+        active = state.active_runs
+        waiting = state.waiting_runs
         semaphore.release()
-        logger.info("arthur_admission.released", active=active, waiting=waiting)
+        logger.info("arthur_admission.released", lane=lane, active=active, waiting=waiting)
 
 
 async def reset_arthur_admission_for_tests() -> None:
     """Reset module state between concurrency tests."""
-    global _semaphore, _configured_limit, _active_runs, _waiting_runs
     async with _state_lock:
-        if _active_runs or _waiting_runs:
+        if any(state.active_runs or state.waiting_runs for state in _lane_states.values()):
             raise RuntimeError("Cannot reset Arthur admission while runs are active")
-        _semaphore = None
-        _configured_limit = 0
-        _active_runs = 0
-        _waiting_runs = 0
+        _lane_states.clear()

@@ -313,6 +313,7 @@ def _has_code_creation_evidence(steps: list[dict[str, Any]]) -> bool:
 
 _BUILD_PROGRESS_TOOLS = frozenset(
     {
+        "create_agent_from_brief",
         "plan_agent",
         "compose_agent_blueprint",
         "compose_agent_instructions",
@@ -342,7 +343,7 @@ def _needs_builder_create_completion(
         return False
     if not (tool_names & _BUILD_PROGRESS_TOOLS):
         return False
-    if "create_agent" in tool_names or "update_agent" in tool_names:
+    if "create_agent" in tool_names or "create_agent_from_brief" in tool_names or "update_agent" in tool_names:
         return False
     # A real entitlement BLOCK is not something to silently retry. Match the
     # actual block — NOT the word "entitlement", because plan_agent always emits

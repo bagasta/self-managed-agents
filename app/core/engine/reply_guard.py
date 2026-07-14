@@ -14,6 +14,7 @@ _BUILDER_TOOLS = {
     "compose_agent_soul",
     "validate_agent_config",
     "create_agent",
+    "create_agent_from_brief",
     "verify_agent",
     "create_wa_dev_trial_link",
     "set_agent_memory",
@@ -79,7 +80,7 @@ def _parse_step_result(result: Any) -> dict[str, Any] | None:
 
 def _builder_entitlement_retry_reply(steps: list[dict[str, Any]]) -> str | None:
     for step in reversed(steps or []):
-        if step.get("tool") not in {"create_agent", "update_agent"}:
+        if step.get("tool") not in {"create_agent", "create_agent_from_brief", "update_agent"}:
             continue
         data = _parse_step_result(step.get("result"))
         if not data:
@@ -261,13 +262,29 @@ def _builder_fallback_reply(steps: list[dict[str, Any]]) -> str | None:
         return trial_link_error_reply
 
     for step in reversed(steps or []):
-        if step.get("tool") != "create_agent":
+        if step.get("tool") not in {"create_agent", "create_agent_from_brief"}:
             continue
         data = _parse_step_result(step.get("result"))
         if not data:
             continue
         if data.get("success") is True:
             return _create_agent_success_reply(data)
+        if step.get("tool") == "create_agent_from_brief":
+            clarifications = data.get("capability_clarifications")
+            questions = [
+                str(item.get("question") or "").strip()
+                for item in (clarifications or [])
+                if isinstance(item, dict) and str(item.get("question") or "").strip()
+            ]
+            if questions:
+                return "Sebelum saya buat, saya perlu memastikan: " + " ".join(questions[:3])
+            if data.get("status") in {"blocked_by_policy", "blocked_by_subscription", "has_errors"}:
+                next_action = str(data.get("next_action") or "").strip()
+                errors = [str(item).strip() for item in (data.get("validation_errors") or []) if str(item).strip()]
+                if errors:
+                    return "Belum bisa dibuat: " + " ".join(errors[:3])
+                if next_action:
+                    return next_action
         error = str(data.get("error") or "").strip()
         if error:
             return f"Belum berhasil dibuat: {error}"
@@ -296,7 +313,7 @@ def _builder_fallback_reply(steps: list[dict[str, Any]]) -> str | None:
             "Coba kirim lagi ya, nanti saya lanjutkan sampai selesai."
         )
 
-    if "create_agent" not in tool_names:
+    if not {"create_agent", "create_agent_from_brief"}.intersection(tool_names):
         return (
             "Maaf, lagi ada kendala sistem sebentar di sisi saya, jadi agennya belum selesai saya buat. "
             "Coba kirim lagi ya, nanti saya lanjutkan sampai selesai."
@@ -383,6 +400,7 @@ def ensure_non_empty_reply(
         ):
             if (
                 "create_agent" in tool_names
+                or "create_agent_from_brief" in tool_names
                 or "update_agent" in tool_names
                 or _looks_like_incomplete_builder_reply(text)
                 or _looks_like_technical_builder_reply(text)
