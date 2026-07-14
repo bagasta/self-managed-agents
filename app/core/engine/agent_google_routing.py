@@ -14,7 +14,6 @@ import structlog
 
 from app.core.engine.agent_identity import (
     _is_customer_whatsapp_session,
-    _normalized_agent_operator_ids,
     _owner_notification_target,
     _session_real_phone,
     _session_sender_phone,
@@ -181,23 +180,6 @@ def _google_workspace_customer_blocker_reply(*, notified_owner: bool) -> str:
         "Maaf, jadwalnya belum bisa saya finalkan otomatis sekarang. "
         "Data pesanan Anda sudah saya catat, tapi saya perlu Owner mengecek sistem penjadwalan dulu. "
         "Nanti akan dikonfirmasi kembali."
-    )
-
-
-def _is_google_workspace_mcp_authorized_for_session(session: Session, agent_model: Any) -> bool:
-    """Only owner/admin/operator WhatsApp senders may access Google MCP tools."""
-    if getattr(session, "channel_type", None) != "whatsapp":
-        return True
-    sender = _session_sender_phone(session)
-    if not sender:
-        return False
-    return sender in _normalized_agent_operator_ids(agent_model)
-
-
-def _google_workspace_mcp_unauthorized_reply() -> str:
-    return (
-        "Maaf, aksi yang terhubung ke Google Workspace hanya bisa dijalankan "
-        "oleh Admin/operator agent ini."
     )
 
 

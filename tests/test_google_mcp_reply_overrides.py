@@ -1,9 +1,8 @@
+import inspect
+
 import pytest
 
-from app.core.engine.agent_google_routing import (
-    _google_workspace_mcp_unauthorized_reply,
-    _is_google_workspace_mcp_authorized_for_session,
-)
+from app.core.engine import agent_runner
 from app.core.engine.agent_runner import (
     _build_google_mcp_auth_failure_reply,
     _build_google_mcp_unavailable_reply,
@@ -43,49 +42,11 @@ def test_google_term_sanitizer_preserves_mcp_auth_url_hostname() -> None:
     assert "lewat integrasi Google" in sanitized
 
 
-def test_google_workspace_mcp_authorization_restricts_whatsapp_to_owner_or_operator() -> None:
-    agent = type(
-        "Agent",
-        (),
-        {
-            "owner_external_id": "628111",
-            "operator_ids": ["628222"],
-            "escalation_config": {"operator_phone": "628333"},
-        },
-    )()
+def test_google_workspace_mcp_is_not_gated_by_whatsapp_sender_role() -> None:
+    source = inspect.getsource(agent_runner.run_agent)
 
-    customer_session = type(
-        "Session",
-        (),
-        {
-            "channel_type": "whatsapp",
-            "external_user_id": "628999",
-            "channel_config": {"phone_number": "628999", "user_phone": "628999@s.whatsapp.net"},
-        },
-    )()
-    owner_session = type(
-        "Session",
-        (),
-        {
-            "channel_type": "whatsapp",
-            "external_user_id": "628111",
-            "channel_config": {"phone_number": "628111", "user_phone": "628111@s.whatsapp.net"},
-        },
-    )()
-    operator_session = type(
-        "Session",
-        (),
-        {
-            "channel_type": "whatsapp",
-            "external_user_id": "628222",
-            "channel_config": {},
-        },
-    )()
-
-    assert _is_google_workspace_mcp_authorized_for_session(customer_session, agent) is False
-    assert _is_google_workspace_mcp_authorized_for_session(owner_session, agent) is True
-    assert _is_google_workspace_mcp_authorized_for_session(operator_session, agent) is True
-    assert "Admin/operator" in _google_workspace_mcp_unauthorized_reply()
+    assert "google_mcp_requires_owner_or_operator" not in source
+    assert "google_workspace_mcp_denied_for_non_operator" not in source
 
 
 @pytest.mark.asyncio

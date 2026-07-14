@@ -56,19 +56,15 @@ from app.core.engine.agent_google_routing import (
     _builder_google_auth_agent_id,
     _extract_auth_url_from_builder_steps,
     _google_workspace_customer_blocker_reply,
-    _google_workspace_mcp_unauthorized_reply,
     _google_workspace_server_has_auth,
     _is_google_chat_intent,
-    _is_google_workspace_mcp_authorized_for_session,
     _remove_google_workspace_mcp_server,
     _route_google_workspace_blocker_to_owner_if_customer,
 )
 from app.core.engine.agent_identity import (
     _is_customer_whatsapp_session,
-    _normalized_agent_operator_ids,
     _owner_notification_target,
     _session_real_phone,
-    _session_sender_phone,
 )
 from app.core.engine.agent_step_utils import (
     _URL_RE,
@@ -133,7 +129,6 @@ from app.core.engine.google_mcp_support import (
     infer_google_workspace_service_context,
     is_google_auth_recovery_followup,
     is_google_workspace_execution_intent,
-    is_google_workspace_mcp_configured,
     prepare_google_mcp_runtime,
     sanitize_google_forms_tools,
     google_slides_dimension_retry_directive,
@@ -1052,59 +1047,6 @@ async def run_agent(
         if google_workspace_builder_reference
         else tools_config
     )
-    google_mcp_role_denied = (
-        google_workspace_execution_intent
-        and not google_workspace_builder_reference
-        and is_google_workspace_mcp_configured(tools_config)
-        and not _is_google_workspace_mcp_authorized_for_session(session, agent_model)
-    )
-    if google_mcp_role_denied:
-        google_mcp_tools_config = _remove_google_workspace_mcp_server(tools_config)
-        log.warning(
-            "agent_run.google_mcp_denied_for_non_operator",
-            sender=_session_sender_phone(session),
-            reason="google_workspace_mcp_requires_owner_or_operator",
-        )
-        if google_workspace_execution_intent:
-            final_reply = _google_workspace_mcp_unauthorized_reply()
-            run_record.status = "completed"
-            run_record.completed_at = datetime.now(timezone.utc)
-            run_record.error_message = "google_workspace_mcp_denied_for_non_operator"
-            run_record.tokens_used = 0
-            run_record.prompt_tokens = 0
-            run_record.completion_tokens = 0
-            run_record.reasoning_tokens = 0
-            run_record.cached_tokens = 0
-            run_record.openrouter_cost_usd = Decimal("0")
-            run_record.usage_details = None
-            db.add(Message(
-                session_id=session.id,
-                role="assistant",
-                content=final_reply,
-                step_index=step_base + 1,
-                run_id=run_id,
-            ))
-            await db.flush()
-            await _stop_wa_run_typing()
-            if sandbox:
-                await sandbox.aclose()
-            for _ssb in sub_sandboxes:
-                await _ssb.aclose()
-            return AgentRunResult(
-                reply=final_reply,
-                steps=[],
-                run_id=run_id,
-                tokens_used=0,
-                usage={
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "reasoning_tokens": 0,
-                    "cached_tokens": 0,
-                    "total_tokens": 0,
-                    "openrouter_cost_usd": 0,
-                    "details": None,
-                },
-            )
     _google_fallback_external_user_id = getattr(agent_model, "owner_external_id", None)
     if not _google_fallback_external_user_id:
         _operator_ids = getattr(agent_model, "operator_ids", None)
