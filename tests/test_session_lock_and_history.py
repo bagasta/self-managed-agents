@@ -226,6 +226,52 @@ class TestWhatsAppRunLifecycle:
         assert "persist_cancelled_run_for_task(current_task)" in channel_src
 
 
+class TestGoogleDrivePendingAttachment:
+    def test_resolves_recent_previous_turn_attachment_for_one_time_upload(self, tmp_path):
+        from app.core.engine.agent_runner import _resolve_google_drive_attachment
+
+        source = tmp_path / "shared" / "current_input" / "image.jpg"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"image")
+
+        path, aliases, consume, age = _resolve_google_drive_attachment(
+            workspace_dir=tmp_path,
+            session_metadata={
+                "current_attachment": {"filename": "image.jpg", "saved_at": 900.0}
+            },
+            current_attachment_name=None,
+            reuse_seconds=300,
+            now_timestamp=1000.0,
+        )
+
+        assert path == str(source.resolve())
+        assert "/workspace/data/incoming/current_input/image.jpg" in aliases
+        assert consume is True
+        assert age == 100.0
+
+    def test_rejects_expired_previous_turn_attachment(self, tmp_path):
+        from app.core.engine.agent_runner import _resolve_google_drive_attachment
+
+        source = tmp_path / "shared" / "current_input" / "image.jpg"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"image")
+
+        path, aliases, consume, age = _resolve_google_drive_attachment(
+            workspace_dir=tmp_path,
+            session_metadata={
+                "current_attachment": {"filename": "image.jpg", "saved_at": 100.0}
+            },
+            current_attachment_name=None,
+            reuse_seconds=300,
+            now_timestamp=1000.0,
+        )
+
+        assert path is None
+        assert aliases == set()
+        assert consume is False
+        assert age == 900.0
+
+
 class TestGraphResultExtraction:
     def test_agent_runner_initializes_graph_output_before_recoverable_retries(self):
         from app.core.engine import agent_runner

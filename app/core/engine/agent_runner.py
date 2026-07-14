@@ -12,6 +12,7 @@ import contextlib
 import copy
 import json
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -481,6 +482,50 @@ async def persist_cancelled_run_for_task(
             run_id=str(run_id),
             error=str(exc)[:300],
         )
+
+
+def _resolve_google_drive_attachment(
+    *,
+    workspace_dir: Path,
+    session_metadata: dict[str, Any],
+    current_attachment_name: str | None,
+    reuse_seconds: int,
+    now_timestamp: float | None = None,
+) -> tuple[str | None, set[str], bool, float | None]:
+    """Resolve a current or short-lived pending attachment without trusting model paths."""
+    attachment_root = (workspace_dir / "shared" / "current_input").resolve()
+    consume_on_success = False
+    attachment_age: float | None = None
+
+    if current_attachment_name:
+        attachment_name = Path(current_attachment_name).name
+    else:
+        attachment_meta = dict((session_metadata or {}).get("current_attachment") or {})
+        attachment_name = Path(str(attachment_meta.get("filename") or "")).name
+        try:
+            saved_at = float(attachment_meta.get("saved_at") or 0)
+        except (TypeError, ValueError):
+            saved_at = 0
+        current_timestamp = now_timestamp if now_timestamp is not None else time.time()
+        attachment_age = current_timestamp - saved_at if saved_at else None
+        if (
+            not attachment_name
+            or attachment_age is None
+            or attachment_age < -60
+            or attachment_age > max(0, reuse_seconds)
+        ):
+            return None, set(), False, attachment_age
+        consume_on_success = True
+
+    candidate = (attachment_root / attachment_name).resolve()
+    if not candidate.is_file() or candidate.parent != attachment_root:
+        return None, set(), False, attachment_age
+
+    aliases = {
+        f"/workspace/shared/current_input/{attachment_name}",
+        f"/workspace/data/incoming/current_input/{attachment_name}",
+    }
+    return str(candidate), aliases, consume_on_success, attachment_age
 
 
 _INLINE_TEXT_ARTIFACT_EXTS = {"txt", "md", "markdown", "csv", "json", "log", "asc"}
@@ -1100,20 +1145,25 @@ async def run_agent(
         if google_mcp.preflight_error and "google_workspace" not in mcp_errors:
             mcp_errors["google_workspace"] = google_mcp.preflight_error
         if mcp_tools:
-            _current_attachment_path: str | None = None
-            if current_attachment_name:
-                from app.core.infra.sandbox import get_workspace_dir
+            from app.core.infra.sandbox import get_workspace_dir
 
-                _attachment_name = Path(current_attachment_name).name
-                _attachment_candidate = (
-                    get_workspace_dir(session.id) / "shared" / "current_input" / _attachment_name
-                ).resolve()
-                _attachment_root = (get_workspace_dir(session.id) / "shared" / "current_input").resolve()
-                if (
-                    _attachment_candidate.is_file()
-                    and _attachment_candidate.parent == _attachment_root
-                ):
-                    _current_attachment_path = str(_attachment_candidate)
+            (
+                _current_attachment_path,
+                _trusted_attachment_aliases,
+                _consume_attachment_on_success,
+                _attachment_age,
+            ) = _resolve_google_drive_attachment(
+                workspace_dir=get_workspace_dir(session.id),
+                session_metadata=dict(getattr(session, "metadata_", None) or {}),
+                current_attachment_name=current_attachment_name,
+                reuse_seconds=int(settings.google_mcp_attachment_reuse_seconds),
+            )
+            if _consume_attachment_on_success and _current_attachment_path:
+                log.info(
+                    "agent_run.google_drive_pending_attachment_ready",
+                    source_name=Path(_current_attachment_path).name,
+                    age_seconds=round(_attachment_age or 0, 1),
+                )
             mcp_tools = filter_google_mcp_tools_for_service_context(
                 mcp_tools,
                 service_context=google_service_context,
@@ -1124,7 +1174,9 @@ async def run_agent(
                 log,
                 service_context=google_service_context,
                 current_attachment_path=_current_attachment_path,
+                trusted_attachment_aliases=_trusted_attachment_aliases,
                 upload_staging_dir=settings.google_mcp_upload_dir,
+                consume_attachment_on_success=_consume_attachment_on_success,
             )
             if getattr(session, "channel_type", None) == "whatsapp":
                 mcp_tools = _filter_whatsapp_unsafe_mcp_tools(

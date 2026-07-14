@@ -132,6 +132,7 @@ async def test_create_drive_file_stages_only_active_attachment_and_cleans_up(tmp
         [create_file],
         SimpleNamespace(warning=lambda *a, **k: None),
         current_attachment_path=str(source),
+        trusted_attachment_aliases={"/workspace/shared/current_input/report.csv"},
         upload_staging_dir=str(staging_dir),
     )
     guarded = next(tool for tool in wrapped if tool.name == "create_drive_file")
@@ -139,7 +140,7 @@ async def test_create_drive_file_stages_only_active_attachment_and_cleans_up(tmp
     result = await guarded.ainvoke(
         {
             "file_name": "sales-report.csv",
-            "fileUrl": "/workspace/shared/current_input/model-invented-name.csv",
+            "fileUrl": "/workspace/shared/current_input/report.csv",
         }
     )
 
@@ -149,3 +150,87 @@ async def test_create_drive_file_stages_only_active_attachment_and_cleans_up(tmp
     assert create_file.staged_path is not None
     assert not create_file.staged_path.exists()
     assert source.exists()
+
+
+@pytest.mark.asyncio
+async def test_create_drive_file_consumes_recent_pending_attachment_after_success(tmp_path: Path) -> None:
+    source = tmp_path / "current_input" / "image.jpg"
+    source.parent.mkdir()
+    source.write_bytes(b"jpeg-data")
+    create_file = FakeTool("create_drive_file", "uploaded")
+    wrapped = sanitize_google_forms_tools(
+        [create_file],
+        SimpleNamespace(warning=lambda *a, **k: None),
+        current_attachment_path=str(source),
+        trusted_attachment_aliases={
+            "/workspace/shared/current_input/image.jpg",
+            "/workspace/data/incoming/current_input/image.jpg",
+        },
+        upload_staging_dir=str(tmp_path / "staging"),
+        consume_attachment_on_success=True,
+    )
+    guarded = next(tool for tool in wrapped if tool.name == "create_drive_file")
+
+    result = await guarded.ainvoke(
+        {
+            "file_name": "Laporan.jpg",
+            "folder_id": "folder123",
+            "mime_type": "image/jpeg",
+            "fileUrl": None,
+        }
+    )
+
+    assert result == "uploaded"
+    assert not source.exists()
+    assert not list((tmp_path / "staging").iterdir())
+
+
+@pytest.mark.asyncio
+async def test_create_drive_file_rejects_different_local_alias_even_with_pending_attachment(tmp_path: Path) -> None:
+    source = tmp_path / "current_input" / "image.jpg"
+    source.parent.mkdir()
+    source.write_bytes(b"jpeg-data")
+    create_file = FakeTool("create_drive_file", "uploaded")
+    wrapped = sanitize_google_forms_tools(
+        [create_file],
+        SimpleNamespace(warning=lambda *a, **k: None),
+        current_attachment_path=str(source),
+        trusted_attachment_aliases={"/workspace/shared/current_input/image.jpg"},
+        upload_staging_dir=str(tmp_path / "staging"),
+    )
+    guarded = next(tool for tool in wrapped if tool.name == "create_drive_file")
+
+    result = await guarded.ainvoke(
+        {
+            "file_name": "wrong.jpg",
+            "mime_type": "image/jpeg",
+            "fileUrl": "file:///workspace/shared/current_input/other.jpg",
+        }
+    )
+
+    assert result.startswith("DRIVE_LOCAL_FILE_UNAVAILABLE")
+    assert not create_file.calls
+    assert source.exists()
+
+
+@pytest.mark.asyncio
+async def test_drive_download_guard_blocks_destination_folder_id() -> None:
+    create_file = FakeTool("create_drive_file", "uploaded")
+    download = FakeTool("get_drive_file_download_url", "downloaded")
+    wrapped = sanitize_google_forms_tools(
+        [create_file, download],
+        SimpleNamespace(warning=lambda *a, **k: None),
+    )
+    guarded_create = next(tool for tool in wrapped if tool.name == "create_drive_file")
+    guarded_download = next(tool for tool in wrapped if tool.name == "get_drive_file_download_url")
+
+    create_result = await guarded_create.ainvoke(
+        {"file_name": "report.jpg", "folder_id": "folder123", "mime_type": "image/jpeg"}
+    )
+    download_result = await guarded_download.ainvoke(
+        {"file_id": "folder123", "export_format": "jpg"}
+    )
+
+    assert create_result.startswith("DRIVE_FILE_SOURCE_REQUIRED")
+    assert download_result.startswith("DRIVE_FOLDER_NOT_DOWNLOADABLE")
+    assert not download.calls

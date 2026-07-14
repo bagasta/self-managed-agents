@@ -17,6 +17,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from langchain_core.tools import StructuredTool, tool
 from langchain_openai import ChatOpenAI
@@ -84,6 +85,13 @@ class CreateDriveFileArgs(BaseModel):
     mime_type: str = "text/plain"
     fileUrl: str | None = None
     file_url: str | None = None
+
+
+class GetDriveFileDownloadUrlArgs(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    file_id: str
+    export_format: str | None = None
 
 
 @dataclass
@@ -2757,7 +2765,9 @@ def sanitize_google_forms_tools(
     *,
     service_context: str | None = None,
     current_attachment_path: str | None = None,
+    trusted_attachment_aliases: set[str] | None = None,
     upload_staging_dir: str | None = None,
+    consume_attachment_on_success: bool = False,
 ) -> list:
     """Wrap Google Workspace tools to repair weak LLM payloads before MCP execution."""
     wrapped_tools: list = []
@@ -2776,6 +2786,7 @@ def sanitize_google_forms_tools(
     inspected_spreadsheets: set[str] = set()
     created_spreadsheets: set[str] = set()
     created_sheets: set[tuple[str, str]] = set()
+    known_drive_folder_ids: set[str] = set()
 
     def _record_sheet_read(spreadsheet_id: Any, range_name: Any) -> None:
         spreadsheet_key = str(spreadsheet_id or "").strip()
@@ -3121,6 +3132,31 @@ def sanitize_google_forms_tools(
             sanitized_tool_names.append(tool_name)
             continue
 
+        if tool_name == "get_drive_file_download_url":
+            def _build_drive_download_guarded(tool_to_call: Any):
+                async def _drive_download_guarded(**kwargs):
+                    file_id = str(kwargs.get("file_id") or "").strip()
+                    if file_id and file_id in known_drive_folder_ids:
+                        return (
+                            "DRIVE_FOLDER_NOT_DOWNLOADABLE: file_id ini adalah folder_id tujuan upload, bukan file binary. "
+                            "Jangan download atau export folder. Lanjutkan upload attachment dengan create_drive_file "
+                            "dan gunakan ID ini hanya sebagai folder_id."
+                        )
+                    return await tool_to_call.ainvoke(kwargs)
+
+                return _drive_download_guarded
+
+            wrapped_tools.append(
+                StructuredTool.from_function(
+                    coroutine=_build_drive_download_guarded(mcp_tool),
+                    name=mcp_tool.name,
+                    description=getattr(mcp_tool, "description", None),
+                    args_schema=getattr(mcp_tool, "args_schema", None) or GetDriveFileDownloadUrlArgs,
+                )
+            )
+            sanitized_tool_names.append(tool_name)
+            continue
+
         if tool_name == "create_drive_file":
             def _build_create_drive_file_guarded(tool_to_call: Any):
                 async def _create_drive_file_guarded(**kwargs):
@@ -3135,15 +3171,37 @@ def sanitize_google_forms_tools(
                     has_content = content is not None and str(content) != ""
                     has_file_url = file_url is not None and str(file_url).strip() != ""
                     is_folder = mime_type == "application/vnd.google-apps.folder"
+                    folder_id = str(kwargs.get("folder_id") or "").strip()
+                    if folder_id and folder_id != "root":
+                        known_drive_folder_ids.add(folder_id)
 
                     staged_path: Path | None = None
+                    source_path: Path | None = None
                     local_reference = has_file_url and (
                         str(file_url).strip().startswith("/")
                         or str(file_url).strip().lower().startswith("file://")
                     )
+                    local_reference_path = ""
+                    if local_reference:
+                        raw_reference = str(file_url).strip()
+                        parsed_reference = urlparse(raw_reference)
+                        local_reference_path = unquote(
+                            parsed_reference.path if parsed_reference.scheme == "file" else raw_reference
+                        )
+                    trusted_aliases = {
+                        str(alias).strip() for alias in (trusted_attachment_aliases or set()) if str(alias).strip()
+                    }
+                    local_reference_is_trusted = bool(
+                        local_reference and local_reference_path in trusted_aliases
+                    )
                     if not has_content and not is_folder and (local_reference or not has_file_url):
                         source_path = Path(current_attachment_path).resolve() if current_attachment_path else None
-                        if source_path is not None and source_path.is_file():
+                        can_use_attachment = bool(
+                            source_path is not None
+                            and source_path.is_file()
+                            and (not local_reference or local_reference_is_trusted)
+                        )
+                        if can_use_attachment:
                             try:
                                 staging_root = Path(upload_staging_dir or "/tmp/google-mcp-uploads").resolve()
                                 await asyncio.to_thread(staging_root.mkdir, parents=True, exist_ok=True)
@@ -3164,16 +3222,19 @@ def sanitize_google_forms_tools(
                                 )
                             except Exception as exc:
                                 if staged_path is not None:
-                                    staged_path.unlink(missing_ok=True)
+                                    try:
+                                        staged_path.unlink(missing_ok=True)
+                                    except OSError:
+                                        pass
                                 return (
                                     "DRIVE_ATTACHMENT_STAGING_FAILED: attachment aktif tidak dapat disiapkan untuk MCP Drive. "
                                     f"Detail: {str(exc)[:200]}"
                                 )
                         elif local_reference:
                             return (
-                                "DRIVE_LOCAL_FILE_UNAVAILABLE: path lokal hanya boleh menunjuk ke attachment aktif "
-                                "yang dikirim user pada turn ini. Minta user mengirim ulang file, lalu panggil "
-                                "create_drive_file pada turn attachment tersebut."
+                                "DRIVE_LOCAL_FILE_UNAVAILABLE: path lokal harus sama dengan alias current_input "
+                                "attachment pending yang tercatat untuk sesi ini. Gunakan path CURRENT_ATTACHMENT "
+                                "dari konteks percakapan; jika sudah kedaluwarsa, minta user mengirim ulang file."
                             )
 
                     if not has_content and not has_file_url and not is_folder:
@@ -3198,10 +3259,35 @@ def sanitize_google_forms_tools(
                         )
 
                     try:
-                        return await tool_to_call.ainvoke(kwargs)
+                        result = await tool_to_call.ainvoke(kwargs)
+                        if (
+                            consume_attachment_on_success
+                            and source_path is not None
+                            and staged_path is not None
+                            and not _google_mcp_text_error(result)
+                        ):
+                            try:
+                                source_path.unlink(missing_ok=True)
+                                getattr(log, "info", lambda *args, **kw: None)(
+                                    "agent_run.google_drive_pending_attachment_consumed",
+                                    source_name=source_path.name,
+                                )
+                            except OSError as exc:
+                                getattr(log, "warning", lambda *args, **kw: None)(
+                                    "agent_run.google_drive_pending_attachment_cleanup_failed",
+                                    source_name=source_path.name,
+                                    error=str(exc)[:200],
+                                )
+                        return result
                     finally:
                         if staged_path is not None:
-                            staged_path.unlink(missing_ok=True)
+                            try:
+                                staged_path.unlink(missing_ok=True)
+                            except OSError as exc:
+                                getattr(log, "warning", lambda *args, **kw: None)(
+                                    "agent_run.google_drive_staging_cleanup_failed",
+                                    error=str(exc)[:200],
+                                )
 
                 return _create_drive_file_guarded
 

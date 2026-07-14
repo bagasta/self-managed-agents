@@ -67,6 +67,7 @@ class Settings(BaseSettings):
     # local uploads. The API writes one randomized copy of the active
     # attachment; the MCP container mounts the same path read-only.
     google_mcp_upload_dir: str = "/tmp/google-mcp-uploads"
+    google_mcp_attachment_reuse_seconds: int = 1800
 
     # Logging
     log_level: str = "INFO"
