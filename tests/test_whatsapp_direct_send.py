@@ -240,7 +240,16 @@ async def test_wa_dev_shared_incoming_requires_explicit_agent_or_code():
 @pytest.mark.asyncio
 async def test_wa_dev_claim_code_returns_virtual_device_id(monkeypatch):
     agent_id = uuid.uuid4()
-    agent = SimpleNamespace(id=agent_id, name="Demo Agent")
+    agent = SimpleNamespace(
+        id=agent_id,
+        name="Demo Agent",
+        active_until=None,
+        token_quota=0,
+        tokens_used=0,
+        owner_external_id=None,
+        capabilities=[],
+        tools_config={},
+    )
 
     async def fake_find_agent(_db, _code):
         return agent
@@ -258,6 +267,35 @@ async def test_wa_dev_claim_code_returns_virtual_device_id(monkeypatch):
     assert result["agent_id"] == str(agent_id)
     assert result["device_id"] == f"wadev_{agent_id}"
     assert result["routing"]["agent_id"] == str(agent_id)
+
+
+@pytest.mark.asyncio
+async def test_wa_dev_claim_code_rejects_expired_agent_before_routing(monkeypatch):
+    agent = SimpleNamespace(id=uuid.uuid4(), name="Expired Agent")
+
+    async def fake_find_agent(_db, _code):
+        return agent
+
+    async def fake_quota_check(_agent, _db):
+        return SimpleNamespace(
+            allowed=False,
+            user_message="Maaf, masa aktif agent ini sudah habis.",
+        )
+
+    monkeypatch.setattr(
+        "app.core.domain.wa_dev_trial_service.find_agent_by_wa_dev_trial_code",
+        fake_find_agent,
+    )
+    monkeypatch.setattr("app.api.channels.check_agent_quota", fake_quota_check)
+
+    with pytest.raises(Exception) as exc_info:
+        await wa_dev_claim_code(
+            WADevClaimCodeRequest(code="AB12C3"),
+            db=SimpleNamespace(),
+        )
+
+    assert getattr(exc_info.value, "status_code", None) == 409
+    assert "masa aktif agent" in str(getattr(exc_info.value, "detail", ""))
 
 
 def test_wa_owner_message_gets_explicit_owner_label():
@@ -580,7 +618,8 @@ def test_builder_prompt_blocks_repeated_continue_questions():
     assert "bukan `QR`" in prompt
     assert "jangan fallback ke agent terbaru" in prompt
     assert "agent_name atau agent_id" in prompt
-    assert "langsung cari agent terkait lalu panggil create_wa_dev_trial_link" in prompt
+    assert "pastikan active_until masih aktif sebelum memanggil create_wa_dev_trial_link" in prompt
+    assert "jangan kirim kode dulu: list_my_agents/get_agent_detail, panggil renew_agent" in prompt
     assert "jangan menjawab `langsung aku betulin`" in prompt
     assert "DILARANG memakai task, subagent, sandbox, read_file, edit_file, atau write_file" in prompt
     assert "get_agent_detail(include_instructions=true)" in prompt

@@ -1422,6 +1422,14 @@ async def wa_dev_claim_code(
     if not agent:
         raise HTTPException(status_code=404, detail="Kode tidak ditemukan atau sudah tidak aktif")
 
+    # A valid reusable trial code is not enough: the target agent must still be
+    # runnable. Without this guard the Go router persists a phone->agent route,
+    # replies "Berhasil switch", then the first customer message is rejected by
+    # the runtime quota gate as expired.
+    quota_check = await check_agent_quota(agent, db)
+    if not quota_check.allowed:
+        raise HTTPException(status_code=409, detail=quota_check.user_message)
+
     virtual_device_id = _wa_dev_virtual_device_id(agent.id)
     if body.phone or body.chat_id:
         reply_target = body.chat_id or body.phone or ""

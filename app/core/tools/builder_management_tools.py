@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 import structlog
@@ -314,6 +315,58 @@ def build_builder_management_tools(
             return f"[error] Gagal mengambil daftar agent: {exc}"
 
     @tool
+    async def renew_agent(agent_id: str) -> str:
+        """Perpanjang masa aktif dan reset kuota token agent milik user ini.
+
+        Gunakan setelah memastikan agent terkait memang expired atau user meminta
+        renewal. Jangan membuat kode WA trial baru sebelum renewal ini sukses.
+        """
+        try:
+            agent_uuid = uuid.UUID(agent_id)
+        except ValueError:
+            return f"[error] agent_id tidak valid: {agent_id}"
+
+        async with db_factory() as db:
+            result = await db.execute(
+                select(Agent).where(Agent.id == agent_uuid, Agent.is_deleted.is_(False))
+            )
+            agent = result.scalar_one_or_none()
+            if not agent:
+                return f"[error] Agent dengan ID {agent_id} tidak ditemukan"
+            if "system" in set(agent.capabilities or []):
+                return "[error] Agent sistem tidak dapat diperpanjang melalui Arthur"
+            if owner_phone and not _agent_belongs_to_owner(agent, owner_phone):
+                return "[error] Kamu tidak punya akses untuk memperpanjang agent ini"
+
+            period_days = max(1, int(agent.quota_period_days or 30))
+            previous_active_until = agent.active_until
+            agent.active_until = datetime.now(timezone.utc) + timedelta(days=period_days)
+            agent.tokens_used = 0
+            agent.version = (agent.version or 1) + 1
+            agent_name = agent.name
+            renewed_until = agent.active_until
+            await db.commit()
+
+        _get_logger().info(
+            "builder_tools.renew_agent.success",
+            agent_id=agent_id,
+            owner_phone=owner_phone,
+            active_until=renewed_until.isoformat(),
+        )
+        return json.dumps({
+            "success": True,
+            "agent_id": agent_id,
+            "agent_name": agent_name,
+            "previous_active_until": previous_active_until.isoformat() if previous_active_until else None,
+            "active_until": renewed_until.isoformat(),
+            "quota_period_days": period_days,
+            "message": (
+                f"Agent '{agent_name}' sudah aktif kembali sampai "
+                f"{renewed_until.isoformat()}. Kuota token di-reset."
+            ),
+        }, ensure_ascii=False, indent=2)
+
+    @tool
     async def add_agent_knowledge(agent_id: str, filename: str = "", title: str = "") -> str:
         """
         Tambahkan FILE yang dikirim user (via WhatsApp) sebagai knowledge base (RAG)
@@ -469,5 +522,6 @@ def build_builder_management_tools(
         "delete_agent": delete_agent,
         "get_agent_detail": get_agent_detail,
         "list_my_agents": list_my_agents,
+        "renew_agent": renew_agent,
         "add_agent_knowledge": add_agent_knowledge,
     }

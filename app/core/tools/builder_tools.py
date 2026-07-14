@@ -387,7 +387,7 @@ def build_builder_tools(
 
     # update_agent lives in app.core.tools.builder_update_tools.
 
-    # delete_agent/get_agent_detail/list_my_agents live in app.core.tools.builder_management_tools.
+    # delete_agent/get_agent_detail/list_my_agents/renew_agent live in app.core.tools.builder_management_tools.
     # generate_google_auth_link lives in app.core.tools.builder_connector_tools.
 
     return [
@@ -413,5 +413,6 @@ def build_builder_tools(
         management_tools["delete_agent"],
         management_tools["get_agent_detail"],
         management_tools["list_my_agents"],
+        management_tools["renew_agent"],
         connector_tools["generate_google_auth_link"],
     ]
