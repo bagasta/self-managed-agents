@@ -113,6 +113,58 @@ def _usable_operating_manual(domain: str = "ecommerce") -> dict:
     }
 
 
+def _confirmed_discovery(
+    *,
+    agent_name: str,
+    problem: str,
+    personal: bool = False,
+    capabilities: str = "Menjawab pertanyaan dan mencatat data sesuai instruksi user.",
+    integrations: str = "Tidak perlu integrasi lain.",
+    expected_outputs: str = "Memberikan jawaban dan hasil kerja konkret di WhatsApp.",
+    vision_requirement: str = "Tidak perlu gambar atau vision.",
+    escalation_phone: str = "+628111111111",
+) -> dict:
+    answers = {
+        "problem": problem,
+        "usage_context": "personal" if personal else "work",
+        "agent_name": agent_name,
+        "audience": "Saya sendiri." if personal else "User atau customer yang menghubungi lewat WhatsApp.",
+        "main_tasks": [problem, expected_outputs],
+        "capabilities": capabilities,
+        "prohibited_actions": "Tidak boleh mengarang fakta, keputusan, atau data yang tidak tersedia.",
+        "allowed_actions": "Boleh menjalankan tugas yang sudah disebut user dalam batas instruksi.",
+        "tone_style": "Ramah, ringkas, dan profesional dalam bahasa Indonesia.",
+        "ideal_conversations": [
+            {"user": "Tolong bantu kebutuhan ini.", "agent": "Baik, saya proses sesuai data yang tersedia."},
+            {"user": "Datanya belum ada.", "agent": "Saya belum tahu dan tidak akan menebak."},
+        ],
+        "avoided_conversations": [
+            {"user": "Tebak saja jawabannya.", "agent_must_not": "Pasti jawabannya seperti ini."}
+        ],
+        "unknown_handling": "Bilang tidak tahu dan berhenti menebak; untuk pekerjaan eskalasi ke admin.",
+        "knowledge_sources": "Gunakan hanya informasi dan sumber yang diberikan user; tidak perlu RAG tambahan.",
+        "sensitive_data_policy": "Jaga kerahasiaan data user dan jangan bagikan ke pihak lain.",
+        "whatsapp_scale": (
+            "Satu nomor WhatsApp pribadi untuk saya sendiri."
+            if personal
+            else "Satu nomor WhatsApp melayani banyak user atau customer sekaligus."
+        ),
+        "daily_chat_volume": "Sekitar 20-50 chat per hari.",
+        "integrations": integrations,
+        "expected_outputs": expected_outputs,
+        "vision_requirement": vision_requirement,
+        "user_confirmed": True,
+    }
+    if not personal:
+        answers["escalation_target"] = {
+            "conditions": "Data tidak tersedia atau keputusan berada di luar wewenang agent.",
+            "recipient": "Admin operasional",
+            "whatsapp_number": escalation_phone,
+        }
+        answers["go_live_approver"] = "Owner atau kepala tim terkait."
+    return answers
+
+
 def _run(coro):
     """Run async coroutine in sync test."""
     return asyncio.get_event_loop().run_until_complete(coro)
@@ -150,9 +202,8 @@ class TestBuilderToolsImport:
         from app.core.tools import builder_tools
 
         source = inspect.getsource(builder_tools)
-        assert "Ini bukan approval gate" in source
-        assert "Jangan minta user menyetujui blueprint" in source
-        assert "langsung create_agent tanpa tanya approval lagi" in source
+        assert "internal artifacts need no micro-approval" in source
+        assert "Brief, workflow, and escalation must be confirmed once before create" in source
 
     def test_import_from_tool_builder(self):
         from app.core.engine.tool_builder import build_builder_tools
@@ -248,6 +299,13 @@ class TestBuilderToolsReturnsList:
             ),
             "agent_name": "Travgent",
             "channel": "whatsapp",
+            "discovery_answers": _confirmed_discovery(
+                agent_name="Travgent",
+                problem="Saya kesulitan menyiapkan itinerary, checklist, budget, dan pengingat liburan.",
+                personal=True,
+                capabilities="Menyusun itinerary, checklist, budget, dan pengingat H-7 serta H-1.",
+                expected_outputs="Itinerary, checklist, budget, dan pengingat di WhatsApp.",
+            ),
         }))
         payload = json.loads(result)
 
@@ -274,8 +332,9 @@ class TestBuilderToolsReturnsList:
         payload = json.loads(result)
 
         assert payload["plan_status"] == "needs_clarification"
-        assert payload["capability_clarifications"][0]["topic"] == "agent_purpose"
-        assert "JANGAN create_agent dulu" in payload["next_action"]
+        assert payload["capability_clarifications"][0]["topic"] == "problem"
+        assert payload["discovery_progress"]["next_group"]["id"] == "context_goal"
+        assert "JANGAN create_agent" in payload["next_action"]
 
     def test_plan_agent_interviews_for_shallow_business_agent_brief(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -292,8 +351,9 @@ class TestBuilderToolsReturnsList:
         payload = json.loads(result)
 
         assert payload["plan_status"] == "needs_clarification"
-        assert any(item["topic"] == "agent_brief" for item in payload["capability_clarifications"])
-        assert "maksimal 3 pertanyaan" in payload["next_action"]
+        assert any(item["topic"] == "problem" for item in payload["capability_clarifications"])
+        assert payload["discovery_progress"]["next_group"]["id"] == "context_goal"
+        assert "seluruh pertanyaan" in payload["next_action"]
 
     def test_plan_agent_defaults_unspecified_channel_to_whatsapp(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -305,6 +365,12 @@ class TestBuilderToolsReturnsList:
         result = _run(plan.ainvoke({
             "user_goal": "Buat agent riset kompetitor dan rangkum insight pasar",
             "agent_name": "RisetBot",
+            "discovery_answers": _confirmed_discovery(
+                agent_name="RisetBot",
+                problem="Tim lambat mengumpulkan riset kompetitor dan merangkum insight pasar.",
+                capabilities="Riset kompetitor dan merangkum insight pasar dari sumber yang dapat ditelusuri.",
+                expected_outputs="Ringkasan insight pasar beserta sumbernya di WhatsApp.",
+            ),
         }))
         payload = json.loads(result)
 
@@ -339,6 +405,14 @@ class TestBuilderToolsReturnsList:
             "agent_name": "MeetMate",
             "channel": "whatsapp",
             "requested_features": "google, calendar",
+            "discovery_answers": _confirmed_discovery(
+                agent_name="MeetMate",
+                problem="Saya sering kesulitan mengatur meeting dan pengingat kalender.",
+                personal=True,
+                capabilities="Mengatur meeting dan reminder melalui Google Calendar.",
+                integrations="Google Calendar.",
+                expected_outputs="Event dan reminder tercatat di Google Calendar.",
+            ),
         }))
         payload = json.loads(result)
         tools_config = payload["recommended_config"]["tools_config"]
@@ -361,6 +435,14 @@ class TestBuilderToolsReturnsList:
             "agent_name": "Baas",
             "channel": "whatsapp",
             "requested_features": "google",
+            "discovery_answers": _confirmed_discovery(
+                agent_name="Baas",
+                problem="Saya butuh bantuan pribadi untuk membuat file dan mengelola pekerjaan di Google Workspace.",
+                personal=True,
+                capabilities="Membuat file dan bekerja dengan Google Workspace.",
+                integrations="Google Workspace.",
+                expected_outputs="Membuat file final dan mengirimkannya melalui WhatsApp.",
+            ),
         }))
         payload = json.loads(result)
         tools_config = payload["recommended_config"]["tools_config"]
@@ -390,6 +472,13 @@ class TestBuilderToolsReturnsList:
                 "https://forms.gle/pe5C1XncFhu56E7M9 sebagai link order."
             ),
             "requested_features": "customer service, escalation, whatsapp_media",
+            "discovery_answers": _confirmed_discovery(
+                agent_name="CeritaCV",
+                problem="Pelanggan kesulitan memahami alur order jasa CV melalui WhatsApp.",
+                capabilities="Menjawab pertanyaan order dan mengarahkan pelanggan ke link Google Form yang sudah ada.",
+                integrations="Tidak perlu integrasi; Google Form hanya dipakai sebagai link order.",
+                expected_outputs="Jawaban CS dan arahan ke link order yang sudah tersedia.",
+            ),
         }))
         payload = json.loads(result)
         tools_config = payload["recommended_config"]["tools_config"]
@@ -413,6 +502,13 @@ class TestBuilderToolsReturnsList:
             "agent_name": "CVin aja",
             "channel": "whatsapp",
             "requested_features": "bikin CV ATS, dokumen PDF, bukti transfer, approval admin",
+            "discovery_answers": _confirmed_discovery(
+                agent_name="CVin aja",
+                problem="Proses wawancara, pembayaran, approval, dan pembuatan CV ATS masih manual.",
+                capabilities="Wawancara customer, menerima bukti transfer, eskalasi approval, dan membuat PDF CV ATS.",
+                expected_outputs="Dokumen PDF CV ATS dikirim setelah admin menyetujui pembayaran.",
+                vision_requirement="Perlu membaca gambar bukti transfer untuk diteruskan ke admin.",
+            ),
         }))
         payload = json.loads(result)
         tools_config = payload["recommended_config"]["tools_config"]
@@ -440,6 +536,13 @@ class TestBuilderToolsReturnsList:
             "agent_name": "KonsulPro",
             "channel": "whatsapp",
             "requested_features": "jasa konsultasi, bukti transfer, approval admin, escalation",
+            "discovery_answers": _confirmed_discovery(
+                agent_name="KonsulPro",
+                problem="Intake kebutuhan, pembayaran, dan penjadwalan konsultasi masih manual.",
+                capabilities="Mencatat kebutuhan, menerima bukti transfer, eskalasi approval, dan menjadwalkan sesi.",
+                expected_outputs="Konfirmasi jadwal konsultasi setelah admin menyetujui pembayaran.",
+                vision_requirement="Perlu menerima gambar bukti transfer untuk diteruskan ke admin.",
+            ),
         }))
         payload = json.loads(result)
         tools_config = payload["recommended_config"]["tools_config"]
@@ -470,6 +573,14 @@ class TestBuilderToolsReturnsList:
                 "dan minta kepastian biaya serta barang tersedia. Kepastian harus dicek pemilik dulu."
             ),
             "operator_phone": "6287700600616",
+            "discovery_answers": _confirmed_discovery(
+                agent_name="Event Helper",
+                problem="Tim lambat memeriksa data acara, stok barang, dan harga final untuk pelanggan.",
+                capabilities="Mencatat data acara, mengecek stok, dan eskalasi kepastian harga ke pemilik.",
+                integrations="Tidak perlu Google atau integrasi lain.",
+                expected_outputs="Ringkasan data acara dan jawaban setelah kepastian pemilik tersedia.",
+                escalation_phone="6287700600616",
+            ),
         }))
         payload = json.loads(result)
         tools_config = payload["recommended_config"]["tools_config"]
@@ -574,6 +685,12 @@ class TestBuilderToolsReturnsList:
                 "user_goal": "Buat agent coding yang bisa bikin website dan deploy",
                 "agent_name": "Codey",
                 "requested_features": "coding, deploy",
+                "discovery_answers": _confirmed_discovery(
+                    agent_name="Codey",
+                    problem="Tim kesulitan membuat dan deploy website dengan cepat.",
+                    capabilities="Membuat kode website dan melakukan deploy.",
+                    expected_outputs="Website yang dapat diakses melalui URL hasil deploy.",
+                ),
             }))
 
         payload = json.loads(result)
@@ -1011,7 +1128,10 @@ class TestComposeAgentBlueprint:
         assert data["summary"]["present"] is True
         assert manual["source"] == "arthur_operating_manual_writer"
         assert manual["domain"] == "rental_alat_pesta"
-        assert manual["maturity"] == "usable"
+        assert data["requires_user_input"] is True
+        assert manual["maturity"] == "needs_review"
+        assert manual["assumptions"] == []
+        assert any("Harga final harus dicek owner" in item for item in manual["missing_context"])
         assert manual["workflows"][0]["required_inputs"] == ["tanggal acara", "lokasi", "item yang disewa", "jumlah tamu"]
         assert "SOP Workflow Detail" in data["prompt_preview"]
 
@@ -1483,7 +1603,7 @@ class TestCreateAgent:
             "maturity": "usable",
             "owner_review_required": False,
             "missing_context": [],
-            "assumptions": ["Stok dan refund perlu dicek owner jika belum pasti."],
+            "assumptions": [],
             "workflows": [
                 {
                     "workflow_id": "order_intake",
@@ -1537,6 +1657,7 @@ class TestCreateAgent:
                         "pembayaran manual, agent harus eskalasi ke owner jika data belum pasti."
                     ),
                     "domain": "ecommerce",
+                    "operating_manual": writer_manual,
                     "tools_config": '{"memory": true, "escalation": true}',
                 }))
             data = json.loads(result)
@@ -1646,14 +1767,8 @@ class TestCreateAgent:
                 }))
             data = json.loads(result)
 
-        manual = captured_kwargs["tools_config"]["operating_manual"]
-        assert data["success"] is True
-        assert manual["source"] == "arthur_blueprint"
-        assert manual["domain"] == "rental_alat_pesta"
-        assert manual["maturity"] == "usable"
-        assert [workflow["workflow_id"] for workflow in manual["workflows"]] == ["intake", "owner_review"]
-        assert "tanggal acara" in manual["workflows"][0]["required_inputs"]
-        assert any("harga final" in item for item in manual["workflows"][1]["escalation_rules"])
+        assert "Operating manual terkonfirmasi wajib diisi" in data["error"]
+        assert captured_kwargs == {}
 
     def test_missing_business_context_creates_draft_intake_safe_sop(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -1757,7 +1872,7 @@ class TestCreateAgent:
             ) as writer:
                 tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
                 tool = next(t for t in tools if t.name == "create_agent")
-                _run(tool.ainvoke({
+                result = _run(tool.ainvoke({
                     "name": "Event Helper",
                     "description": "Agent WhatsApp untuk bantu orang menyiapkan acara.",
                     "instructions": "Kamu membantu calon pelanggan dengan ramah dan mengumpulkan kebutuhan mereka.",
@@ -1772,15 +1887,10 @@ class TestCreateAgent:
                     "channel_type": "whatsapp",
                 }))
 
-        manual = captured_kwargs["tools_config"]["operating_manual"]
-        assert writer.await_count == 1
-        assert manual["source"] == "arthur_operating_manual_writer_auto"
-        assert manual["domain"] == "event_equipment_operations"
-        assert manual["maturity"] == "usable"
-        assert manual["owner_review_required"] is False
-        assert [workflow["workflow_id"] for workflow in manual["workflows"]] == ["event_need_intake", "owner_review"]
-        assert "tanggal acara" in manual["workflows"][0]["required_inputs"]
-        assert any("kepastian biaya" in rule for rule in manual["workflows"][1]["escalation_rules"])
+        data = json.loads(result)
+        assert "Operating manual terkonfirmasi wajib diisi" in data["error"]
+        assert writer.await_count == 0
+        assert captured_kwargs == {}
 
     def test_create_agent_rewrites_generic_fallback_blueprint_with_semantic_sop(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -1852,7 +1962,7 @@ class TestCreateAgent:
             ):
                 tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
                 tool = next(t for t in tools if t.name == "create_agent")
-                _run(tool.ainvoke({
+                result = _run(tool.ainvoke({
                     "name": "Event Helper",
                     "description": "Agent WhatsApp untuk bantu pelanggan persiapan acara.",
                     "instructions": "Kamu membantu pelanggan mengumpulkan kebutuhan acara dan eskalasi kepastian biaya ke pemilik.",
@@ -1863,11 +1973,9 @@ class TestCreateAgent:
                     "blueprint": json.dumps(generic_blueprint),
                 }))
 
-        manual = captured_kwargs["tools_config"]["operating_manual"]
-        assert manual["source"] == "arthur_operating_manual_writer_auto"
-        assert manual["domain"] == "event_equipment_operations"
-        assert manual["workflows"][0]["workflow_id"] == "event_need_intake"
-        assert "tanggal acara" in manual["workflows"][0]["required_inputs"]
+        data = json.loads(result)
+        assert "Operating manual terkonfirmasi wajib diisi" in data["error"]
+        assert captured_kwargs == {}
 
     def test_event_context_does_not_fallback_to_food_or_ecommerce_sop_domain(self):
         from app.core.domain.agent_sop_service import build_agent_operating_manual
@@ -1950,6 +2058,13 @@ class TestCreateAgent:
                 "name": "CS Agent",
                 "instructions": "Kamu adalah CS yang membantu pelanggan.",
                 "file_capability": "text_only",
+                "operating_manual": _usable_operating_manual("customer_service"),
+                "discovery_answers": _confirmed_discovery(
+                    agent_name="CS Agent",
+                    problem="Customer terlalu lama menunggu jawaban dari tim CS.",
+                    capabilities="Menjawab pertanyaan customer sesuai informasi resmi.",
+                    expected_outputs="Jawaban CS yang akurat dan eskalasi ke admin saat tidak tahu.",
+                ),
             }))
             data = json.loads(result)
 
@@ -3346,6 +3461,33 @@ def test_create_file_agent_writer_fallback_keeps_media_tools_unlocked():
                     "send_whatsapp_image setelah artifact kembali."
                 ),
                 "business_context": "Agent personal untuk visualisasi data dari dokumen yang user kirim.",
+                "operating_manual": {
+                    "manual_id": "agent_operating_manual",
+                    "version": 1,
+                    "source": "owner_confirmed_test_brief",
+                    "domain": "personal_data_visualization",
+                    "maturity": "usable",
+                    "owner_review_required": False,
+                    "missing_context": [],
+                    "assumptions": [],
+                    "workflows": [{
+                        "workflow_id": "visualize_user_file",
+                        "name": "Visualisasi file user",
+                        "trigger": "User mengirim file dan meminta visualisasi.",
+                        "goal": "Membuat visualisasi dari file user dan mengirim hasilnya.",
+                        "required_inputs": ["file user", "jenis visualisasi"],
+                        "steps": ["Baca file user.", "Buat visualisasi.", "Kirim hasil final."],
+                        "decision_points": [],
+                        "allowed_tools": ["sandbox", "whatsapp_media"],
+                        "escalation_rules": [],
+                        "prohibited_actions": ["Jangan memakai data contoh."],
+                        "final_output": "File visualisasi terkirim ke user.",
+                        "examples": [],
+                    }],
+                    "knowledge_plan": {"must_have": [], "nice_to_have": [], "needs_upload": False},
+                    "memory_plan": [],
+                    "validation_checklist": ["Gunakan hanya file user."],
+                },
                 "file_capability": "enabled",
                 "tools_config": '{"memory": true, "skills": true, "sandbox": true, "whatsapp_media": true, "subagents": {"enabled": true}}',
                 "channel_type": "whatsapp",

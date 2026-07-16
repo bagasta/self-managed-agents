@@ -3,29 +3,20 @@ from __future__ import annotations
 
 import json
 import uuid
-from typing import Any, Awaitable, Callable
+from typing import Any, Callable
 
 import structlog
 from langchain_core.tools import tool
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app.core.domain.agent_sop_service import (
-    build_agent_operating_manual_from_blueprint,
-    ensure_operating_manual_in_tools_config,
-    summarize_operating_manual,
-    upsert_agent_operating_manual,
-)
+from app.core.domain.agent_sop_service import ensure_operating_manual_in_tools_config, summarize_operating_manual, upsert_agent_operating_manual
 from app.core.launch_safety import (
     SANDBOX_DISABLED_NOTICE,
     disable_sandbox_subagent_tools_config,
     sandbox_subagents_enabled,
 )
-from app.core.tools.builder_fallbacks import (
-    _blueprint_needs_semantic_operating_manual,
-    _fallback_agent_blueprint,
-    mark_manual_needs_review_if_fallback,
-)
+from app.core.tools.builder_discovery import discovery_operator_phone, validate_agent_discovery
 from app.core.tools.builder_google import has_google_workspace_tools as _has_google_workspace_tools
 from app.core.tools.builder_identity import (
     agent_created_by_metadata as _agent_created_by_metadata,
@@ -34,9 +25,7 @@ from app.core.tools.builder_identity import (
     owner_filter as _owner_filter,
     owner_variants as _owner_variants,
 )
-from app.core.tools.builder_json import parse_llm_json_object as _parse_llm_json_object
 from app.core.tools.builder_intent import (
-    _detect_preset_from_config,
     _file_capability_negated,
     _has_approval_state_contract,
     _looks_like_approval_gated_service,
@@ -51,9 +40,6 @@ from app.models.agent import Agent
 
 logger = structlog.get_logger(__name__)
 
-_BLUEPRINT_WRITER_MODEL = "deepseek/deepseek-v4-pro"
-
-AsyncCallable = Callable[..., Awaitable[Any]]
 LoggerProvider = Callable[[], Any]
 StringTransformer = Callable[[str], str]
 BlockProvider = Callable[[], str]
@@ -73,8 +59,6 @@ def build_builder_create_tools(
     owner_phone: str | None = None,
     self_agent_id: str | None = None,
     agent_model: Any = Agent,
-    preview_agent_creation_entitlement: AsyncCallable,
-    call_instruction_writer: AsyncCallable,
     append_platform_staff_identity_instruction: StringTransformer,
     append_google_workspace_instruction: StringTransformer,
     platform_staff_identity_block: BlockProvider,
@@ -82,124 +66,10 @@ def build_builder_create_tools(
 ) -> dict[str, Any]:
     _get_logger = get_logger or (lambda: logger)
     logger = _LoggerProxy(_get_logger)
-    _preview_agent_creation_entitlement = preview_agent_creation_entitlement
-    _call_instruction_writer = call_instruction_writer
     _append_platform_staff_identity_instruction = append_platform_staff_identity_instruction
     _append_google_workspace_instruction = append_google_workspace_instruction
     _platform_staff_identity_block = platform_staff_identity_block
 
-    async def _compose_semantic_operating_manual_from_context(
-        *,
-        name: str,
-        description: str,
-        instructions: str,
-        business_context: str,
-        domain: str,
-        channel_type: str,
-        tools_config: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        """Ask the writer to infer a SOP semantically when Arthur skipped manual/blueprint."""
-        context = "\n".join(
-            part
-            for part in (
-                f"agent_name: {name}" if name else "",
-                f"description: {description}" if description else "",
-                f"business_context: {business_context}" if business_context else "",
-                f"instructions: {instructions}" if instructions else "",
-            )
-            if part.strip()
-        )
-        if not context.strip():
-            return None
-
-        system_msg = (
-            "Kamu adalah senior operations designer untuk AI agent bisnis. "
-            "Tugasmu menyusun Agent Operating Manual/SOP dari makna konteks user, bukan dari pencocokan keyword. "
-            "Baca niat bisnis, aktor yang terlibat, data yang perlu dikumpulkan, keputusan yang harus ditahan untuk manusia, "
-            "risiko salah janji, dan definisi selesai. "
-            "Jangan bergantung pada nama domain atau kata kunci eksplisit; kalau user menjelaskan alur dengan bahasa sehari-hari, infer workflow dari alur itu. "
-            "Return HANYA JSON valid, tanpa markdown dan tanpa penjelasan di luar JSON."
-        )
-        user_msg = (
-            "Susun Agent Operating Manual/SOP dari konteks ini.\n\n"
-            f"{context}\n"
-            f"domain_hint: {domain or '-'}\n"
-            f"channel_type: {channel_type or '-'}\n"
-            f"tools_config: {json.dumps(tools_config, ensure_ascii=False)}\n\n"
-            "Schema JSON wajib:\n"
-            "{\n"
-            '  "manual_id": "agent_operating_manual",\n'
-            '  "version": 1,\n'
-            '  "source": "arthur_operating_manual_writer_auto",\n'
-            '  "domain": "domain hasil inferensi semantik",\n'
-            '  "domain_confidence": "high|medium|low",\n'
-            '  "maturity": "usable|needs_review|draft",\n'
-            '  "owner_review_required": false,\n'
-            '  "missing_context": ["hanya data kritis yang benar-benar belum ada"],\n'
-            '  "assumptions": ["asumsi operasional"],\n'
-            '  "workflows": [{\n'
-            '    "workflow_id": "snake_case_id",\n'
-            '    "name": "Nama workflow",\n'
-            '    "trigger": "Kapan workflow dimulai",\n'
-            '    "goal": "Tujuan workflow",\n'
-            '    "required_inputs": ["data wajib"],\n'
-            '    "steps": ["langkah konkret berurutan"],\n'
-            '    "decision_points": ["kondisi dan keputusan"],\n'
-            '    "allowed_tools": ["tool relevan"],\n'
-            '    "escalation_rules": ["kapan harus eskalasi ke manusia"],\n'
-            '    "prohibited_actions": ["hal yang tidak boleh dilakukan"],\n'
-            '    "final_output": "Definisi selesai yang nyata",\n'
-            '    "examples": ["contoh pendek jika perlu"]\n'
-            "  }],\n"
-            '  "knowledge_plan": {"must_have": ["..."], "nice_to_have": ["..."], "needs_upload": false},\n'
-            '  "memory_plan": [{"key": "...", "value_to_store": "..."}],\n'
-            '  "validation_checklist": ["..."]\n'
-            "}\n\n"
-            "Aturan kualitas:\n"
-            "- Buat SOP spesifik dari alur user, bukan SOP generic customer service.\n"
-            "- Untuk agent yang bicara dengan customer, minimal ada intake data, boundary keputusan manusia, dan follow-up/closing.\n"
-            "- Jika ada harga final, ketersediaan, booking, pembayaran, refund, komplain, atau approval, agent wajib berhenti dan eskalasi sebelum menjanjikan keputusan.\n"
-            "- Jika konteks cukup untuk bekerja aman, set maturity usable. Jangan needs_review hanya karena daftar harga/detail lengkap belum diberikan."
-        )
-        try:
-            raw = await _call_instruction_writer(
-                user_msg,
-                system_msg,
-                model=_BLUEPRINT_WRITER_MODEL,
-                max_tokens=7000,
-                temperature=0.1,
-                json_mode=True,
-            )
-            manual, _ = _parse_llm_json_object(raw)
-        except Exception as exc:
-            logger.warning(
-                "builder_tools.semantic_operating_manual.failed",
-                error=str(exc),
-                agent_name=name,
-                domain=domain,
-            )
-            return None
-
-        if not isinstance(manual.get("workflows"), list) or not manual["workflows"]:
-            logger.warning(
-                "builder_tools.semantic_operating_manual.empty_workflows",
-                agent_name=name,
-                domain=domain,
-            )
-            return None
-        manual.setdefault("manual_id", "agent_operating_manual")
-        manual.setdefault("version", 1)
-        manual.setdefault("source", "arthur_operating_manual_writer_auto")
-        manual.setdefault("domain", domain or "semantic_business_workflow")
-        manual.setdefault("domain_confidence", "medium")
-        manual.setdefault("maturity", "usable")
-        manual.setdefault("owner_review_required", manual.get("maturity") in {"draft", "needs_review"})
-        manual.setdefault("missing_context", [])
-        manual.setdefault("assumptions", [])
-        manual.setdefault("knowledge_plan", {"must_have": [], "nice_to_have": [], "needs_upload": bool(tools_config.get("rag"))})
-        manual.setdefault("memory_plan", [])
-        manual.setdefault("validation_checklist", [])
-        return manual
     Agent = agent_model
 
     @tool
@@ -223,6 +93,7 @@ def build_builder_create_tools(
         domain: str = "",
         operating_manual: Any = None,
         file_capability: str = "",
+        discovery_answers: Any = None,
     ) -> str:
         """
         Buat agent baru di platform dan simpan ke database.
@@ -246,10 +117,15 @@ def build_builder_create_tools(
             blueprint: Agent Blueprint hasil compose_agent_blueprint. Jika diisi, disimpan otomatis ke memory key='agent_blueprint'.
             business_context: Ringkasan konteks bisnis Owner dari interview Arthur. Dipakai untuk membuat SOP terpisah.
             domain: Bidang bisnis jika sudah diketahui, misal food_beverage, travel, ecommerce, local_service, clinic_wellness, education, property.
-            operating_manual: Agent Operating Manual/SOP artifact terstruktur. Jika kosong, Arthur/runtime membuat draft dari konteks.
+            operating_manual: Agent Operating Manual/SOP terstruktur. Wajib untuk agent pekerjaan/bisnis
+                yang dibuat Arthur; harus berasal dari discovery terkonfirmasi dan tidak boleh memuat asumsi.
             file_capability: Keputusan eksplisit kemampuan file agent — WAJIB diisi kalau kebutuhan file ambigu.
                 'enabled' = agent perlu menerima/membuat file (otomatis aktifkan sandbox+whatsapp_media+subagents);
                 'text_only' = user sudah konfirmasi agent hanya butuh teks. Kosongkan hanya jika workflow file sudah jelas dari instruksi.
+            discovery_answers: Salinan JSON/object discovery enam grup yang sudah lengkap dan dikonfirmasi user.
+                Untuk Arthur (self_agent_id tersedia), create diblokir jika ada jawaban wajib yang kosong,
+                contoh ideal kurang dari dua, eskalasi bisnis tidak detail, atau user_confirmed belum true.
+                Jam aktif/jam operasional agent tidak diminta dan tidak menjadi bagian schema discovery.
         """
         if not name or len(name.strip()) < 2:
             return "[error] Nama agent minimal 2 karakter"
@@ -269,6 +145,33 @@ def build_builder_create_tools(
                 "[error] Tidak bisa membuat agent karena owner_external_id tidak tersedia. "
                 "Pastikan Arthur dijalankan dari session user yang memiliki external_user_id."
             )
+        confirmed_discovery: dict[str, Any] = {}
+        discovery_context_text = ""
+        if self_agent_id:
+            discovery = validate_agent_discovery(
+                discovery_answers,
+                agent_name=name,
+                operator_phone=operator_phone,
+                require_confirmation=True,
+            )
+            if not discovery.get("complete"):
+                return json.dumps(
+                    {
+                        "error": "Discovery kebutuhan agent belum lengkap atau belum dikonfirmasi user.",
+                        "discovery_progress": discovery,
+                        "validation_errors": discovery.get("validation_errors") or [],
+                        "hint": (
+                            "Jangan create. Tanyakan seluruh pertanyaan pada next_group dalam satu pesan, "
+                            "panggil plan_agent lagi dengan jawaban lengkap, lalu minta konfirmasi akhir. "
+                            "Jangan menanyakan jam aktif/jam operasional agent."
+                        ),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            confirmed_discovery = dict(discovery.get("normalized_answers") or {})
+            discovery_context_text = json.dumps(confirmed_discovery, ensure_ascii=False)
+            operator_phone = operator_phone or discovery_operator_phone(discovery)
         requested_channel_type = str(channel_type or "").strip().lower()
         channel_type = "whatsapp" if requested_channel_type != "whatsapp" else requested_channel_type
 
@@ -294,59 +197,49 @@ def build_builder_create_tools(
         if operator_phone:
             tc["escalation"] = True
         operating_manual_input = operating_manual
-        used_fallback = False
-        if operating_manual_input in (None, "", {}) and str(blueprint or "").strip():
-            if _blueprint_needs_semantic_operating_manual(blueprint):
-                operating_manual_input = await _compose_semantic_operating_manual_from_context(
-                    name=name,
-                    description=description,
-                    instructions=instructions,
-                    business_context=business_context,
-                    domain=domain,
-                    channel_type=channel_type,
-                    tools_config=tc,
-                )
-            if operating_manual_input in (None, "", {}):
-                operating_manual_input = build_agent_operating_manual_from_blueprint(
-                    blueprint,
-                    name=name,
-                    description=description,
-                    business_context=business_context,
-                    domain=domain,
-                    tools_config=tc,
-                )
-        if operating_manual_input in (None, "", {}) and (business_context.strip() or description.strip()):
-            operating_manual_input = await _compose_semantic_operating_manual_from_context(
-                name=name,
-                description=description,
-                instructions=instructions,
-                business_context=business_context,
-                domain=domain,
-                channel_type=channel_type,
-                tools_config=tc,
+        confirmed_context_requires_manual = bool(
+            str(business_context or "").strip()
+            or str(blueprint or "").strip()
+            or str(domain or "").strip()
+            or (
+                bool(self_agent_id)
+                and str(confirmed_discovery.get("usage_context") or "") == "work"
             )
-        if operating_manual_input in (None, "", {}) and (business_context.strip() or description.strip()):
-            preset_for_manual = _detect_preset_from_config(tc, channel_type or "")
-            fallback_blueprint = _fallback_agent_blueprint(
-                preset_id=preset_for_manual,
-                user_goal=description or name,
-                agent_name=name,
-                business_context=business_context or instructions,
-                target_users="customer" if channel_type == "whatsapp" else "",
-                channel=channel_type or "",
-                requested_features=json.dumps(tc, ensure_ascii=False),
-                known_constraints="",
-                tools_config=tc,
+        )
+        if operating_manual_input in (None, "", {}) and confirmed_context_requires_manual:
+            return json.dumps({
+                "error": "Operating manual terkonfirmasi wajib diisi; runtime tidak boleh menyusunnya dari asumsi.",
+                "validation_errors": [
+                    "Konteks bisnis/blueprint/domain sudah diberikan, tetapi operating_manual belum ada."
+                ],
+                "hint": (
+                    "Panggil compose_agent_operating_manual. Jika hasilnya memiliki assumptions, missing_context, "
+                    "maturity draft/needs_review, atau requires_user_input=true, tanyakan user dulu dan jangan create."
+                ),
+            }, ensure_ascii=False, indent=2)
+        if operating_manual_input not in (None, "", {}):
+            parsed_manual, manual_error = _parse_json_arg(
+                operating_manual_input,
+                {},
+                expected=dict,
             )
-            operating_manual_input = build_agent_operating_manual_from_blueprint(
-                fallback_blueprint,
-                name=name,
-                description=description,
-                business_context=business_context or instructions,
-                domain=domain,
-                tools_config=tc,
-            )
-            used_fallback = True
+            if manual_error:
+                return json.dumps({
+                    "error": "operating_manual bukan JSON/object yang valid.",
+                    "validation_errors": [manual_error],
+                }, ensure_ascii=False, indent=2)
+            manual_assumptions = list(parsed_manual.get("assumptions") or [])
+            manual_missing_context = list(parsed_manual.get("missing_context") or [])
+            manual_maturity = str(parsed_manual.get("maturity") or "").strip().lower()
+            if manual_assumptions or manual_missing_context or manual_maturity in {"draft", "needs_review"}:
+                return json.dumps({
+                    "error": "Kebutuhan agent belum boleh dibuat karena SOP masih memuat asumsi atau konteks yang belum dikonfirmasi.",
+                    "assumptions": manual_assumptions,
+                    "missing_context": manual_missing_context,
+                    "maturity": manual_maturity or "unknown",
+                    "hint": "Tanyakan poin yang belum pasti kepada user, susun ulang SOP tanpa asumsi, lalu coba create_agent lagi.",
+                }, ensure_ascii=False, indent=2)
+            operating_manual_input = parsed_manual
         approval_gated_service = _looks_like_approval_gated_service(
             name,
             description,
@@ -380,23 +273,12 @@ def build_builder_create_tools(
             blueprint,
         )
         file_decision = str(file_capability or "").strip().lower()
-        fallback_file_workflow_is_safe_to_run = (
-            used_fallback
-            and channel_type == "whatsapp"
-            and not payment_approval_workflow
-            and (file_decision == "enabled" or file_delivery_workflow or generated_file_workflow)
-        )
-        operating_manual_input = mark_manual_needs_review_if_fallback(
-            operating_manual_input,
-            used_fallback=used_fallback,
-            allow_usable_fallback=fallback_file_workflow_is_safe_to_run,
-        )
         tc, generated_operating_manual = ensure_operating_manual_in_tools_config(
             tc,
             name=name,
             description=description,
             instructions=instructions,
-            business_context=business_context or blueprint or soul,
+            business_context=business_context or blueprint or soul or discovery_context_text,
             domain=domain,
             operating_manual=operating_manual_input,
         )
@@ -726,6 +608,7 @@ def build_builder_create_tools(
                 **created_by_metadata,
                 "platform_identity_added": platform_identity_added,
                 "operating_manual": summarize_operating_manual(generated_operating_manual),
+                "discovery_complete": bool(confirmed_discovery) if self_agent_id else None,
                 "whatsapp_onboarding_required": agent.channel_type == "whatsapp",
                 "api_key": agent.api_key,
                 "token_quota": agent.token_quota,
@@ -742,8 +625,8 @@ def build_builder_create_tools(
                 "message": (
                     f"Agent '{agent.name}' berhasil dibuat dengan ID: {agent.id}. "
                     "Simpan agent_id ini sebagai target utama untuk aksi lanjutan pada percakapan ini. "
-                    "Jika channel_type adalah whatsapp, jawaban ke user WAJIB langsung lanjut ke onboarding: "
-                    "'Mau agent ini langsung dipasang ke nomor WhatsApp kamu sendiri, atau dicoba dulu lewat nomor demo Arthur yang sudah siap pakai?' "
+                    "Jika channel_type adalah whatsapp, jawaban ke user WAJIB mengarahkan uji coba nomor demo Arthur terlebih dahulu. "
+                    "Jangan menawarkan pemasangan nomor WhatsApp user sebelum user mencoba demo dan menyatakan cocok, kecuali user memintanya sendiri. "
                     "Jangan berhenti hanya dengan menyebut agent sudah jadi atau ID agent. "
                     "Jika google_workspace_enabled=true, langkah berikutnya adalah generate_google_auth_link lalu kirim link login Google; "
                     "jangan menunggu user bertanya cara koneknya. "

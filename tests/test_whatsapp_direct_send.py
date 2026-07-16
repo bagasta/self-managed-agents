@@ -591,27 +591,30 @@ def test_builder_prompt_blocks_repeated_continue_questions():
     )
 
     assert "## Arthur Builder Mode" in prompt
-    assert "plan_agent -> compose_agent_blueprint -> compose_agent_operating_manual -> compose_agent_instructions -> validate_agent_config -> compose_agent_soul -> create_agent -> verify_agent" in prompt
+    assert "rangkuman kebutuhan yang lengkap dan tidak ambigu" in prompt
+    assert "plan_agent -> compose_agent_blueprint -> compose_agent_operating_manual -> compose_agent_instructions -> validate_agent_config -> compose_agent_soul -> create_agent(discovery_answers yang sama) -> verify_agent" in prompt
     assert "## Arthur Tool Categories" in prompt
     assert "Agent Builder" in prompt
     assert "Agent Management" in prompt
     assert "Channel Management" in prompt
     assert "Workspace/App Connectors" in prompt
     assert "sampai user tahu langkah berikutnya" in prompt
-    assert "cara test, cara connect Google, cara pasang WhatsApp" in prompt
-    assert "brief minimal sudah jelas" in prompt
-    assert "Wawancara singkat dulu" in prompt
-    assert "maksimal 3 hal paling penting" in prompt
+    assert "inisiatif hanya boleh mengikuti kebutuhan yang sudah dikonfirmasi" in prompt
+    assert "discovery enam grup secara lengkap" in prompt
+    assert "Mulai dari Grup 1" in prompt
+    assert "Discovery dilakukan satu grup per pesan" in prompt
     assert "minta pembayaran, bukti apa yang diminta" in prompt
-    assert "Jangan berhenti hanya untuk menampilkan rencana" in prompt
+    assert "Rangkuman dan konfirmasi kebutuhan adalah gerbang wajib" in prompt
     assert "Jangan mengunci preset hanya dari satu kata kunci" in prompt
     assert "jangan menyebut label preset internal" in prompt
     assert "google_workspace_option.should_offer=true" in prompt
     assert "Mau sekalian dihubungkan ke Google" in prompt
     assert "user membalas nama seperti `Travgent`" in prompt
-    assert "Jangan mengulang plan_agent/compose_agent_instructions" in prompt
+    assert "anggap hanya nama itu yang terkonfirmasi" in prompt
+    assert "Jangan mengulang composer jika kebutuhan tidak berubah" in prompt
     assert "jangan menyebut nama tool internal" in prompt
-    assert "Mau agent ini langsung dipasang ke nomor WhatsApp kamu sendiri" in prompt
+    assert "Kita coba dulu lewat nomor demo Arthur" in prompt
+    assert "Nomor WhatsApp user baru boleh ditawarkan setelah user mencoba demo" in prompt
     assert "nomor demo Arthur" in prompt
     assert "jangan berhenti hanya dengan `agent sudah jadi` atau ID agent" in prompt
     assert "terus gimana pakenya?" in prompt
@@ -620,7 +623,7 @@ def test_builder_prompt_blocks_repeated_continue_questions():
     assert "agent_name atau agent_id" in prompt
     assert "pastikan active_until masih aktif sebelum memanggil create_wa_dev_trial_link" in prompt
     assert "jangan kirim kode dulu: list_my_agents/get_agent_detail, panggil renew_agent" in prompt
-    assert "jangan menjawab `langsung aku betulin`" in prompt
+    assert "Jangan menjawab `langsung aku betulin`" in prompt
     assert "DILARANG memakai task, subagent, sandbox, read_file, edit_file, atau write_file" in prompt
     assert "get_agent_detail(include_instructions=true)" in prompt
     # Launch-safe temporary-limits block is only present when the kill switch is OFF.
@@ -662,7 +665,7 @@ def test_arthur_builder_mode_knows_crud_is_primary_job():
     )
 
     assert "## Arthur Builder Mode" in prompt
-    assert "membuat, mengubah, mengecek, dan menyiapkan agent user" in prompt
+    assert "memahami workflow user, menjelaskan eskalasi" in prompt
     assert "Arthur Builder: aktif" in prompt
     assert "membuat, membaca, mengubah, dan menghapus agent platform milik Owner" in prompt
 

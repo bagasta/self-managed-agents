@@ -125,7 +125,7 @@ def test_builder_create_agent_success_overrides_unclear_non_empty_reply():
     assert out == "Travgent sudah jadi. ID agent: agent-123."
 
 
-def test_builder_create_whatsapp_agent_success_includes_onboarding_options():
+def test_builder_create_whatsapp_agent_success_uses_demo_first_onboarding():
     steps = [
         {
             "tool": "create_agent",
@@ -134,7 +134,7 @@ def test_builder_create_whatsapp_agent_success_includes_onboarding_options():
     ]
     out = ensure_non_empty_reply("", steps)
     assert "CVin aja sudah jadi" in out
-    assert "nomor WhatsApp kamu sendiri" in out
+    assert "nomor WhatsApp kamu sendiri" not in out
     assert "nomor demo Arthur" in out
     assert "agent-123" not in out
 
@@ -148,8 +148,8 @@ def test_builder_create_whatsapp_agent_overrides_id_only_reply():
     ]
     out = ensure_non_empty_reply("CVin aja sudah jadi. ID agent: agent-123.", steps)
     assert out == (
-        "CVin aja sudah jadi. Sekarang mau agent ini langsung dipasang ke nomor WhatsApp kamu sendiri, "
-        "atau dicoba dulu lewat nomor demo Arthur yang sudah siap pakai?"
+        "CVin aja sudah jadi. Kita coba dulu lewat nomor demo Arthur supaya kamu bisa cek kualitas jawaban "
+        "dan alurnya tanpa setup nomor sendiri, ya?"
     )
 
 
@@ -274,7 +274,7 @@ def test_builder_reply_sanitizes_webchat_channel_offer():
     assert "Fokus risetnya" in out
     assert "Channelnya saya set ke WhatsApp" in out
     assert "nomor demo Arthur" in out
-    assert "nomor WhatsApp kamu sendiri" in out
+    assert "nomor WhatsApp kamu sendiri" not in out
 
 
 def test_builder_update_agent_success_reply_is_natural():

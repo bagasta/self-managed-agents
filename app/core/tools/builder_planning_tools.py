@@ -13,6 +13,11 @@ from app.core.launch_safety import (
     sandbox_subagents_enabled,
 )
 from app.core.tools.builder_catalog import AGENT_PRESETS, RUNTIME_LIMITATIONS, _DEFAULT_MODEL
+from app.core.tools.builder_discovery import (
+    discovery_escalation_policy,
+    discovery_operator_phone,
+    validate_agent_discovery,
+)
 from app.core.tools.builder_google import (
     enable_google_workspace_tools as _enable_google_workspace_tools,
     google_workspace_option as _google_workspace_option,
@@ -155,6 +160,23 @@ def re_sub_word(word: str, replacement: str, text: str) -> str:
     return re.sub(rf"\b{re.escape(word)}\b", replacement, text).strip()
 
 
+def _discovery_clarification_payload(discovery: dict[str, Any]) -> dict[str, Any]:
+    next_group = discovery.get("next_group") or {}
+    return {
+        "plan_status": "needs_clarification",
+        "detected_preset": "",
+        "discovery_progress": discovery,
+        "capability_clarifications": discovery.get("next_questions") or [],
+        "next_action": (
+            "JANGAN create_agent atau compose artifact dulu. Tanyakan seluruh pertanyaan pada "
+            f"{next_group.get('label') or 'grup discovery berikutnya'} dalam satu pesan yang ringkas, "
+            "simpan jawaban faktualnya, lalu panggil plan_agent lagi dengan discovery_answers lengkap "
+            "(jawaban grup sebelumnya tetap disertakan). Jangan menanyakan jam aktif/jam operasional agent. "
+            "Setelah semua grup lengkap, rangkum dan minta satu konfirmasi akhir dari user."
+        ),
+    }
+
+
 def build_builder_planning_tools(
     *,
     preview_agent_creation_entitlement: PreviewEntitlement,
@@ -170,6 +192,8 @@ def build_builder_planning_tools(
         persona: str = "",
         business_context: str = "",
         operator_phone: str = "",
+        escalation_policy: str = "",
+        discovery_answers: Any = None,
     ) -> str:
         """
         Buat rencana agent terstruktur berdasarkan goal user sebelum create.
@@ -177,10 +201,10 @@ def build_builder_planning_tools(
         validation warnings, dan langkah selanjutnya.
 
         Gunakan ini SEBELUM create_agent untuk memastikan config sudah tepat.
-        Ini bukan approval gate. Setelah plan siap, lanjutkan ke compose_agent_blueprint,
-        compose_agent_instructions, validate_agent_config, lalu create_agent tanpa bertanya
-        "setuju/lanjut?" kecuali ada validation_errors atau data kritis yang benar-benar
-        wajib dari user.
+        Plan adalah gerbang kelengkapan brief enam grup. Semua grup discovery (kecuali
+        jam aktif/jam operasional agent) harus lengkap, lalu dirangkum dan dikonfirmasi
+        user satu kali sebelum compose/create. Setelah itu tidak perlu meminta approval
+        mikro untuk tiap artifact internal.
 
         PENGECUALIAN WAJIB: kalau plan_status == "needs_clarification" atau ada isi di
         capability_clarifications, JANGAN create dulu. Tanyakan dulu kebutuhan itu ke user
@@ -195,6 +219,16 @@ def build_builder_planning_tools(
             persona: Persona/gaya bicara agent (opsional)
             business_context: Konteks bisnis untuk agent CS/FAQ (opsional)
             operator_phone: Nomor operator/admin untuk eskalasi (opsional)
+            escalation_policy: Pilihan eksplisit user: 'owner', 'operator', atau 'none'. Kosong berarti belum dikonfirmasi.
+            discovery_answers: JSON/object berisi seluruh jawaban discovery yang sudah user berikan:
+                problem, usage_context (personal/work), agent_name, audience, main_tasks,
+                capabilities, prohibited_actions, allowed_actions, tone_style,
+                ideal_conversations (2-3 contoh), avoided_conversations, unknown_handling,
+                escalation_target (untuk work: conditions, recipient, whatsapp_number),
+                knowledge_sources, sensitive_data_policy, whatsapp_scale, daily_chat_volume,
+                integrations, expected_outputs, vision_requirement, go_live_approver (work),
+                dan user_confirmed=true setelah rangkuman akhir disetujui. Selalu kirim ulang
+                jawaban lengkap yang sudah terkumpul. Jangan menyertakan operational_hours/jam aktif.
         """
         policy_reason = _blocked_agent_policy_reason(
             user_goal,
@@ -210,12 +244,14 @@ def build_builder_planning_tools(
                 "next_action": "Tolak permintaan ini dengan singkat dan tawarkan jenis agent non-politik/non-buzzer.",
             }, ensure_ascii=False, indent=2)
 
-        if _needs_agent_purpose_clarification(
-            user_goal=user_goal,
-            requested_features=requested_features,
-            persona=persona,
-            business_context=business_context,
-        ):
+        discovery = validate_agent_discovery(
+            discovery_answers,
+            agent_name=agent_name,
+            operator_phone=operator_phone,
+            require_confirmation=True,
+        )
+        if not discovery.get("complete"):
+            # Check the basic creation slot before making the user complete a long discovery.
             early_channel = str(channel or "").strip().lower() or "whatsapp"
             if early_channel != "whatsapp":
                 early_channel = "whatsapp"
@@ -259,28 +295,34 @@ def build_builder_planning_tools(
                     "creation_entitlement_check": early_entitlement_check,
                     "next_action": next_action,
                 }, ensure_ascii=False, indent=2)
-            return json.dumps({
-                "plan_status": "needs_clarification",
-                "detected_preset": "",
-                "capability_clarifications": [
-                    {
-                        "topic": "agent_purpose",
-                        "question": (
-                            "Agent barunya mau dipakai untuk apa, siapa yang akan chat dengan agent itu, "
-                            "dan hasil akhir apa yang harus agent lakukan?"
-                        ),
-                    }
-                ],
-                "next_action": (
-                    "JANGAN create_agent dulu. User baru meminta dibuatkan agent tanpa brief tujuan. "
-                    "Tanyakan 1 pertanyaan singkat tentang fungsi agent, target pengguna, dan hasil akhir. "
-                    "Jangan memakai kebutuhan agent lama/history sebagai asumsi untuk agent baru."
-                ),
-            }, ensure_ascii=False, indent=2)
+            return json.dumps(
+                _discovery_clarification_payload(discovery),
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        original_user_goal = str(user_goal or "").strip()
+        confirmed_discovery = dict(discovery.get("normalized_answers") or {})
+        agent_name = str(confirmed_discovery.get("agent_name") or agent_name).strip()
+        user_goal = str(confirmed_discovery.get("problem") or user_goal).strip()
+        persona = str(confirmed_discovery.get("tone_style") or persona).strip()
+        operator_phone = operator_phone or discovery_operator_phone(discovery)
+        escalation_policy = discovery_escalation_policy(discovery)
+        discovery_context_text = json.dumps(confirmed_discovery, ensure_ascii=False)
 
         features = [f.strip().lower() for f in requested_features.split(",") if f.strip()]
-        feature_text = _combined_context_text(user_goal, requested_features, business_context)
-        google_context_text = f"{user_goal} {requested_features} {business_context}"
+        feature_text = _combined_context_text(
+            original_user_goal,
+            user_goal,
+            requested_features,
+            business_context,
+            discovery_context_text,
+        )
+        discovery_integrations = str(confirmed_discovery.get("integrations") or "")
+        google_context_text = (
+            f"{original_user_goal} {user_goal} {requested_features} "
+            f"{business_context} {discovery_integrations}"
+        )
 
         # Auto-detect preset from goal keywords
         detected_preset = _detect_preset(feature_text, features, channel)
@@ -328,9 +370,9 @@ def build_builder_planning_tools(
         wants_files = file_delivery_workflow or wants_cv_document
         wants_generated_files = generated_file_workflow or wants_cv_document
         plain_google_form_link = _is_plain_google_form_link_reference(google_context_text)
-        google_negated = _negates_google_workspace(feature_text)
+        google_negated = _negates_google_workspace(google_context_text)
         wants_google = (
-            any(k in feature_text for k in ("google", "gmail", "calendar", "drive", "docs", "sheets", "workspace"))
+            any(k in google_context_text.lower() for k in ("google", "gmail", "calendar", "drive", "docs", "sheets", "workspace"))
             and not plain_google_form_link
             and not google_negated
         )
@@ -393,6 +435,11 @@ def build_builder_planning_tools(
         )
         if needs_human_handoff:
             tools_config["escalation"] = True
+        normalized_escalation_policy = str(escalation_policy or "").strip().lower()
+        if normalized_escalation_policy == "none" and not (approval_gated_service or payment_approval_workflow):
+            tools_config["escalation"] = False
+        elif normalized_escalation_policy in {"owner", "operator"}:
+            tools_config["escalation"] = True
         if wants_google:
             tools_config = _enable_google_workspace_tools(tools_config)
 
@@ -403,7 +450,8 @@ def build_builder_planning_tools(
         # filenya tersimpan. Kalau sinyal kebutuhan file tidak jelas DAN tidak dinegasikan user,
         # Arthur WAJIB tanya dulu sebelum create — bukan menebak.
         file_capability_signal = bool(
-            wants_files
+            discovery.get("complete")
+            or wants_files
             or wants_generated_files
             or explicit_media_request
             or file_delivery_workflow
@@ -421,6 +469,14 @@ def build_builder_planning_tools(
                 detected_preset=detected_preset,
             )
         )
+        if normalized_escalation_policy == "none" and (approval_gated_service or payment_approval_workflow):
+            capability_clarifications.append({
+                "topic": "escalation_required_for_approval",
+                "question": (
+                    "Workflow ini membutuhkan keputusan pembayaran/approval manusia. "
+                    "Siapa Owner atau operator/admin yang harus menerima eskalasi?"
+                ),
+            })
         if not file_capability_signal and not file_capability_negated and not file_ready:
             capability_clarifications.append(
                 {
@@ -559,17 +615,20 @@ def build_builder_planning_tools(
         else:
             next_action = (
                 "Untuk agent bisnis/custom, panggil compose_agent_blueprint lalu compose_agent_instructions. "
-                "Setelah itu validate_agent_config dan create_agent tanpa minta approval mikro."
+                "Setelah workflow, eskalasi, dan rangkuman kebutuhan dikonfirmasi user, lanjut validate_agent_config dan create_agent."
             )
         plan = {
             "plan_status": plan_status,
             "detected_preset": detected_preset,
             "preset_label": preset.get("label", "Custom"),
-            "agent_name": agent_name or f"Agent {detected_preset.replace('_', ' ').title()}",
+            "agent_name": agent_name,
             "business_goal": user_goal,
+            "escalation_policy": normalized_escalation_policy,
             "channel": effective_channel,
             "persona": persona or "ramah dan profesional",
             "business_context": business_context,
+            "discovery": discovery,
+            "confirmed_discovery": confirmed_discovery,
             "blueprint_seed": {
                 "agent_summary": f"{agent_name or 'Agent ini'} dibuat untuk {user_goal}",
                 "customization_goal": (
@@ -577,6 +636,7 @@ def build_builder_planning_tools(
                     "produk, tim, atau industri. Jangan hanya mengandalkan persona generik."
                 ),
                 "known_business_context": business_context,
+                "confirmed_discovery": confirmed_discovery,
                 "requested_features": features,
                 "design_considerations": [
                     "Langkah kerja ideal agent dari awal sampai selesai.",

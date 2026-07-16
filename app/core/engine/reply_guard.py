@@ -174,14 +174,14 @@ def _sanitize_builder_channel_reply(reply: str) -> str:
 
     sanitized = "\n".join(kept_lines).strip()
     channel_note = (
-        "Channelnya saya set ke WhatsApp. Setelah jadi, bisa dicoba lewat nomor demo Arthur "
-        "atau dipasang ke nomor WhatsApp kamu sendiri."
+        "Channelnya saya set ke WhatsApp. Setelah jadi, kita uji dulu lewat nomor demo Arthur "
+        "supaya kualitas jawaban dan alurnya bisa dicek tanpa setup nomor sendiri."
     )
     if not removed_channel_offer:
         return sanitized or channel_note
     if not sanitized:
         return channel_note
-    if "nomor demo arthur" in sanitized.lower() and "nomor whatsapp kamu sendiri" in sanitized.lower():
+    if "nomor demo arthur" in sanitized.lower() and "nomor whatsapp kamu sendiri" not in sanitized.lower():
         return sanitized
     return f"{sanitized}\n\n{channel_note}"
 
@@ -194,8 +194,8 @@ def _create_agent_success_reply(data: dict[str, Any]) -> str:
     if channel == "whatsapp":
         return (
             f"{name} sudah jadi. "
-            "Sekarang mau agent ini langsung dipasang ke nomor WhatsApp kamu sendiri, "
-            "atau dicoba dulu lewat nomor demo Arthur yang sudah siap pakai?"
+            "Kita coba dulu lewat nomor demo Arthur supaya kamu bisa cek kualitas jawaban "
+            "dan alurnya tanpa setup nomor sendiri, ya?"
         )
     if agent_id:
         return f"{name} sudah jadi. ID agent: {agent_id}."

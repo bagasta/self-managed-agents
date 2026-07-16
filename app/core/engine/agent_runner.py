@@ -1256,85 +1256,7 @@ async def run_agent(
         )
         step_counter = step_base + 1
 
-        _progress_last_sent_at: float = 0.0
-        _progress_sent_count: int = 0
-        _progress_important_tools = {
-            "task",
-            "deploy_app",
-            "execute",
-            "send_whatsapp_document",
-            "send_whatsapp_image",
-            "plan_agent",
-            "compose_agent_blueprint",
-            "compose_agent_instructions",
-            "compose_agent_soul",
-            "validate_agent_config",
-            "create_agent",
-            "update_agent",
-        }
-        _progress_notice_task: asyncio.Task | None = None
-        _progress_notice_sent: bool = False
-        _progress_finished: bool = False
-        _long_progress_notice_seconds = max(
-            5.0,
-            float(getattr(settings, "wa_long_progress_notice_seconds", 25.0) or 25.0),
-        )
-
-        async def _schedule_wa_long_progress_notice(reason: str) -> None:
-            nonlocal _progress_last_sent_at, _progress_sent_count, _progress_notice_task, _progress_notice_sent
-            if not _is_wa_session:
-                return
-
-            import time as _time
-            now_ts = _time.monotonic()
-            if _progress_notice_task is not None or _progress_notice_sent:
-                return
-            _progress_last_sent_at = now_ts
-
-            async def _send_delayed_notice() -> None:
-                nonlocal _progress_sent_count, _progress_notice_sent
-                try:
-                    await asyncio.sleep(_long_progress_notice_seconds)
-                    if _progress_finished or _progress_notice_sent:
-                        return
-                    from app.core.infra.wa_client import send_wa_message, start_wa_typing
-
-                    message = "Masih saya proses ya. Saya akan kirim hasilnya begitu selesai."
-                    await send_wa_message(_wa_device_id, _wa_target, message)
-                    with contextlib.suppress(Exception):
-                        await start_wa_typing(_wa_device_id, _wa_target)
-                    _progress_notice_sent = True
-                    _progress_sent_count += 1
-                    log.info("agent_run.wa_long_progress_notice_sent", reason=reason)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    log.warning("agent_run.wa_long_progress_notice_failed", reason=reason, error=str(exc)[:200])
-
-            _progress_notice_task = asyncio.create_task(_send_delayed_notice())
-
-        async def _wa_progress_callback(tool_name: str, input_payload: Any, phase: str, output: Any | None) -> None:
-            if tool_name == "notify_user":
-                return
-            if tool_name not in _progress_important_tools:
-                return
-            if phase != "start":
-                return
-            await _schedule_wa_long_progress_notice(tool_name)
-
-        async def _cancel_wa_long_progress_notice() -> None:
-            nonlocal _progress_finished, _progress_notice_task
-            _progress_finished = True
-            if _progress_notice_task is None:
-                return
-            _progress_notice_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await _progress_notice_task
-            _progress_notice_task = None
-
-        _agent_logger = AgentStepLogger(log,
-            progress_callback=_wa_progress_callback if _is_wa_session else None,
-        )
+        _agent_logger = AgentStepLogger(log)
 
         def _usage_summary() -> dict[str, Any]:
             return {
@@ -1631,7 +1553,6 @@ async def run_agent(
                 status="cancelled",
                 error_message="Cancelled because a newer user message interrupted this run.",
             )
-            await _cancel_wa_long_progress_notice()
             await _cleanup_sandboxes()
             raise  # propagate so the task is properly marked cancelled
         except asyncio.TimeoutError:
@@ -1646,7 +1567,6 @@ async def run_agent(
                 status="timed_out",
                 error_message=f"Timeout after {_timeout}s",
             )
-            await _cancel_wa_long_progress_notice()
             await _cleanup_sandboxes()
             await send_agent_recovery_message(
                 is_wa_session=_is_wa_session,
@@ -1693,7 +1613,6 @@ async def run_agent(
                     run_record.error_message = str(_retry_json_exc)[:2000]
                     _apply_run_usage(_agent_logger.total_tokens_from_callbacks)
                     await db.flush()
-                    await _cancel_wa_long_progress_notice()
                     await _cleanup_sandboxes()
                     await send_agent_recovery_message(
                         is_wa_session=_is_wa_session,
@@ -2048,7 +1967,6 @@ async def run_agent(
                         status="failed",
                         error_message=err_str,
                     )
-                    await _cancel_wa_long_progress_notice()
                     await _cleanup_sandboxes()
                     await send_agent_recovery_message(
                         is_wa_session=_is_wa_session,
@@ -2446,8 +2364,6 @@ async def run_agent(
                 scope=_memory_scope,
             )
 
-    await _cancel_wa_long_progress_notice()
-
     # cleanup
     await _cleanup_sandboxes()
 
@@ -2571,10 +2487,13 @@ async def run_agent(
             log=log,
         )
 
+    _completed_at = datetime.now(timezone.utc)
+    _duration_ms = max(0, int((_completed_at - _now).total_seconds() * 1000))
     log.info(
         "agent_run.complete",
         steps=len(steps),
         reply_len=len(final_reply),
+        duration_ms=_duration_ms,
         tokens_used=total_tokens_used,
         prompt_tokens=_agent_logger.prompt_tokens_from_callbacks,
         completion_tokens=_agent_logger.completion_tokens_from_callbacks,
@@ -2583,7 +2502,7 @@ async def run_agent(
 
     # Update Run → completed
     run_record.status = "completed"
-    run_record.completed_at = datetime.now(timezone.utc)
+    run_record.completed_at = _completed_at
     _apply_run_usage(total_tokens_used)
     await db.flush()
 

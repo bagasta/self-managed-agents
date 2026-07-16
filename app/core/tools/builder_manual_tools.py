@@ -100,10 +100,11 @@ def build_builder_manual_tools(
                 "operating_manual": manual,
                 "summary": summarize_operating_manual(manual),
                 "parse_status": parse_status,
+                "requires_user_input": True,
                 "prompt_preview": format_operating_manual_for_prompt(manual)[:1800],
                 "next_step": (
-                    "Gunakan operating_manual ini sebagai parameter create_agent/update_agent. "
-                    "Jangan membuat agent bisnis tanpa SOP ini kecuali user hanya meminta agent coding sederhana."
+                    "Jangan gunakan SOP fallback untuk create/update karena dapat berisi asumsi. "
+                    "Minta user melengkapi workflow lalu susun ulang operating manual."
                 ),
             }, ensure_ascii=False, indent=2)
 
@@ -112,6 +113,7 @@ def build_builder_manual_tools(
             "Tugasmu mengubah kebutuhan user dan Agent Blueprint menjadi Agent Operating Manual/SOP yang konkret, spesifik, dan siap dipakai runtime. "
             "Jangan membuat SOP generik. Tulis seperti SOP pekerja manusia: state kerja, data wajib, langkah tindakan, decision points, handoff manusia, larangan, dan output akhir. "
             "Jika ada pembayaran, bukti transfer, approval admin, booking, refund, deliverable, file, atau integrasi akun, SOP harus menyebut kapan agent boleh lanjut dan kapan wajib berhenti/eskalasi. "
+            "DILARANG membuat asumsi. Data yang belum diberikan harus dicatat di missing_context dan membuat maturity needs_review. "
             "Return HANYA JSON valid, tanpa markdown dan tanpa penjelasan di luar JSON."
         )
         user_msg = (
@@ -138,7 +140,7 @@ def build_builder_manual_tools(
             '  "maturity": "usable",\n'
             '  "owner_review_required": false,\n'
             '  "missing_context": [],\n'
-            '  "assumptions": ["asumsi operasional yang dibuat"],\n'
+            '  "assumptions": [],\n'
             '  "workflows": [{\n'
             '    "workflow_id": "snake_case_id",\n'
             '    "name": "Nama workflow",\n'
@@ -162,6 +164,7 @@ def build_builder_manual_tools(
             "- Untuk payment/approval/delivery, workflow wajib memisahkan intake, payment_review, approved/fulfillment, delivery, dan aftercare.\n"
             "- Jika business_context cukup, maturity harus usable dan owner_review_required false.\n"
             "- Jika ada data kritis belum ada, isi missing_context dengan data itu dan set maturity needs_review.\n"
+            "- assumptions harus selalu kosong. Jangan menginfer harga, SOP, kewenangan, operator, kondisi eskalasi, atau hasil akhir.\n"
             "- Jangan menaruh SOP lengkap di instructions; SOP ini disimpan sebagai operating_manual terpisah."
         )
 
@@ -170,7 +173,7 @@ def build_builder_manual_tools(
                 user_msg,
                 system_msg,
                 model=_BLUEPRINT_WRITER_MODEL,
-                max_tokens=7000,
+                max_tokens=4000,
                 temperature=0.15,
                 json_mode=True,
             )
@@ -207,14 +210,28 @@ def build_builder_manual_tools(
             )
             return _fallback_response("deterministic_fallback")
 
+        assumptions = list(manual.get("assumptions") or [])
+        missing_context = list(manual.get("missing_context") or [])
+        requires_user_input = bool(assumptions or missing_context or manual.get("maturity") in {"draft", "needs_review"})
+        if assumptions:
+            manual["missing_context"] = [
+                *missing_context,
+                *[f"Perlu konfirmasi user; jangan diasumsikan: {item}" for item in assumptions],
+            ]
+            manual["assumptions"] = []
+            manual["maturity"] = "needs_review"
+            manual["owner_review_required"] = True
+
         summary = summarize_operating_manual(manual)
         payload = {
             "operating_manual": manual,
             "summary": summary,
+            "requires_user_input": requires_user_input,
             "prompt_preview": format_operating_manual_for_prompt(manual)[:1800],
             "next_step": (
-                "Gunakan operating_manual ini sebagai parameter create_agent/update_agent. "
-                "Setelah itu validate_agent_config dan create_agent/update_agent tanpa minta approval mikro."
+                "Tanyakan missing_context dan tunggu jawaban user; jangan lanjut create/update."
+                if requires_user_input
+                else "Gunakan operating_manual ini sebagai parameter create_agent/update_agent."
             ),
         }
         if repaired_json:

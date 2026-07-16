@@ -247,6 +247,39 @@ def build_builder_update_tools(
             if policy_reason:
                 return json.dumps({"error": policy_reason}, ensure_ascii=False)
 
+            if (business_context.strip() or domain.strip()) and operating_manual in (None, "", {}):
+                return json.dumps({
+                    "error": "Operating manual terkonfirmasi wajib untuk perubahan workflow/bisnis.",
+                    "hint": (
+                        "Susun ulang operating manual dari kebutuhan user. Jika masih ada assumptions atau "
+                        "missing_context, tanyakan user dulu dan jangan update."
+                    ),
+                }, ensure_ascii=False, indent=2)
+            if operating_manual not in (None, "", {}):
+                if isinstance(operating_manual, str):
+                    try:
+                        operating_manual = json.loads(operating_manual)
+                    except json.JSONDecodeError as exc:
+                        return json.dumps({
+                            "error": "operating_manual bukan JSON/object yang valid.",
+                            "validation_errors": [str(exc)],
+                        }, ensure_ascii=False, indent=2)
+                if not isinstance(operating_manual, dict):
+                    return json.dumps({
+                        "error": "operating_manual harus berupa object.",
+                    }, ensure_ascii=False, indent=2)
+                manual_assumptions = list(operating_manual.get("assumptions") or [])
+                manual_missing_context = list(operating_manual.get("missing_context") or [])
+                manual_maturity = str(operating_manual.get("maturity") or "").strip().lower()
+                if manual_assumptions or manual_missing_context or manual_maturity in {"draft", "needs_review"}:
+                    return json.dumps({
+                        "error": "Update diblokir karena SOP masih memuat asumsi atau konteks yang belum dikonfirmasi.",
+                        "assumptions": manual_assumptions,
+                        "missing_context": manual_missing_context,
+                        "maturity": manual_maturity or "unknown",
+                        "hint": "Tanyakan poin yang belum pasti, susun ulang SOP tanpa asumsi, lalu update lagi.",
+                    }, ensure_ascii=False, indent=2)
+
             if name and name.strip():
                 dup_result = await db.execute(
                     select(Agent).where(

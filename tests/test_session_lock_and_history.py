@@ -188,12 +188,12 @@ class TestWhatsAppRunLifecycle:
         return_pos = src.index('return {\n        "reply": final_reply')
         assert cleanup_pos < return_pos
 
-    def test_long_progress_notice_not_scheduled_for_every_wa_run(self):
+    def test_static_long_progress_notice_is_removed(self):
         from app.core.engine import agent_runner
 
         src = inspect.getsource(agent_runner.run_agent)
-        assert '_schedule_wa_long_progress_notice("run")' not in src
-        assert "await _schedule_wa_long_progress_notice(tool_name)" in src
+        assert "_schedule_wa_long_progress_notice" not in src
+        assert "Masih saya proses ya" not in src
 
 
 class TestGraphResultExtraction:

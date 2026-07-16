@@ -267,8 +267,8 @@ def build_builder_tools(
     planning_tools = build_builder_planning_tools(
         preview_agent_creation_entitlement=_preview_agent_creation_entitlement,
     )
-    # plan_agent contract kept visible in this facade for legacy source-inspection tests:
-    # Ini bukan approval gate. Jangan minta user menyetujui blueprint; langsung create_agent tanpa tanya approval lagi.
+    # plan_agent contract kept visible in this facade for source-inspection tests:
+    # Brief, workflow, and escalation must be confirmed once before create; internal artifacts need no micro-approval.
 
     async def _call_builder_instruction_writer(*args: Any, **kwargs: Any) -> str:
         return await _call_instruction_writer(*args, **kwargs)
@@ -326,8 +326,6 @@ def build_builder_tools(
         owner_phone=owner_phone,
         self_agent_id=self_agent_id,
         agent_model=Agent,
-        preview_agent_creation_entitlement=_preview_agent_creation_entitlement,
-        call_instruction_writer=_call_builder_instruction_writer,
         append_platform_staff_identity_instruction=_append_platform_staff_identity_instruction,
         append_google_workspace_instruction=_append_google_workspace_instruction,
         platform_staff_identity_block=_platform_staff_identity_block,

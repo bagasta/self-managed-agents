@@ -530,16 +530,47 @@ def build_wa_notify_tool(session: Any) -> list:
             )
         )
 
+    def _looks_like_generic_progress_placeholder(message: str) -> bool:
+        lowered = " ".join((message or "").lower().split())
+        progress_markers = (
+            "masih saya proses",
+            "masih diproses",
+            "sedang saya proses",
+            "lagi saya proses",
+            "akan saya kirim hasilnya begitu selesai",
+            "saya kabari begitu selesai",
+            "mohon tunggu",
+        )
+        blocker_markers = (
+            "gagal",
+            "error",
+            "terputus",
+            "izin",
+            "login",
+            "hubungkan ulang",
+            "reconnect",
+            "tidak tersedia",
+            "butuh",
+        )
+        return any(marker in lowered for marker in progress_markers) and not any(
+            marker in lowered for marker in blocker_markers
+        )
+
     @tool
     async def notify_user(message: str) -> str:
-        """Kirim pesan progress/update ke user WhatsApp saat sedang mengerjakan task panjang.
-        Gunakan ini untuk memberi tahu user bahwa pekerjaan masih berjalan, BUKAN sebagai reply final.
-        Contoh: notify_user('Sedang menulis file HTML...'), notify_user('Deploy sedang berjalan, hampir selesai...')
+        """Kirim update blocker konkret ke user WhatsApp selama agent masih running.
+        Jangan gunakan pesan placeholder generik bahwa pekerjaan masih diproses.
+        Contoh: notify_user('Koneksi Google terputus; saya sedang menyiapkan link hubungkan ulang.')
         """
         nonlocal notify_attempted
         if notify_attempted:
             return "[notify_user] suppressed: progress notification already attempted for this run"
         notify_attempted = True
+        if _looks_like_generic_progress_placeholder(message):
+            return (
+                "[notify_user] suppressed: pesan progress generik dinonaktifkan; "
+                "kirim hanya blocker atau retry yang konkret"
+            )
         if _looks_like_delivery_claim(message):
             return (
                 "[notify_user] suppressed: jangan pakai notify_user untuk klaim file siap/terkirim. "
