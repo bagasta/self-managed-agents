@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api import agents, auth, channels, custom_tools, documents, history, memory, messages, models, runs, sessions, skills, stream, subscriptions, users
 from app.config import get_settings
-from app.database import get_db
+from app.database import engine, get_db
 from app.middleware.request_id import RequestIDMiddleware
 
 settings = get_settings()
@@ -113,9 +113,18 @@ async def lifespan(_app: FastAPI):
     except asyncio.TimeoutError:
         structlog.get_logger(__name__).warning("startup.abandon_running_runs.timeout")
 
-    # Start proactive agent scheduler (only in non-worker deployments)
+    # Create the bounded Redis pool before burst traffic reaches the process.
+    # Consumers still degrade to their existing in-memory fallbacks when Redis
+    # is unavailable.
+    from app.core.infra.redis_client import close_redis, get_redis
+    await get_redis()
+
+    # Local/dev deployments can keep the scheduler embedded. Production runs a
+    # dedicated scheduler container so API capacity stays focused on chat.
     from app.core.workers.scheduler_service import start_scheduler, stop_scheduler
-    start_scheduler()
+
+    if settings.embedded_scheduler_enabled:
+        start_scheduler()
 
     from app.core.infra.deployment_service import (
         cleanup_expired_deployments,
@@ -160,7 +169,10 @@ async def lifespan(_app: FastAPI):
             await _t
         except asyncio.CancelledError:
             pass
-    stop_scheduler()
+    if settings.embedded_scheduler_enabled:
+        stop_scheduler()
+    await close_redis()
+    await engine.dispose()
 
 
 app = FastAPI(
@@ -228,7 +240,10 @@ async def health_detailed(db: AsyncSession = Depends(get_db)) -> dict:
         checks["database"] = f"error: {exc}"
 
     from app.core.workers.scheduler_service import is_scheduler_running
-    checks["scheduler"] = "ok" if is_scheduler_running() else "stopped"
+    if settings.embedded_scheduler_enabled:
+        checks["scheduler"] = "ok" if is_scheduler_running() else "stopped"
+    else:
+        checks["scheduler"] = "external"
 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -237,7 +252,7 @@ async def health_detailed(db: AsyncSession = Depends(get_db)) -> dict:
     except Exception:
         checks["wa_service"] = "unreachable"
 
-    all_ok = all(v == "ok" for v in checks.values())
+    all_ok = all(v in {"ok", "external"} for v in checks.values())
     return JSONResponse(
         status_code=200 if all_ok else 503,
         content={"status": "ok" if all_ok else "degraded", "checks": checks, "version": "0.2.0"},

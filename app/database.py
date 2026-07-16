@@ -12,10 +12,11 @@ engine = create_async_engine(
     settings.database_url,
     echo=False,
     pool_pre_ping=True,
-    pool_size=5,            # Per worker
-    max_overflow=10,
-    pool_timeout=30,
-    pool_recycle=1800,      # Recycle idle connection periodically
+    pool_size=max(1, settings.db_pool_size),
+    max_overflow=max(0, settings.db_max_overflow),
+    pool_timeout=max(1.0, settings.db_pool_timeout_seconds),
+    pool_recycle=max(60, settings.db_pool_recycle_seconds),
+    pool_use_lifo=True,
 )
 
 

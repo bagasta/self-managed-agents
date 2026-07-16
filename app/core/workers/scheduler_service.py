@@ -403,10 +403,12 @@ async def _tick_with_lock() -> None:
         if not acquired:
             return  # another instance is already ticking
 
-    try:
-        await _tick()
-    finally:
-        async with AsyncSessionLocal() as db:
+        # PostgreSQL advisory locks belong to a physical connection. Keep this
+        # session checked out until the tick finishes so unlock always runs on
+        # the same connection instead of leaking a lock through the pool.
+        try:
+            await _tick()
+        finally:
             await db.execute(text("SELECT pg_advisory_unlock(12345)"))
             await db.commit()
 

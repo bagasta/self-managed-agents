@@ -1,4 +1,6 @@
-.PHONY: help install dev db-up migrate upgrade downgrade lint format wa wa-build dev-all wa-dev-build wa-dev sandbox-build sandbox-check seed-agents mcp-smoke-live mcp-smoke-live-strict mcp-smoke-live-reauth mcp-smoke-live-onboard
+.PHONY: help install dev db-up migrate upgrade downgrade lint format wa wa-build dev-all wa-dev-build wa-dev sandbox-build sandbox-check seed-agents deploy-api-fast deploy-app deploy-all mcp-smoke-live mcp-smoke-live-strict mcp-smoke-live-reauth mcp-smoke-live-onboard
+
+PROD_COMPOSE := docker compose -f deploy/docker-compose.prod.yml
 
 help:
 	@echo "Managed Agent Platform"
@@ -11,6 +13,9 @@ help:
 	@echo "  make wa-dev                 Run WA dev number service (port 8081) + dashboard"
 	@echo "  make sandbox-build          Build Docker sandbox image for file/subagent tools"
 	@echo "  make sandbox-check          Verify Docker sandbox image exists locally"
+	@echo "  make deploy-api-fast        Rebuild/restart only the API"
+	@echo "  make deploy-app             Build shared app image; restart API + scheduler"
+	@echo "  make deploy-all             Rebuild/restart the full production stack"
 	@echo "  make dev-all                Run API + wa-service (2 terminals needed)"
 	@echo "  make db-up                  Start PostgreSQL via docker-compose"
 	@echo "  make migrate                Generate migration  (MSG='description')"
@@ -77,6 +82,17 @@ format:
 
 seed-agents:
 	python -m scripts.seed_system_agents
+
+deploy-api-fast:
+	$(PROD_COMPOSE) build api
+	$(PROD_COMPOSE) up -d --no-deps api
+
+deploy-app:
+	$(PROD_COMPOSE) build api
+	$(PROD_COMPOSE) up -d --no-deps api scheduler
+
+deploy-all:
+	$(PROD_COMPOSE) up -d --build
 
 mcp-smoke-live:
 	RUN_GOOGLE_MCP_LIVE_SMOKE=true \

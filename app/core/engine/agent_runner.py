@@ -48,6 +48,7 @@ from app.core.engine.agent_hitl import handle_graph_interrupt, handle_pending_in
 from app.core.engine.agent_input import build_input_messages
 from app.core.engine.agent_llm import build_agent_llms
 from app.core.engine.agent_recovery import send_agent_recovery_message
+from app.core.engine.run_capacity import bounded_agent_run
 from app.core.engine.agent_google_routing import (
     _append_builder_google_auth_link_if_needed,
     _builder_google_auth_agent_id,
@@ -627,6 +628,7 @@ def _remember_latest_shared_artifact(
 # keyword matching against the user's message.
 
 
+@bounded_agent_run
 async def run_agent(
     *,
     agent_model: AgentModel,

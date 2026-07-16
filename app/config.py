@@ -8,6 +8,10 @@ class Settings(BaseSettings):
 
     # Database
     database_url: str = "postgresql+asyncpg://postgres:password@localhost:5432/managed_agents"
+    db_pool_size: int = 16
+    db_max_overflow: int = 16
+    db_pool_timeout_seconds: float = 10.0
+    db_pool_recycle_seconds: int = 1800
 
     # Auth
     api_key: str = "change-me"
@@ -79,6 +83,11 @@ class Settings(BaseSettings):
     # Redis — dipakai untuk event bus multi-process dan rate limiting
     # Set ke "" untuk disable Redis (fallback ke in-memory, single-worker only)
     redis_url: str = ""
+    redis_max_connections: int = 64
+    redis_pool_timeout_seconds: float = 5.0
+    redis_socket_connect_timeout_seconds: float = 3.0
+    redis_socket_timeout_seconds: float = 10.0
+    redis_health_check_interval_seconds: int = 30
 
     # Tunable limits
     context_summary_trigger: int = 10      # summarize after N user messages
@@ -89,6 +98,8 @@ class Settings(BaseSettings):
     message_max_length: int = 10_000       # max chars per user message
     media_max_length: int = 10_000_000     # max chars for base64 media payload
     max_concurrent_sandboxes: int = 6      # bounded semaphore; requests queue instead of failing
+    max_concurrent_agent_runs: int = 24    # global per-process backpressure for burst traffic
+    embedded_scheduler_enabled: bool = True  # false when a dedicated scheduler container is running
 
 
 @lru_cache

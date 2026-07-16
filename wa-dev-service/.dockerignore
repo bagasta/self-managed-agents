@@ -1,0 +1,10 @@
+.git
+wa-dev-service
+wa-dev-store
+connections.json
+*.db
+*.db-shm
+*.db-wal
+*.log
+coverage.out
+
