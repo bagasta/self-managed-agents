@@ -2044,7 +2044,10 @@ async def wa_incoming(
         # Commit agar session_id visible ke koneksi DB terpisah (e.g. scheduler_tool)
         await db.commit()
 
-    provision_external_id = real_from_phone
+    # A LID is a stable enough owner identity for an independent Trial account.
+    # If WA resolves the real phone on a later turn, get_or_create_wa_user merges
+    # it through wa_lid instead of requiring a dashboard-link detour.
+    provision_external_id = real_from_phone or sender_lid
     if provision_external_id and not _is_operator:
         try:
             from app.core.domain.subscription_service import get_or_create_wa_user

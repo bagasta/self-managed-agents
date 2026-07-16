@@ -581,7 +581,7 @@ def build_builder_create_tools(
             logger.info("builder_tools.create_agent.start", owner_phone=owner_phone, name=name)
 
             async with db_factory() as db:
-                # Auto-provision user + Tier 1 subscription untuk WA user.
+                # Auto-provision user + Trial subscription untuk WA user.
                 # Saat unit test mem-patch Agent menjadi mock, skip integrasi subscription.
                 if owner_phone and hasattr(Agent, "__table__"):
                     _user, _sub = await get_or_create_wa_user(owner_phone, db)

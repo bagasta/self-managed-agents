@@ -3892,7 +3892,11 @@ async def prepare_google_mcp_runtime(
     fallback_external_user_id: str | None = None,
     service_context: str | None = None,
 ) -> GoogleMcpRuntime:
-    mcp_cfg = tools_config.get("mcp", {})
+    # Older agent rows and the dashboard can persist `mcp` as a plain boolean.
+    # Treat that legacy shape as an empty config: it must never crash a normal
+    # agent run while there is no structured MCP server definition to load.
+    raw_mcp_cfg = tools_config.get("mcp", {}) if isinstance(tools_config, dict) else {}
+    mcp_cfg = raw_mcp_cfg if isinstance(raw_mcp_cfg, dict) else {}
     mcp_enabled = False
     workspace_server = None
     if isinstance(mcp_cfg, dict):

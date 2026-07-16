@@ -6,7 +6,7 @@ from typing import Any
 
 import structlog
 from langchain_core.tools import tool
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.tools.builder_identity import (
@@ -14,7 +14,6 @@ from app.core.tools.builder_identity import (
     is_probable_lid,
     owner_filter,
 )
-from app.core.utils.phone_utils import normalize_phone
 from app.models.agent import Agent
 
 logger = structlog.get_logger(__name__)
@@ -78,22 +77,12 @@ def build_builder_user_tools(
                         getattr(user, "external_id", None),
                         target_phone,
                     )
-                elif is_probable_lid(target_phone):
-                    sub_details = await get_subscription_by_external_id(target_phone, db)
-                    if sub_details is None:
-                        return {
-                            "checked": True,
-                            "allowed": False,
-                            "owner": target_phone,
-                            "identifier_type": "lid",
-                            "reason": "nomor WhatsApp asli belum tersedia.",
-                            "user_message": (
-                                "Saya belum bisa cek paket kamu karena yang terbaca masih ID WhatsApp internal, "
-                                "bukan nomor asli. Kirim pesan dari nomor yang sudah terhubung dulu."
-                            ),
-                        }
                 else:
-                    await get_or_create_wa_user(target_phone, db)
+                    # A stable WhatsApp LID is sufficient for a fresh trial.
+                    # Dashboard linking is only needed to attach an existing
+                    # paid dashboard plan, never to create the first agent.
+                    provision_kwargs = {"wa_lid": target_phone} if is_probable_lid(target_phone) else {}
+                    await get_or_create_wa_user(target_phone, db, **provision_kwargs)
                     await db.commit()
 
                 create_check = await check_can_create_agent(target_phone, db)
@@ -184,6 +173,7 @@ def build_builder_user_tools(
         try:
             from app.core.domain.subscription_service import (
                 get_best_subscription_by_external_ids,
+                get_or_create_wa_user,
                 get_subscription_by_external_id,
             )
 
@@ -204,20 +194,13 @@ def build_builder_user_tools(
                     db,
                     sender_name=sender_name,
                 )
-                if details is None and is_probable_lid(target_phone):
+                if details is None:
+                    provision_kwargs = {"wa_lid": target_phone} if is_probable_lid(target_phone) else {}
+                    await get_or_create_wa_user(target_phone, db, **provision_kwargs)
+                    await db.commit()
                     details = await get_subscription_by_external_id(target_phone, db)
                 if details is None:
-                    return json.dumps({
-                        "error": "Subscription owner sesi ini tidak ditemukan.",
-                        "identifier": target_phone,
-                        "identifier_type": "lid" if is_probable_lid(target_phone) else "external_id",
-                        "lookup_identifiers": [
-                            normalize_phone(str(candidate or ""))
-                            for candidate in owner_candidates
-                            if normalize_phone(str(candidate or ""))
-                        ],
-                        "read_only": True,
-                    }, ensure_ascii=False)
+                    return json.dumps({"error": "Subscription Trial gagal dibuat."}, ensure_ascii=False)
 
                 user, sub, plan = details
                 owner_for_agents = best_owner_identifier(
@@ -225,28 +208,16 @@ def build_builder_user_tools(
                     getattr(user, "external_id", None),
                     target_phone,
                 )
-                if (
-                    getattr(plan, "is_trial", False)
-                    and not getattr(user, "phone_number", None)
-                    and (is_probable_lid(owner_phone) or is_probable_lid(default_target))
-                ):
-                    return json.dumps({
-                        "error": (
-                            "WhatsApp kamu masih terbaca sebagai LID dan belum terhubung "
-                            "ke akun dashboard yang punya subscription."
-                        ),
-                        "status": "identity_unlinked",
-                        "identifier": target_phone,
-                        "user_id": str(getattr(user, "id", "")),
-                        "plan_code": getattr(plan, "code", None),
-                        "read_only": True,
-                    }, ensure_ascii=False)
-
                 # Hitung agent aktif
                 active_count_result = await db.execute(
                     select(Agent).where(
                         Agent.is_deleted.is_(False),
-                        owner_filter(owner_for_agents),
+                        or_(
+                            owner_filter(owner_for_agents),
+                            owner_filter(getattr(user, "external_id", None)),
+                            owner_filter(getattr(user, "phone_number", None)),
+                            owner_filter(getattr(user, "wa_lid", None)),
+                        ),
                     )
                 )
                 active_agents = active_count_result.scalars().all()
@@ -281,9 +252,10 @@ def build_builder_user_tools(
         """
         Hubungkan nomor WhatsApp pengirim sesi ini ke akun dashboard Clevio.
 
-        Pakai saat plan yang terbaca tidak sesuai klaim user (misal dashboard
-        sudah Enterprise tapi di sini terbaca Trial) atau saat status
-        identity_unlinked. Minta user generate kode dari Dashboard →
+        Pakai hanya saat plan yang terbaca tidak sesuai klaim user (misal dashboard
+        sudah Enterprise tapi di sini terbaca Trial). User baru tidak perlu
+        membuka dashboard karena otomatis mendapat plan Trial. Untuk sinkronisasi
+        plan berbayar, minta user generate kode dari Dashboard →
         Settings → "Hubungkan WhatsApp", lalu kirim kodenya ke chat ini.
 
         Identitas yang di-link SELALU nomor pengirim sesi terverifikasi —

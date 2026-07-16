@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -61,7 +61,15 @@ async def get_owner_subscription(agent: Any, db: AsyncSession):
     from app.models.subscription import User, UserSubscription
 
     user = (
-        await db.execute(select(User).where(User.external_id == owner_external_id))
+        await db.execute(
+            select(User).where(
+                or_(
+                    User.external_id == owner_external_id,
+                    User.phone_number == owner_external_id,
+                    User.wa_lid == owner_external_id,
+                )
+            )
+        )
     ).scalar_one_or_none()
     if not user:
         return None, None

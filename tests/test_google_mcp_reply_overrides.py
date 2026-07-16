@@ -393,6 +393,26 @@ async def test_prepare_google_mcp_runtime_uses_agent_owner_fallback_for_auth(mon
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_mcp_value", [False, True])
+async def test_prepare_google_mcp_runtime_accepts_legacy_boolean_mcp_config(legacy_mcp_value) -> None:
+    runtime = await prepare_google_mcp_runtime(
+        tools_config={"mcp": legacy_mcp_value},
+        tools=[],
+        active_groups=[],
+        session=type("Session", (), {"channel_config": {}, "external_user_id": None})(),
+        agent_id="00000000-0000-0000-0000-000000000000",
+        memory_scope=None,
+        api_key="test",
+        user_message="halo",
+        system_prompt="",
+        log=type("Log", (), {"warning": lambda *args, **kwargs: None, "info": lambda *args, **kwargs: None})(),
+    )
+
+    assert runtime.enabled is False
+    assert runtime.workspace_server is None
+
+
+@pytest.mark.asyncio
 async def test_prepare_google_mcp_runtime_uses_token_promoted_during_connect(monkeypatch) -> None:
     class FakeSettings:
         google_integration_service_url = "https://devtunnel.example"
