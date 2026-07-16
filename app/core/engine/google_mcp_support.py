@@ -1393,6 +1393,10 @@ def build_google_mcp_usage_notice(user_message: str) -> str:
         "modify_sheet_values memakai argumen range_name (bukan range); "
         "draft_gmail_message.to/cc/bcc berupa string tunggal; "
         "manage_contact.emails/phones berupa list of objects; "
+        "UNTUK SPREADSHEET YANG SUDAH ADA: jangan buat spreadsheet baru dan jangan panggil manage_drive_access hanya agar agent bisa menulis. "
+        "Panggil read_sheet_values dulu untuk membaca nama sheet, header, dan data yang ada; gunakan append_table_rows untuk menambah record, "
+        "atau modify_sheet_values hanya setelah struktur/range target sudah terbaca. Jangan menebak Sheet1, header, atau range A1/A2. "
+        "manage_drive_access hanya boleh dipakai bila Owner secara eksplisit meminta perubahan akses dan penerimanya adalah alamat email Google, bukan nomor WhatsApp. "
         "UNTUK GOOGLE DRIVE: create_drive_folder dipakai untuk membuat folder. create_drive_file hanya untuk upload file jika ada content teks atau fileUrl/file_url valid; "
         "jangan panggil create_drive_file dengan content null dan fileUrl null. Untuk laporan spreadsheet/xlsx baru, gunakan create_spreadsheet + modify_sheet_values, lalu pindahkan file ke folder dengan update_drive_file(add_parents=<folder_id>); "
         "UNTUK GOOGLE CALENDAR: manage_event action update/delete/rsvp WAJIB memakai event_id asli dari Google Calendar. "
@@ -1825,6 +1829,11 @@ def sanitize_google_forms_tools(mcp_tools: list, log: Any) -> list:
     sanitized_tool_names: list[str] = []
     get_events_tool = next((tool for tool in mcp_tools if getattr(tool, "name", "") == "get_events"), None)
     create_sheet_tool = next((tool for tool in mcp_tools if getattr(tool, "name", "") == "create_sheet"), None)
+    read_sheet_values_available = any(
+        getattr(tool, "name", "") == "read_sheet_values" for tool in mcp_tools
+    )
+    inspected_spreadsheet_ids: set[str] = set()
+    created_spreadsheet_ids: set[str] = set()
     for mcp_tool in mcp_tools:
         tool_name = getattr(mcp_tool, "name", "")
         if tool_name == "create_spreadsheet":
@@ -1844,7 +1853,11 @@ def sanitize_google_forms_tools(mcp_tools: list, log: Any) -> list:
                         kwargs.pop("sheet_names", None)
                     elif "sheet_names" in kwargs:
                         kwargs["sheet_names"] = _normalize_string_list_arg(kwargs.get("sheet_names"))
-                    return await tool_to_call.ainvoke(kwargs)
+                    result = await tool_to_call.ainvoke(kwargs)
+                    spreadsheet_id = _extract_spreadsheet_id_from_text(str(result))
+                    if spreadsheet_id:
+                        created_spreadsheet_ids.add(spreadsheet_id)
+                    return result
 
                 return _create_spreadsheet_guarded
 
@@ -2095,9 +2108,44 @@ def sanitize_google_forms_tools(mcp_tools: list, log: Any) -> list:
             sanitized_tool_names.append(tool_name)
             continue
 
+        if tool_name == "read_sheet_values":
+            def _build_read_sheet_values_guarded(tool_to_call: Any):
+                async def _read_sheet_values_guarded(**kwargs):
+                    result = await tool_to_call.ainvoke(kwargs)
+                    spreadsheet_id = str(kwargs.get("spreadsheet_id") or "").strip()
+                    if spreadsheet_id:
+                        inspected_spreadsheet_ids.add(spreadsheet_id)
+                    return result
+
+                return _read_sheet_values_guarded
+
+            wrapped_tools.append(
+                StructuredTool.from_function(
+                    coroutine=_build_read_sheet_values_guarded(mcp_tool),
+                    name=mcp_tool.name,
+                    description=getattr(mcp_tool, "description", None),
+                    args_schema=getattr(mcp_tool, "args_schema", None),
+                )
+            )
+            sanitized_tool_names.append(tool_name)
+            continue
+
         if tool_name == "modify_sheet_values":
             def _build_modify_sheet_values_guarded(tool_to_call: Any):
                 async def _modify_sheet_values_guarded(**kwargs):
+                    spreadsheet_id = str(kwargs.get("spreadsheet_id") or "").strip()
+                    if (
+                        read_sheet_values_available
+                        and spreadsheet_id
+                        and spreadsheet_id not in inspected_spreadsheet_ids
+                        and spreadsheet_id not in created_spreadsheet_ids
+                    ):
+                        return (
+                            "SHEETS_STRUCTURE_REQUIRED: Sebelum mengubah spreadsheet yang sudah ada, "
+                            "panggil read_sheet_values(spreadsheet_id=..., range_name='A1:ZZ20') untuk "
+                            "membaca nama sheet, header, dan baris yang tersedia. Jangan menebak Sheet1, "
+                            "range A1, atau posisi baris."
+                        )
                     range_alias = kwargs.pop("range", None)
                     if not kwargs.get("range_name") and range_alias:
                         kwargs["range_name"] = range_alias
@@ -2169,6 +2217,34 @@ def sanitize_google_forms_tools(mcp_tools: list, log: Any) -> list:
                     name=mcp_tool.name,
                     description=getattr(mcp_tool, "description", None),
                     args_schema=ModifySheetValuesArgs,
+                )
+            )
+            sanitized_tool_names.append(tool_name)
+            continue
+
+        if tool_name == "manage_drive_access":
+            def _build_manage_drive_access_guarded(tool_to_call: Any):
+                async def _manage_drive_access_guarded(**kwargs):
+                    action = str(kwargs.get("action") or "").strip().lower()
+                    share_type = str(kwargs.get("share_type") or "").strip().lower()
+                    share_with = str(kwargs.get("share_with") or "").strip()
+                    if action == "grant" and share_type == "user" and (not share_with or "@" not in share_with):
+                        return (
+                            "DRIVE_EMAIL_REQUIRED: manage_drive_access untuk share_type='user' hanya menerima "
+                            "alamat email Google yang valid. Nomor WhatsApp/telepon tidak dapat diberi permission "
+                            "Google Drive. Jangan ubah akses hanya agar agent dapat menulis ke spreadsheet yang "
+                            "sudah disediakan; gunakan koneksi Google Owner yang aktif."
+                        )
+                    return await tool_to_call.ainvoke(kwargs)
+
+                return _manage_drive_access_guarded
+
+            wrapped_tools.append(
+                StructuredTool.from_function(
+                    coroutine=_build_manage_drive_access_guarded(mcp_tool),
+                    name=mcp_tool.name,
+                    description=getattr(mcp_tool, "description", None),
+                    args_schema=getattr(mcp_tool, "args_schema", None),
                 )
             )
             sanitized_tool_names.append(tool_name)
