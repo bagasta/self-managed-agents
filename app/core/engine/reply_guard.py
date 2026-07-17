@@ -117,10 +117,14 @@ def _builder_success_reply_is_clear(reply: str) -> bool:
 
 def _has_whatsapp_onboarding(reply: str) -> bool:
     normalized = reply.lower()
-    return (
-        "nomor demo arthur" in normalized
-        and "nomor whatsapp kamu sendiri" in normalized
+    if "nomor demo arthur" not in normalized:
+        return False
+    premature_dedicated_number_markers = (
+        "nomor whatsapp kamu sendiri",
+        "nomor khusus",
+        "langsung dipasang",
     )
+    return not any(marker in normalized for marker in premature_dedicated_number_markers)
 
 
 def _looks_like_incomplete_builder_reply(reply: str) -> bool:
@@ -253,7 +257,10 @@ def _builder_fallback_reply(steps: list[dict[str, Any]]) -> str | None:
             agent_name = str(data.get("agent_name") or "agent").strip()
             contact_name = str(data.get("shared_whatsapp_name") or "").strip()
             if data.get("contact_sent") and contact_name:
-                return f"Kontak {contact_name} sudah saya kirim. Kode trial {agent_name}: {code}. Link: {link}"
+                return (
+                    f"Link demo {agent_name}: {link}\n"
+                    f"Kode: {code}. Setelah link dan kode ini, kontak {contact_name} juga sudah saya kirim."
+                )
             return f"Kode trial {agent_name}: {code}. Link: {link}"
         if link:
             return f"Agent-nya sudah siap dicoba. Link: {link}"

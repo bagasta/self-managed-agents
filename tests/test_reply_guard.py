@@ -1,3 +1,7 @@
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
 from app.core.engine.reply_guard import ensure_non_empty_reply
 
 
@@ -8,6 +12,23 @@ def test_builder_google_auth_agent_id_detects_update_needs_auth():
     steps = [
         {
             "tool": "update_agent",
+            "result": (
+                '{"success": true, "agent_id": "%s", "google_workspace_enabled": true, '
+                '"needs_google_auth": true}'
+            ) % agent_id,
+        }
+    ]
+
+    assert _builder_google_auth_agent_id(steps) == agent_id
+
+
+def test_builder_google_auth_agent_id_detects_create_needs_auth():
+    from app.core.engine.agent_runner import _builder_google_auth_agent_id
+
+    agent_id = "11111111-1111-4111-8111-111111111111"
+    steps = [
+        {
+            "tool": "create_agent",
             "result": (
                 '{"success": true, "agent_id": "%s", "google_workspace_enabled": true, '
                 '"needs_google_auth": true}'
@@ -30,6 +51,47 @@ def test_builder_google_auth_agent_id_skips_when_tool_already_called():
     ]
 
     assert _builder_google_auth_agent_id(steps) is None
+
+
+def test_builder_google_auth_link_is_appended_after_create_even_if_model_skips_tool():
+    from app.core.engine.agent_google_routing import _append_builder_google_auth_link_if_needed
+
+    agent_id = "11111111-1111-4111-8111-111111111111"
+    steps = [
+        {
+            "tool": "create_agent",
+            "result": (
+                '{"success": true, "agent_id": "%s", "google_workspace_enabled": true, '
+                '"needs_google_auth": true}'
+            ) % agent_id,
+        }
+    ]
+    session = SimpleNamespace(
+        external_user_id="+628111111111",
+        channel_type="whatsapp",
+        channel_config={"phone_number": "+628111111111"},
+    )
+    settings = SimpleNamespace(
+        google_integration_service_url="https://integration.example.test",
+        api_key="test-key",
+    )
+    log = MagicMock()
+
+    with patch(
+        "app.core.engine.agent_google_routing._fetch_google_auth_link",
+        new=AsyncMock(return_value="https://accounts.example.test/oauth"),
+    ) as fetch_auth:
+        out = asyncio.run(_append_builder_google_auth_link_if_needed(
+            "Veselka Care sudah jadi.",
+            steps=steps,
+            session=session,
+            settings_obj=settings,
+            log=log,
+        ))
+
+    fetch_auth.assert_awaited_once()
+    assert "https://accounts.example.test/oauth" in out
+    assert "Buka link ini dulu" in out
 
 
 def test_needs_builder_create_completion_when_planned_but_not_created():
@@ -153,6 +215,24 @@ def test_builder_create_whatsapp_agent_overrides_id_only_reply():
     )
 
 
+def test_builder_create_whatsapp_agent_overrides_dedicated_number_choice():
+    steps = [
+        {
+            "tool": "create_agent",
+            "result": '{"success": true, "name": "Veselka Care", "agent_id": "agent-123", "channel_type": "whatsapp"}',
+        }
+    ]
+    reply = (
+        "Veselka Care sudah jadi. Sekarang mau agent ini langsung dipasang ke nomor WhatsApp kamu sendiri, "
+        "atau dicoba dulu lewat nomor demo Arthur?"
+    )
+
+    out = ensure_non_empty_reply(reply, steps)
+
+    assert "nomor WhatsApp kamu sendiri" not in out
+    assert "Kita coba dulu lewat nomor demo Arthur" in out
+
+
 def test_builder_trial_link_ambiguous_target_asks_agent_name():
     steps = [
         {
@@ -224,9 +304,10 @@ def test_builder_trial_link_reply_without_code_or_link_is_replaced():
 
     out = ensure_non_empty_reply("Kode demo untuk Baas sudah saya kirim ke WhatsApp kamu.", steps)
 
-    assert "Kontak Demo Baas sudah saya kirim" in out
+    assert "kontak Demo Baas juga sudah saya kirim" in out
     assert "8EX446" in out
     assert "https://wa.me/6282221000062" in out
+    assert out.index("https://wa.me/6282221000062") < out.index("kontak Demo Baas")
 
 
 def test_builder_trial_link_success_wins_over_later_blocked_stale_target():
@@ -252,7 +333,7 @@ def test_builder_trial_link_success_wins_over_later_blocked_stale_target():
 
     out = ensure_non_empty_reply("", steps)
 
-    assert "Kontak Demo Baas sudah saya kirim" in out
+    assert "kontak Demo Baas juga sudah saya kirim" in out
     assert "8EX446" in out
     assert "Mas Brew" not in out
 

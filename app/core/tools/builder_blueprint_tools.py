@@ -139,7 +139,13 @@ def build_builder_blueprint_tools(
                 json_mode=True,
             )
         except Exception as exc:
-            _get_logger().error("builder_tools.compose_agent_blueprint.error", error=str(exc))
+            _get_logger().error(
+                "builder_tools.compose_agent_blueprint.error",
+                error_type=type(exc).__name__,
+                error=repr(exc),
+                preset_id=preset_id,
+                agent_name=agent_name,
+            )
             return _fallback_response("deterministic_fallback")
 
         try:

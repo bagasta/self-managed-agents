@@ -307,6 +307,8 @@ def build_builder_channel_tools(
         contact_sent = False
         contact_error = ""
         contact_already_sent = False
+        link_message_sent = False
+        link_message_error = ""
         if send_contact and target:
             dedupe_key = _contact_dedupe_key(session_id, target, resolved_agent_id)
             if _contact_recently_sent(dedupe_key):
@@ -314,13 +316,28 @@ def build_builder_channel_tools(
                 contact_error = "vCard demo untuk agent ini sudah dikirim beberapa menit terakhir; tidak dikirim ulang."
             elif device_id and not device_id.startswith("wadev_"):
                 try:
-                    from app.core.infra.wa_client import send_wa_contact
+                    from app.core.infra.wa_client import send_wa_contact, send_wa_message
 
+                    await send_wa_message(
+                        device_id,
+                        target,
+                        (
+                            f"{resolved_agent_name} siap dicoba lewat nomor demo Arthur.\n"
+                            f"Buka: {wa_me_url}\n"
+                            f"Kode: {code}\n"
+                            "Setelah pesan ini saya kirim kontak nomor demonya."
+                        ),
+                    )
+                    link_message_sent = True
                     await send_wa_contact(device_id, target, contact_name, shared_phone)
                     _mark_contact_sent(dedupe_key)
                     contact_sent = True
                 except Exception as exc:
-                    contact_error = str(exc)
+                    if link_message_sent:
+                        contact_error = str(exc)
+                    else:
+                        link_message_error = str(exc)
+                        contact_error = "vCard tidak dikirim karena pesan link/kode belum berhasil dikirim lebih dulu."
             elif device_id and device_id.startswith("wadev_"):
                 contact_error = (
                     "Arthur sedang berjalan lewat nomor shared wa-dev, jadi vCard tidak dikirim "
@@ -337,12 +354,14 @@ def build_builder_channel_tools(
             "shared_whatsapp_name": contact_name,
             "shared_whatsapp_phone": f"+{shared_phone}",
             "wa_me_url": wa_me_url,
+            "link_message_sent": link_message_sent,
+            "link_message_error": link_message_error,
             "contact_sent": contact_sent,
             "contact_already_sent": contact_already_sent,
             "contact_error": contact_error,
             "instruction_for_user": (
-                f"Simpan kontak {contact_name}, atau buka link wa.me. "
-                f"Kirim kode {code} untuk menghubungkan WhatsApp ke agent ini. "
+                f"Buka link wa.me dan gunakan kode {code} terlebih dahulu. "
+                f"Setelah link/kode disampaikan, simpan kontak {contact_name}. "
                 "Kode bisa dipakai ulang; kirim /stop di WhatsApp kalau ingin disconnect. "
                 "Untuk switch agent, minta kode baru dari Arthur lalu kirim kode baru itu."
             ),

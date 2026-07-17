@@ -591,6 +591,7 @@ def test_builder_prompt_blocks_repeated_continue_questions():
     )
 
     assert "## Arthur Builder Mode" in prompt
+    assert "konsultan kebutuhan sekaligus pembuat AI Staff dari Clevio" in prompt
     assert "rangkuman kebutuhan yang lengkap dan tidak ambigu" in prompt
     assert "plan_agent -> compose_agent_blueprint -> compose_agent_operating_manual -> compose_agent_instructions -> validate_agent_config -> compose_agent_soul -> create_agent(discovery_answers yang sama) -> verify_agent" in prompt
     assert "## Arthur Tool Categories" in prompt
