@@ -1,9 +1,8 @@
+import inspect
+
 import pytest
 
-from app.core.engine.agent_google_routing import (
-    _google_workspace_mcp_unauthorized_reply,
-    _is_google_workspace_mcp_authorized_for_session,
-)
+from app.core.engine import agent_runner
 from app.core.engine.agent_runner import (
     _build_google_mcp_auth_failure_reply,
     _build_google_mcp_unavailable_reply,
@@ -43,49 +42,11 @@ def test_google_term_sanitizer_preserves_mcp_auth_url_hostname() -> None:
     assert "lewat integrasi Google" in sanitized
 
 
-def test_google_workspace_mcp_authorization_restricts_whatsapp_to_owner_or_operator() -> None:
-    agent = type(
-        "Agent",
-        (),
-        {
-            "owner_external_id": "628111",
-            "operator_ids": ["628222"],
-            "escalation_config": {"operator_phone": "628333"},
-        },
-    )()
+def test_google_workspace_mcp_is_not_gated_by_whatsapp_sender_role() -> None:
+    source = inspect.getsource(agent_runner.run_agent)
 
-    customer_session = type(
-        "Session",
-        (),
-        {
-            "channel_type": "whatsapp",
-            "external_user_id": "628999",
-            "channel_config": {"phone_number": "628999", "user_phone": "628999@s.whatsapp.net"},
-        },
-    )()
-    owner_session = type(
-        "Session",
-        (),
-        {
-            "channel_type": "whatsapp",
-            "external_user_id": "628111",
-            "channel_config": {"phone_number": "628111", "user_phone": "628111@s.whatsapp.net"},
-        },
-    )()
-    operator_session = type(
-        "Session",
-        (),
-        {
-            "channel_type": "whatsapp",
-            "external_user_id": "628222",
-            "channel_config": {},
-        },
-    )()
-
-    assert _is_google_workspace_mcp_authorized_for_session(customer_session, agent) is False
-    assert _is_google_workspace_mcp_authorized_for_session(owner_session, agent) is True
-    assert _is_google_workspace_mcp_authorized_for_session(operator_session, agent) is True
-    assert "Admin/operator" in _google_workspace_mcp_unauthorized_reply()
+    assert "google_mcp_requires_owner_or_operator" not in source
+    assert "google_workspace_mcp_denied_for_non_operator" not in source
 
 
 @pytest.mark.asyncio
@@ -351,7 +312,7 @@ async def test_fetch_google_auth_link_accepts_short_start_url(monkeypatch) -> No
     auth_url = await _fetch_google_auth_link(
         integration_url="https://devtunnel.example",
         api_key="test",
-        agent_id="00000000-0000-0000-0000-000000000000",
+        auth_agent_id=None,
         candidate_user_ids=["628111"],
     )
 
@@ -428,6 +389,93 @@ async def test_prepare_google_mcp_runtime_uses_agent_owner_fallback_for_auth(mon
     assert "State: enabled_needs_auth" in runtime.system_prompt
     assert "Owner membuka link otentikasi" in runtime.system_prompt
     assert any(call[0] == "POST" and call[2]["json"]["external_user_id"] == "62895619356936" for call in calls)
+    assert any(call[0] == "POST" and call[2]["json"]["agent_id"] is None for call in calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_mcp_value", [False, True])
+async def test_prepare_google_mcp_runtime_accepts_legacy_boolean_mcp_config(legacy_mcp_value) -> None:
+    runtime = await prepare_google_mcp_runtime(
+        tools_config={"mcp": legacy_mcp_value},
+        tools=[],
+        active_groups=[],
+        session=type("Session", (), {"channel_config": {}, "external_user_id": None})(),
+        agent_id="00000000-0000-0000-0000-000000000000",
+        memory_scope=None,
+        api_key="test",
+        user_message="halo",
+        system_prompt="",
+        log=type("Log", (), {"warning": lambda *args, **kwargs: None, "info": lambda *args, **kwargs: None})(),
+    )
+
+    assert runtime.enabled is False
+    assert runtime.workspace_server is None
+
+
+@pytest.mark.asyncio
+async def test_prepare_google_mcp_runtime_uses_token_promoted_during_connect(monkeypatch) -> None:
+    class FakeSettings:
+        google_integration_service_url = "https://devtunnel.example"
+
+    class FakeResponse:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+            self.text = "{}"
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, **kwargs):
+            if url.endswith("/status"):
+                return FakeResponse(200, {"connected": False})
+            if url.endswith("/token") and not kwargs.get("params", {}).get("agent_id"):
+                return FakeResponse(200, {"bearer_token": "promoted-owner-token"})
+            return FakeResponse(404, {})
+
+        async def post(self, url, **kwargs):
+            return FakeResponse(200, {"connected": True, "auth_url": ""})
+
+    monkeypatch.setattr("app.config.get_settings", lambda: FakeSettings())
+    monkeypatch.setattr("httpx.AsyncClient", FakeClient)
+
+    workspace_server = {
+        "url": "http://localhost:8002/mcp",
+        "transport": "streamable_http",
+    }
+    runtime = await prepare_google_mcp_runtime(
+        tools_config={
+            "mcp": {
+                "enabled": True,
+                "servers": {"google_workspace": workspace_server},
+            }
+        },
+        tools=[],
+        active_groups=[],
+        session=type("Session", (), {"channel_config": {}, "external_user_id": "customer"})(),
+        agent_id="00000000-0000-0000-0000-000000000000",
+        memory_scope="customer",
+        api_key="test",
+        user_message="upload laporan ke Google Drive",
+        system_prompt="",
+        log=type("Log", (), {"warning": lambda *args, **kwargs: None, "info": lambda *args, **kwargs: None})(),
+        fallback_external_user_id="owner-user",
+    )
+
+    assert runtime.connected_user_id == "owner-user"
+    assert runtime.preflight_error is None
+    assert runtime.auth_url is None
+    assert workspace_server["headers"]["Authorization"] == "Bearer promoted-owner-token"
 
 
 @pytest.mark.asyncio
@@ -711,6 +759,119 @@ async def test_google_mcp_success_claim_without_google_tool_is_overridden() -> N
     assert "tidak memanggil tool google" in lowered
     assert "mcp" not in lowered
     assert steps == [{"tool": "task", "result": "done"}]
+
+
+@pytest.mark.asyncio
+async def test_arthur_agent_brief_reply_is_not_replaced_by_workspace_fallback() -> None:
+    runtime = GoogleMcpRuntime(
+        enabled=False,
+        workspace_server=None,
+        connected_user_id=None,
+        auth_url=None,
+        preflight_error=None,
+        integration_url="http://localhost:8002",
+        candidate_user_ids=[],
+        system_prompt="",
+    )
+    original = (
+        "Saya akan lanjut menyusun agent wawancara tersebut. Integrasi Google Spreadsheet "
+        "akan menjadi bagian dari setup agent, bukan pekerjaan spreadsheet pada chat ini."
+    )
+    steps = [{"tool": "plan_agent", "result": "blueprint ready"}]
+
+    reply, returned_steps, _ = await apply_google_mcp_reply_overrides(
+        final_reply=original,
+        steps=steps,
+        mcp_errors={},
+        runtime=runtime,
+        auth_url=None,
+        llm_raw=None,
+        user_message=(
+            "Buat agent baru untuk wawancara penerima bantuan dan simpan hasilnya "
+            "ke Google Spreadsheet"
+        ),
+        agent_id="00000000-0000-0000-0000-000000000000",
+        api_key="test",
+        log=type("Log", (), {"warning": lambda *args, **kwargs: None})(),
+        service_context=None,
+        workspace_execution_intent=False,
+    )
+
+    assert reply == original
+    assert returned_steps == steps
+
+
+@pytest.mark.asyncio
+async def test_requesting_a_spreadsheet_link_is_not_a_success_claim() -> None:
+    runtime = GoogleMcpRuntime(
+        enabled=True,
+        workspace_server={},
+        connected_user_id="user@example.com",
+        auth_url=None,
+        preflight_error=None,
+        integration_url="http://localhost:8002",
+        candidate_user_ids=["user@example.com"],
+        system_prompt="",
+    )
+    original = (
+        "Saya butuh link Google Spreadsheet tujuan agar konfigurasi penyimpanan "
+        "agent bisa dilengkapi."
+    )
+
+    reply, _, _ = await apply_google_mcp_reply_overrides(
+        final_reply=original,
+        steps=[],
+        mcp_errors={},
+        runtime=runtime,
+        auth_url=None,
+        llm_raw=None,
+        user_message="Buat agent baru yang menyimpan data ke Google Spreadsheet",
+        agent_id="00000000-0000-0000-0000-000000000000",
+        api_key="test",
+        log=type("Log", (), {"warning": lambda *args, **kwargs: None})(),
+        service_context="sheets",
+    )
+
+    assert reply == original
+
+
+@pytest.mark.asyncio
+async def test_sheet_read_cannot_support_claim_that_mutation_ran() -> None:
+    runtime = GoogleMcpRuntime(
+        enabled=True,
+        workspace_server={},
+        connected_user_id="user@example.com",
+        auth_url=None,
+        preflight_error=None,
+        integration_url="http://localhost:8002",
+        candidate_user_ids=["user@example.com"],
+        system_prompt="",
+    )
+    log = type("Log", (), {"warning": lambda *args, **kwargs: None})()
+
+    reply, _, _ = await apply_google_mcp_reply_overrides(
+        final_reply="Prosesnya sudah saya jalankan. Kalau belum muncul, kirim lanjut ya.",
+        steps=[
+            {
+                "tool": "read_sheet_values",
+                "args": {"spreadsheet_id": "sheet123", "range_name": "A1:Z100"},
+                "result": "Successfully read 10 rows",
+            }
+        ],
+        mcp_errors={},
+        runtime=runtime,
+        auth_url=None,
+        llm_raw=None,
+        user_message='lakukan lagi yang benar, isi A1:Z100 dengan "Bakmi"',
+        agent_id="00000000-0000-0000-0000-000000000000",
+        api_key="test",
+        log=log,
+        service_context="sheets",
+    )
+
+    assert "sudah membaca" in reply.lower()
+    assert "belum berhasil dijalankan" in reply.lower()
+    assert "prosesnya sudah saya jalankan" not in reply.lower()
 
 
 @pytest.mark.asyncio

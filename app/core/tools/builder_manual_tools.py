@@ -175,7 +175,15 @@ def build_builder_manual_tools(
                 json_mode=True,
             )
         except Exception as exc:
-            _get_logger().error("builder_tools.compose_agent_operating_manual.error", error=str(exc))
+            # Manual generation has a deterministic fallback. A transient
+            # writer timeout/error should therefore not look like a failed
+            # agent run, and ``str(asyncio.TimeoutError())`` is empty; retain
+            # the exception type so the fallback remains diagnosable.
+            _get_logger().warning(
+                "builder_tools.compose_agent_operating_manual.writer_fallback",
+                error_type=type(exc).__name__,
+                error=str(exc) or repr(exc),
+            )
             return _fallback_response("deterministic_fallback")
 
         try:

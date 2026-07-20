@@ -181,7 +181,7 @@ class TestBuilderToolsReturnsList:
         from app.core.tools.builder_tools import build_builder_tools
         db = _make_mock_db()
         tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
-        assert len(tools) == 22, f"Harus ada 21 tools, dapat {len(tools)}"
+        assert len(tools) == 23, f"Harus ada 23 tools, dapat {len(tools)}"
 
     def test_all_tools_have_name(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -197,6 +197,38 @@ class TestBuilderToolsReturnsList:
         for t in tools:
             assert hasattr(t, "description") and t.description, f"Tool '{t.name}' harus punya description"
 
+    def test_get_self_config_reports_effective_builder_runtime_without_sandbox(self):
+        from app.core.tools.builder_read_tools import build_builder_read_tools
+
+        agent_id = uuid.uuid4()
+        agent = _make_mock_agent(
+            agent_id=agent_id,
+            name="Arthur",
+            tools_config={
+                "builder": True,
+                "sandbox": True,
+                "deploy": True,
+                "tool_creator": True,
+                "subagents": {"enabled": True},
+            },
+        )
+        db = _make_mock_db()
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = agent
+        db.execute = AsyncMock(return_value=result)
+        tool = build_builder_read_tools(
+            db,
+            self_agent_id=str(agent_id),
+        )["get_self_config"]
+
+        payload = json.loads(_run(tool.ainvoke({})))
+
+        assert payload["tools_config"]["sandbox"] is False
+        assert payload["tools_config"]["deploy"] is False
+        assert payload["tools_config"]["tool_creator"] is False
+        assert payload["tools_config"]["subagents"] == {"enabled": False}
+        assert "tidak memiliki sandbox" in payload["runtime_policy"]
+
     def test_expected_tool_names(self):
         from app.core.tools.builder_tools import build_builder_tools
         db = _make_mock_db()
@@ -206,6 +238,7 @@ class TestBuilderToolsReturnsList:
             "get_self_config",
             "get_platform_capabilities",
             "get_user_subscription",
+            "get_payment_link",
             "link_dashboard_account",
             "get_presets",
             "plan_agent",
@@ -232,7 +265,7 @@ class TestBuilderToolsReturnsList:
         from app.core.tools.builder_tools import build_builder_tools
         db = _make_mock_db()
         tools = build_builder_tools(db_factory=db, owner_phone=None)
-        assert len(tools) == 22
+        assert len(tools) == 23
 
     def test_travel_planning_request_uses_personal_assistant_not_faq(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -658,6 +691,61 @@ class TestGetPlatformCapabilities:
 
 
 class TestGetUserSubscription:
+    def test_creation_entitlement_auto_provisions_lid_trial(self):
+        """A fresh WA LID can pass Arthur's create gate without dashboard linking."""
+        from app.core.tools.builder_user_tools import build_builder_user_tools
+
+        lid = "12345678901234567890"
+        db = _make_mock_db()
+        user = SimpleNamespace(id=uuid.uuid4(), external_id=lid, phone_number=None, wa_lid=lid)
+        sub = SimpleNamespace(status="trial", tokens_remaining=5_000_000)
+        plan = SimpleNamespace(
+            code="trial",
+            label="Trial",
+            allowed_models=[],
+            subagents_allowed=True,
+            wa_connect=True,
+        )
+        provisioned: dict[str, object] = {}
+
+        async def _fake_get_best(_identifiers, _db, **_kwargs):
+            return None
+
+        async def _fake_create(external_id, _db, *, wa_lid=None):
+            provisioned["external_id"] = external_id
+            provisioned["wa_lid"] = wa_lid
+            return user, sub
+
+        async def _fake_check(_external_id, _db):
+            return {
+                "allowed": True,
+                "plan": "Trial",
+                "agents_used": 0,
+                "max_agents": 1,
+                "expires_at": None,
+            }
+
+        async def _fake_get_subscription(_external_id, _db):
+            return user, sub, plan
+
+        with patch("app.core.domain.subscription_service.get_best_subscription_by_external_ids", _fake_get_best), patch(
+            "app.core.domain.subscription_service.get_or_create_wa_user", _fake_create
+        ), patch(
+            "app.core.domain.subscription_service.check_can_create_agent", _fake_check
+        ), patch(
+            "app.core.domain.subscription_service.get_subscription_by_external_id", _fake_get_subscription
+        ):
+            helpers = build_builder_user_tools(db, owner_phone=f"{lid}@lid")
+            result = _run(helpers["preview_agent_creation_entitlement"](
+                tools_config={"memory": True},
+                model="deepseek/deepseek-v4-flash",
+                channel_type="whatsapp",
+            ))
+
+        assert result["allowed"] is True
+        assert result["plan_code"] == "trial"
+        assert provisioned == {"external_id": lid, "wa_lid": lid}
+
     def test_tier3_unlimited_agent_slot_does_not_crash(self):
         from app.core.tools import builder_tools as bt
         from app.core.tools.builder_tools import build_builder_tools
@@ -758,29 +846,68 @@ class TestGetUserSubscription:
         assert data["phone"] == "62895619356936"
         assert data["plan_code"] == "tier_3"
 
-    def test_get_user_subscription_is_read_only_when_subscription_missing(self):
+    def test_get_user_subscription_auto_provisions_trial_when_missing(self):
         from app.core.tools.builder_tools import build_builder_tools
 
         db = _make_mock_db()
+        user = SimpleNamespace(
+            id=uuid.uuid4(),
+            external_id="12345678901234567890",
+            phone_number=None,
+            wa_lid="12345678901234567890",
+        )
+        sub = SimpleNamespace(
+            status="trial",
+            is_usable=True,
+            plan_id=uuid.uuid4(),
+            token_quota=5_000_000,
+            tokens_used=0,
+            tokens_remaining=5_000_000,
+            expires_at=None,
+        )
+        plan = SimpleNamespace(
+            id=sub.plan_id,
+            code="trial",
+            label="Trial",
+            max_agents=1,
+            is_trial=True,
+        )
+        agents_result = MagicMock()
+        agents_result.scalars.return_value.all.return_value = []
+        db.execute = AsyncMock(side_effect=[agents_result])
 
         async def _fake_get_best(_identifiers, _db, **_kwargs):
             return None
 
-        async def _fail_create(*_args, **_kwargs):
-            raise AssertionError("get_user_subscription must not auto-provision trial users")
+        provisioned: dict[str, object] = {}
+
+        async def _fake_create(external_id, _db, *, wa_lid=None):
+            provisioned["external_id"] = external_id
+            provisioned["wa_lid"] = wa_lid
+            return user, sub
+
+        async def _fake_get_subscription(_external_id, _db):
+            return user, sub, plan
 
         with patch("app.core.domain.subscription_service.get_best_subscription_by_external_ids", _fake_get_best), patch(
-            "app.core.domain.subscription_service.get_or_create_wa_user", _fail_create
+            "app.core.domain.subscription_service.get_or_create_wa_user", _fake_create
+        ), patch(
+            "app.core.domain.subscription_service.get_subscription_by_external_id", _fake_get_subscription
         ):
-            tools = build_builder_tools(db_factory=db, owner_phone="+74350933852232")
+            tools = build_builder_tools(db_factory=db, owner_phone="12345678901234567890@lid")
             tool = next(t for t in tools if t.name == "get_user_subscription")
             result = _run(tool.ainvoke({}))
 
         data = json.loads(result)
-        assert data["read_only"] is True
-        assert "tidak ditemukan" in data["error"].lower()
+        assert data["plan_code"] == "trial"
+        assert data["agents_remaining"] == 1
+        assert provisioned == {
+            "external_id": "12345678901234567890",
+            "wa_lid": "12345678901234567890",
+        }
+        db.commit.assert_awaited_once()
 
-    def test_get_user_subscription_does_not_report_trial_for_unlinked_lid_identity(self):
+    def test_get_user_subscription_reports_trial_for_lid_without_dashboard(self):
         from app.core.tools.builder_tools import build_builder_tools
 
         db = _make_mock_db()
@@ -800,7 +927,12 @@ class TestGetUserSubscription:
                 id=uuid.uuid4(),
                 external_id="74350933852232",
                 phone_number=None,
+                wa_lid="74350933852232",
             ), sub, plan
+
+        agents_result = MagicMock()
+        agents_result.scalars.return_value.all.return_value = []
+        db.execute = AsyncMock(side_effect=[agents_result])
 
         with patch("app.core.domain.subscription_service.get_best_subscription_by_external_ids", _fake_get_best):
             tools = build_builder_tools(
@@ -812,9 +944,9 @@ class TestGetUserSubscription:
             result = _run(tool.ainvoke({}))
 
         data = json.loads(result)
-        assert data["status"] == "identity_unlinked"
-        assert data["read_only"] is True
-        assert "LID" in data["error"]
+        assert data["status"] == "trial"
+        assert data["plan_code"] == "trial"
+        assert "error" not in data
 
 
 class TestComposeAgentBlueprint:
@@ -2809,6 +2941,9 @@ class TestUpdateAgent:
             async def __aexit__(self, *args):
                 return None
 
+            async def get(self, *args, **kwargs):
+                raise httpx.TimeoutException("connect timeout")
+
             async def post(self, *args, **kwargs):
                 raise httpx.TimeoutException("connect timeout")
 
@@ -2834,7 +2969,7 @@ class TestUpdateAgent:
         from app.core.tools.builder_tools import build_builder_tools
 
         db = _make_mock_db()
-        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tools = build_builder_tools(db_factory=db, owner_phone="151414827434073@lid")
         tool = next(t for t in tools if t.name == "generate_google_auth_link")
 
         settings = SimpleNamespace(

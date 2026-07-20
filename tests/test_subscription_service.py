@@ -206,6 +206,43 @@ class TestGetOrCreateWaUser:
         assert sub is existing_sub
         mock_db.add.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_real_phone_reuses_lid_trial_user(self):
+        """LID-only first turn must not create a second trial once phone resolves."""
+        from app.core.domain import subscription_service
+        from app.core.domain.subscription_service import get_or_create_wa_user
+
+        lid = "12345678901234567890"
+        existing_user = SimpleNamespace(
+            id=uuid.uuid4(),
+            external_id=lid,
+            phone_number=None,
+            wa_lid=lid,
+            has_used_trial=True,
+        )
+        existing_sub = _make_sub()
+        existing_key = MagicMock()
+        results = [
+            MagicMock(**{"scalar_one_or_none.return_value": existing_user}),
+            MagicMock(**{"scalar_one_or_none.return_value": existing_sub}),
+            MagicMock(**{"scalar_one_or_none.return_value": existing_key}),
+        ]
+        mock_db = AsyncMock()
+        mock_db.execute = AsyncMock(side_effect=results)
+        mock_db.flush = AsyncMock()
+
+        with patch.object(subscription_service, "ensure_default_subscription_plans", AsyncMock()):
+            user, sub = await get_or_create_wa_user(
+                "628111222333",
+                mock_db,
+                wa_lid=lid,
+            )
+
+        assert user is existing_user
+        assert sub is existing_sub
+        assert user.phone_number == "628111222333"
+        mock_db.add.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Tests: check_can_create_agent — deteksi agent lama (operator_ids fallback)
@@ -262,6 +299,41 @@ class TestCheckCanCreateAgent:
 
         assert result["allowed"] is False
         assert "upgrade" in result["reason"].lower()
+
+    @pytest.mark.asyncio
+    async def test_phone_and_lid_aliases_share_the_same_agent_limit(self):
+        """An agent created under LID still counts after WA learns the phone."""
+        from app.core.domain.subscription_service import check_can_create_agent
+
+        lid = "12345678901234567890"
+        phone = "628111222333"
+        user = SimpleNamespace(
+            id=uuid.uuid4(),
+            external_id=lid,
+            phone_number=phone,
+            wa_lid=lid,
+        )
+        sub = _make_sub()
+        plan = _make_plan(max_agents=1)
+        lid_owned_agent = _make_agent(owner_external_id=lid, operator_ids=[lid])
+        results = [
+            MagicMock(**{"scalar_one_or_none.return_value": user}),
+            MagicMock(**{"scalar_one_or_none.return_value": sub}),
+            MagicMock(**{"scalar_one.return_value": plan}),
+            MagicMock(**{"scalars.return_value.all.return_value": [lid_owned_agent]}),
+        ]
+        mock_db = AsyncMock()
+        mock_db.execute = AsyncMock(side_effect=results)
+
+        result = await check_can_create_agent(phone, mock_db)
+
+        assert result["allowed"] is False
+        count_query = mock_db.execute.await_args_list[-1].args[0]
+        query_params = count_query.compile().params
+        assert any(
+            isinstance(value, list) and phone in value and lid in value
+            for value in query_params.values()
+        )
 
     @pytest.mark.asyncio
     async def test_allows_when_no_agents(self):

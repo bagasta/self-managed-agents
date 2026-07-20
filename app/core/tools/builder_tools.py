@@ -123,6 +123,7 @@ from app.core.tools.builder_json import (
 )
 from app.core.tools.builder_management_tools import build_builder_management_tools
 from app.core.tools.builder_manual_tools import build_builder_manual_tools
+from app.core.tools.builder_pipeline_tools import build_builder_pipeline_tools
 from app.core.tools.builder_payment_tools import build_builder_payment_tools
 from app.core.tools.builder_planning_tools import build_builder_planning_tools, _get_post_create_steps
 from app.core.tools.builder_read_tools import build_builder_read_tools
@@ -195,6 +196,7 @@ async def _call_instruction_writer(
     max_tokens: int = 1500,
     temperature: float = 0.5,
     json_mode: bool = False,
+    timeout_seconds: float = 45.0,
 ) -> str:
     """Call LLM via OpenRouter for instruction/soul writing."""
     settings = get_settings()
@@ -215,7 +217,7 @@ async def _call_instruction_writer(
         # Force a JSON object so the model can't wrap the blueprint in prose.
         # Some models reject response_format; fall back to a plain call.
         try:
-            async with asyncio.timeout(45):
+            async with asyncio.timeout(timeout_seconds):
                 response = await client.chat.completions.create(
                     **create_kwargs,
                     response_format={"type": "json_object"},
@@ -223,15 +225,33 @@ async def _call_instruction_writer(
         except asyncio.TimeoutError:
             raise
         except Exception:
-            async with asyncio.timeout(45):
+            async with asyncio.timeout(timeout_seconds):
                 response = await client.chat.completions.create(**create_kwargs)
     else:
-        async with asyncio.timeout(45):
+        async with asyncio.timeout(timeout_seconds):
             response = await client.chat.completions.create(**create_kwargs)
     content = response.choices[0].message.content or ""
     # Strip reasoning/thinking tags
     content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
     return content
+
+
+async def _call_optimized_instruction_writer(*args: Any, **kwargs: Any) -> str:
+    """Use a responsive writer for optimized artifacts, preserving soul's model."""
+    settings = get_settings()
+    requested_model = str(kwargs.get("model") or "").strip()
+    if requested_model != "openai/gpt-4o-mini":
+        kwargs["model"] = settings.arthur_builder_writer_model
+        requested_max_tokens = int(kwargs.get("max_tokens") or 1500)
+        kwargs["max_tokens"] = min(
+            requested_max_tokens,
+            max(1000, int(settings.arthur_builder_writer_max_tokens)),
+        )
+        kwargs["timeout_seconds"] = max(
+            5.0,
+            float(settings.arthur_builder_writer_timeout_seconds),
+        )
+    return await _call_instruction_writer(*args, **kwargs)
 
 
 
@@ -307,6 +327,7 @@ def build_builder_tools(
     connector_tools = build_builder_connector_tools(
         get_settings=_get_builder_settings,
         get_logger=_get_builder_logger,
+        owner_external_id=owner_phone,
     )
     channel_tools = build_builder_channel_tools(
         db_factory,
@@ -390,7 +411,7 @@ def build_builder_tools(
     # delete_agent/get_agent_detail/list_my_agents live in app.core.tools.builder_management_tools.
     # generate_google_auth_link lives in app.core.tools.builder_connector_tools.
 
-    return [
+    tools = [
         read_tools["get_self_config"],
         read_tools["get_platform_capabilities"],
         user_tools["get_user_subscription"],
@@ -415,3 +436,31 @@ def build_builder_tools(
         management_tools["list_my_agents"],
         connector_tools["generate_google_auth_link"],
     ]
+    if str(get_settings().arthur_builder_pipeline_mode).strip().lower() == "optimized":
+        optimized_blueprint_tools = build_builder_blueprint_tools(
+            call_instruction_writer=_call_optimized_instruction_writer,
+            get_logger=_get_builder_logger,
+        )
+        optimized_manual_tools = build_builder_manual_tools(
+            call_instruction_writer=_call_optimized_instruction_writer,
+            get_logger=_get_builder_logger,
+        )
+        optimized_instruction_tools = build_builder_instruction_tools(
+            call_instruction_writer=_call_optimized_instruction_writer,
+            get_logger=_get_builder_logger,
+        )
+        pipeline_tools = build_builder_pipeline_tools(
+            plan_tool=planning_tools["plan_agent"],
+            blueprint_tool=optimized_blueprint_tools["compose_agent_blueprint"],
+            manual_tool=optimized_manual_tools["compose_agent_operating_manual"],
+            instruction_tool=optimized_instruction_tools["compose_agent_instructions"],
+            soul_tool=soul_tools["compose_agent_soul"],
+            validation_tool=validation_tools["validate_agent_config"],
+            create_tool=create_tools["create_agent"],
+            verify_tool=verify_tools["verify_agent"],
+            connector_tool=connector_tools["generate_google_auth_link"],
+            get_settings=_get_builder_settings,
+            get_logger=_get_builder_logger,
+        )
+        tools.append(pipeline_tools["create_agent_from_brief"])
+    return tools

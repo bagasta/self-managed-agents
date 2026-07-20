@@ -136,6 +136,22 @@ class TestDeliveryStatusQuarantine:
         assert len(out) == 1
         assert isinstance(out[0], AIMessage)
 
+    def test_invalid_tool_claim_agent_row_is_excluded(self):
+        from app.core.engine.context_service import (
+            INVALID_TOOL_CLAIM_TAG,
+            db_messages_to_lc,
+        )
+
+        out = db_messages_to_lc([
+            _row(
+                "agent",
+                "Google Tasks API diperlukan untuk menghapus row spreadsheet.",
+                tool_name=INVALID_TOOL_CLAIM_TAG,
+            )
+        ])
+
+        assert out == []
+
 
 # ===========================================================================
 # FIX D — messages from dead (failed/abandoned/...) runs are quarantined,
@@ -162,3 +178,21 @@ class TestDeadRunQuarantine:
 
         rows = [_row("agent", "no-run", run_id=None)]
         assert filter_dead_run_messages(rows, {}) == rows
+
+
+class TestFailedToolRunQuarantine:
+    def test_keeps_user_request_but_drops_agent_claim(self):
+        from app.core.engine.context_service import filter_failed_tool_run_agent_messages
+
+        rows = [
+            _row("user", "Hilangkan row duplikat", run_id="r1"),
+            _row("agent", "Aktifkan Google Tasks API", run_id="r1"),
+            _row("agent", "Normal answer", run_id="r2"),
+        ]
+
+        kept = filter_failed_tool_run_agent_messages(rows, {"r1"})
+
+        assert [row.content for row in kept] == [
+            "Hilangkan row duplikat",
+            "Normal answer",
+        ]

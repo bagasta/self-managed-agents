@@ -57,9 +57,9 @@ def resolve_auto_provision_external_id(
     """
     Resolve the external user id we can safely provision into users table.
 
-    WhatsApp sessions must provide a real phone number via channel_config["phone_number"].
-    If we only have a LID/JID-like identity, skip provisioning so we do not
-    create the wrong user row.
+    Prefer a resolved WhatsApp phone number. If only a stable LID/JID identity
+    exists, use it for an independent Trial account; it can be reconciled with
+    the real phone later through users.wa_lid.
     """
     cfg = channel_config if isinstance(channel_config, dict) else {}
     phone_number = normalize_phone(str(cfg.get("phone_number") or ""))
@@ -67,7 +67,14 @@ def resolve_auto_provision_external_id(
         return phone_number
 
     if channel_type == "whatsapp":
-        return None
+        candidate = (
+            session_external_user_id
+            or cfg.get("user_phone")
+            or payload_external_user_id
+            or ""
+        ).strip()
+        normalized = normalize_phone(candidate)
+        return normalized or None
 
     candidate = (payload_external_user_id or session_external_user_id or "").strip()
     if not candidate or is_probable_whatsapp_lid(candidate):

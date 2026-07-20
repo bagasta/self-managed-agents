@@ -15,6 +15,8 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.phone_utils import normalize_phone
+from app.core.utils.wa_identity import is_probable_whatsapp_lid
+from app.core.model_defaults import CREATED_AGENT_DEFAULT_MODEL
 from app.models.subscription import SubscriptionPlan, User, UserSubscription
 from app.models.user_api_key import UserApiKey, generate_user_key, hash_user_key
 
@@ -57,7 +59,7 @@ DEFAULT_SUBSCRIPTION_PLANS: list[dict[str, Any]] = [
         "token_quota": 5_000_000,
         "period_days": 14,
         "grace_period_days": 3,
-        "allowed_models": ["openai/gpt-4.1-mini"],
+        "allowed_models": [CREATED_AGENT_DEFAULT_MODEL, "openai/gpt-4.1-mini"],
         "subagents_allowed": True,
         "wa_connect": True,
         "is_trial": True,
@@ -71,7 +73,7 @@ DEFAULT_SUBSCRIPTION_PLANS: list[dict[str, Any]] = [
         "token_quota": 10_000_000,
         "period_days": 30,
         "grace_period_days": 3,
-        "allowed_models": ["openai/gpt-4.1-mini"],
+        "allowed_models": [CREATED_AGENT_DEFAULT_MODEL, "openai/gpt-4.1-mini"],
         "subagents_allowed": True,
         "wa_connect": True,
         "is_trial": False,
@@ -132,8 +134,14 @@ async def ensure_default_subscription_plans(db: AsyncSession) -> None:
             existing.max_agents = 1
             existing.token_quota = 5_000_000
             existing.period_days = 14
-            existing.allowed_models = ["openai/gpt-4.1-mini"]
+            existing.allowed_models = list(
+                dict.fromkeys([CREATED_AGENT_DEFAULT_MODEL, *(existing.allowed_models or [])])
+            )
             existing.subagents_allowed = True
+        if existing.id == SubscriptionPlan.TIER_1_ID:
+            existing.allowed_models = list(
+                dict.fromkeys([CREATED_AGENT_DEFAULT_MODEL, *(existing.allowed_models or [])])
+            )
     await db.flush()
 
 
@@ -156,36 +164,65 @@ async def get_or_create_wa_user(
     """
     await ensure_default_subscription_plans(db)
 
+    raw_external_id = str(external_id or "").strip()
+    normalized_external_id = normalize_phone(raw_external_id) or raw_external_id
+    normalized_wa_lid = normalize_phone(wa_lid or "") or None
+    # A user may have been provisioned from a LID-only first turn. When a
+    # later webhook also contains the real phone, query both identities so the
+    # existing trial row is reused instead of creating a second account.
+    lookup_identifiers = list(
+        dict.fromkeys(
+            value
+            for value in (raw_external_id, normalized_external_id, normalized_wa_lid)
+            if value
+        )
+    )
+    identity_clauses = [
+        clause
+        for identifier in lookup_identifiers
+        for clause in (
+            User.external_id == identifier,
+            User.phone_number == identifier,
+            User.wa_lid == identifier,
+        )
+    ]
     user = (
         await db.execute(
-            select(User).where(
-                or_(
-                    User.external_id == external_id,
-                    User.phone_number == external_id,
-                    User.wa_lid == external_id,
-                )
-            )
+            select(User).where(or_(*identity_clauses))
         )
     ).scalar_one_or_none()
 
     if user is None:
         user = User(
-            email=f"{external_id.replace('+', '').replace(' ', '')}@wa.placeholder",
+            email=f"{normalized_external_id.replace('+', '').replace(' ', '')}@wa.placeholder",
             password_hash="",
-            external_id=external_id,
+            external_id=normalized_external_id,
             has_used_trial=False,
             email_verified=False,
         )
         db.add(user)
         await db.flush()
-        logger.info("subscription_service.user_created", external_id=external_id, user_id=str(user.id))
+        logger.info("subscription_service.user_created", external_id=normalized_external_id, user_id=str(user.id))
 
-    if wa_lid and getattr(user, "wa_lid", None) != wa_lid:
-        user.wa_lid = wa_lid
+    if normalized_wa_lid and getattr(user, "wa_lid", None) != normalized_wa_lid:
+        user.wa_lid = normalized_wa_lid
         logger.info(
             "subscription_service.wa_lid_learned",
             user_id=str(user.id),
-            external_id=external_id,
+            external_id=normalized_external_id,
+        )
+
+    if (
+        normalized_external_id
+        and normalized_external_id.isdigit()
+        and not is_probable_whatsapp_lid(normalized_external_id)
+        and getattr(user, "phone_number", None) != normalized_external_id
+    ):
+        user.phone_number = normalized_external_id
+        logger.info(
+            "subscription_service.phone_number_learned",
+            user_id=str(user.id),
+            external_id=normalized_external_id,
         )
 
     # Subscription
@@ -203,7 +240,7 @@ async def get_or_create_wa_user(
     # UserApiKey — buat satu kalau belum punya
     existing_key = (
         await db.execute(
-            select(UserApiKey).where(UserApiKey.label == f"wa:{external_id}")
+            select(UserApiKey).where(UserApiKey.label == f"wa:{normalized_external_id}")
         )
     ).scalar_one_or_none()
 
@@ -211,11 +248,11 @@ async def get_or_create_wa_user(
         raw_key = generate_user_key()
         api_key = UserApiKey(
             key_hash=hash_user_key(raw_key),
-            label=f"wa:{external_id}",
+            label=f"wa:{normalized_external_id}",
             expires_at=sub.expires_at or (datetime.now(timezone.utc) + timedelta(days=30)),
         )
         db.add(api_key)
-        logger.info("subscription_service.api_key_created", external_id=external_id)
+        logger.info("subscription_service.api_key_created", external_id=normalized_external_id)
 
     await db.flush()
     return user, sub
@@ -484,7 +521,6 @@ async def check_can_create_agent(
     2. operator_ids @> ARRAY[external_id]  (agent lama / legacy)
     Digabung dengan OR agar agent lama tetap terhitung.
     """
-    from sqlalchemy.dialects.postgresql import array
     from app.models.agent import Agent
 
     result = await get_subscription_by_external_id(external_id, db)
@@ -500,14 +536,28 @@ async def check_can_create_agent(
             "plan": plan.label,
         }
 
+    # Count all aliases belonging to this user. A trial may start from a
+    # LID-only turn and learn the real phone later; both identities must still
+    # share the same max_agents limit.
+    owner_identifiers: list[str] = []
+    for raw in (
+        external_id,
+        getattr(user, "external_id", None),
+        getattr(user, "phone_number", None),
+        getattr(user, "wa_lid", None),
+    ):
+        for candidate in (str(raw or "").strip(), normalize_phone(str(raw or ""))):
+            if candidate and candidate not in owner_identifiers:
+                owner_identifiers.append(candidate)
+
     # Gabungkan: agent baru (owner_external_id) + agent lama (operator_ids)
     active_agents = (
         await db.execute(
             select(Agent).where(
                 Agent.is_deleted.is_(False),
                 or_(
-                    Agent.owner_external_id == external_id,
-                    Agent.operator_ids.contains([external_id]),
+                    Agent.owner_external_id.in_(owner_identifiers),
+                    *(Agent.operator_ids.contains([identifier]) for identifier in owner_identifiers),
                 ),
             )
         )

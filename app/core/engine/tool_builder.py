@@ -711,6 +711,7 @@ def build_whatsapp_media_tools(
     *,
     device_id: str = "",
     default_target: str = "",
+    allow_workspace_paths: bool = True,
 ) -> list:
     """
     Tools untuk mengirim gambar dan dokumen ke WhatsApp.
@@ -718,6 +719,11 @@ def build_whatsapp_media_tools(
 
     device_id / default_target: kw-args opsional — dipakai saat session=None (misal subagent).
     Jika session diberikan, device_id/default_target diambil dari session.channel_config.
+
+    ``allow_workspace_paths`` hanya mengontrol pembacaan path lokal. Base64 dan
+    attachment yang terdaftar pada session tetap dapat dikirim tanpa sandbox.
+    Builder seperti Arthur tidak memiliki workspace eksekusi, sehingga path yang
+    hanya muncul di history/memory tidak boleh diperlakukan sebagai file nyata.
     """
     if session is not None:
         _raw_cfg = session.channel_config
@@ -770,8 +776,11 @@ def build_whatsapp_media_tools(
                 if resolved_mimetype and (not mimetype or mimetype == "image/jpeg"):
                     mimetype = resolved_mimetype
             else:
-                if sandbox is None:
-                    return "[error] Tool send_whatsapp_image membutuhkan sandbox aktif untuk membaca file. Gunakan base64 langsung atau attachment WA terbaru."
+                if not allow_workspace_paths or sandbox is None:
+                    return (
+                        "[MEDIA_SOURCE_UNAVAILABLE] Tidak ada gambar tervalidasi untuk "
+                        "dikirim pada percakapan ini."
+                    )
                 path = image_path_or_base64 if image_path_or_base64.startswith("/workspace/") else f"/workspace/{image_path_or_base64}"
                 import shlex as _shlex
 
@@ -836,8 +845,11 @@ def build_whatsapp_media_tools(
                 if resolved_mimetype and (not mimetype or mimetype == "application/octet-stream"):
                     mimetype = resolved_mimetype
             else:
-                if sandbox is None:
-                    return "[error] Tool send_whatsapp_document membutuhkan sandbox aktif untuk membaca file."
+                if not allow_workspace_paths or sandbox is None:
+                    return (
+                        "[MEDIA_SOURCE_UNAVAILABLE] Tidak ada dokumen tervalidasi untuk "
+                        "dikirim pada percakapan ini."
+                    )
                 path = file_path_or_base64 if file_path_or_base64.startswith("/workspace/") else f"/workspace/{file_path_or_base64}"
                 import shlex as _shlex
 

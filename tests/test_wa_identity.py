@@ -28,15 +28,27 @@ def test_resolve_auto_provision_external_id_uses_phone_number_for_whatsapp():
     )
 
 
-def test_resolve_auto_provision_external_id_skips_whatsapp_without_phone_number():
+def test_resolve_auto_provision_external_id_uses_lid_without_phone_number():
     assert (
         resolve_auto_provision_external_id(
             channel_type="whatsapp",
             channel_config={},
-            payload_external_user_id="62895619356936",
+            payload_external_user_id=None,
+            session_external_user_id="12345678901234567890@lid",
+        )
+        == "12345678901234567890"
+    )
+
+
+def test_resolve_auto_provision_external_id_uses_session_phone_without_channel_mapping():
+    assert (
+        resolve_auto_provision_external_id(
+            channel_type="whatsapp",
+            channel_config={},
+            payload_external_user_id=None,
             session_external_user_id="62895619356936",
         )
-        is None
+        == "62895619356936"
     )
 
 

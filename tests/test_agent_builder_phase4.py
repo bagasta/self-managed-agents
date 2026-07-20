@@ -380,6 +380,12 @@ class TestArthurRuntimeToolGating:
         assert "sandbox" not in result.active_groups
         assert "deploy" not in result.active_groups
         assert not any(str(group).startswith("subagents(") for group in result.active_groups)
+        image_tool = next(tool for tool in result.tools if tool.name == "send_whatsapp_image")
+        media_result = _run(image_tool.ainvoke(
+            {"image_path_or_base64": "/workspace/shared/career_survey_chart.png"}
+        ))
+        assert media_result.startswith("[MEDIA_SOURCE_UNAVAILABLE]")
+        assert "sandbox" not in media_result.lower()
         assert not any(getattr(tool, "name", "") == "sandbox_write_binary_file" for tool in result.tools)
 
 

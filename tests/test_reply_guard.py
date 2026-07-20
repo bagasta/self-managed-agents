@@ -463,3 +463,39 @@ def test_disabled_google_workspace_claim_is_rewritten():
 
     assert "belum bisa mengakses Google Workspace" in out
     assert "Owner perlu mengaktifkan dan menghubungkan Google" in out
+
+
+def test_empty_reply_after_optimized_create_returns_onboarding():
+    out = ensure_non_empty_reply(
+        "",
+        [
+            {
+                "tool": "create_agent_from_brief",
+                "result": '{"success": true, "name": "Sales Agent", "agent_id": "agent-1", "channel_type": "whatsapp"}',
+            }
+        ],
+        active_groups=["builder"],
+    )
+
+    assert "Sales Agent sudah jadi" in out
+    assert "nomor demo Arthur" in out
+
+
+def test_optimized_create_clarification_is_not_replaced_by_generic_failure():
+    out = ensure_non_empty_reply(
+        "Apakah agent ini perlu menerima file?",
+        [
+            {
+                "tool": "create_agent_from_brief",
+                "result": (
+                    '{"success": false, "status": "needs_clarification", '
+                    '"creation_attempted": false, "capability_clarifications": '
+                    '[{"question": "Apakah agent ini perlu menerima atau membuat file?"}]}'
+                ),
+            }
+        ],
+        active_groups=["builder"],
+    )
+
+    assert "perlu menerima atau membuat file" in out
+    assert "kendala sistem" not in out

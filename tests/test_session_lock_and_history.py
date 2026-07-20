@@ -131,6 +131,25 @@ class TestCancelActiveRun:
         await unregister_active_task(sid)
 
     @pytest.mark.asyncio
+    async def test_active_task_identity_rejects_stale_progress_task(self):
+        from app.core.engine.session_lock import (
+            is_registered_active_task,
+            register_active_task,
+            unregister_active_task,
+        )
+
+        sid = uuid.uuid4()
+        active = asyncio.create_task(asyncio.sleep(0.1))
+        stale = asyncio.create_task(asyncio.sleep(0.1))
+        await register_active_task(sid, active)
+
+        assert await is_registered_active_task(sid, active) is True
+        assert await is_registered_active_task(sid, stale) is False
+
+        await unregister_active_task(sid, active)
+        await asyncio.gather(active, stale)
+
+    @pytest.mark.asyncio
     async def test_cancel_cancels_running_task(self):
         from app.core.engine.session_lock import (
             cancel_active_run, register_active_task, unregister_active_task
@@ -194,6 +213,63 @@ class TestWhatsAppRunLifecycle:
         src = inspect.getsource(agent_runner.run_agent)
         assert '_schedule_wa_long_progress_notice("run")' not in src
         assert "await _schedule_wa_long_progress_notice(tool_name)" in src
+        assert "is_registered_active_task(session.id, _run_owner_task)" in src
+
+    def test_outer_channel_cancellation_closes_exact_run(self):
+        from app.api import channels
+        from app.core.engine import agent_runner
+
+        runner_src = inspect.getsource(agent_runner.persist_cancelled_run_for_task)
+        channel_src = inspect.getsource(channels.wa_incoming)
+        assert '_managed_agent_run_id' in runner_src
+        assert 'Run.id == run_id, Run.status == "running"' in runner_src
+        assert "persist_cancelled_run_for_task(current_task)" in channel_src
+
+
+class TestGoogleDrivePendingAttachment:
+    def test_resolves_recent_previous_turn_attachment_for_one_time_upload(self, tmp_path):
+        from app.core.engine.agent_runner import _resolve_google_drive_attachment
+
+        source = tmp_path / "shared" / "current_input" / "image.jpg"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"image")
+
+        path, aliases, consume, age = _resolve_google_drive_attachment(
+            workspace_dir=tmp_path,
+            session_metadata={
+                "current_attachment": {"filename": "image.jpg", "saved_at": 900.0}
+            },
+            current_attachment_name=None,
+            reuse_seconds=300,
+            now_timestamp=1000.0,
+        )
+
+        assert path == str(source.resolve())
+        assert "/workspace/data/incoming/current_input/image.jpg" in aliases
+        assert consume is True
+        assert age == 100.0
+
+    def test_rejects_expired_previous_turn_attachment(self, tmp_path):
+        from app.core.engine.agent_runner import _resolve_google_drive_attachment
+
+        source = tmp_path / "shared" / "current_input" / "image.jpg"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"image")
+
+        path, aliases, consume, age = _resolve_google_drive_attachment(
+            workspace_dir=tmp_path,
+            session_metadata={
+                "current_attachment": {"filename": "image.jpg", "saved_at": 100.0}
+            },
+            current_attachment_name=None,
+            reuse_seconds=300,
+            now_timestamp=1000.0,
+        )
+
+        assert path is None
+        assert aliases == set()
+        assert consume is False
+        assert age == 900.0
 
 
 class TestGraphResultExtraction:

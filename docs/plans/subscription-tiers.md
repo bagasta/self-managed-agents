@@ -12,7 +12,7 @@
 | **Harga** | Gratis | *(tim bisnis)* | *(tim bisnis)* |
 | **Masa Aktif** | Sekali pakai (tidak perpanjang) | 30 hari | 30 hari |
 | **Jumlah Agent** | 1 | 1 | 2 |
-| **Model** | `gpt-4.1-mini` | `gpt-4.1-mini` | `gpt-4.1-mini` atau `deepseek/deepseek-v4-flash` |
+| **Model** | `deepseek/deepseek-v4-flash` (default) atau `gpt-4.1-mini` | `deepseek/deepseek-v4-flash` (default) atau `gpt-4.1-mini` | `deepseek/deepseek-v4-flash` (default) atau `gpt-4.1-mini` |
 | **WhatsApp** | ✅ (1 nomor) | ✅ (1 nomor) | ✅ (2 nomor) |
 | **Sub-agent** | ❌ | Opsional | Opsional |
 | **Token Quota (shared)** | ~\$1 | ~\$5 | ~\$10 (shared 2 agent) |
@@ -29,7 +29,7 @@
 | **Harga** | Gratis, sekali seumur hidup per user |
 | **Masa Aktif** | Tidak ada tanggal — berlaku sampai quota habis |
 | **Jumlah Agent** | 1 |
-| **Model** | `openai/gpt-4.1-mini` |
+| **Model** | `deepseek/deepseek-v4-flash` (default) atau `openai/gpt-4.1-mini` |
 | **WhatsApp** | ✅ (1 nomor) |
 | **Sub-agent** | ❌ tidak tersedia |
 | **Token Quota** | Setara \$1 usage `gpt-4.1-mini` |
@@ -67,7 +67,7 @@ Total combined ≈ 2,031,250 tokens
 | **Harga** | *(ditentukan tim bisnis)* |
 | **Masa Aktif** | 30 hari per siklus |
 | **Jumlah Agent** | 1 |
-| **Model** | `openai/gpt-4.1-mini` |
+| **Model** | `deepseek/deepseek-v4-flash` (default) atau `openai/gpt-4.1-mini` |
 | **WhatsApp** | ✅ (1 nomor) |
 | **Sub-agent** | Opsional (diaktifkan manual di config agent) |
 | **Token Quota** | Setara \$5 usage `gpt-4.1-mini` (shared) |
@@ -202,8 +202,8 @@ CREATE TABLE subscription_plans (
 
 ```sql
 INSERT INTO subscription_plans (code, label, max_agents, token_quota, period_days, allowed_models, subagents_allowed, is_trial) VALUES
-('trial',  'Trial',      1, 2000000,  NULL, '["openai/gpt-4.1-mini"]', false, true),
-('tier_1', 'Starter',    1, 10000000, 30,   '["openai/gpt-4.1-mini"]', true,  false),
+('trial',  'Trial',      1, 2000000,  NULL, '["deepseek/deepseek-v4-flash","openai/gpt-4.1-mini"]', false, true),
+('tier_1', 'Starter',    1, 10000000, 30,   '["deepseek/deepseek-v4-flash","openai/gpt-4.1-mini"]', true,  false),
 ('tier_2', 'Pro',        2, 20000000, 30,   '["openai/gpt-4.1-mini","deepseek/deepseek-v4-flash"]', true, false),
 ('tier_3', 'Enterprise', NULL, 100000000, NULL, '[]', true, false);  -- unlimited agent, quota 100 juta token
 ```
@@ -365,7 +365,7 @@ AND grace_until < now();
 3. Hitung active_agents milik user (is_deleted = false, owner_external_id = external_user_id)
    - Kalau active_agents >= plan.max_agents → tolak, minta upgrade
 4. Validasi model yang diminta ada di plan.allowed_models
-   - Kalau tidak → default ke gpt-4.1-mini
+   - Kalau tidak → default ke deepseek/deepseek-v4-flash
 5. Set agent.active_until = subscription.expires_at (atau grace_until kalau grace period)
 6. Set agent.owner_external_id = external_user_id
 7. Untuk trial: blokir subagents di tools_config
@@ -379,7 +379,7 @@ AND grace_until < now();
 
 - [x] Token quota Tier 2: **shared** antara semua agent
 - [x] Grace period: **3 hari**
-- [x] Trial: **1 agent, gpt-4.1-mini, \$1 quota, tanpa sub-agent**
+- [x] Trial: **1 agent, deepseek/deepseek-v4-flash default, \$1 quota**
 - [x] Model Tier 2: bisa **ganti kapan saja** melalui Arthur (bukan hanya saat buat agent)
 - [x] Tier 3 / Enterprise: **unlimited agent, 100 juta token shared**
 - [x] Upgrade dari Trial: agent yang sudah dibuat **tetap jalan**, tidak perlu buat ulang
@@ -414,7 +414,7 @@ Arthur: cek plan.allowed_models user → deepseek ada → panggil update_agent(m
 
 **Aturan enforcement:**
 - Arthur wajib cek `plan.allowed_models` sebelum `update_agent`
-- Kalau user Tier 1 minta model selain `gpt-4.1-mini` → Arthur jelaskan perlu upgrade ke Tier 2
+- Kalau user meminta model di luar `plan.allowed_models` → Arthur jelaskan opsi plan yang mendukungnya
 - Ganti model **tidak reset token quota** — hitungan tetap berjalan dari sebelumnya
 
 ---

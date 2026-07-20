@@ -220,6 +220,7 @@ async def build_agent_tool_setup(
                 user_jid=user_jid,
                 sender_name=sender_name,
                 user_message=user_message,
+                allow_reply_to_user=operator_turn and bool(escalation_user_jid),
             )
         )
         active_groups.append("escalation")
@@ -252,7 +253,13 @@ async def build_agent_tool_setup(
                 reason="whatsapp_media_disabled_but_channel_is_whatsapp",
                 agent_id=str(agent_id),
             )
-        tools.extend(build_whatsapp_media_tools(session, sandbox))
+        tools.extend(
+            build_whatsapp_media_tools(
+                session,
+                sandbox,
+                allow_workspace_paths=not builder_agent,
+            )
+        )
         active_groups.append("whatsapp_media")
         if _is_enabled(tools_config, "wa_agent_manager", default=False):
             tools.extend(build_wa_agent_manager_tools(session, db_factory=AsyncSessionLocal))

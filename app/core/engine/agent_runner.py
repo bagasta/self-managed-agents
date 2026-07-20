@@ -12,9 +12,11 @@ import contextlib
 import copy
 import json
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, TypedDict
 
 import structlog
@@ -53,19 +55,15 @@ from app.core.engine.agent_google_routing import (
     _builder_google_auth_agent_id,
     _extract_auth_url_from_builder_steps,
     _google_workspace_customer_blocker_reply,
-    _google_workspace_mcp_unauthorized_reply,
     _google_workspace_server_has_auth,
     _is_google_chat_intent,
-    _is_google_workspace_mcp_authorized_for_session,
     _remove_google_workspace_mcp_server,
     _route_google_workspace_blocker_to_owner_if_customer,
 )
 from app.core.engine.agent_identity import (
     _is_customer_whatsapp_session,
-    _normalized_agent_operator_ids,
     _owner_notification_target,
     _session_real_phone,
-    _session_sender_phone,
 )
 from app.core.engine.agent_step_utils import (
     _URL_RE,
@@ -85,7 +83,8 @@ from app.models.agent import Agent as AgentModel
 from app.models.message import Message
 from app.models.run import Run
 from app.models.session import Session
-from sqlalchemy import select
+from app.core.model_defaults import CREATED_AGENT_DEFAULT_MODEL
+from sqlalchemy import select, update
 from app.core.engine.result_parser import (
     ParsedResult,
     sanitize_input_messages as _sanitize_input_messages,
@@ -111,9 +110,12 @@ from app.core.engine.google_mcp_support import (
     _is_google_mcp_intent,
     _is_google_sheets_authoring_intent,
     _is_google_slides_relayout_intent,
+    _google_mcp_result_text,
+    _google_mcp_text_error,
     _looks_like_progress_claim,
     _needs_google_forms_followup,
     _needs_google_sheets_followup,
+    _needs_google_sheets_verification_followup,
     _needs_google_slides_followup,
     apply_google_mcp_reply_overrides,
     apply_mcp_error_notice,
@@ -122,9 +124,11 @@ from app.core.engine.google_mcp_support import (
     google_forms_followup_retry_directive,
     google_forms_request_kind_retry_directive,
     google_sheets_followup_directive,
+    filter_google_mcp_tools_for_service_context,
     find_last_google_workspace_user_request,
+    infer_google_workspace_service_context,
     is_google_auth_recovery_followup,
-    is_google_workspace_mcp_configured,
+    is_google_workspace_execution_intent,
     prepare_google_mcp_runtime,
     sanitize_google_forms_tools,
     google_slides_dimension_retry_directive,
@@ -145,7 +149,7 @@ from app.core.engine.agent_followups import (
     _builder_create_completion_directive,
     _BUILD_PROGRESS_TOOLS,
     _deploy_followup_message,
-    _extract_shared_workspace_file_from_steps,
+    _extract_verified_shared_workspace_file_from_steps,
     _has_code_creation_evidence,
     _has_external_service_fallback_blocked_step,
     _has_public_url_in_steps,
@@ -438,6 +442,87 @@ async def _persist_run_failure(
     await db.commit()
 
 
+async def persist_cancelled_run_for_task(
+    task: asyncio.Task | None,
+    *,
+    reason: str = "Cancelled because a newer user message interrupted this run.",
+) -> None:
+    """Close a committed run when cancellation happens outside the graph call.
+
+    Follow-up graph calls and MCP retries run after the main ``graph.ainvoke``
+    cancellation handler. The request task carries its exact run ID so an outer
+    channel handler can close only that run, even if a newer turn already began.
+    """
+    run_id = getattr(task, "_managed_agent_run_id", None) if task is not None else None
+    if not isinstance(run_id, uuid.UUID):
+        return
+
+    from app.database import AsyncSessionLocal
+
+    try:
+        async with AsyncSessionLocal() as cleanup_db:
+            await cleanup_db.execute(
+                update(Run)
+                .where(Run.id == run_id, Run.status == "running")
+                .values(
+                    status="cancelled",
+                    completed_at=datetime.now(timezone.utc),
+                    error_message=reason[:2000],
+                )
+            )
+            await cleanup_db.commit()
+    except Exception as exc:
+        logger.warning(
+            "agent_run.outer_cancellation_persist_failed",
+            run_id=str(run_id),
+            error=str(exc)[:300],
+        )
+
+
+def _resolve_google_drive_attachment(
+    *,
+    workspace_dir: Path,
+    session_metadata: dict[str, Any],
+    current_attachment_name: str | None,
+    reuse_seconds: int,
+    now_timestamp: float | None = None,
+) -> tuple[str | None, set[str], bool, float | None]:
+    """Resolve a current or short-lived pending attachment without trusting model paths."""
+    attachment_root = (workspace_dir / "shared" / "current_input").resolve()
+    consume_on_success = False
+    attachment_age: float | None = None
+
+    if current_attachment_name:
+        attachment_name = Path(current_attachment_name).name
+    else:
+        attachment_meta = dict((session_metadata or {}).get("current_attachment") or {})
+        attachment_name = Path(str(attachment_meta.get("filename") or "")).name
+        try:
+            saved_at = float(attachment_meta.get("saved_at") or 0)
+        except (TypeError, ValueError):
+            saved_at = 0
+        current_timestamp = now_timestamp if now_timestamp is not None else time.time()
+        attachment_age = current_timestamp - saved_at if saved_at else None
+        if (
+            not attachment_name
+            or attachment_age is None
+            or attachment_age < -60
+            or attachment_age > max(0, reuse_seconds)
+        ):
+            return None, set(), False, attachment_age
+        consume_on_success = True
+
+    candidate = (attachment_root / attachment_name).resolve()
+    if not candidate.is_file() or candidate.parent != attachment_root:
+        return None, set(), False, attachment_age
+
+    aliases = {
+        f"/workspace/shared/current_input/{attachment_name}",
+        f"/workspace/data/incoming/current_input/{attachment_name}",
+    }
+    return str(candidate), aliases, consume_on_success, attachment_age
+
+
 _INLINE_TEXT_ARTIFACT_EXTS = {"txt", "md", "markdown", "csv", "json", "log", "asc"}
 
 
@@ -566,6 +651,33 @@ async def _deliver_shared_whatsapp_file_via_tool(
     return True, f"File {filename} sudah saya kirim ke WhatsApp."
 
 
+async def _verify_google_sheet_range_once(
+    *,
+    tools: list[Any],
+    spreadsheet_id: str,
+    target_range: str | None,
+    timeout_seconds: float,
+) -> tuple[dict[str, Any], str]:
+    """Read the mutated range once without replaying the user's whole workflow."""
+    read_tool = next(
+        (tool for tool in tools if getattr(tool, "name", "") == "read_sheet_values"),
+        None,
+    )
+    if read_tool is None:
+        raise RuntimeError("read_sheet_values tidak tersedia untuk verifikasi")
+
+    args = {
+        "spreadsheet_id": spreadsheet_id,
+        "range_name": target_range or "A1:Z1000",
+        "include_formulas": True,
+    }
+    async with asyncio.timeout(timeout_seconds):
+        raw_result = await read_tool.ainvoke(args)
+    if error_text := _google_mcp_text_error(raw_result):
+        raise RuntimeError(error_text)
+    return args, _google_mcp_result_text(raw_result)
+
+
 def _shared_artifact_record(shared_path: str, *, sent: bool = False) -> dict[str, Any]:
     filename = (shared_path or "").rsplit("/", 1)[-1] or "file"
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
@@ -607,14 +719,13 @@ def _remember_shared_artifact_path(
 def _remember_latest_shared_artifact(
     session: Session,
     steps: list[dict[str, Any]],
-    final_reply: str,
     *,
     sent: bool = False,
 ) -> str | None:
-    """Store the newest /workspace/shared artifact mentioned by this run."""
+    """Store the newest /workspace/shared artifact verified by a successful step."""
     return _remember_shared_artifact_path(
         session,
-        _extract_shared_workspace_file_from_steps(steps, final_reply),
+        _extract_verified_shared_workspace_file_from_steps(steps),
         sent=sent,
     )
 
@@ -652,6 +763,9 @@ async def run_agent(
     7. Auto-extract long-term memory (jika triggered)
     """
     run_id = uuid.uuid4()
+    _run_owner_task = asyncio.current_task()
+    if _run_owner_task is not None:
+        setattr(_run_owner_task, "_managed_agent_run_id", run_id)
     agent_id: uuid.UUID = session.agent_id
     _raw_tools_cfg = agent_model.tools_config
     tools_config: dict[str, Any] = _raw_tools_cfg if isinstance(_raw_tools_cfg, dict) else {}
@@ -787,6 +901,11 @@ async def run_agent(
         if context_summary
         else settings.short_term_memory_turns
     )
+    if runtime_policy.is_builder:
+        # Arthur's operating manual is already injected separately. Keeping a
+        # short conversational tail avoids re-sending large builder transcripts
+        # on every step while preserving the user's immediate context.
+        _history_turns = min(_history_turns, 6)
     history_rows = await load_history(session.id, db, max_turns=_history_turns)
     prior_messages = db_messages_to_lc(history_rows)
     google_auth_recovery_followup = is_google_auth_recovery_followup(
@@ -799,6 +918,35 @@ async def run_agent(
         else None
     )
     execution_user_message = google_auth_recovery_request or user_message
+    google_service_context = infer_google_workspace_service_context(
+        execution_user_message,
+        history_rows,
+        is_builder=runtime_policy.is_builder,
+    )
+    _direct_google_workspace_intent = is_google_workspace_execution_intent(
+        execution_user_message,
+        is_builder=runtime_policy.is_builder,
+    )
+    google_workspace_execution_intent = bool(
+        _direct_google_workspace_intent
+        or google_service_context
+        or google_auth_recovery_followup
+    )
+    google_workspace_builder_reference = bool(
+        runtime_policy.is_builder
+        and _is_google_mcp_intent(execution_user_message)
+        and not google_workspace_execution_intent
+    )
+    if google_workspace_builder_reference:
+        log.info(
+            "agent_run.builder_google_reference_only",
+            reason="workspace_service_describes_managed_agent_capability",
+        )
+    if google_service_context:
+        log.info(
+            "agent_run.google_service_context_resolved",
+            service_context=google_service_context,
+        )
     log.debug("agent_run.history_loaded", turns=len(prior_messages) // 2)
     direct_wa_text_send_context = (
         getattr(session, "channel_type", None) == "whatsapp"
@@ -833,6 +981,14 @@ async def run_agent(
         is_operator_message=is_op_msg,
         user_message=user_message,
     )
+    if runtime_policy.is_builder:
+        system_prompt += (
+            "\n\n## Authoritative Platform Model Default\n"
+            f"Model default untuk agent baru adalah `{CREATED_AGENT_DEFAULT_MODEL}`. "
+            "Gunakan model ini ketika user tidak menyebut model secara eksplisit. "
+            "Jangan mewarisi model Arthur atau model dari contoh percakapan lama. "
+            "Jika user meminta model lain secara eksplisit, hanya gunakan bila plan user mengizinkannya."
+        )
     if abandoned_before_current is not None:
         system_prompt += (
             "\n\n## Restart Recovery\n"
@@ -913,58 +1069,11 @@ async def run_agent(
             log.warning("agent_run.wa_typing_stop_failed", error=str(exc)[:200])
 
     await _start_wa_run_typing()
-    google_mcp_tools_config = tools_config
-    google_mcp_role_denied = (
-        is_google_workspace_mcp_configured(tools_config)
-        and not _is_google_workspace_mcp_authorized_for_session(session, agent_model)
+    google_mcp_tools_config = (
+        _remove_google_workspace_mcp_server(tools_config)
+        if google_workspace_builder_reference
+        else tools_config
     )
-    if google_mcp_role_denied:
-        google_mcp_tools_config = _remove_google_workspace_mcp_server(tools_config)
-        log.warning(
-            "agent_run.google_mcp_denied_for_non_operator",
-            sender=_session_sender_phone(session),
-            reason="google_workspace_mcp_requires_owner_or_operator",
-        )
-        if _is_google_mcp_intent(execution_user_message) or google_auth_recovery_followup:
-            final_reply = _google_workspace_mcp_unauthorized_reply()
-            run_record.status = "completed"
-            run_record.completed_at = datetime.now(timezone.utc)
-            run_record.error_message = "google_workspace_mcp_denied_for_non_operator"
-            run_record.tokens_used = 0
-            run_record.prompt_tokens = 0
-            run_record.completion_tokens = 0
-            run_record.reasoning_tokens = 0
-            run_record.cached_tokens = 0
-            run_record.openrouter_cost_usd = Decimal("0")
-            run_record.usage_details = None
-            db.add(Message(
-                session_id=session.id,
-                role="assistant",
-                content=final_reply,
-                step_index=step_base + 1,
-                run_id=run_id,
-            ))
-            await db.flush()
-            await _stop_wa_run_typing()
-            if sandbox:
-                await sandbox.aclose()
-            for _ssb in sub_sandboxes:
-                await _ssb.aclose()
-            return AgentRunResult(
-                reply=final_reply,
-                steps=[],
-                run_id=run_id,
-                tokens_used=0,
-                usage={
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "reasoning_tokens": 0,
-                    "cached_tokens": 0,
-                    "total_tokens": 0,
-                    "openrouter_cost_usd": 0,
-                    "details": None,
-                },
-            )
     _google_fallback_external_user_id = getattr(agent_model, "owner_external_id", None)
     if not _google_fallback_external_user_id:
         _operator_ids = getattr(agent_model, "operator_ids", None)
@@ -980,6 +1089,7 @@ async def run_agent(
         memory_scope=_memory_scope,
         api_key=settings.api_key,
         user_message=execution_user_message,
+        service_context=google_service_context,
         system_prompt=system_prompt,
         log=log,
         fallback_external_user_id=_google_fallback_external_user_id,
@@ -1004,7 +1114,39 @@ async def run_agent(
         if google_mcp.preflight_error and "google_workspace" not in mcp_errors:
             mcp_errors["google_workspace"] = google_mcp.preflight_error
         if mcp_tools:
-            mcp_tools = sanitize_google_forms_tools(mcp_tools, log)
+            from app.core.infra.sandbox import get_workspace_dir
+
+            (
+                _current_attachment_path,
+                _trusted_attachment_aliases,
+                _consume_attachment_on_success,
+                _attachment_age,
+            ) = _resolve_google_drive_attachment(
+                workspace_dir=get_workspace_dir(session.id),
+                session_metadata=dict(getattr(session, "metadata_", None) or {}),
+                current_attachment_name=current_attachment_name,
+                reuse_seconds=int(settings.google_mcp_attachment_reuse_seconds),
+            )
+            if _consume_attachment_on_success and _current_attachment_path:
+                log.info(
+                    "agent_run.google_drive_pending_attachment_ready",
+                    source_name=Path(_current_attachment_path).name,
+                    age_seconds=round(_attachment_age or 0, 1),
+                )
+            mcp_tools = filter_google_mcp_tools_for_service_context(
+                mcp_tools,
+                service_context=google_service_context,
+                log=log,
+            )
+            mcp_tools = sanitize_google_forms_tools(
+                mcp_tools,
+                log,
+                service_context=google_service_context,
+                current_attachment_path=_current_attachment_path,
+                trusted_attachment_aliases=_trusted_attachment_aliases,
+                upload_staging_dir=settings.google_mcp_upload_dir,
+                consume_attachment_on_success=_consume_attachment_on_success,
+            )
             if getattr(session, "channel_type", None) == "whatsapp":
                 mcp_tools = _filter_whatsapp_unsafe_mcp_tools(
                     mcp_tools,
@@ -1060,7 +1202,7 @@ async def run_agent(
                 and not mcp_tools
                 and (
                     google_mcp_parent_only
-                    or _is_google_mcp_intent(user_message)
+                    or google_workspace_execution_intent
                     or google_auth_recovery_followup
                 )
             )
@@ -1070,7 +1212,7 @@ async def run_agent(
                         _google_mcp_auth_url = await _fetch_google_auth_link(
                             integration_url=google_mcp.integration_url,
                             api_key=settings.api_key,
-                            agent_id=agent_id,
+                            auth_agent_id=google_mcp.auth_agent_id,
                             candidate_user_ids=google_mcp.candidate_user_ids,
                         )
                     final_reply = await _build_google_mcp_auth_failure_reply(
@@ -1270,6 +1412,7 @@ async def run_agent(
             "compose_agent_soul",
             "validate_agent_config",
             "create_agent",
+            "create_agent_from_brief",
             "update_agent",
         }
         _progress_notice_task: asyncio.Task | None = None
@@ -1296,6 +1439,17 @@ async def run_agent(
                 try:
                     await asyncio.sleep(_long_progress_notice_seconds)
                     if _progress_finished or _progress_notice_sent:
+                        return
+                    if (
+                        _run_owner_task is None
+                        or _run_owner_task.done()
+                        or _run_owner_task.cancelling()
+                    ):
+                        return
+                    from app.core.engine.session_lock import is_registered_active_task
+
+                    if not await is_registered_active_task(session.id, _run_owner_task):
+                        log.info("agent_run.wa_long_progress_notice_stale_suppressed")
                         return
                     from app.core.infra.wa_client import send_wa_message, start_wa_typing
 
@@ -1424,6 +1578,7 @@ async def run_agent(
                     final_reply=final_reply,
                     current_attachment_name=current_attachment_name,
                     generated_artifact_path=path if (_sent and remember_sent_artifact) else None,
+                    tool_steps=steps,
                     log=log,
                 )
             await db.flush()
@@ -1567,6 +1722,7 @@ async def run_agent(
                     user_message=execution_user_message,
                     final_reply=final_reply,
                     current_attachment_name=current_attachment_name,
+                    tool_steps=steps,
                     log=log,
                 )
             await db.flush()
@@ -2006,7 +2162,7 @@ async def run_agent(
                         _google_mcp_auth_url = await _fetch_google_auth_link(
                             integration_url=google_mcp.integration_url,
                             api_key=settings.api_key,
-                            agent_id=agent_id,
+                            auth_agent_id=google_mcp.auth_agent_id,
                             candidate_user_ids=google_mcp.candidate_user_ids,
                         )
                     _reply = await _build_google_mcp_auth_failure_reply(
@@ -2095,7 +2251,6 @@ async def run_agent(
         _current_shared_artifact_path = _remember_latest_shared_artifact(
             session,
             steps,
-            final_reply,
             sent=False,
         )
         # Prefer callback-based counter — it captures sub-agent LLM calls too.
@@ -2103,7 +2258,7 @@ async def run_agent(
         _cb_tokens = _agent_logger.total_tokens_from_callbacks
         total_tokens_used = _cb_tokens if _cb_tokens > 0 else parsed["total_tokens_used"]
         if (
-            _is_google_mcp_intent(execution_user_message)
+            google_workspace_execution_intent
             and mcp_tools
             and not _has_google_mcp_step(steps)
             and _has_external_service_fallback_blocked_step(steps)
@@ -2183,7 +2338,10 @@ async def run_agent(
                 total_tokens_used = _agent_logger.total_tokens_from_callbacks or parsed["total_tokens_used"]
                 log.info(
                     "agent_run.builder_create_completion_continue_ok",
-                    created=any(str(s.get("tool", "")) == "create_agent" for s in steps),
+                    created=any(
+                        str(s.get("tool", "")) in {"create_agent", "create_agent_from_brief"}
+                        for s in steps
+                    ),
                 )
             except Exception as _create_completion_exc:
                 log.warning(
@@ -2241,12 +2399,15 @@ async def run_agent(
                     error=str(_deploy_followup_exc)[:300],
                 )
 
-        _needs_wa_file_followup, _wa_shared_file_path = _needs_whatsapp_file_delivery_followup(
-            execution_user_message,
-            tools_config,
-            steps,
-            final_reply,
-        )
+        if runtime_policy.is_builder:
+            _needs_wa_file_followup, _wa_shared_file_path = False, None
+        else:
+            _needs_wa_file_followup, _wa_shared_file_path = _needs_whatsapp_file_delivery_followup(
+                execution_user_message,
+                tools_config,
+                steps,
+                final_reply,
+            )
         if _needs_wa_file_followup and _wa_shared_file_path:
             log.info("agent_run.whatsapp_file_delivery_followup", path=_wa_shared_file_path)
             _sent, _delivery_reply = await _deliver_shared_whatsapp_file_via_tool(
@@ -2427,6 +2588,80 @@ async def run_agent(
                     spreadsheet_id=_followup_spreadsheet_id,
                 )
 
+        (
+            _needs_sheets_verification,
+            _verification_spreadsheet_id,
+            _verification_range,
+        ) = _needs_google_sheets_verification_followup(steps)
+        if _needs_sheets_verification and _verification_spreadsheet_id:
+            log.info(
+                "agent_run.sheets_verification_continue",
+                spreadsheet_id=_verification_spreadsheet_id,
+                range_name=_verification_range,
+            )
+            _prior_verification_steps = list(steps)
+            try:
+                _verification_args, _verification_result = await _verify_google_sheet_range_once(
+                    tools=tools,
+                    spreadsheet_id=_verification_spreadsheet_id,
+                    target_range=_verification_range,
+                    timeout_seconds=settings.agent_timeout_seconds,
+                )
+
+                _verification_step_no = max(
+                    [int((step or {}).get("step") or 0) for step in _prior_verification_steps]
+                    + [0]
+                ) + 1
+                _verification_step = {
+                    "step": _verification_step_no,
+                    "tool": "read_sheet_values",
+                    "args": _verification_args,
+                    "result": _verification_result[:12000],
+                    "tool_call_id": "deterministic_sheets_post_write_verification",
+                }
+                _combined_verification_steps = _prior_verification_steps + [_verification_step]
+                _still_unverified, _, _ = _needs_google_sheets_verification_followup(
+                    _combined_verification_steps
+                )
+                if _still_unverified:
+                    raise RuntimeError("hasil read_sheet_values tidak mencakup range mutasi")
+                steps = _combined_verification_steps
+                db.add(
+                    Message(
+                        session_id=session.id,
+                        role="tool",
+                        tool_name="read_sheet_values",
+                        tool_args=_verification_args,
+                        tool_result=_verification_result[:4000],
+                        step_index=step_counter + 1,
+                        run_id=run_id,
+                    )
+                )
+                log.info(
+                    "agent_run.sheets_verification_succeeded",
+                    spreadsheet_id=_verification_spreadsheet_id,
+                    range_name=_verification_range,
+                )
+            except Exception as _sheets_verification_exc:
+                log.warning(
+                    "agent_run.sheets_verification_continue_failed",
+                    error=str(_sheets_verification_exc)[:300],
+                    spreadsheet_id=_verification_spreadsheet_id,
+                )
+                final_reply = (
+                    "Perubahan spreadsheet sempat dijalankan, tetapi pembacaan verifikasi gagal. "
+                    "Saya belum dapat memastikan hasil akhirnya dan tidak akan mengklaim task selesai."
+                )
+                db.add(
+                    Message(
+                        session_id=session.id,
+                        role="agent",
+                        content=final_reply,
+                        step_index=step_counter + 1,
+                        run_id=run_id,
+                    )
+                )
+
     await db.flush()
 
     # ------------------------------------------------------------------ #
@@ -2482,6 +2717,8 @@ async def run_agent(
         agent_id=agent_id,
         api_key=settings.api_key,
         log=log,
+        service_context=google_service_context,
+        workspace_execution_intent=google_workspace_execution_intent,
     )
     _google_mcp_auth_err = _google_mcp_auth_err_before_override or _extract_google_mcp_step_error(steps)
     _google_mcp_has_artifact = (
@@ -2557,7 +2794,6 @@ async def run_agent(
         _memory_artifact_path = _current_shared_artifact_path or _remember_latest_shared_artifact(
             session,
             steps,
-            final_reply,
             sent=False,
         )
         await record_runtime_memory(
@@ -2568,6 +2804,8 @@ async def run_agent(
             final_reply=final_reply,
             current_attachment_name=current_attachment_name,
             generated_artifact_path=_memory_artifact_path,
+            tool_steps=steps,
+            external_service_context=google_service_context,
             log=log,
         )
 

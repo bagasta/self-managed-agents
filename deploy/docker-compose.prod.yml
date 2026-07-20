@@ -3,6 +3,9 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+    deploy:
+      # API stateless dapat direplikasi; service stateful di bawah tetap singleton.
+      replicas: ${API_REPLICAS:-3}
     restart: unless-stopped
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
     env_file:
@@ -13,6 +16,7 @@ services:
       REDIS_URL: redis://redis:6379/0
     volumes:
       - /tmp/agent-sandboxes:/tmp/agent-sandboxes
+      - /tmp/google-mcp-uploads:/tmp/google-mcp-uploads
       - /var/run/docker.sock:/var/run/docker.sock
     extra_hosts:
       - "host.docker.internal:host-gateway"

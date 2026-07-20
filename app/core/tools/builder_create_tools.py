@@ -47,6 +47,7 @@ from app.core.tools.builder_intent import (
     file_delivery_contract_issues,
 )
 from app.core.tools.builder_json import parse_json_arg as _parse_json_arg
+from app.core.model_defaults import CREATED_AGENT_DEFAULT_MODEL
 from app.models.agent import Agent
 
 logger = structlog.get_logger(__name__)
@@ -207,7 +208,7 @@ def build_builder_create_tools(
         name: str,
         instructions: str,
         description: str = "",
-        model: str = "openai/gpt-4.1-mini",
+        model: str = CREATED_AGENT_DEFAULT_MODEL,
         temperature: float = 0.7,
         tools_config: Any = '{"memory": true, "skills": true, "escalation": true}',
         allowed_senders: Any = "",
@@ -232,7 +233,7 @@ def build_builder_create_tools(
             name: Nama agent (wajib, maks 255 karakter)
             instructions: System prompt / instructions lengkap agent
             description: Deskripsi singkat fungsi agent
-            model: Model LLM (default: openai/gpt-4.1-mini)
+            model: Model LLM (default: deepseek/deepseek-v4-flash)
             temperature: Kreativitas respons, 0.0-2.0 (default: 0.7)
             tools_config: JSON string atau object konfigurasi tools, contoh: '{"memory": true, "scheduler": true}'
             allowed_senders: JSON array/string nomor WA yang diizinkan, contoh: '["+62811xxx"]'. Kosong = semua.
@@ -580,7 +581,7 @@ def build_builder_create_tools(
             logger.info("builder_tools.create_agent.start", owner_phone=owner_phone, name=name)
 
             async with db_factory() as db:
-                # Auto-provision user + Tier 1 subscription untuk WA user.
+                # Auto-provision user + Trial subscription untuk WA user.
                 # Saat unit test mem-patch Agent menjadi mock, skip integrasi subscription.
                 if owner_phone and hasattr(Agent, "__table__"):
                     _user, _sub = await get_or_create_wa_user(owner_phone, db)

@@ -19,6 +19,11 @@ class _ScalarResult:
     def first(self):
         return self._value
 
+    def all(self):
+        if self._value is None:
+            return []
+        return self._value if isinstance(self._value, list) else [self._value]
+
 
 class _FakeDB:
     def __init__(self, result=None):
@@ -56,6 +61,7 @@ def _agent():
 def _session(**overrides):
     values = {
         "id": uuid.uuid4(),
+        "agent_id": uuid.uuid4(),
         "external_user_id": "628customer",
         "channel_config": {
             "user_phone": "628customer@s.whatsapp.net",
@@ -103,6 +109,54 @@ def test_non_owner_operator_ids_still_work_for_legacy_extra_operator():
     )
 
     assert is_operator_message("628operator2", "628operator2@s.whatsapp.net", agent) is True
+
+
+@pytest.mark.asyncio
+async def test_cross_agent_quoted_escalation_is_resolved_only_for_source_owner():
+    from app.api.wa_helpers import find_authorized_session_by_quoted_escalation
+
+    source_agent_id = uuid.uuid4()
+    source_agent = SimpleNamespace(
+        id=source_agent_id,
+        is_deleted=False,
+        escalation_config={"operator_phone": "628owner"},
+        owner_external_id="628owner",
+        operator_ids=["628owner"],
+    )
+    target = _session(
+        agent_id=source_agent_id,
+        metadata_={
+            "escalation_case_id": "esc_1784045026_b7a34b",
+            "escalation_message_id": "MSG-MEDCO-1",
+            "escalation_message_ids": ["MSG-MEDCO-1"],
+        },
+    )
+    db = _FakeDB(result=[target])
+    db.get_results[source_agent_id] = source_agent
+
+    session, case_id, agent = await find_authorized_session_by_quoted_escalation(
+        db,
+        quoted_text="ESKALASI PESAN DARI CUSTOMER\nID Kasus: esc_1784045026_b7a34b",
+        quoted_stanza_id="MSG-MEDCO-1",
+        from_phone="628owner",
+        reply_target="74350933852232@lid",
+    )
+
+    assert session is target
+    assert case_id == "esc_1784045026_b7a34b"
+    assert agent is source_agent
+
+    unauthorized_db = _FakeDB(result=[target])
+    unauthorized_db.get_results[source_agent_id] = source_agent
+    session, _, agent = await find_authorized_session_by_quoted_escalation(
+        unauthorized_db,
+        quoted_text="ID Kasus: esc_1784045026_b7a34b",
+        quoted_stanza_id="MSG-MEDCO-1",
+        from_phone="628stranger",
+        reply_target="628stranger@s.whatsapp.net",
+    )
+    assert session is None
+    assert agent is None
 
 
 @pytest.mark.asyncio
@@ -1183,7 +1237,15 @@ async def test_pending_operator_text_confirmation_sends_saved_corrected_draft(mo
     from app.api.channels import _send_pending_operator_text_reply
 
     agent_id = uuid.uuid4()
-    target = _session(id=uuid.uuid4(), agent_id=agent_id)
+    target = _session(
+        id=uuid.uuid4(),
+        agent_id=agent_id,
+        channel_config={
+            "user_phone": "628customer@s.whatsapp.net",
+            "phone_number": "628customer",
+            "device_id": "wadev-source-agent",
+        },
+    )
     operator = _session(
         id=uuid.uuid4(),
         external_user_id="628operator",
@@ -1193,6 +1255,7 @@ async def test_pending_operator_text_confirmation_sends_saved_corrected_draft(mo
                 "target": "628customer@s.whatsapp.net",
                 "case_id": "esc_123456_ab12cd",
                 "message": "Halo Ka Wira, silakan cek paket di https://jet.co.id/track.",
+                "source_device_id": "wadev-source-agent",
             }
         },
     )
@@ -1213,7 +1276,7 @@ async def test_pending_operator_text_confirmation_sends_saved_corrected_draft(mo
     assert result["steps"][0]["tool"] == "reply_to_user"
     assert "pending_operator_text_reply" not in operator.metadata_
     assert send_msg.await_args_list[0].args == (
-        "dev-1",
+        "wadev-source-agent",
         "628customer@s.whatsapp.net",
         "Halo Ka Wira, silakan cek paket di https://jet.co.id/track.",
     )

@@ -63,6 +63,11 @@ class Settings(BaseSettings):
     workspace_mcp_prefer_local: str = "false"
     workspace_mcp_token: str = ""
     google_integration_service_url: str = ""
+    # Host/container path shared with Google Workspace MCP for short-lived
+    # local uploads. The API writes one randomized copy of the active
+    # attachment; the MCP container mounts the same path read-only.
+    google_mcp_upload_dir: str = "/tmp/google-mcp-uploads"
+    google_mcp_attachment_reuse_seconds: int = 1800
 
     # Logging
     log_level: str = "INFO"
@@ -90,6 +95,18 @@ class Settings(BaseSettings):
     message_max_length: int = 10_000       # max chars per user message
     media_max_length: int = 10_000_000     # max chars for base64 media payload
     max_concurrent_sandboxes: int = 6      # bounded semaphore; requests queue instead of failing
+    arthur_max_concurrent_runs: int = 4    # bound expensive builder graphs; other requests wait
+    arthur_max_queued_runs: int = 64       # reject overload instead of growing without bound
+    # Arthur's optimized builder keeps the legacy pipeline available as an
+    # immediate rollback. Enable with ARTHUR_BUILDER_PIPELINE_MODE=optimized.
+    arthur_builder_pipeline_mode: str = "legacy"
+    arthur_builder_min_quality_score: int = 60
+    arthur_builder_writer_model: str = "openai/gpt-4.1-mini"
+    arthur_builder_writer_max_tokens: int = 1000
+    arthur_builder_writer_timeout_seconds: float = 25.0
+    # Separate light control-plane traffic from long create/update workflows.
+    arthur_max_concurrent_fast_runs: int = 12
+    arthur_max_concurrent_builder_runs: int = 6
 
 
 @lru_cache

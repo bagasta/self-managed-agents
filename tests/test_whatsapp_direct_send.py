@@ -172,6 +172,28 @@ async def test_send_to_number_blocks_spam_request_before_channel_send(monkeypatc
     assert "spam" in result.lower()
 
 
+def test_reply_to_user_is_exposed_only_for_verified_operator_route():
+    session_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+
+    normal_tools = build_escalation_tools(
+        session_id,
+        agent_id,
+        lambda: None,
+        user_jid="628owner@s.whatsapp.net",
+    )
+    operator_tools = build_escalation_tools(
+        session_id,
+        agent_id,
+        lambda: None,
+        user_jid="628customer@s.whatsapp.net",
+        allow_reply_to_user=True,
+    )
+
+    assert "reply_to_user" not in {tool.name for tool in normal_tools}
+    assert "reply_to_user" in {tool.name for tool in operator_tools}
+
+
 def test_non_vision_model_strips_wa_image_payload_instead_of_crashing():
     warnings: list[tuple[str, dict]] = []
     content = _build_human_content_for_model(
@@ -553,6 +575,12 @@ def test_builder_prompt_blocks_repeated_continue_questions():
     )
 
     assert "## Arthur Builder Mode" in prompt
+    assert "## Arthur Runtime Boundaries" in prompt
+    assert "Arthur adalah control-plane agent builder dan TIDAK memiliki sandbox" in prompt
+    assert "## File Workspace Tool Rules" not in prompt
+    assert "Jangan mengarang nama file, chart, atau artifact" in prompt
+    assert "### Arthur Control-Plane Execution" in prompt
+    assert "gambar/chart dari workspace" not in prompt
     assert "plan_agent -> compose_agent_blueprint -> compose_agent_operating_manual -> compose_agent_instructions -> validate_agent_config -> compose_agent_soul -> create_agent -> verify_agent" in prompt
     assert "## Arthur Tool Categories" in prompt
     assert "Agent Builder" in prompt
@@ -561,6 +589,9 @@ def test_builder_prompt_blocks_repeated_continue_questions():
     assert "Workspace/App Connectors" in prompt
     assert "sampai user tahu langkah berikutnya" in prompt
     assert "cara test, cara connect Google, cara pasang WhatsApp" in prompt
+    assert "spesifikasi kemampuan agent target" in prompt
+    assert "setup connector berstatus pending" in prompt
+    assert "buat agent yang menyimpan hasil ke Google Sheets" in prompt
     assert "brief minimal sudah jelas" in prompt
     assert "Wawancara singkat dulu" in prompt
     assert "maksimal 3 hal paling penting" in prompt
@@ -898,6 +929,38 @@ async def test_send_whatsapp_image_uses_current_attachment_without_sandbox(tmp_p
     assert base64.b64decode(sent["image_b64"]) == raw
     assert sent["caption"] == "Promo hari ini"
     assert sent["mimetype"] == "image/png"
+
+
+@pytest.mark.asyncio
+async def test_builder_media_rejects_unverified_workspace_path_without_sandbox():
+    from app.core.engine.tool_builder import build_whatsapp_media_tools
+
+    session = SimpleNamespace(
+        channel_config={"device_id": "arthur-device", "user_phone": "628123@s.whatsapp.net"},
+        metadata_={},
+    )
+    tools = build_whatsapp_media_tools(
+        session,
+        sandbox=None,
+        allow_workspace_paths=False,
+    )
+
+    image_tool = next(item for item in tools if item.name == "send_whatsapp_image")
+    document_tool = next(item for item in tools if item.name == "send_whatsapp_document")
+    image_result = await image_tool.ainvoke(
+        {"image_path_or_base64": "/workspace/shared/career_survey_chart.png"}
+    )
+    document_result = await document_tool.ainvoke(
+        {
+            "file_path_or_base64": "/workspace/shared/career_survey_chart.png",
+            "filename": "career_survey_chart.png",
+        }
+    )
+
+    assert image_result.startswith("[MEDIA_SOURCE_UNAVAILABLE]")
+    assert document_result.startswith("[MEDIA_SOURCE_UNAVAILABLE]")
+    assert "sandbox" not in image_result.lower()
+    assert "sandbox" not in document_result.lower()
 
 
 def test_current_image_attachment_delivery_request_extracts_caption():
