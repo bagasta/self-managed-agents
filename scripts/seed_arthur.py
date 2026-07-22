@@ -16,11 +16,16 @@ import os
 import pathlib
 import sys
 
+import yaml
+
 # Add project root to path
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
 
-RULEBOOK_PATH = pathlib.Path(__file__).parent.parent / "system-message-builder.md"
+PROJECT_ROOT = pathlib.Path(__file__).parent.parent
+ARTHUR_SKILLS_ROOT = PROJECT_ROOT / "arthur-skills"
+RULEBOOK_PATH = ARTHUR_SKILLS_ROOT / "KERNEL.md"
+ARTHUR_SKILL_BUNDLE_VERSION = "arthur-skills-2026-07-22-v1"
 
 ARTHUR_SOUL = """\
 Kamu adalah Arthur, AI Agent Builder.
@@ -50,9 +55,9 @@ CARA BICARA:
 ARTHUR_CONFIG = {
     "name": "Arthur",
     "description": "AI Agent Builder — bantu user buat dan kelola AI agent via WhatsApp",
-    "model": "openai/gpt-4.1-mini",
+    "model": "deepseek/deepseek-v4-flash",
     "temperature": 0.2,
-    "max_tokens": 2048,         # Arthur butuh ruang lebih untuk nulis instructions agent
+    "max_tokens": 8192,
     "capabilities": ["system", "builder"],
     "allowed_senders": None,  # terbuka untuk siapapun
     "token_quota": 0,            # 0 = unlimited; Arthur adalah control-plane agent
@@ -72,6 +77,19 @@ ARTHUR_CONFIG = {
         "wa_agent_manager": True,
         "subagents": {"enabled": False},  # disabled — hemat ~250 tokens/request
         "builder": True,        # marker, dimuat via is_system_agent flag
+        "arthur_runtime": {
+            "enabled": True,
+            "progressive_skills": True,
+            "build_state": True,
+            "image_routing": True,
+            "document_routing": True,
+            "primary_model": "deepseek/deepseek-v4-flash",
+            "document_model": "mistral-ocr-latest",
+            "image_model": "openai/gpt-4.1-mini",
+            "engine_version": "arthur-progressive-v1",
+            "prompt_version": "arthur-kernel-v1",
+            "skill_bundle_version": ARTHUR_SKILL_BUNDLE_VERSION,
+        },
     },
     "escalation_config": {},
     "operator_ids": [
@@ -89,7 +107,39 @@ async def seed(dry_run: bool = False) -> None:
         sys.exit(1)
 
     instructions = RULEBOOK_PATH.read_text(encoding="utf-8")
-    print(f"[OK] Rulebook dimuat: {len(instructions)} karakter")
+    print(f"[OK] Compact kernel dimuat: {len(instructions)} karakter")
+    if len(instructions) > 10_000:
+        print("[ERROR] Arthur kernel melebihi batas 10.000 karakter")
+        sys.exit(1)
+
+    skill_sources: list[dict] = []
+    for skill_path in sorted(ARTHUR_SKILLS_ROOT.glob("*/SKILL.md")):
+        runtime_path = skill_path.parent / "runtime.yaml"
+        if not runtime_path.exists():
+            print(f"[ERROR] runtime.yaml tidak ditemukan untuk {skill_path.parent.name}")
+            sys.exit(1)
+        content = skill_path.read_text(encoding="utf-8")
+        if "[TODO" in content:
+            print(f"[ERROR] Skill masih berisi TODO: {skill_path}")
+            sys.exit(1)
+        if not content.startswith("---\n") or "\n---\n" not in content[4:]:
+            print(f"[ERROR] Frontmatter skill invalid: {skill_path}")
+            sys.exit(1)
+        _frontmatter, body = content[4:].split("\n---\n", 1)
+        metadata = yaml.safe_load(_frontmatter) or {}
+        runtime = yaml.safe_load(runtime_path.read_text(encoding="utf-8")) or {}
+        skill_sources.append({
+            "name": metadata.get("name"),
+            "description": metadata.get("description"),
+            "content_md": body.strip(),
+            "version": str(runtime.get("version") or "1.0.0"),
+            "triggers": list(runtime.get("triggers") or []),
+            "supported_states": list(runtime.get("supported_states") or []),
+            "allowed_tool_groups": list(runtime.get("allowed_tool_groups") or []),
+        })
+    if len(skill_sources) != 8 or any(not item["name"] or not item["description"] for item in skill_sources):
+        print(f"[ERROR] Bundle skill Arthur tidak lengkap/invalid: {len(skill_sources)} skill")
+        sys.exit(1)
 
     if dry_run:
         print("\n=== DRY RUN — config yang akan di-seed ===")
@@ -99,6 +149,7 @@ async def seed(dry_run: bool = False) -> None:
         print(f"  tools_config  : {ARTHUR_CONFIG['tools_config']}")
         print(f"  operator_ids  : {ARTHUR_CONFIG['operator_ids']}")
         print(f"  instructions  : {instructions[:200]}...")
+        print(f"  skill_bundle  : {ARTHUR_SKILL_BUNDLE_VERSION} ({len(skill_sources)} skills)")
         print("\n[DRY RUN] Tidak ada perubahan ke database.")
         return
 
@@ -141,7 +192,7 @@ async def seed(dry_run: bool = False) -> None:
             await db.commit()
             print(f"[UPDATED] Arthur diupdate ke versi {existing.version}")
             print(f"  id     : {existing.id}")
-            print(f"  api_key: {existing.api_key}")
+            print("  api_key: [REDACTED — existing key preserved]")
             arthur_id = existing.id
         else:
             arthur = Agent(
@@ -168,7 +219,7 @@ async def seed(dry_run: bool = False) -> None:
             await db.refresh(arthur)
             print(f"[CREATED] Arthur berhasil dibuat!")
             print(f"  id     : {arthur.id}")
-            print(f"  api_key: {arthur.api_key}")
+            print("  api_key: [REDACTED — stored in database]")
             arthur_id = arthur.id
 
     # Seed Arthur's soul ke agent_memories (scope=None → global per agent)
@@ -177,6 +228,19 @@ async def seed(dry_run: bool = False) -> None:
         await upsert_memory(arthur_id, "soul", ARTHUR_SOUL, db, scope=None)
         await db.commit()
     print(f"[OK] Arthur's soul di-seed ke agent_memories")
+
+    from app.core.domain.skill_service import publish_system_skill
+    async with AsyncSessionLocal() as db:
+        for source in skill_sources:
+            await publish_system_skill(
+                agent_id=arthur_id,
+                bundle_version=ARTHUR_SKILL_BUNDLE_VERSION,
+                publisher="scripts/seed_arthur.py",
+                db=db,
+                **source,
+            )
+        await db.commit()
+    print(f"[OK] {len(skill_sources)} system skills Arthur dipublish: {ARTHUR_SKILL_BUNDLE_VERSION}")
 
     print("\n=== Langkah selanjutnya ===")
     print("1. Pastikan Arthur terhubung ke channel WhatsApp yang dipakai user.")

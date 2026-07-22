@@ -10,6 +10,7 @@
 --   * user, subscription, top-up, dan link code
 --   * semua agent milik user beserta data turunannya
 --   * session Arthur/user, messages, runs, dan scheduled jobs
+--   * build draft Arthur, evidence, dan question history
 --   * scoped memory milik Arthur untuk user (termasuk last_agent_id/BeeChat)
 --   * Google OAuth tokens dan pending OAuth states
 --
@@ -359,7 +360,20 @@ WITH deleted AS (
 )
 INSERT INTO _reset_counts VALUES ('arthur_scoped_memories', (SELECT count(*) FROM deleted));
 
--- 3. Menghapus session meng-cascade messages, runs, dan scheduled_jobs.
+-- 3. Hapus build state Arthur secara eksplisit berdasarkan session maupun
+-- owner identity. FK session juga menjadi safety net untuk cascade.
+WITH deleted AS (
+    DELETE FROM agent_build_drafts draft
+    WHERE draft.session_id IN (SELECT session_id FROM _reset_session_ids)
+       OR btrim(COALESCE(draft.owner_external_id, '')) IN (
+            SELECT identity FROM _reset_identities
+        )
+    RETURNING 1
+)
+INSERT INTO _reset_counts VALUES ('arthur_build_drafts', (SELECT count(*) FROM deleted));
+
+-- 4. Menghapus session meng-cascade messages, runs, scheduled_jobs, dan draft
+-- yang mungkin dibuat setelah snapshot target di atas.
 WITH deleted AS (
     DELETE FROM sessions s
     WHERE s.id IN (SELECT session_id FROM _reset_session_ids)
@@ -367,7 +381,7 @@ WITH deleted AS (
 )
 INSERT INTO _reset_counts VALUES ('sessions', (SELECT count(*) FROM deleted));
 
--- 4. Link code bisa tetap ada pada reset parsial lama; bersihkan berdasarkan
+-- 5. Link code bisa tetap ada pada reset parsial lama; bersihkan berdasarkan
 -- user_id maupun claimed identity sebelum users dihapus.
 WITH deleted AS (
     DELETE FROM wa_link_codes link
@@ -404,7 +418,7 @@ WITH deleted AS (
 )
 INSERT INTO _reset_counts VALUES ('wa_link_codes', (SELECT count(*) FROM deleted));
 
--- 5. Hard-delete agent milik user. FK cascade membersihkan memories agent,
+-- 6. Hard-delete agent milik user. FK cascade membersihkan memories agent,
 -- documents, skills, custom_tools, manuals, jobs, dan session yang tersisa.
 WITH deleted AS (
     DELETE FROM agents a
@@ -413,7 +427,7 @@ WITH deleted AS (
 )
 INSERT INTO _reset_counts VALUES ('agents', (SELECT count(*) FROM deleted));
 
--- 6. User delete meng-cascade subscription, token top-up, dan link code.
+-- 7. User delete meng-cascade subscription, token top-up, dan link code.
 WITH deleted AS (
     DELETE FROM users u
     WHERE u.id IN (SELECT user_id FROM _reset_user_ids)
@@ -430,6 +444,16 @@ BEGIN
         WHERE s.id IN (SELECT session_id FROM _reset_session_ids)
     ) THEN
         RAISE EXCEPTION 'Reset gagal: session/riwayat percakapan masih tersisa';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM agent_build_drafts draft
+        WHERE draft.session_id IN (SELECT session_id FROM _reset_session_ids)
+           OR btrim(COALESCE(draft.owner_external_id, '')) IN (
+                SELECT identity FROM _reset_identities
+            )
+    ) THEN
+        RAISE EXCEPTION 'Reset gagal: build state Arthur masih tersisa';
     END IF;
 
     IF EXISTS (

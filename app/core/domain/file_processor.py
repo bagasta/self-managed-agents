@@ -5,8 +5,7 @@ Supported formats
 -----------------
 .txt / .md          UTF-8 decode
 .pdf                Mistral OCR API (mistral-ocr-latest)
-.docx               python-docx (paragraphs + tables)
-.pptx               python-pptx (slide text + speaker notes)
+.docx / .pptx        local parser by default; Mistral Document AI for Arthur
 
 After extraction the text is chunked so each chunk fits the embedding
 model's context window (~512 tokens ≈ 1200 chars) and gets its own
@@ -57,6 +56,8 @@ async def extract_text(
     filename: str,
     content_type: str | None,
     mistral_api_key: str,
+    use_mistral_for_office: bool = False,
+    mistral_model: str = "mistral-ocr-latest",
 ) -> str:
     """
     Route to the correct extractor and return the full extracted text.
@@ -78,12 +79,38 @@ async def extract_text(
                 f"PDF is too large for Mistral OCR ({len(content) // 1024 // 1024} MB). "
                 f"Maximum is {MISTRAL_MAX_BYTES // 1024 // 1024} MB."
             )
-        return await _extract_pdf_mistral(content, filename, mistral_api_key)
+        return await _extract_document_mistral(
+            content,
+            filename,
+            mistral_api_key,
+            model=mistral_model,
+            content_type="application/pdf",
+        )
 
     if ext == ".docx":
+        if use_mistral_for_office:
+            if not mistral_api_key:
+                raise ValueError("MISTRAL_API_KEY is not configured — cannot process DOCX files for Arthur.")
+            return await _extract_document_mistral(
+                content,
+                filename,
+                mistral_api_key,
+                model=mistral_model,
+                content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
         return _extract_docx(content)
 
     if ext == ".pptx":
+        if use_mistral_for_office:
+            if not mistral_api_key:
+                raise ValueError("MISTRAL_API_KEY is not configured — cannot process PPTX files for Arthur.")
+            return await _extract_document_mistral(
+                content,
+                filename,
+                mistral_api_key,
+                model=mistral_model,
+                content_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            )
         return _extract_pptx(content)
 
     if ext == ".csv":
@@ -152,14 +179,22 @@ def _extract_txt(content: bytes) -> str:
 # PDF via Mistral OCR
 # ---------------------------------------------------------------------------
 
-async def _extract_pdf_mistral(
-    pdf_bytes: bytes,
+async def _extract_document_mistral(
+    document_bytes: bytes,
     filename: str,
     api_key: str,
+    *,
+    model: str = "mistral-ocr-latest",
+    content_type: str = "application/pdf",
 ) -> str:
     """
-    Upload PDF to Mistral, run OCR, collect markdown per page, delete file.
+    Upload a supported document to Mistral, run OCR, collect markdown per page, delete file.
     """
+    if len(document_bytes) > MISTRAL_MAX_BYTES:
+        raise ValueError(
+            f"Document is too large for Mistral OCR ({len(document_bytes) // 1024 // 1024} MB). "
+            f"Maximum is {MISTRAL_MAX_BYTES // 1024 // 1024} MB."
+        )
     headers_auth = {"Authorization": f"Bearer {api_key}"}
     file_id: str | None = None
 
@@ -168,7 +203,7 @@ async def _extract_pdf_mistral(
         upload_resp = await client.post(
             "https://api.mistral.ai/v1/files",
             headers=headers_auth,
-            files={"file": (filename, pdf_bytes, "application/pdf")},
+            files={"file": (filename, document_bytes, content_type)},
             data={"purpose": "ocr"},
         )
         upload_resp.raise_for_status()
@@ -189,7 +224,7 @@ async def _extract_pdf_mistral(
             "https://api.mistral.ai/v1/ocr",
             headers={**headers_auth, "Content-Type": "application/json"},
             json={
-                "model": "mistral-ocr-latest",
+                "model": model,
                 "document": {
                     "type": "document_url",
                     "document_url": signed_url,
@@ -218,6 +253,21 @@ async def _extract_pdf_mistral(
             page_texts.append(f"<!-- page {idx + 1} -->\n{md}")
 
     return "\n\n".join(page_texts)
+
+
+async def _extract_pdf_mistral(
+    pdf_bytes: bytes,
+    filename: str,
+    api_key: str,
+) -> str:
+    """Backward-compatible wrapper used by older tests/imports."""
+    return await _extract_document_mistral(
+        pdf_bytes,
+        filename,
+        api_key,
+        model="mistral-ocr-latest",
+        content_type="application/pdf",
+    )
 
 
 # ---------------------------------------------------------------------------

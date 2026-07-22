@@ -54,6 +54,7 @@ from app.core.engine.wa_reply_delivery import should_skip_whatsapp_final_reply
 from app.core.infra.wa_client import resolve_wa_phones, send_wa_message
 from app.database import get_db
 from app.models.agent import Agent
+from app.models.agent_build_draft import AgentBuildDraft
 from app.models.message import Message
 from app.models.session import Session
 
@@ -1577,6 +1578,9 @@ async def incoming_message(
     # --- /reset intercept ---
     if not is_operator and user_message.strip().lower() == "/reset":
         await db.execute(delete(Message).where(Message.session_id == session.id))
+        await db.execute(
+            delete(AgentBuildDraft).where(AgentBuildDraft.session_id == session.id)
+        )
         session.metadata_ = {}
         db.add(session)
         await db.commit()
@@ -2108,12 +2112,24 @@ async def wa_incoming(
         return {"status": "media_payload_missing", "reply": reply, "run_id": "", "steps": [], "messages_to_user": [reply]}
 
     if body.media_type and body.media_data:
+        _arthur_runtime_cfg = (
+            agent.tools_config.get("arthur_runtime", {})
+            if isinstance(getattr(agent, "tools_config", None), dict)
+            else {}
+        )
+        _force_arthur_document_route = bool(
+            "builder" in (getattr(agent, "capabilities", None) or [])
+            and isinstance(_arthur_runtime_cfg, dict)
+            and _arthur_runtime_cfg.get("enabled")
+            and _arthur_runtime_cfg.get("document_routing")
+        )
         media_context, media_image_b64, media_image_mime, media_meta = await process_wa_media(
             media_type=body.media_type,
             media_data=body.media_data,
             media_filename=body.media_filename,
             session_id=session.id,
             logger=log,
+            arthur_model_routing=_force_arthur_document_route,
         )
         if media_meta:
             import time as _time

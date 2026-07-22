@@ -34,3 +34,4 @@ redis[hiredis]>=5.0.0          # optional: untuk Redis-backed event bus (multi-p
 coredis>=3.4.0                 # required by slowapi for async redis rate limiting
 
 python-dotenv==1.0.1
+PyYAML>=6.0.2

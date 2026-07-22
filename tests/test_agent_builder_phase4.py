@@ -117,11 +117,14 @@ class TestArthurConfig:
         assert '"token_quota": 0' in src, "Arthur harus unlimited quota; 0 berarti tidak dibatasi"
 
     def test_rulebook_uses_current_arthur_model(self):
-        p = pathlib.Path(__file__).parent.parent / "system-message-builder.md"
-        src = p.read_text()
-        assert "Model Arthur sendiri: openai/gpt-4.1-mini" in src
-        assert "Model Arthur sendiri: deepseek/deepseek-v4-flash" not in src
-        assert "Model writer untuk blueprint/instructions/manual/soul: deepseek/deepseek-v4-pro" in src
+        root = pathlib.Path(__file__).parent.parent
+        seed_src = (root / "scripts/seed_arthur.py").read_text()
+        legacy_src = (root / "system-message-builder.md").read_text()
+        kernel_src = (root / "arthur-skills/KERNEL.md").read_text()
+        assert '"model": "deepseek/deepseek-v4-flash"' in seed_src
+        assert "Model Arthur sendiri: deepseek/deepseek-v4-flash" in legacy_src
+        assert "openai/gpt-4.1-mini" not in kernel_src
+        assert "Model writer untuk blueprint/instructions/manual/soul: deepseek/deepseek-v4-pro" in legacy_src
 
     def test_arthur_has_system_capabilities(self):
         p = pathlib.Path(__file__).parent.parent / "scripts/seed_arthur.py"

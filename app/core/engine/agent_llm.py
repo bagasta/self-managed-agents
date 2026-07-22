@@ -24,5 +24,7 @@ def build_agent_llms(agent_model: Any, settings: Any, temperature: float) -> tup
         base_url=base_url,
         temperature=temperature,
         max_tokens=max_tokens,
+        timeout=getattr(settings, "llm_request_timeout_seconds", 120.0),
+        max_retries=getattr(settings, "llm_max_retries", 1),
     )
     return llm_raw, llm_raw.bind(parallel_tool_calls=False)

@@ -19,8 +19,17 @@ class Settings(BaseSettings):
     # OpenRouter
     openrouter_api_key: str = ""
 
-    # Mistral (used for PDF OCR)
+    # Mistral (used for PDF and Office document extraction)
     mistral_api_key: str = ""
+
+    # Arthur content-aware model routing
+    arthur_primary_model: str = "deepseek/deepseek-v4-flash"
+    arthur_document_model: str = "mistral-ocr-latest"
+    arthur_image_model: str = "openai/gpt-4.1-mini"
+    arthur_engine_version: str = "arthur-progressive-v1"
+    arthur_prompt_version: str = "arthur-kernel-v1"
+    llm_request_timeout_seconds: float = 120.0
+    llm_max_retries: int = 1
 
     # Tavily (web search / browsing for agents)
     tavily_api_key: str = ""
@@ -79,6 +88,7 @@ class Settings(BaseSettings):
     # Error tracking
     sentry_dsn: str = ""
     environment: str = "development"
+    app_commit_sha: str = "unknown"
 
     # Redis — dipakai untuk event bus multi-process dan rate limiting
     # Set ke "" untuk disable Redis (fallback ke in-memory, single-worker only)

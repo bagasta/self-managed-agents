@@ -29,6 +29,10 @@ from app.core.engine.context_service import (
     db_messages_to_lc,
     load_history,
 )
+from app.core.domain.agent_build_state_service import (
+    guard_repeated_questions,
+    record_build_outcome,
+)
 from app.core.domain.agent_sop_service import get_latest_agent_operating_manual
 from app.core.domain.memory_service import (
     build_memory_context,
@@ -47,6 +51,14 @@ from app.core.engine.agent_callbacks import AgentStepLogger
 from app.core.engine.agent_hitl import handle_graph_interrupt, handle_pending_interrupt
 from app.core.engine.agent_input import build_input_messages
 from app.core.engine.agent_llm import build_agent_llms
+from app.core.engine.arthur_skill_runtime import (
+    ARTHUR_ENGINE_VERSION,
+    ARTHUR_PROMPT_VERSION,
+    arthur_runtime_enabled,
+    prepare_arthur_skill_context,
+    scope_arthur_builder_tools,
+)
+from app.core.engine.attachment_evidence import extract_image_evidence
 from app.core.engine.agent_recovery import send_agent_recovery_message
 from app.core.engine.run_capacity import bounded_agent_run
 from app.core.engine.agent_google_routing import (
@@ -688,6 +700,13 @@ async def run_agent(
         session_id=session.id,
         status="running",
         started_at=_now,
+        runtime_metadata={
+            "model": str(agent_model.model or ""),
+            "engine_version": "legacy",
+            "prompt_version": "legacy",
+            "skill_versions": {},
+            "attachment_route": None,
+        },
     )
     db.add(run_record)
 
@@ -749,6 +768,82 @@ async def run_agent(
     _memory_scope = tool_setup.memory_scope
 
     runtime_policy = build_agent_runtime_policy(agent_model, tools_config)
+    _current_attachment_meta = (
+        session.metadata_.get("current_attachment")
+        if isinstance(getattr(session, "metadata_", None), dict)
+        else None
+    )
+    _last_incoming_media = (
+        session.metadata_.get("last_incoming_media")
+        if isinstance(getattr(session, "metadata_", None), dict)
+        else None
+    )
+    if (
+        runtime_policy.is_builder
+        and isinstance(_current_attachment_meta, dict)
+        and _current_attachment_meta.get("media_type") == "document"
+    ):
+        run_record.runtime_metadata = {
+            **dict(run_record.runtime_metadata or {}),
+            "attachment_route": "document",
+            "attachment_model": (
+                _last_incoming_media.get("processor_model")
+                if isinstance(_last_incoming_media, dict)
+                else settings.arthur_document_model
+            ),
+            "attachment_status": (
+                _last_incoming_media.get("processing_status")
+                if isinstance(_last_incoming_media, dict)
+                else "unknown"
+            ),
+        }
+    _arthur_skill_context = None
+    if runtime_policy.is_builder and arthur_runtime_enabled(tools_config, "progressive_skills"):
+        _arthur_skill_context = await prepare_arthur_skill_context(
+            agent_id=agent_id,
+            session_id=session.id,
+            owner_external_id=(
+                str(getattr(session, "external_user_id", None) or "")
+                or str((getattr(session, "channel_config", None) or {}).get("user_phone") or "")
+                or f"session:{session.id}"
+            ),
+            user_message=user_message,
+            message_id=str(run_id),
+            tools_config=tools_config,
+            db=db,
+        )
+        run_record.runtime_metadata = {
+            **dict(run_record.runtime_metadata or {}),
+            "engine_version": ARTHUR_ENGINE_VERSION,
+            "prompt_version": ARTHUR_PROMPT_VERSION,
+            "primary_skill": _arthur_skill_context.primary_skill,
+            "mixin_skills": list(_arthur_skill_context.mixin_skills),
+            "skill_versions": dict(_arthur_skill_context.skill_versions),
+            "build_id": (
+                str(_arthur_skill_context.draft.id)
+                if _arthur_skill_context.draft is not None
+                else None
+            ),
+        }
+        log.info(
+            "agent_run.arthur_skill_context_ready",
+            primary_skill=_arthur_skill_context.primary_skill,
+            mixin_skills=_arthur_skill_context.mixin_skills,
+            skill_versions=_arthur_skill_context.skill_versions,
+            engine_version=ARTHUR_ENGINE_VERSION,
+            prompt_version=ARTHUR_PROMPT_VERSION,
+        )
+        tools, _arthur_removed_tools = scope_arthur_builder_tools(
+            tools,
+            primary_skill=_arthur_skill_context.primary_skill or "arthur-discovery",
+            mixin_skills=_arthur_skill_context.mixin_skills,
+        )
+        log.info(
+            "agent_run.arthur_tools_scoped",
+            primary_skill=_arthur_skill_context.primary_skill,
+            removed_tools=_arthur_removed_tools,
+            remaining_tools=len(tools),
+        )
     google_mcp_parent_only = should_use_google_workspace_parent_only(
         policy=runtime_policy,
         user_message=user_message,
@@ -837,6 +932,8 @@ async def run_agent(
         is_operator_message=is_op_msg,
         user_message=user_message,
     )
+    if _arthur_skill_context is not None and _arthur_skill_context.prompt_block:
+        system_prompt += "\n\n" + _arthur_skill_context.prompt_block
     if abandoned_before_current is not None:
         system_prompt += (
             "\n\n## Restart Recovery\n"
@@ -1236,15 +1333,43 @@ async def run_agent(
                 checkpointer=_checkpointer,
             )
 
-        human_content: Any = _build_human_content_for_model(
-            user_message=user_message,
-            model=getattr(agent_model, "model", None),
-            media_image_b64=media_image_b64,
-            media_image_mime=media_image_mime,
-            google_auth_recovery_followup=google_auth_recovery_followup,
-            google_auth_recovery_request=google_auth_recovery_request,
-            log=log,
-        )
+        _attachment_evidence = None
+        if (
+            runtime_policy.is_builder
+            and arthur_runtime_enabled(tools_config, "image_routing")
+            and media_image_b64
+            and media_image_mime
+        ):
+            _attachment_evidence = await extract_image_evidence(
+                image_b64=media_image_b64,
+                mime_type=media_image_mime,
+                filename=current_attachment_name,
+                user_request=user_message,
+                settings=settings,
+                log=log,
+            )
+            human_content = (user_message or "").strip() + "\n\n" + _attachment_evidence.to_prompt()
+            _session_meta = dict(session.metadata_ or {})
+            _session_meta["arthur_attachment_evidence"] = _attachment_evidence.to_dict()
+            session.metadata_ = _session_meta
+            db.add(session)
+            run_record.runtime_metadata = {
+                **dict(run_record.runtime_metadata or {}),
+                "attachment_route": _attachment_evidence.route,
+                "attachment_model": _attachment_evidence.model,
+                "attachment_status": _attachment_evidence.status,
+                "attachment_id": _attachment_evidence.attachment_id,
+            }
+        else:
+            human_content = _build_human_content_for_model(
+                user_message=user_message,
+                model=getattr(agent_model, "model", None),
+                media_image_b64=media_image_b64,
+                media_image_mime=media_image_mime,
+                google_auth_recovery_followup=google_auth_recovery_followup,
+                google_auth_recovery_request=google_auth_recovery_request,
+                log=log,
+            )
 
         input_messages: list[BaseMessage] = build_input_messages(
             prior_messages=prior_messages,
@@ -2518,6 +2643,18 @@ async def run_agent(
             after_preview=(final_reply or "")[:220],
         )
 
+    if _arthur_skill_context is not None and _arthur_skill_context.draft is not None:
+        final_reply, _removed_repeated_questions = guard_repeated_questions(
+            final_reply,
+            _arthur_skill_context.draft.question_history_json,
+            _arthur_skill_context.draft.evidence_json,
+        )
+        if _removed_repeated_questions:
+            log.warning(
+                "agent_run.arthur_repeated_questions_removed",
+                count=len(_removed_repeated_questions),
+            )
+
     if _is_enabled(tools_config, "memory", default=True):
         _memory_artifact_path = _current_shared_artifact_path or _remember_latest_shared_artifact(
             session,
@@ -2535,6 +2672,30 @@ async def run_agent(
             generated_artifact_path=_memory_artifact_path,
             log=log,
         )
+
+    if (
+        _arthur_skill_context is not None
+        and _arthur_skill_context.draft is not None
+        and arthur_runtime_enabled(tools_config, "build_state")
+    ):
+        try:
+            await record_build_outcome(
+                draft=_arthur_skill_context.draft,
+                final_reply=final_reply,
+                steps=steps,
+                skill_versions=_arthur_skill_context.skill_versions,
+                db=db,
+            )
+        except Exception as _build_state_exc:
+            log.error(
+                "agent_run.arthur_build_state_outcome_failed",
+                error=str(_build_state_exc)[:300],
+                build_id=str(_arthur_skill_context.draft.id),
+            )
+            run_record.runtime_metadata = {
+                **dict(run_record.runtime_metadata or {}),
+                "build_state_error": f"{type(_build_state_exc).__name__}: {str(_build_state_exc)[:200]}",
+            }
 
     _completed_at = datetime.now(timezone.utc)
     _duration_ms = max(0, int((_completed_at - _now).total_seconds() * 1000))

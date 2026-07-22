@@ -1,0 +1,4 @@
+interface:
+  display_name: "Arthur WhatsApp Demo"
+  short_description: "Siapkan demo dan channel WhatsApp"
+  default_prompt: "Use $arthur-whatsapp-demo-channel to prepare and verify a WhatsApp demo or channel setup."

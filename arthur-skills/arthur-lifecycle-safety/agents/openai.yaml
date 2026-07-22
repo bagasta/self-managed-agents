@@ -1,0 +1,4 @@
+interface:
+  display_name: "Arthur Lifecycle Safety"
+  short_description: "Kelola lifecycle agent dengan aman"
+  default_prompt: "Use $arthur-lifecycle-safety to safely inspect, renew, or delete an agent."
