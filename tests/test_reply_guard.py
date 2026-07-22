@@ -461,6 +461,61 @@ def test_builder_create_agent_entitlement_reply_is_rewritten_to_retry():
     assert "upgrade" not in out.lower()
 
 
+def test_builder_create_file_blocker_is_rendered_as_discovery_question():
+    steps = [
+        {
+            "tool": "create_agent",
+            "result": json.dumps(
+                {"error": "Kemampuan file belum diputuskan — jangan menebak."},
+                ensure_ascii=False,
+            ),
+        }
+    ]
+
+    out = ensure_non_empty_reply(
+        "Masih saya proses ya. Saya akan kirim hasilnya begitu selesai.",
+        steps,
+    )
+
+    assert "hanya chat teks" in out
+    assert "menerima file/gambar" in out
+    assert "membuat file/laporan" in out
+    assert "belum berhasil" not in out.lower()
+    assert "proses" not in out.lower()
+
+
+def test_builder_create_discovery_blocker_returns_capability_questions():
+    steps = [
+        {
+            "tool": "create_agent",
+            "result": json.dumps(
+                {
+                    "error": "Discovery kebutuhan agent belum lengkap atau belum dikonfirmasi user.",
+                    "discovery_progress": {
+                        "next_questions": [
+                            {
+                                "topic": "main_tasks",
+                                "question": "Apa saja tugas utama agent dari awal sampai selesai?",
+                            },
+                            {
+                                "topic": "capabilities",
+                                "question": "Kemampuan apa yang dibutuhkan, termasuk keputusan file?",
+                            },
+                        ]
+                    },
+                },
+                ensure_ascii=False,
+            ),
+        }
+    ]
+
+    out = ensure_non_empty_reply("Belum berhasil dibuat.", steps)
+
+    assert "tugas utama agent" in out
+    assert "Kemampuan apa yang dibutuhkan" in out
+    assert "belum berhasil" not in out.lower()
+
+
 def test_builder_entitlement_error_forces_retry_reply():
     steps = [
         {

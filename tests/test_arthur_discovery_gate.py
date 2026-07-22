@@ -69,7 +69,7 @@ def _personal_discovery(**overrides):
         "agent_name": "IngatAku",
         "audience": "Saya sendiri.",
         "main_tasks": ["Mencatat tugas", "Mengingatkan tindak lanjut"],
-        "capabilities": ["Input catatan", "Kirim pengingat"],
+        "capabilities": ["Input catatan", "Kirim pengingat", "Hanya chat teks; tidak perlu file"],
         "prohibited_actions": ["Tidak boleh mengarang jadwal"],
         "allowed_actions": ["Boleh mencatat dan mengingatkan setelah saya minta"],
         "tone_style": "Santai, bahasa Indonesia, tanpa emoji berlebihan.",
@@ -123,6 +123,32 @@ def test_group_two_questions_include_examples_for_hard_to_answer_items():
     assert "Contoh:" in questions["tone_style"]
     assert "2-3 contoh" in questions["ideal_conversations"]
     assert "red line" in questions["avoided_conversations"]
+
+
+def test_capabilities_must_include_an_explicit_file_decision():
+    answers = _personal_discovery(
+        capabilities=["Menjawab pertanyaan", "Mengirim notifikasi"]
+    )
+
+    result = validate_agent_discovery(answers)
+
+    assert result["complete"] is False
+    assert "capabilities" in result["invalid_fields"]
+    assert result["next_group"]["id"] == "agent_behavior"
+    question = next(
+        item["question"] for item in result["next_questions"]
+        if item["topic"] == "capabilities"
+    )
+    assert "hanya chat teks" in question
+    assert "menerima file" in question
+    assert "membuat file" in question
+
+
+def test_confirmed_file_workflow_is_derived_from_discovery():
+    result = validate_agent_discovery(_work_discovery())
+
+    assert result["complete"] is True
+    assert result["file_capability"] == "receive_only"
 
 
 def test_problem_must_be_a_pain_point_not_only_an_agent_feature():
@@ -265,6 +291,8 @@ def test_plan_agent_is_ready_with_confirmed_personal_discovery():
     assert payload["discovery"]["complete"] is True
     assert payload["confirmed_discovery"]["problem"].startswith("Saya sering lupa")
     assert payload["escalation_policy"] == "none"
+    assert payload["recommended_config"]["file_capability"] == "text_only"
+    assert payload["recommended_config"]["tools_config"]["whatsapp_media"] is False
 
 
 def test_arthur_create_agent_hard_blocks_without_discovery():

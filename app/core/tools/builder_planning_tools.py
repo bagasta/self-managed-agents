@@ -331,6 +331,7 @@ def build_builder_planning_tools(
 
         original_user_goal = str(user_goal or "").strip()
         confirmed_discovery = dict(discovery.get("normalized_answers") or {})
+        file_capability_decision = str(discovery.get("file_capability") or "").strip().lower()
         agent_name = str(confirmed_discovery.get("agent_name") or agent_name).strip()
         user_goal = str(confirmed_discovery.get("problem") or user_goal).strip()
         persona = str(confirmed_discovery.get("tone_style") or persona).strip()
@@ -429,14 +430,16 @@ def build_builder_planning_tools(
             feat in features
             for feat in ("media", "gambar", "foto", "file", "pdf", "excel", "xlsx", "docx", "dokumen")
         )
-        # Fix #1: jangan pernah mematikan whatsapp_media hanya karena heuristik keyword
-        # tidak menebak kebutuhan file. Untuk onboarding WhatsApp, kirim/terima file adalah
-        # kebutuhan laten yang nyaris universal — selaras dengan default schema (whatsapp_media=True).
-        # Media hanya dimatikan kalau user EKSPLISIT menolak file (hanya teks).
-        if _file_capability_negated(feature_text):
-            tools_config["whatsapp_media"] = False
-        else:
+        # Keputusan file berasal dari discovery yang sudah dikonfirmasi, bukan
+        # dari asumsi preset atau kemampuan laten yang mungkin dibutuhkan nanti.
+        if file_capability_decision == "receive_only":
             tools_config["whatsapp_media"] = True
+        elif file_capability_decision in {"generate", "both", "enabled"}:
+            tools_config["whatsapp_media"] = True
+            tools_config["sandbox"] = True
+            tools_config["subagents"] = {"enabled": True}
+        elif file_capability_decision == "text_only":
+            tools_config["whatsapp_media"] = False
         if approval_gated_service or payment_approval_workflow:
             tools_config["escalation"] = True
             tools_config["whatsapp_media"] = True
@@ -478,7 +481,7 @@ def build_builder_planning_tools(
         # filenya tersimpan. Kalau sinyal kebutuhan file tidak jelas DAN tidak dinegasikan user,
         # Arthur WAJIB tanya dulu sebelum create — bukan menebak.
         file_capability_signal = bool(
-            discovery.get("complete")
+            file_capability_decision
             or wants_files
             or wants_generated_files
             or explicit_media_request
@@ -679,6 +682,7 @@ def build_builder_planning_tools(
                 "temperature": preset.get("default_temperature", 0.7),
                 "max_tokens": preset.get("default_max_tokens", 1024),
                 "tools_config": tools_config,
+                "file_capability": file_capability_decision,
                 "channel_type": effective_channel,
                 "escalation_config": (
                     {"channel_type": "whatsapp", "operator_phone": operator_phone}

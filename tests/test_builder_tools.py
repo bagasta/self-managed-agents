@@ -124,6 +124,14 @@ def _confirmed_discovery(
     vision_requirement: str = "Tidak perlu gambar atau vision.",
     escalation_phone: str = "+628111111111",
 ) -> dict:
+    file_context = capabilities.lower()
+    if not any(
+        marker in file_context
+        for marker in (
+            "file", "pdf", "excel", "csv", "dokumen", "gambar", "foto", "bukti transfer"
+        )
+    ):
+        capabilities = f"{capabilities} Hanya chat teks; tidak perlu file."
     answers = {
         "problem": problem,
         "usage_context": "personal" if personal else "work",
@@ -591,7 +599,7 @@ class TestBuilderToolsReturnsList:
         assert tools_config["escalation"] is True
         assert tools_config.get("sandbox") is False
         assert tools_config.get("subagents", {}).get("enabled") is False
-        assert tools_config["whatsapp_media"] is True
+        assert tools_config["whatsapp_media"] is False
         assert "mcp" not in tools_config
         assert payload["google_workspace_option"]["should_offer"] is False
         assert payload["google_workspace_option"]["enabled"] is False

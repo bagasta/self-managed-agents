@@ -95,6 +95,17 @@ def _builder_entitlement_retry_reply(steps: list[dict[str, Any]]) -> str | None:
 
 def _builder_success_reply_is_clear(reply: str) -> bool:
     normalized = reply.lower()
+    if any(
+        marker in normalized
+        for marker in (
+            "belum berhasil",
+            "tidak berhasil",
+            "gagal dibuat",
+            "gagal diupdate",
+            "belum selesai",
+        )
+    ):
+        return False
     return any(
         marker in normalized
         for marker in (
@@ -206,6 +217,45 @@ def _create_agent_success_reply(data: dict[str, Any]) -> str:
     return f"{name} sudah jadi."
 
 
+def _render_builder_questions(questions: Any) -> str | None:
+    if not isinstance(questions, list):
+        return None
+    question_texts = [
+        str(item.get("question") or "").strip()
+        for item in questions
+        if isinstance(item, dict) and str(item.get("question") or "").strip()
+    ]
+    if not question_texts:
+        return None
+    if len(question_texts) == 1:
+        return question_texts[0]
+    rendered = "\n".join(
+        f"{index}. {question}"
+        for index, question in enumerate(question_texts, start=1)
+    )
+    return "Supaya agent-nya sesuai kebutuhanmu, saya perlu melengkapi bagian ini:\n" + rendered
+
+
+def _builder_clarification_reply(data: dict[str, Any]) -> str | None:
+    """Turn deterministic builder blockers into questions, never failure text."""
+    questions = data.get("capability_clarifications") or []
+    if not questions:
+        progress = data.get("discovery_progress")
+        if isinstance(progress, dict):
+            questions = progress.get("next_questions") or []
+    rendered = _render_builder_questions(questions)
+    if rendered:
+        return rendered
+
+    error = str(data.get("error") or "").strip().lower()
+    if "kemampuan file belum diputuskan" in error or "keputusan kemampuan file" in error:
+        return (
+            "Sebelum saya buat, pilih kebutuhan file agent ini: hanya chat teks, menerima "
+            "file/gambar dari user, membuat file/laporan untuk dikirim, atau keduanya?"
+        )
+    return None
+
+
 def _builder_fallback_reply(steps: list[dict[str, Any]]) -> str | None:
     entitlement_retry = _builder_entitlement_retry_reply(steps)
     if entitlement_retry:
@@ -276,24 +326,9 @@ def _builder_fallback_reply(steps: list[dict[str, Any]]) -> str | None:
         data = _parse_step_result(step.get("result"))
         if not data or str(data.get("plan_status") or "").strip().lower() != "needs_clarification":
             continue
-        questions = data.get("capability_clarifications") or []
-        if not questions:
-            progress = data.get("discovery_progress")
-            if isinstance(progress, dict):
-                questions = progress.get("next_questions") or []
-        question_texts = [
-            str(item.get("question") or "").strip()
-            for item in questions
-            if isinstance(item, dict) and str(item.get("question") or "").strip()
-        ]
-        if question_texts:
-            if len(question_texts) == 1:
-                return question_texts[0]
-            rendered = "\n".join(
-                f"{index}. {question}"
-                for index, question in enumerate(question_texts, start=1)
-            )
-            return "Supaya agent-nya sesuai kebutuhanmu, saya perlu melengkapi bagian ini:\n" + rendered
+        clarification_reply = _builder_clarification_reply(data)
+        if clarification_reply:
+            return clarification_reply
 
     for step in reversed(steps or []):
         if step.get("tool") != "create_agent":
@@ -303,6 +338,9 @@ def _builder_fallback_reply(steps: list[dict[str, Any]]) -> str | None:
             continue
         if data.get("success") is True:
             return _create_agent_success_reply(data)
+        clarification_reply = _builder_clarification_reply(data)
+        if clarification_reply:
+            return clarification_reply
         error = str(data.get("error") or "").strip()
         if error:
             return f"Belum berhasil dibuat: {error}"

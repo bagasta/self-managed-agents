@@ -64,7 +64,11 @@ _QUESTIONS: dict[str, str] = {
     "agent_name": "Nama agent yang kamu inginkan apa? Saya tidak akan memilih nama tanpa persetujuanmu.",
     "audience": "Siapa yang akan chat dengan agent ini: kamu sendiri, internal tim, atau customer eksternal?",
     "main_tasks": "Apa saja tugas utama agent? Tulis sebagai daftar pekerjaan konkret dari awal sampai selesai.",
-    "capabilities": "Kemampuan apa yang dibutuhkan, misalnya menjawab pertanyaan, input data, mengolah file, atau mengirim notifikasi?",
+    "capabilities": (
+        "Kemampuan apa saja yang dibutuhkan agent dari awal sampai selesai? Sebutkan pekerjaan konkretnya, "
+        "lalu pilih kemampuan file secara eksplisit: (a) hanya chat teks/tidak perlu file, "
+        "(b) menerima file atau gambar dari user, (c) membuat file/laporan untuk dikirim, atau (d) keduanya."
+    ),
     "prohibited_actions": "Apa yang sama sekali TIDAK BOLEH agent lakukan? Contoh: memberi diskon, menyetujui refund, atau mengarang informasi.",
     "allowed_actions": "Apa yang BOLEH agent lakukan dan sampai batas wewenang mana? Contoh: mencatat pesanan boleh, mengonfirmasi pembayaran tidak boleh.",
     "tone_style": "Tone dan gaya bahasanya bagaimana? Contoh: santai, bahasa Indonesia, boleh emoji secukupnya, tetapi tetap sopan.",
@@ -330,6 +334,81 @@ def _confirmed(value: Any) -> bool:
     }
 
 
+def discovery_file_capability(answers: dict[str, Any] | None) -> str:
+    """Derive only an explicit, user-confirmed file decision from discovery.
+
+    Product details or a generic "menjawab pertanyaan" capability are not enough
+    to decide this. The answer must either contain a concrete file workflow or a
+    global text-only/no-file statement.
+    """
+    data = answers if isinstance(answers, dict) else {}
+    text = _normalize_evidence_text(
+        " ".join(
+            str(data.get(field) or "")
+            for field in (
+                "capabilities",
+                "knowledge_sources",
+                "expected_outputs",
+                "vision_requirement",
+            )
+        )
+    )
+    text_only_markers = (
+        "hanya chat teks",
+        "hanya teks",
+        "cuma chat teks",
+        "cuma teks",
+        "teks saja",
+        "text only",
+        "tidak perlu file",
+        "tidak butuh file",
+        "tanpa file",
+        "tidak perlu dokumen atau gambar",
+        "tanpa dokumen atau gambar",
+    )
+    receive_markers = (
+        "menerima file",
+        "menerima dokumen",
+        "menerima gambar",
+        "menerima foto",
+        "membaca file",
+        "membaca dokumen",
+        "membaca gambar",
+        "membaca foto",
+        "mengolah file",
+        "mengolah dokumen",
+        "mengolah data excel",
+        "katalog pdf",
+        "file pdf",
+        "file excel",
+        "file csv",
+        "bukti transfer",
+        "foto produk",
+    )
+    generate_markers = (
+        "membuat file",
+        "membuat dokumen",
+        "membuat laporan",
+        "membuat pdf",
+        "mengirim file",
+        "mengirim dokumen",
+        "visualisasi data",
+    )
+    # Concrete positive workflows win over a local negative such as "tidak
+    # perlu gambar" when another answer explicitly requires a PDF/Excel file.
+    receives_files = any(marker in text for marker in receive_markers)
+    generates_files = any(marker in text for marker in generate_markers)
+    if receives_files and generates_files:
+        return "both"
+    if generates_files:
+        return "generate"
+    if receives_files:
+        return "receive_only"
+    if any(marker in text for marker in text_only_markers):
+        return "text_only"
+    return ""
+
+
 def _has_two_to_three_conversation_examples(value: Any) -> bool:
     if isinstance(value, (list, tuple)):
         count = len([item for item in value if _is_answered(item)])
@@ -511,6 +590,13 @@ def validate_agent_discovery(
     if _is_answered(answers.get("problem")) and not _problem_is_pain_point(answers.get("problem")):
         invalid_fields.append("problem")
         validation_errors.append("problem harus menjelaskan pain point/masalah, bukan hanya fitur atau jenis agent.")
+    file_capability = discovery_file_capability(answers)
+    if _is_answered(answers.get("capabilities")) and not file_capability:
+        invalid_fields.append("capabilities")
+        validation_errors.append(
+            "capabilities harus menjelaskan tugas konkret dan memilih kemampuan file secara eksplisit: "
+            "hanya chat teks, menerima file/gambar, membuat file/laporan, atau keduanya."
+        )
     if _is_answered(answers.get("ideal_conversations")) and not _has_two_to_three_conversation_examples(
         answers.get("ideal_conversations")
     ):
@@ -634,6 +720,7 @@ def validate_agent_discovery(
         ),
         "ignored_fields": ignored_fields,
         "operational_hours_requested": False,
+        "file_capability": file_capability,
     }
 
 

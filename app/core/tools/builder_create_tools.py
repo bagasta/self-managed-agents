@@ -18,6 +18,7 @@ from app.core.launch_safety import (
 )
 from app.core.tools.builder_discovery import (
     DiscoveryEvidenceUnavailable,
+    discovery_file_capability,
     discovery_operator_phone,
     load_discovery_user_messages,
     validate_agent_discovery,
@@ -126,8 +127,11 @@ def build_builder_create_tools(
             operating_manual: Agent Operating Manual/SOP terstruktur. Wajib untuk agent pekerjaan/bisnis
                 yang dibuat Arthur; harus berasal dari discovery terkonfirmasi dan tidak boleh memuat asumsi.
             file_capability: Keputusan eksplisit kemampuan file agent — WAJIB diisi kalau kebutuhan file ambigu.
-                'enabled' = agent perlu menerima/membuat file (otomatis aktifkan sandbox+whatsapp_media+subagents);
-                'text_only' = user sudah konfirmasi agent hanya butuh teks. Kosongkan hanya jika workflow file sudah jelas dari instruksi.
+                'receive_only' = hanya menerima file/gambar (aktifkan whatsapp_media);
+                'generate' = membuat file/laporan; 'both' = menerima dan membuat file
+                (keduanya mengaktifkan sandbox+whatsapp_media+subagents);
+                'text_only' = user sudah konfirmasi agent hanya butuh teks.
+                Nilai legacy 'enabled' diperlakukan sama dengan 'both'.
             discovery_answers: Salinan JSON/object discovery enam grup yang sudah lengkap dan dikonfirmasi user.
                 Untuk Arthur (self_agent_id tersedia), create diblokir jika ada jawaban wajib yang kosong,
                 contoh ideal kurang dari dua, eskalasi bisnis tidak detail, atau user_confirmed belum true.
@@ -153,6 +157,7 @@ def build_builder_create_tools(
                 "Pastikan Arthur dijalankan dari session user yang memiliki external_user_id."
             )
         confirmed_discovery: dict[str, Any] = {}
+        confirmed_file_capability = ""
         discovery_context_text = ""
         if self_agent_id:
             evidence_required = bool(db_factory is not None and session_id)
@@ -195,6 +200,10 @@ def build_builder_create_tools(
                     indent=2,
                 )
             confirmed_discovery = dict(discovery.get("normalized_answers") or {})
+            confirmed_file_capability = str(
+                discovery.get("file_capability")
+                or discovery_file_capability(confirmed_discovery)
+            ).strip().lower()
             discovery_context_text = json.dumps(confirmed_discovery, ensure_ascii=False)
             operator_phone = operator_phone or discovery_operator_phone(discovery)
         requested_channel_type = str(channel_type or "").strip().lower()
@@ -297,7 +306,27 @@ def build_builder_create_tools(
             soul,
             blueprint,
         )
-        file_decision = str(file_capability or "").strip().lower()
+        requested_file_decision = str(file_capability or "").strip().lower()
+        if (
+            confirmed_file_capability
+            and requested_file_decision
+            and requested_file_decision != confirmed_file_capability
+        ):
+            return json.dumps(
+                {
+                    "error": "Keputusan kemampuan file berbeda dari discovery yang dikonfirmasi user.",
+                    "validation_errors": [
+                        f"Discovery={confirmed_file_capability}, create_agent={requested_file_decision}."
+                    ],
+                    "hint": (
+                        "Jangan menimpa jawaban user. Gunakan keputusan file dari discovery, "
+                        "atau tanyakan ulang jika kebutuhan memang berubah."
+                    ),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        file_decision = confirmed_file_capability or requested_file_decision
         tc, generated_operating_manual = ensure_operating_manual_in_tools_config(
             tc,
             name=name,
@@ -329,7 +358,9 @@ def build_builder_create_tools(
         # user, dan config belum file-ready (sandbox+whatsapp_media) — Arthur WAJIB memutuskan
         # eksplisit via file_capability, bukan menebak diam-diam lalu mengirim agent cacat.
         disabled_launch_features: list[str] = []
-        if file_decision == "enabled":
+        if file_decision == "receive_only":
+            tc["whatsapp_media"] = True
+        elif file_decision in {"generate", "both", "enabled"}:
             tc["whatsapp_media"] = True
             tc["sandbox"] = True
             _subc = tc.get("subagents")
@@ -341,7 +372,10 @@ def build_builder_create_tools(
             tc, disabled_launch_features = disable_sandbox_subagent_tools_config(tc)
             launch_blocked_workflow = (
                 generated_file_workflow
-                or bool(disabled_launch_features and file_decision == "enabled")
+                or bool(
+                    disabled_launch_features
+                    and file_decision in {"generate", "both", "enabled"}
+                )
                 or bool(disabled_launch_features and any(
                     key in disabled_launch_features
                     for key in ("sandbox", "deploy", "tool_creator", "subagents")
@@ -392,7 +426,9 @@ def build_builder_create_tools(
             and not file_signal
             and not file_negated
             and not file_ready
-            and file_decision not in {"enabled", "text_only", "not_needed"}
+            and file_decision not in {
+                "enabled", "receive_only", "generate", "both", "text_only", "not_needed"
+            }
         ):
             return json.dumps({
                 "error": "Kemampuan file belum diputuskan — jangan menebak.",
@@ -403,12 +439,15 @@ def build_builder_create_tools(
                 "hint": (
                     "Tanyakan ke user (bahasa awam): apakah agent perlu MENERIMA file (PDF/Excel/CSV/gambar) "
                     "ATAU MEMBUAT file/laporan/visualisasi untuk dikirim balik? "
-                    "Jika YA → create_agent lagi dengan file_capability='enabled' "
-                    "(sandbox+whatsapp_media+subagents otomatis diaktifkan). "
-                    "Jika TIDAK → create_agent lagi dengan file_capability='text_only'."
+                    "Gunakan receive_only bila hanya menerima file/gambar; generate bila membuat file/laporan; "
+                    "both bila keduanya; atau text_only bila hanya chat teks."
                 ),
             }, ensure_ascii=False, indent=2)
-        if file_delivery_workflow:
+        requires_file_delivery = bool(
+            generated_file_workflow
+            or file_decision in {"generate", "both", "enabled"}
+        )
+        if requires_file_delivery:
             if not tc.get("whatsapp_media"):
                 critical_errors.append("Workflow delivery file wajib whatsapp_media=true.")
             critical_errors.extend(file_delivery_contract_issues(instructions, file_delivery=True))
