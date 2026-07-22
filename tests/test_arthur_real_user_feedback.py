@@ -70,6 +70,9 @@ def test_arthur_prompt_forbids_assumptions_for_crud() -> None:
     assert "DILARANG menebak detail edit" in prompt
     assert "keluhan/reset/edit bukan izin hapus" in prompt
     assert "kata itu bukan izin mengarang detail" in prompt
+    assert "`_evidence`" in prompt
+    assert "kutipan persis pesan user" in prompt
+    assert "membalas eksplisit `sudah sesuai`" in prompt
 
 
 def test_arthur_onboarding_is_demo_first() -> None:
@@ -88,6 +91,8 @@ def test_rulebook_requires_confirmed_workflow_and_no_assumptions() -> None:
     assert "Nama saja BUKAN konfirmasi" in rulebook
     assert "Setelah user benar-benar mencoba demo dan menyatakan puas/cocok" in rulebook
     assert "gunakan default untuk yang belum diisi" not in rulebook
+    assert "validator mencocokkannya dengan riwayat pesan tersimpan" in rulebook
+    assert "_evidence.user_confirmed" in rulebook
 
 
 def test_static_long_progress_sender_and_config_are_removed() -> None:

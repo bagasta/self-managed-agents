@@ -14,8 +14,10 @@ from app.core.launch_safety import (
 )
 from app.core.tools.builder_catalog import AGENT_PRESETS, RUNTIME_LIMITATIONS, _DEFAULT_MODEL
 from app.core.tools.builder_discovery import (
+    DiscoveryEvidenceUnavailable,
     discovery_escalation_policy,
     discovery_operator_phone,
+    load_discovery_user_messages,
     validate_agent_discovery,
 )
 from app.core.tools.builder_google import (
@@ -171,8 +173,10 @@ def _discovery_clarification_payload(discovery: dict[str, Any]) -> dict[str, Any
             "JANGAN create_agent atau compose artifact dulu. Tanyakan seluruh pertanyaan pada "
             f"{next_group.get('label') or 'grup discovery berikutnya'} dalam satu pesan yang ringkas, "
             "simpan jawaban faktualnya, lalu panggil plan_agent lagi dengan discovery_answers lengkap "
-            "(jawaban grup sebelumnya tetap disertakan). Jangan menanyakan jam aktif/jam operasional agent. "
-            "Setelah semua grup lengkap, rangkum dan minta satu konfirmasi akhir dari user."
+            "(jawaban grup sebelumnya tetap disertakan). Isi `_evidence` untuk setiap field dengan kutipan "
+            "persis dari pesan user; jangan membuat atau memparafrasekan kutipan. Jangan menanyakan jam "
+            "aktif/jam operasional agent. Setelah semua grup lengkap, rangkum dan minta user membalas "
+            "secara eksplisit `sudah sesuai` sebagai konfirmasi akhir."
         ),
     }
 
@@ -180,6 +184,8 @@ def _discovery_clarification_payload(discovery: dict[str, Any]) -> dict[str, Any
 def build_builder_planning_tools(
     *,
     preview_agent_creation_entitlement: PreviewEntitlement,
+    db_factory: Any = None,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     _preview_agent_creation_entitlement = preview_agent_creation_entitlement
 
@@ -228,7 +234,10 @@ def build_builder_planning_tools(
                 knowledge_sources, sensitive_data_policy, whatsapp_scale, daily_chat_volume,
                 integrations, expected_outputs, vision_requirement, go_live_approver (work),
                 dan user_confirmed=true setelah rangkuman akhir disetujui. Selalu kirim ulang
-                jawaban lengkap yang sudah terkumpul. Jangan menyertakan operational_hours/jam aktif.
+                jawaban lengkap yang sudah terkumpul. Sertakan `_evidence` berupa mapping setiap
+                field ke kutipan persis dari pesan user yang mendukung jawaban tersebut. Untuk
+                user_confirmed, kutip pesan konfirmasi terakhir seperti `sudah sesuai`. Jangan
+                menyertakan operational_hours/jam aktif dan jangan membuat kutipan sendiri.
         """
         policy_reason = _blocked_agent_policy_reason(
             user_goal,
@@ -244,11 +253,30 @@ def build_builder_planning_tools(
                 "next_action": "Tolak permintaan ini dengan singkat dan tawarkan jenis agent non-politik/non-buzzer.",
             }, ensure_ascii=False, indent=2)
 
+        evidence_required = bool(db_factory is not None and session_id)
+        try:
+            user_messages = await load_discovery_user_messages(db_factory, session_id)
+        except DiscoveryEvidenceUnavailable as exc:
+            return json.dumps(
+                {
+                    "plan_status": "temporarily_unavailable",
+                    "retryable": True,
+                    "error": str(exc),
+                    "next_action": (
+                        "Ulangi plan_agent secara internal satu kali. Jangan create_agent dan jangan "
+                        "meminta user mengulang jawaban discovery."
+                    ),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
         discovery = validate_agent_discovery(
             discovery_answers,
             agent_name=agent_name,
             operator_phone=operator_phone,
             require_confirmation=True,
+            user_messages=user_messages,
+            require_evidence=evidence_required,
         )
         if not discovery.get("complete"):
             # Check the basic creation slot before making the user complete a long discovery.

@@ -144,6 +144,7 @@ from app.core.engine.agent_reply_guards import (
 )
 from app.core.engine.agent_followups import (
     _builder_create_completion_directive,
+    _builder_retryable_plan_directive,
     _BUILD_PROGRESS_TOOLS,
     _deploy_followup_message,
     _extract_shared_workspace_file_from_steps,
@@ -153,6 +154,7 @@ from app.core.engine.agent_followups import (
     _has_public_url_in_text,
     _is_website_or_app_request,
     _needs_builder_create_completion,
+    _needs_builder_retryable_plan,
     _needs_deploy_followup,
     _needs_whatsapp_file_delivery_followup,
 )
@@ -2068,10 +2070,52 @@ async def run_agent(
                     error=str(_mcp_retry_exc)[:300],
                 )
 
-        if _needs_builder_create_completion(steps, is_builder=runtime_policy.is_builder):
+        if _needs_builder_retryable_plan(steps, is_builder=runtime_policy.is_builder):
+            log.warning("agent_run.builder_plan_evidence_retry", steps=len(steps))
+            _plan_retry_input = _sanitize_input_messages(input_messages)
+            _plan_retry_input.append(HumanMessage(content=_builder_retryable_plan_directive()))
+            try:
+                async with asyncio.timeout(_timeout):
+                    _plan_retry_output = await graph.ainvoke(
+                        {"messages": _plan_retry_input},
+                        config=_graph_config,
+                        version="v2",
+                    )
+                    result = await _graph_result_from_output(
+                        graph=graph,
+                        graph_config=_graph_config,
+                        graph_output=_plan_retry_output,
+                        log=log,
+                    )
+                parsed = parse_agent_result(
+                    result=result,
+                    input_messages=input_messages,
+                    session_id=session.id,
+                    run_id=run_id,
+                    step_start=step_counter,
+                    log=log,
+                )
+                final_reply = parsed["final_reply"]
+                steps = parsed["steps"]
+                total_tokens_used = _agent_logger.total_tokens_from_callbacks or parsed["total_tokens_used"]
+                log.info("agent_run.builder_plan_evidence_retry_ok")
+            except Exception as _plan_retry_exc:
+                log.warning(
+                    "agent_run.builder_plan_evidence_retry_failed",
+                    error=str(_plan_retry_exc)[:300],
+                )
+
+        # A ready plan should finish without asking the user to type "coba lagi".
+        # Give the model one additional internal recovery attempt when the first
+        # continuation still stops before create_agent. Clarification plans never
+        # enter this loop; _needs_builder_create_completion enforces plan_status=ready.
+        for _create_completion_attempt in range(1, 3):
+            if not _needs_builder_create_completion(steps, is_builder=runtime_policy.is_builder):
+                break
             log.warning(
                 "agent_run.builder_create_completion_continue",
                 steps=len(steps),
+                attempt=_create_completion_attempt,
             )
             _create_completion_input = _sanitize_input_messages(input_messages)
             _create_completion_input.append(
@@ -2103,13 +2147,16 @@ async def run_agent(
                 total_tokens_used = _agent_logger.total_tokens_from_callbacks or parsed["total_tokens_used"]
                 log.info(
                     "agent_run.builder_create_completion_continue_ok",
+                    attempt=_create_completion_attempt,
                     created=any(str(s.get("tool", "")) == "create_agent" for s in steps),
                 )
             except Exception as _create_completion_exc:
                 log.warning(
                     "agent_run.builder_create_completion_continue_failed",
+                    attempt=_create_completion_attempt,
                     error=str(_create_completion_exc)[:300],
                 )
+                break
 
         if _needs_deploy_followup(execution_user_message, tools_config, steps, final_reply):
             log.warning(

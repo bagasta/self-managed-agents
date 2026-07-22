@@ -267,6 +267,34 @@ def _builder_fallback_reply(steps: list[dict[str, Any]]) -> str | None:
     if trial_link_error_reply:
         return trial_link_error_reply
 
+    # A discovery question is a normal builder state, not a technical failure.
+    # If the model produced an empty/progress-like reply, reconstruct the exact
+    # user-facing questions from plan_agent instead of saying "coba lagi".
+    for step in reversed(steps or []):
+        if step.get("tool") != "plan_agent":
+            continue
+        data = _parse_step_result(step.get("result"))
+        if not data or str(data.get("plan_status") or "").strip().lower() != "needs_clarification":
+            continue
+        questions = data.get("capability_clarifications") or []
+        if not questions:
+            progress = data.get("discovery_progress")
+            if isinstance(progress, dict):
+                questions = progress.get("next_questions") or []
+        question_texts = [
+            str(item.get("question") or "").strip()
+            for item in questions
+            if isinstance(item, dict) and str(item.get("question") or "").strip()
+        ]
+        if question_texts:
+            if len(question_texts) == 1:
+                return question_texts[0]
+            rendered = "\n".join(
+                f"{index}. {question}"
+                for index, question in enumerate(question_texts, start=1)
+            )
+            return "Supaya agent-nya sesuai kebutuhanmu, saya perlu melengkapi bagian ini:\n" + rendered
+
     for step in reversed(steps or []):
         if step.get("tool") != "create_agent":
             continue

@@ -1,4 +1,5 @@
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -98,10 +99,29 @@ def test_needs_builder_create_completion_when_planned_but_not_created():
     from app.core.engine.agent_runner import _needs_builder_create_completion
 
     steps = [
-        {"tool": "plan_agent", "result": "ok"},
+        {"tool": "plan_agent", "result": '{"plan_status": "ready", "creation_entitlement_check": {"checked": true, "allowed": true}}'},
         {"tool": "compose_agent_instructions", "result": "ok"},
     ]
     assert _needs_builder_create_completion(steps, is_builder=True) is True
+
+
+def test_needs_builder_create_completion_false_when_discovery_needs_clarification():
+    from app.core.engine.agent_runner import _needs_builder_create_completion
+
+    steps = [
+        {
+            "tool": "plan_agent",
+            "result": '{"plan_status": "needs_clarification", "next_group": {"id": "agent_behavior"}}',
+        }
+    ]
+    assert _needs_builder_create_completion(steps, is_builder=True) is False
+
+
+def test_needs_builder_create_completion_false_for_unstructured_plan_output():
+    from app.core.engine.agent_runner import _needs_builder_create_completion
+
+    steps = [{"tool": "plan_agent", "result": "ok"}]
+    assert _needs_builder_create_completion(steps, is_builder=True) is False
 
 
 def test_needs_builder_create_completion_false_when_created():
@@ -144,6 +164,30 @@ def test_needs_builder_create_completion_false_without_plan_agent():
 
 def test_keep_existing_reply():
     assert ensure_non_empty_reply("Halo jadi", []) == "Halo jadi"
+
+
+def test_builder_clarification_fallback_returns_questions_not_system_error():
+    steps = [
+        {
+            "tool": "plan_agent",
+            "result": json.dumps(
+                {
+                    "plan_status": "needs_clarification",
+                    "capability_clarifications": [
+                        {"topic": "problem", "question": "Masalah utama apa yang ingin diselesaikan?"},
+                        {"topic": "audience", "question": "Siapa yang akan memakai agent ini?"},
+                    ],
+                }
+            ),
+        }
+    ]
+
+    out = ensure_non_empty_reply("", steps)
+
+    assert "Masalah utama" in out
+    assert "Siapa yang akan memakai" in out
+    assert "kendala sistem" not in out.lower()
+    assert "coba kirim lagi" not in out.lower()
 
 
 def test_build_reply_from_url_in_steps():

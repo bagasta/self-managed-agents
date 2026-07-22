@@ -271,8 +271,13 @@ def _needs_builder_create_completion(
     Arthur (on a small model) often stops after plan_agent — e.g. to ask about
     Google — and never chains through to create_agent, leaving the user with a
     confusing "belum berhasil" loop. When that happens with no real plan/
-    entitlement block, the runtime continues the build once internally instead
-    of bouncing it back to the user.
+    entitlement block, the runtime continues the build internally instead of
+    bouncing it back to the user.
+
+    A plan that still needs clarification is deliberately excluded. Previously
+    any ``plan_agent`` call was treated as build-ready, so the continuation told
+    Arthur to invent missing details and create anyway. That turned a valid
+    discovery question into the generic "kendala sistem" fallback.
     """
     if not is_builder:
         return False
@@ -284,19 +289,59 @@ def _needs_builder_create_completion(
         return False
     if "create_agent" in tool_names or "update_agent" in tool_names:
         return False
-    # A real entitlement BLOCK is not something to silently retry. Match the
-    # actual block — NOT the word "entitlement", because plan_agent always emits
-    # a `creation_entitlement_check` field even on success (allowed=true).
+    ready_plan_found = False
+    # Only a structured, explicitly ready plan may enter auto-completion. A real
+    # entitlement block or clarification response must be returned to the user.
     for step in steps or []:
+        if str(step.get("tool", "")).strip() != "plan_agent":
+            continue
         result = step.get("result")
         parsed = _parse_step_result_json(result)
         if isinstance(parsed, dict):
+            plan_status = str(parsed.get("plan_status") or "").strip().lower()
+            if plan_status != "ready":
+                return False
             check = parsed.get("creation_entitlement_check")
             if isinstance(check, dict) and check.get("checked") and not check.get("allowed", True):
                 return False
+            ready_plan_found = True
+        else:
+            # Unstructured/legacy output is not enough evidence that discovery
+            # and confirmation were completed.
+            return False
         if "melebihi entitlement" in str(result or "").lower():
             return False
-    return True
+    return ready_plan_found
+
+
+def _needs_builder_retryable_plan(
+    steps: list[dict[str, Any]],
+    *,
+    is_builder: bool,
+) -> bool:
+    """Return True when the latest plan failed only on transient evidence I/O."""
+    if not is_builder:
+        return False
+    for step in reversed(steps or []):
+        if str(step.get("tool", "")).strip() != "plan_agent":
+            continue
+        parsed = _parse_step_result_json(step.get("result"))
+        return bool(
+            isinstance(parsed, dict)
+            and parsed.get("retryable") is True
+            and str(parsed.get("plan_status") or "").strip().lower()
+            == "temporarily_unavailable"
+        )
+    return False
+
+
+def _builder_retryable_plan_directive() -> str:
+    return (
+        "ULANGI plan_agent SEKARANG satu kali dengan argumen dan discovery_answers yang sama. "
+        "Kegagalan sebelumnya hanya saat memverifikasi riwayat pesan. Jangan meminta user mengulang "
+        "jawaban, jangan mengubah `_evidence`, jangan mengarang detail, dan jangan create_agent kecuali "
+        "hasil plan_agent yang baru benar-benar berstatus ready."
+    )
 
 
 def _builder_create_completion_directive() -> str:
@@ -304,11 +349,12 @@ def _builder_create_completion_directive() -> str:
     return (
         "LANJUTKAN PEMBUATAN AGENT SEKARANG SAMPAI SELESAI — JANGAN BERHENTI.\n"
         "Kamu sudah merencanakan/menyusun agent tapi belum memanggil create_agent. "
+        "plan_agent sudah berstatus ready dan kebutuhan user sudah dikonfirmasi. "
         "JANGAN bertanya konfirmasi lagi, JANGAN menawarkan Google lagi, JANGAN mengulang plan_agent. "
         "Langsung jalankan berurutan: compose_agent_blueprint (jika belum) -> compose_agent_instructions -> "
         "validate_agent_config -> create_agent, memakai konteks bisnis yang sudah ada. "
-        "Kalau ada detail yang belum lengkap, pakai asumsi wajar dan tandai untuk direview nanti — "
-        "jangan berhenti untuk bertanya. Setelah create_agent sukses, balas singkat dan natural bahwa agennya sudah jadi."
+        "DILARANG menambah asumsi atau detail yang tidak pernah diberikan user; gunakan hanya discovery_answers "
+        "yang sudah dikonfirmasi. Setelah create_agent sukses, balas singkat dan natural bahwa agennya sudah jadi."
     )
 
 

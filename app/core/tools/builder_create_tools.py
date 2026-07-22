@@ -16,7 +16,12 @@ from app.core.launch_safety import (
     disable_sandbox_subagent_tools_config,
     sandbox_subagents_enabled,
 )
-from app.core.tools.builder_discovery import discovery_operator_phone, validate_agent_discovery
+from app.core.tools.builder_discovery import (
+    DiscoveryEvidenceUnavailable,
+    discovery_operator_phone,
+    load_discovery_user_messages,
+    validate_agent_discovery,
+)
 from app.core.tools.builder_google import has_google_workspace_tools as _has_google_workspace_tools
 from app.core.tools.builder_identity import (
     agent_created_by_metadata as _agent_created_by_metadata,
@@ -63,6 +68,7 @@ def build_builder_create_tools(
     append_google_workspace_instruction: StringTransformer,
     platform_staff_identity_block: BlockProvider,
     get_logger: LoggerProvider | None = None,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     _get_logger = get_logger or (lambda: logger)
     logger = _LoggerProxy(_get_logger)
@@ -125,6 +131,7 @@ def build_builder_create_tools(
             discovery_answers: Salinan JSON/object discovery enam grup yang sudah lengkap dan dikonfirmasi user.
                 Untuk Arthur (self_agent_id tersedia), create diblokir jika ada jawaban wajib yang kosong,
                 contoh ideal kurang dari dua, eskalasi bisnis tidak detail, atau user_confirmed belum true.
+                Wajib menyertakan `_evidence` untuk setiap field berupa kutipan persis pesan user.
                 Jam aktif/jam operasional agent tidak diminta dan tidak menjadi bagian schema discovery.
         """
         if not name or len(name.strip()) < 2:
@@ -148,11 +155,29 @@ def build_builder_create_tools(
         confirmed_discovery: dict[str, Any] = {}
         discovery_context_text = ""
         if self_agent_id:
+            evidence_required = bool(db_factory is not None and session_id)
+            try:
+                user_messages = await load_discovery_user_messages(db_factory, session_id)
+            except DiscoveryEvidenceUnavailable as exc:
+                return json.dumps(
+                    {
+                        "error": str(exc),
+                        "retryable": True,
+                        "hint": (
+                            "Ulangi create_agent secara internal satu kali dengan payload yang sama. "
+                            "Jangan meminta user mengulang discovery."
+                        ),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
             discovery = validate_agent_discovery(
                 discovery_answers,
                 agent_name=name,
                 operator_phone=operator_phone,
                 require_confirmation=True,
+                user_messages=user_messages,
+                require_evidence=evidence_required,
             )
             if not discovery.get("complete"):
                 return json.dumps(
@@ -407,6 +432,19 @@ def build_builder_create_tools(
             operator_name=operator_name,
         )
         owner_ids = _owner_variants(owner_phone)
+        creation_request_id = ""
+        if session_id and owner_phone:
+            creation_request_id = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"arthur-create:{session_id}:{str(owner_phone).strip()}:{name.strip().casefold()}",
+                )
+            )
+            # Persist the deterministic request marker with the agent. If the DB
+            # commit succeeds but the tool response is lost, a retry in the same
+            # session returns the existing agent as success instead of creating a
+            # duplicate or telling the user the build failed.
+            tc["_builder_creation_request_id"] = creation_request_id
 
         ec, ec_error = _parse_json_arg(escalation_config, {}, expected=dict)
         if ec_error:
@@ -432,6 +470,37 @@ def build_builder_create_tools(
                 )
                 dup = dup_result.scalar_one_or_none()
             if dup:
+                duplicate_tools_config = (
+                    dup.tools_config if isinstance(getattr(dup, "tools_config", None), dict) else {}
+                )
+                if (
+                    creation_request_id
+                    and duplicate_tools_config.get("_builder_creation_request_id")
+                    == creation_request_id
+                ):
+                    duplicate_google_enabled = _has_google_workspace_tools(duplicate_tools_config)
+                    return json.dumps(
+                        {
+                            "success": True,
+                            "idempotent_replay": True,
+                            "agent_id": str(dup.id),
+                            "name": dup.name,
+                            "model": dup.model,
+                            "channel_type": dup.channel_type,
+                            "google_workspace_enabled": duplicate_google_enabled,
+                            "needs_google_auth": duplicate_google_enabled,
+                            "whatsapp_onboarding_required": dup.channel_type == "whatsapp",
+                            "api_key": dup.api_key,
+                            "token_quota": dup.token_quota,
+                            "active_until": dup.active_until.isoformat() if dup.active_until else None,
+                            "message": (
+                                f"Agent '{dup.name}' sudah berhasil dibuat pada percobaan sebelumnya. "
+                                "Gunakan agent_id ini dan lanjutkan verify/demo; jangan membuat duplikat."
+                            ),
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
                 return json.dumps({
                     "error": f"Agent dengan nama '{name.strip()}' sudah ada.",
                     "existing_agent_id": str(dup.id),

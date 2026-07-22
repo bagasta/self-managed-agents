@@ -266,6 +266,8 @@ def build_builder_tools(
 
     planning_tools = build_builder_planning_tools(
         preview_agent_creation_entitlement=_preview_agent_creation_entitlement,
+        db_factory=db_factory,
+        session_id=session_id,
     )
     # plan_agent contract kept visible in this facade for source-inspection tests:
     # Brief, workflow, and escalation must be confirmed once before create; internal artifacts need no micro-approval.
@@ -330,6 +332,7 @@ def build_builder_tools(
         append_google_workspace_instruction=_append_google_workspace_instruction,
         platform_staff_identity_block=_platform_staff_identity_block,
         get_logger=_get_builder_logger,
+        session_id=session_id,
     )
     update_tools = build_builder_update_tools(
         db_factory,

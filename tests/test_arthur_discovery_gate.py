@@ -1,6 +1,8 @@
 import asyncio
 import json
 import uuid
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 from app.core.tools.builder_create_tools import build_builder_create_tools
 from app.core.tools.builder_discovery import (
@@ -315,3 +317,167 @@ def test_arthur_work_agent_requires_manual_from_confirmed_discovery():
 
     assert "Operating manual terkonfirmasi wajib diisi" in payload["error"]
     assert payload["validation_errors"]
+
+
+def _discovery_with_persisted_evidence(answers):
+    payload = dict(answers)
+    evidence = {}
+    messages = []
+    for field, value in answers.items():
+        if field == "user_confirmed":
+            continue
+        quote = f"Jawaban saya untuk {field}: {json.dumps(value, ensure_ascii=False)}"
+        evidence[field] = quote
+        messages.append(quote)
+    evidence["user_confirmed"] = "sudah sesuai"
+    messages.append("sudah sesuai")
+    payload["_evidence"] = evidence
+    return payload, messages
+
+
+def test_evidence_backed_discovery_accepts_only_persisted_user_quotes():
+    answers, messages = _discovery_with_persisted_evidence(_work_discovery())
+
+    result = validate_agent_discovery(
+        answers,
+        user_messages=messages,
+        require_evidence=True,
+    )
+
+    assert result["complete"] is True
+    assert result["missing_evidence_fields"] == []
+    assert set(result["verified_evidence_fields"]) == set(result["required_fields"])
+    assert "_evidence" not in result["normalized_answers"]
+
+
+def test_discovery_rejects_model_invented_answers_without_user_evidence():
+    answers = _work_discovery()
+    answers["_evidence"] = {
+        field: f"Kutipan buatan untuk {field}"
+        for field in answers
+        if field != "user_confirmed"
+    }
+    answers["_evidence"]["user_confirmed"] = "sudah sesuai"
+
+    result = validate_agent_discovery(
+        answers,
+        user_messages=["Saya mau dibantu membuat agent.", "sudah sesuai"],
+        require_evidence=True,
+    )
+
+    assert result["complete"] is False
+    assert "problem" in result["missing_evidence_fields"]
+    assert result["next_group"]["id"] == "context_goal"
+    assert any("Jangan mengarang" in error for error in result["validation_errors"])
+
+
+def test_real_but_unrelated_quote_cannot_justify_an_invented_field():
+    answers, messages = _discovery_with_persisted_evidence(_personal_discovery())
+    unrelated_quote = "Saya ingin agent untuk pekerjaan bisnis."
+    messages.append(unrelated_quote)
+    answers["_evidence"]["prohibited_actions"] = unrelated_quote
+
+    result = validate_agent_discovery(
+        answers,
+        user_messages=messages,
+        require_evidence=True,
+    )
+
+    assert result["complete"] is False
+    assert "prohibited_actions" in result["unsupported_evidence_fields"]
+    assert result["next_group"]["id"] == "agent_behavior"
+    assert any("tidak mendukung isi jawaban" in error for error in result["validation_errors"])
+
+
+def test_generic_oke_or_iya_cannot_confirm_the_full_agent_brief():
+    answers, messages = _discovery_with_persisted_evidence(_personal_discovery())
+    answers["_evidence"]["user_confirmed"] = "iya"
+    messages[-1] = "iya"
+
+    result = validate_agent_discovery(
+        answers,
+        user_messages=messages,
+        require_evidence=True,
+    )
+
+    assert result["complete"] is False
+    assert result["next_group"]["id"] == "confirmation"
+    assert "user_confirmed" in result["missing_evidence_fields"]
+
+
+def test_explicit_confirmation_must_be_the_latest_user_message():
+    answers, messages = _discovery_with_persisted_evidence(_personal_discovery())
+    messages.append("Tapi ubah tugas utamanya dulu.")
+
+    result = validate_agent_discovery(
+        answers,
+        user_messages=messages,
+        require_evidence=True,
+    )
+
+    assert result["complete"] is False
+    assert result["next_group"]["id"] == "confirmation"
+
+
+def test_create_agent_retry_returns_committed_agent_as_idempotent_success():
+    session_id = str(uuid.uuid4())
+    owner_phone = "628111111111"
+    agent_name = "OpsMate"
+    request_id = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"arthur-create:{session_id}:{owner_phone}:{agent_name.casefold()}",
+        )
+    )
+    existing = SimpleNamespace(
+        id=uuid.uuid4(),
+        name=agent_name,
+        model="openai/gpt-4.1-mini",
+        channel_type="whatsapp",
+        tools_config={"_builder_creation_request_id": request_id},
+        api_key="existing-key",
+        token_quota=4_000_000,
+        active_until=None,
+    )
+    scalar_result = MagicMock()
+    scalar_result.scalar_one_or_none.return_value = existing
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=scalar_result)
+
+    class _DbContext:
+        async def __aenter__(self):
+            return db
+
+        async def __aexit__(self, *_args):
+            return False
+
+    def db_factory():
+        return _DbContext()
+
+    create_agent = build_builder_create_tools(
+        db_factory,
+        owner_phone=owner_phone,
+        self_agent_id=None,
+        session_id=session_id,
+        append_platform_staff_identity_instruction=lambda text, **_kwargs: (text, False),
+        append_google_workspace_instruction=lambda text, **_kwargs: (text, False),
+        platform_staff_identity_block=lambda **_kwargs: "",
+    )["create_agent"]
+
+    payload = json.loads(
+        _run(
+            create_agent.ainvoke(
+                {
+                    "name": agent_name,
+                    "instructions": "Jawab sesuai sumber dan jangan mengarang informasi.",
+                    "channel_type": "whatsapp",
+                    "file_capability": "text_only",
+                }
+            )
+        )
+    )
+
+    assert payload["success"] is True
+    assert payload["idempotent_replay"] is True
+    assert payload["agent_id"] == str(existing.id)
+    assert "jangan membuat duplikat" in payload["message"].lower()
