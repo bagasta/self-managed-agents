@@ -184,8 +184,8 @@ def test_builder_clarification_fallback_returns_questions_not_system_error():
 
     out = ensure_non_empty_reply("", steps)
 
-    assert "Masalah utama" in out
-    assert "Siapa yang akan memakai" in out
+    assert out == "Masalah utama apa yang ingin diselesaikan?"
+    assert "Siapa yang akan memakai" not in out
     assert "kendala sistem" not in out.lower()
     assert "coba kirim lagi" not in out.lower()
 
@@ -511,8 +511,8 @@ def test_builder_create_discovery_blocker_returns_capability_questions():
 
     out = ensure_non_empty_reply("Belum berhasil dibuat.", steps)
 
-    assert "tugas utama agent" in out
-    assert "Kemampuan apa yang dibutuhkan" in out
+    assert out == "Apa saja tugas utama agent dari awal sampai selesai?"
+    assert "Kemampuan apa yang dibutuhkan" not in out
     assert "belum berhasil" not in out.lower()
 
 

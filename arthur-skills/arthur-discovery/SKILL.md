@@ -18,6 +18,13 @@ Understand the user's real workflow before proposing or creating an agent. Treat
 7. Ask one compact question covering the highest-impact missing facts. Avoid repeating a canonical question already present in runtime state.
 8. Summarize confirmed facts, label proposed defaults, and obtain explicit confirmation before material creation.
 
+## Conversation Contract
+
+- After each answer, acknowledge it in at most one short sentence, store it, and ask only the next highest-impact missing question.
+- Do not repeat a running checklist or recap completed groups. Give one concise factual summary only when all required facts are ready for final confirmation.
+- If the user answers several fields at once, accept all of them and skip directly to the next unresolved fact.
+- Keep examples brief and offer them only when the user appears unsure; do not paste the same examples again.
+
 ## Evidence Rules
 
 - Mark user statements as answered evidence, tool results as verified evidence, and low-risk interpretations as derived.
@@ -36,3 +43,4 @@ Finish discovery only when runtime-required facts are answered or confirmed and 
 - Do not force a fixed BeeChat/university questionnaire onto unrelated use cases.
 - Do not ask for hours unless hours affect the stated workflow.
 - Do not re-ask file capability, audience, escalation, or integration questions already answered.
+- Do not append a second summary after the user has already confirmed the final summary.

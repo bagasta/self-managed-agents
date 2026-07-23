@@ -16,7 +16,7 @@ from app.core.domain.skill_service import list_active_system_skills
 from app.models.agent_build_draft import AgentBuildDraft
 
 ARTHUR_ENGINE_VERSION = "arthur-progressive-v1"
-ARTHUR_PROMPT_VERSION = "arthur-kernel-v1"
+ARTHUR_PROMPT_VERSION = "arthur-kernel-v2"
 
 _BUILDER_TOOL_NAMES = {
     "get_self_config", "get_platform_capabilities", "list_available_wa_devices", "get_presets",
@@ -126,16 +126,23 @@ def _contains(text: str, terms: tuple[str, ...]) -> bool:
 
 
 def classify_builder_intent(user_message: str, prior_evidence: str = "") -> str:
-    text = f"{prior_evidence}\n{user_message}".casefold()
-    if _contains(text, ("hapus agent", "delete agent", "reset user", "reset agent", "nonaktifkan agent")):
+    current = (user_message or "").casefold()
+    if _contains(current, ("hapus agent", "delete agent", "reset user", "reset agent", "nonaktifkan agent")):
         return "lifecycle"
-    if _contains(text, ("upgrade", "langganan", "subscription", "bayar", "payment", "kuota", "slot")):
+    if _contains(current, ("upgrade", "langganan", "subscription", "bayar", "payment", "kuota", "slot")):
         return "subscription"
-    if _contains(text, ("coba demo", "nomor demo", "kode trial", "trial link", "pasang nomor", "scan qr")):
+    if _contains(current, ("coba demo", "nomor demo", "kode trial", "trial link", "pasang nomor", "scan qr")):
         return "demo"
-    if _contains(text, ("edit agent", "ubah agent", "update agent", "ganti agent", "perbaiki agent")):
+    if _contains(current, ("edit agent", "ubah agent", "update agent", "ganti agent", "perbaiki agent")):
         return "edit"
-    if _contains(text, ("buat", "bikin", "mau agent", "mau ai", "butuh ai", "cs ", "asisten")):
+    if _contains(current, ("buat", "bikin", "mau agent", "mau ai", "butuh ai", "cs ", "asisten")):
+        return "create"
+    # Prior evidence may keep a multi-turn build anchored to create intent, but
+    # must never turn an old mention of demo/payment/edit into the current turn's
+    # explicit intent. Workflow state decides whether a short reply such as
+    # "sesuai" advances the active build.
+    prior = (prior_evidence or "").casefold()
+    if _contains(prior, ("buat", "bikin", "mau agent", "mau ai", "butuh ai", "cs ", "asisten")):
         return "create"
     return "discover"
 
@@ -149,7 +156,7 @@ def resolve_primary_skill(intent: str, workflow_state: str) -> str:
         return "arthur-subscription-payment"
     if intent == "lifecycle":
         return "arthur-lifecycle-safety"
-    if intent == "create" and workflow_state in {
+    if intent in {"create", "discover"} and workflow_state in {
         "awaiting_confirmation",
         "ready_to_create",
         "creating",

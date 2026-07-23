@@ -15,6 +15,7 @@ Create only from confirmed evidence and finish the whole required transaction.
 - Subscription capacity and duplicate-name constraints have been checked.
 
 If any precondition fails, return to discovery with one precise question. Never call create with placeholders or invented defaults.
+`Trial` is a valid plan state, not a blocker by itself. Continue when the verified entitlement says creation is allowed; never require dashboard linking merely because the plan label is Trial.
 
 ## Workflow
 
@@ -27,6 +28,8 @@ If any precondition fails, return to discovery with one precise question. Never 
 7. Read the created agent back and verify name, model, instructions, required tools, escalation, and ownership.
 8. If integrations are required, continue into their setup skill. Creation alone is `agent_created`, not `production_ready`.
 9. When setup permits, prepare the WhatsApp demo and return the verified trial link/code.
+
+After an explicit confirmation such as “sesuai” or “sudah sesuai”, execute the create workflow in the same turn. Do not ask the user to open a dashboard, connect WhatsApp, or send a code unless a verified tool result for this build explicitly requires that exact step.
 
 ## Postconditions
 

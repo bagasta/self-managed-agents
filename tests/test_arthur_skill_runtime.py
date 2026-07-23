@@ -25,6 +25,23 @@ def test_intent_and_primary_skill_routing_are_not_beechat_specific():
     assert resolve_primary_skill("create", "awaiting_confirmation") == "arthur-create-agent"
 
 
+def test_prior_demo_evidence_does_not_hijack_confirmation_turn():
+    prior = (
+        "Buat agent CS Veselmate untuk Veselka. "
+        "Setelah jadi saya mau coba nomor demo dulu."
+    )
+
+    assert classify_builder_intent("Sesuai", prior) == "create"
+    assert resolve_primary_skill("discover", "awaiting_confirmation") == "arthur-create-agent"
+
+
+def test_explicit_current_demo_request_still_wins_over_build_history():
+    prior = "Buat agent CS Veselmate untuk Veselka."
+
+    assert classify_builder_intent("Sekarang kirim nomor demo", prior) == "demo"
+    assert resolve_primary_skill("demo", "agent_created") == "arthur-whatsapp-demo-channel"
+
+
 def test_google_and_file_mixins_are_limited_to_one():
     mixins = resolve_policy_mixins(
         "Simpan hasil survey ke Google Sheets dan baca file PDF",

@@ -227,13 +227,11 @@ def _render_builder_questions(questions: Any) -> str | None:
     ]
     if not question_texts:
         return None
-    if len(question_texts) == 1:
-        return question_texts[0]
-    rendered = "\n".join(
-        f"{index}. {question}"
-        for index, question in enumerate(question_texts, start=1)
-    )
-    return "Supaya agent-nya sesuai kebutuhanmu, saya perlu melengkapi bagian ini:\n" + rendered
+    # The discovery validator returns every missing field in the current group,
+    # but WhatsApp should reveal them progressively. Asking only the first
+    # highest-priority question keeps the exchange short and lets later turns
+    # incorporate information the user volunteers without repeating a checklist.
+    return question_texts[0]
 
 
 def _builder_clarification_reply(data: dict[str, Any]) -> str | None:
