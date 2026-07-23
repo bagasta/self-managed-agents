@@ -1548,6 +1548,107 @@ class TestValidateAgentConfig:
 # ────────────────────────────────────────────────────────────────────────────
 
 class TestCreateAgent:
+    def test_arthur_creates_minsel_after_confirmed_discovery_replay(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        session_id = str(uuid.uuid4())
+        discovery = _confirmed_discovery(
+            agent_name="Minsel",
+            problem="Survey pelanggan dilakukan manual satu per satu sehingga tim membuang banyak waktu.",
+            capabilities=(
+                "Mengirim survey, menerima chat masuk, serta terima gambar dan text aja."
+            ),
+            integrations="Google Sheets untuk mencatat hasil survey.",
+            expected_outputs="Tambahkan satu baris hasil survey ke Google Sheets.",
+            vision_requirement="Perlu bisa baca dan analisis gambar.",
+            escalation_phone="+62895626765423",
+        )
+        evidence = {}
+        persisted_messages = []
+        for field, value in discovery.items():
+            if field == "user_confirmed":
+                continue
+            quote = f"Jawaban {field}: {json.dumps(value, ensure_ascii=False)}"
+            evidence[field] = quote
+            persisted_messages.append(quote)
+        evidence["user_confirmed"] = "sudah"
+        persisted_messages.extend(
+            [
+                "Rangkuman Arthur yang dikonfirmasi user: Rangkuman final agent Minsel.",
+                "sudah",
+            ]
+        )
+        discovery["_evidence"] = evidence
+
+        instructions = (
+            "Kamu adalah Minsel, staf survey pelanggan melalui WhatsApp. "
+            "Kirim pertanyaan survey yang ringkas, catat jawaban ke Google Sheets, "
+            "dan pahami gambar yang pelanggan kirim. Gunakan hanya data yang tersedia. "
+            "Jangan meminta data pribadi yang tidak diperlukan, jangan mengarang jawaban, "
+            "dan jangan menyetujui diskon atau refund. Jika tidak tahu atau ada komplain, "
+            "eskalasi ke Bagas di +62895626765423 dengan ringkasan percakapan. "
+        ) * 3
+
+        db = _make_mock_db()
+        created_agent = _make_mock_agent(
+            name="Minsel",
+            owner_external_id="+62895626765423",
+            operator_ids=["+62895626765423"],
+            channel_type="whatsapp",
+            tools_config={
+                "memory": True,
+                "skills": True,
+                "escalation": True,
+                "whatsapp_media": True,
+            },
+        )
+        with (
+            patch("app.core.tools.builder_tools.Agent", return_value=created_agent),
+            patch(
+                "app.core.tools.builder_create_tools.load_discovery_user_messages",
+                new=AsyncMock(return_value=persisted_messages),
+            ),
+            patch(
+                "app.core.tools.builder_create_tools.load_build_discovery_facts",
+                new=AsyncMock(return_value={}),
+            ),
+        ):
+            tools = build_builder_tools(
+                db_factory=db,
+                owner_phone="+62895626765423",
+                self_agent_id=str(uuid.uuid4()),
+                session_id=session_id,
+            )
+            create_agent = next(tool for tool in tools if tool.name == "create_agent")
+            result = _run(
+                create_agent.ainvoke(
+                    {
+                        "name": "Minsel",
+                        "instructions": instructions,
+                        "description": "AI staff untuk survey kepuasan pelanggan Veselka.",
+                        "channel_type": "whatsapp",
+                        "operator_phone": "+62895626765423",
+                        "operator_name": "Bagas",
+                        "file_capability": "receive_only",
+                        "tools_config": {
+                            "memory": True,
+                            "skills": True,
+                            "escalation": True,
+                            "whatsapp_media": True,
+                        },
+                        "operating_manual": _usable_operating_manual("ecommerce"),
+                        "discovery_answers": discovery,
+                    }
+                )
+            )
+
+        payload = json.loads(result)
+        assert payload["success"] is True
+        assert payload["name"] == "Minsel"
+        assert payload["discovery_complete"] is True
+        assert created_agent.tools_config["whatsapp_media"] is True
+        assert db.add.called
+
     def test_create_agent_blocks_unsafe_payment_workflow_even_if_called_directly(self):
         from app.core.tools.builder_tools import build_builder_tools
 

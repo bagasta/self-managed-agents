@@ -7,6 +7,10 @@ from typing import Any, Awaitable, Callable
 from langchain_core.tools import tool
 
 from app.core.engine.google_mcp_support import _is_plain_google_form_link_reference
+from app.core.domain.agent_build_state_service import (
+    load_build_discovery_facts,
+    merge_discovery_answers,
+)
 from app.core.launch_safety import (
     SANDBOX_DISABLED_NOTICE,
     disable_sandbox_subagent_tools_config,
@@ -259,6 +263,7 @@ def build_builder_planning_tools(
         evidence_required = bool(db_factory is not None and session_id)
         try:
             user_messages = await load_discovery_user_messages(db_factory, session_id)
+            persisted_facts = await load_build_discovery_facts(db_factory, session_id)
         except DiscoveryEvidenceUnavailable as exc:
             return json.dumps(
                 {
@@ -273,6 +278,24 @@ def build_builder_planning_tools(
                 ensure_ascii=False,
                 indent=2,
             )
+        except Exception:
+            return json.dumps(
+                {
+                    "plan_status": "temporarily_unavailable",
+                    "retryable": True,
+                    "error": "State discovery tersimpan belum dapat dibaca dengan aman.",
+                    "next_action": (
+                        "Ulangi plan_agent secara internal satu kali. Jangan meminta user "
+                        "mengulang jawaban discovery."
+                    ),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        discovery_answers = merge_discovery_answers(
+            discovery_answers,
+            persisted_facts,
+        )
         discovery = validate_agent_discovery(
             discovery_answers,
             agent_name=agent_name,
@@ -280,6 +303,7 @@ def build_builder_planning_tools(
             require_confirmation=True,
             user_messages=user_messages,
             require_evidence=evidence_required,
+            require_confirmed_summary=evidence_required,
         )
         if not discovery.get("complete"):
             # Check the basic creation slot before making the user complete a long discovery.

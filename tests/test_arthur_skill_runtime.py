@@ -3,9 +3,11 @@ from types import SimpleNamespace
 from app.core.domain.agent_build_state_service import (
     answered_question_topics,
     canonical_question,
+    discovery_snapshot_from_steps,
     extract_questions,
     guard_repeated_questions,
     infer_workflow_state,
+    merge_discovery_answers,
     question_topic,
 )
 from app.core.engine.arthur_skill_runtime import (
@@ -140,11 +142,99 @@ def test_guard_does_not_reask_explicit_escalation_evidence():
     assert "tidak akan menanyakannya lagi" in reply
 
 
+def test_guard_uses_canonical_facts_to_remove_rephrased_answered_questions():
+    facts = {
+        "discovery_answers": {
+            "daily_chat_volume": "Puluhan",
+            "vision_requirement": "Perlu bisa baca gambar",
+        },
+        "unresolved_fields": [],
+    }
+    reply, removed = guard_repeated_questions(
+        "Volume harian itu 20-50 atau 50-90 chat per hari?\nAgent perlu bisa lihat gambar?",
+        [],
+        [],
+        facts,
+    )
+
+    assert len(removed) == 2
+    assert "tidak akan menanyakannya lagi" in reply
+
+
+def test_partial_plan_payload_merges_verified_persisted_discovery():
+    facts = {
+        "discovery_answers": {
+            "usage_context": "work",
+            "daily_chat_volume": "Puluhan",
+        },
+        "discovery_evidence": {
+            "usage_context": "untuk bisnis",
+            "daily_chat_volume": "Puluhan",
+        },
+    }
+    merged = merge_discovery_answers(
+        {
+            "vision_requirement": "Perlu bisa baca gambar",
+            "_evidence": {"vision_requirement": "Perlu"},
+        },
+        facts,
+    )
+
+    assert merged["usage_context"] == "work"
+    assert merged["daily_chat_volume"] == "Puluhan"
+    assert merged["vision_requirement"] == "Perlu bisa baca gambar"
+    assert merged["_evidence"]["daily_chat_volume"] == "Puluhan"
+    assert "user_confirmed" not in merged
+
+
+def test_plan_result_persists_facts_and_confirmation_status():
+    discovery = {
+        "complete": True,
+        "normalized_answers": {
+            "agent_name": "Minsel",
+            "daily_chat_volume": "Puluhan",
+            "user_confirmed": True,
+        },
+        "completed_fields": ["agent_name", "daily_chat_volume"],
+        "required_fields": ["agent_name", "daily_chat_volume"],
+        "missing_fields": [],
+        "invalid_fields": [],
+        "verified_evidence_fields": ["agent_name", "daily_chat_volume"],
+        "file_capability": "receive_only",
+    }
+    steps = [
+        {
+            "tool": "plan_agent",
+            "args": {
+                "discovery_answers": {
+                    "agent_name": "Minsel",
+                    "daily_chat_volume": "Puluhan",
+                    "user_confirmed": True,
+                    "_evidence": {
+                        "agent_name": "namanya Minsel",
+                        "daily_chat_volume": "Puluhan",
+                        "user_confirmed": "sudah",
+                    },
+                }
+            },
+            "result": {"plan_status": "ready", "discovery": discovery},
+        }
+    ]
+
+    facts, confirmation = discovery_snapshot_from_steps({}, steps)
+
+    assert facts["discovery_answers"]["agent_name"] == "Minsel"
+    assert facts["discovery_answers"]["user_confirmed"] is True
+    assert facts["discovery_evidence"]["daily_chat_volume"] == "Puluhan"
+    assert facts["unresolved_fields"] == []
+    assert confirmation == "confirmed"
+
+
 def test_workflow_state_comes_from_verified_steps():
     assert infer_workflow_state("discovery", [{"tool": "create_agent", "result": "{}"}], "") == "agent_created"
     assert infer_workflow_state(
         "discovery",
         [{"tool": "plan_agent", "result": '{"plan_status":"ready"}'}],
         "Silakan konfirmasi.",
-    ) == "awaiting_confirmation"
+    ) == "ready_to_create"
     assert infer_workflow_state("agent_created", [{"tool": "create_wa_dev_trial_link"}], "") == "demo_ready"

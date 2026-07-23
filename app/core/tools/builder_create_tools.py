@@ -10,6 +10,10 @@ from langchain_core.tools import tool
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.core.domain.agent_build_state_service import (
+    load_build_discovery_facts,
+    merge_discovery_answers,
+)
 from app.core.domain.agent_sop_service import ensure_operating_manual_in_tools_config, summarize_operating_manual, upsert_agent_operating_manual
 from app.core.launch_safety import (
     SANDBOX_DISABLED_NOTICE,
@@ -164,6 +168,7 @@ def build_builder_create_tools(
             evidence_required = bool(db_factory is not None and session_id)
             try:
                 user_messages = await load_discovery_user_messages(db_factory, session_id)
+                persisted_facts = await load_build_discovery_facts(db_factory, session_id)
             except DiscoveryEvidenceUnavailable as exc:
                 return json.dumps(
                     {
@@ -177,6 +182,23 @@ def build_builder_create_tools(
                     ensure_ascii=False,
                     indent=2,
                 )
+            except Exception:
+                return json.dumps(
+                    {
+                        "error": "State discovery tersimpan belum dapat dibaca dengan aman.",
+                        "retryable": True,
+                        "hint": (
+                            "Ulangi create_agent secara internal satu kali. Jangan meminta "
+                            "user mengulang discovery."
+                        ),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            discovery_answers = merge_discovery_answers(
+                discovery_answers,
+                persisted_facts,
+            )
             discovery = validate_agent_discovery(
                 discovery_answers,
                 agent_name=name,
@@ -184,6 +206,7 @@ def build_builder_create_tools(
                 require_confirmation=True,
                 user_messages=user_messages,
                 require_evidence=evidence_required,
+                require_confirmed_summary=evidence_required,
             )
             if not discovery.get("complete"):
                 return json.dumps(

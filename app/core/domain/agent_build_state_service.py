@@ -25,6 +25,12 @@ _QUESTION_TOPIC_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("escalation", ("eskalasi", "diteruskan", "hubungi siapa", "nomor operator", "bantuan manusia")),
     ("file_capability", ("menerima file", "membuat file", "dokumen", "pdf", "excel", "csv", "visualisasi data")),
     ("integration", ("integrasi", "google sheets", "spreadsheet", "oauth", "connector")),
+    ("daily_chat_volume", ("volume harian", "chat per hari", "berapa banyak chat", "puluhan atau ratusan", "20 50", "50 90")),
+    ("vision_requirement", ("perlu bisa lihat", "baca gambar", "analisis gambar", "memahami gambar", "vision")),
+    ("usage_context", ("untuk bisnis", "untuk pekerjaan", "keperluan bisnis", "personal atau pekerjaan")),
+    ("go_live_approver", ("siapa yang approve", "siapa yang menyetujui", "approver", "review sebelum")),
+    ("ideal_conversations", ("contoh percakapan ideal", "contoh pas", "alur percakapan")),
+    ("expected_outputs", ("output survey", "hasil survey", "disimpan di mana", "dicatat di mana")),
     ("trigger_timing", ("kapan agent", "setelah pembelian", "jadwal", "jam operasional", "trigger")),
     ("success_metric", ("indikator berhasil", "ukuran keberhasilan", "target keberhasilan", "kpi")),
     ("tone_language", ("gaya bahasa", "tone", "bahasa apa", "formal atau", "sapaan")),
@@ -73,6 +79,12 @@ def answered_question_topics(evidence: list[dict[str, Any]] | None) -> set[str]:
         ("escalation", ("eskalasi", "diteruskan ke", "hubungi saya", "nomor saya", "bantuan manusia")),
         ("file_capability", ("menerima file", "membuat file", "tidak perlu file", "hanya cs")),
         ("integration", ("google sheets", "spreadsheet", "oauth", "integrasi ")),
+        ("daily_chat_volume", ("chat per hari", "orang per hari", "puluhan", "ratusan", "50an")),
+        ("vision_requirement", ("baca gambar", "lihat gambar", "analisis gambar", "menerima gambar", "terima gambar")),
+        ("usage_context", ("untuk bisnis", "untuk pekerjaan", "keperluan bisnis", "keperluan pribadi")),
+        ("go_live_approver", ("saya sendiri yang approve", "gua sendiri yang approve", "approver", "yang approve")),
+        ("ideal_conversations", ("contoh percakapan ideal", "contohnya kamu atur", "atur aja", "sesuaikan aja")),
+        ("expected_outputs", ("hasil survey", "output survey", "dicatat di google sheets", "di google sheets")),
         ("trigger_timing", ("setelah pembelian", "setelah beli", "setiap jam", "setiap hari", "jadwalnya")),
         ("success_metric", ("targetnya", "kpi", "dianggap berhasil", "ukuran keberhasilan")),
         ("tone_language", ("gaya bahasanya", "bahasa indonesia", "formal", "santai")),
@@ -87,6 +99,7 @@ def guard_repeated_questions(
     reply: str,
     question_history: list[dict[str, Any]] | None,
     evidence: list[dict[str, Any]] | None = None,
+    facts: dict[str, Any] | None = None,
 ) -> tuple[str, list[str]]:
     """Remove exact canonical questions already shown to the user.
 
@@ -105,6 +118,18 @@ def guard_repeated_questions(
     }
     prior_topics.discard("")
     answered_topics = answered_question_topics(evidence)
+    persisted = facts if isinstance(facts, dict) else {}
+    persisted_answers = persisted.get("discovery_answers")
+    if isinstance(persisted_answers, dict):
+        unresolved = {
+            str(field)
+            for field in persisted.get("unresolved_fields") or []
+        }
+        answered_topics.update(
+            str(field)
+            for field, value in persisted_answers.items()
+            if field not in unresolved and value not in (None, "", [], {})
+        )
     cleaned = str(reply or "")
     removed: list[str] = []
     for question in extract_questions(cleaned, max_questions=12):
@@ -130,6 +155,154 @@ def guard_repeated_questions(
             "Saya lanjutkan dari informasi yang sudah tersimpan."
         )
     return cleaned, removed
+
+
+def merge_discovery_answers(
+    discovery_answers: Any,
+    facts: dict[str, Any] | None,
+) -> Any:
+    """Merge a partial tool payload with the last verified discovery snapshot.
+
+    Models may omit old fields once chat history is summarized. Persisted facts
+    are authoritative, while values and evidence explicitly supplied on the
+    current call replace their prior versions. Final confirmation is never
+    inherited: it must be proven by the latest user message on every create
+    attempt.
+    """
+    if isinstance(discovery_answers, str):
+        try:
+            incoming = json.loads(discovery_answers)
+        except (TypeError, ValueError):
+            return discovery_answers
+    elif isinstance(discovery_answers, dict):
+        incoming = dict(discovery_answers)
+    elif discovery_answers in (None, ""):
+        incoming = {}
+    else:
+        return discovery_answers
+
+    snapshot = facts if isinstance(facts, dict) else {}
+    prior_answers = snapshot.get("discovery_answers")
+    prior_evidence = snapshot.get("discovery_evidence")
+    merged = dict(prior_answers) if isinstance(prior_answers, dict) else {}
+    merged.pop("user_confirmed", None)
+
+    incoming_evidence = incoming.pop("_evidence", {})
+    merged.update(incoming)
+
+    evidence = dict(prior_evidence) if isinstance(prior_evidence, dict) else {}
+    if isinstance(incoming_evidence, dict):
+        evidence.update(incoming_evidence)
+    if evidence:
+        merged["_evidence"] = evidence
+    return merged
+
+
+async def load_build_discovery_facts(
+    db_factory: Any,
+    session_id: str | None,
+) -> dict[str, Any]:
+    """Load the committed canonical discovery snapshot for a planning tool."""
+    if db_factory is None or not session_id:
+        return {}
+    parsed_session_id = uuid.UUID(str(session_id))
+    async with db_factory() as db:
+        stmt = (
+            select(AgentBuildDraft.facts_json)
+            .where(
+                AgentBuildDraft.session_id == parsed_session_id,
+                AgentBuildDraft.completed_at.is_(None),
+            )
+            .order_by(AgentBuildDraft.updated_at.desc())
+            .limit(1)
+        )
+        result = await db.execute(stmt)
+        facts = result.scalar_one_or_none()
+    return dict(facts) if isinstance(facts, dict) else {}
+
+
+def discovery_snapshot_from_steps(
+    existing_facts: dict[str, Any] | None,
+    steps: list[dict[str, Any]],
+) -> tuple[dict[str, Any], str]:
+    """Build the next canonical fact snapshot from the latest plan result."""
+    facts = dict(existing_facts or {})
+    confirmation_status = "pending"
+    if bool((facts.get("discovery_answers") or {}).get("user_confirmed")):
+        confirmation_status = "confirmed"
+
+    for step in reversed(steps or []):
+        if str(step.get("tool") or "") != "plan_agent":
+            continue
+        result_data = _step_result(step)
+        discovery = result_data.get("discovery")
+        if not isinstance(discovery, dict):
+            discovery = result_data.get("discovery_progress")
+        if not isinstance(discovery, dict):
+            continue
+
+        step_args = step.get("args") if isinstance(step.get("args"), dict) else {}
+        raw_answers = step_args.get("discovery_answers")
+        if isinstance(raw_answers, str):
+            try:
+                raw_answers = json.loads(raw_answers)
+            except (TypeError, ValueError):
+                raw_answers = {}
+        raw_answers = raw_answers if isinstance(raw_answers, dict) else {}
+        raw_evidence = raw_answers.get("_evidence")
+        raw_evidence = raw_evidence if isinstance(raw_evidence, dict) else {}
+
+        normalized = discovery.get("normalized_answers")
+        normalized = normalized if isinstance(normalized, dict) else {}
+        completed = {
+            str(field)
+            for field in discovery.get("completed_fields") or []
+        }
+        prior_answers = facts.get("discovery_answers")
+        canonical_answers = dict(prior_answers) if isinstance(prior_answers, dict) else {}
+        for field in completed:
+            if field in normalized:
+                canonical_answers[field] = normalized[field]
+
+        complete = bool(discovery.get("complete"))
+        if complete:
+            canonical_answers["user_confirmed"] = True
+            confirmation_status = "confirmed"
+        else:
+            canonical_answers.pop("user_confirmed", None)
+            confirmation_status = "pending"
+
+        prior_evidence = facts.get("discovery_evidence")
+        canonical_evidence = dict(prior_evidence) if isinstance(prior_evidence, dict) else {}
+        for field in completed:
+            if field in raw_evidence:
+                canonical_evidence[field] = raw_evidence[field]
+        if complete and "user_confirmed" in raw_evidence:
+            canonical_evidence["user_confirmed"] = raw_evidence["user_confirmed"]
+        else:
+            canonical_evidence.pop("user_confirmed", None)
+
+        facts = {
+            **facts,
+            "discovery_answers": canonical_answers,
+            "discovery_evidence": canonical_evidence,
+            "required_fields": list(discovery.get("required_fields") or []),
+            "unresolved_fields": list(
+                dict.fromkeys(
+                    [
+                        *(discovery.get("missing_fields") or []),
+                        *(discovery.get("invalid_fields") or []),
+                    ]
+                )
+            ),
+            "verified_evidence_fields": list(
+                discovery.get("verified_evidence_fields") or []
+            ),
+            "file_capability": str(discovery.get("file_capability") or ""),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        break
+    return facts, confirmation_status
 
 
 async def get_active_build_draft(
@@ -256,7 +429,7 @@ def infer_workflow_state(
         result = _step_result(step)
         status = str(result.get("plan_status") or result.get("status") or "").lower()
         if status == "ready":
-            return "awaiting_confirmation"
+            return "ready_to_create"
         if status in {"needs_clarification", "clarification"}:
             return "discovery"
     if extract_questions(final_reply):
@@ -289,9 +462,16 @@ async def record_build_outcome(
             existing.add(canonical)
     history = history[-30:]
     new_state = infer_workflow_state(draft.workflow_state, steps, final_reply)
+    facts, confirmation_status = discovery_snapshot_from_steps(
+        draft.facts_json,
+        steps,
+    )
+
     expected_version = int(draft.state_version or 1)
     values: dict[str, Any] = {
         "workflow_state": new_state,
+        "facts_json": facts,
+        "confirmation_status": confirmation_status,
         "question_history_json": history,
         "skill_versions_json": dict(skill_versions),
         "state_version": expected_version + 1,
@@ -328,6 +508,14 @@ def build_state_prompt(draft: AgentBuildDraft) -> str:
         for item in evidence
     ) or "- Belum ada evidence tersimpan."
     question_lines = "\n".join(f"- {question}" for question in questions) or "- Belum ada."
+    facts = dict(draft.facts_json or {})
+    discovery_answers = facts.get("discovery_answers")
+    discovery_answers = discovery_answers if isinstance(discovery_answers, dict) else {}
+    unresolved_fields = [
+        str(field) for field in facts.get("unresolved_fields") or []
+    ]
+    facts_text = json.dumps(discovery_answers, ensure_ascii=False, separators=(",", ":"))
+    unresolved_text = ", ".join(unresolved_fields) or "tidak ada"
     return (
         "## Arthur Persistent Build State\n"
         f"- build_id: {draft.id}\n"
@@ -335,6 +523,9 @@ def build_state_prompt(draft: AgentBuildDraft) -> str:
         f"- workflow_state: {draft.workflow_state}\n"
         f"- confirmation_status: {draft.confirmation_status}\n"
         f"- state_version: {draft.state_version}\n"
+        "### Fakta discovery canonical (gunakan kembali; jangan ditanyakan ulang)\n"
+        f"{facts_text or '{}'}\n"
+        f"### Field yang benar-benar belum selesai\n- {unresolved_text}\n"
         "### Evidence user terbaru\n"
         f"{evidence_lines}\n"
         "### Pertanyaan canonical yang sudah pernah diajukan\n"

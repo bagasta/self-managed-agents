@@ -91,7 +91,10 @@ _QUESTIONS: dict[str, str] = {
         "Agent dipakai pada satu atau banyak nomor WhatsApp? Jelaskan juga polanya: satu nomor melayani banyak user "
         "sekaligus seperti CS, atau setiap user memiliki nomor sendiri."
     ),
-    "daily_chat_volume": "Berapa estimasi volume chat per hari? Boleh berupa rentang, misalnya 50-100 percakapan/hari.",
+    "daily_chat_volume": (
+        "Berapa estimasi volume chat per hari? Boleh berupa kategori seperti puluhan/ratusan "
+        "atau rentang, misalnya 50-100 percakapan/hari."
+    ),
     "integrations": "Perlu integrasi ke sistem lain seperti Google Workspace, CRM, payment gateway, atau database? Nyatakan juga jika tidak perlu.",
     "expected_outputs": "Output konkretnya apa? Contoh: tambah satu baris spreadsheet, buat PDF, atau kirim notifikasi ke admin. Berikan minimal satu contoh.",
     "vision_requirement": "Apakah agent perlu menerima atau memahami gambar/foto/vision? Jawab ya atau tidak dan beri contoh jika ya.",
@@ -122,6 +125,7 @@ _IGNORED_OPERATIONAL_HOUR_FIELDS = {
 }
 
 _EVIDENCE_KEY = "_evidence"
+_CONFIRMED_SUMMARY_PREFIX = "Rangkuman Arthur yang dikonfirmasi user: "
 _EXPLICIT_CONFIRMATION_MARKERS = (
     "sudah sesuai",
     "sudah benar",
@@ -137,6 +141,21 @@ _EXPLICIT_CONFIRMATION_MARKERS = (
 _SHORT_EXPLICIT_CONFIRMATIONS = {
     "sudah",
     "sesuai",
+}
+_DELEGATION_MARKERS = (
+    "atur aja",
+    "sesuaikan aja",
+    "kamu atur",
+    "kamu sesuaikan",
+    "lu atur",
+    "terserah kamu",
+    "buatkan aja",
+)
+_DELEGATABLE_FIELDS = {
+    "ideal_conversations",
+    "avoided_conversations",
+    "tone_style",
+    "expected_outputs",
 }
 _EVIDENCE_STOPWORDS = {
     "agent",
@@ -216,23 +235,31 @@ async def load_discovery_user_messages(
         for row in rows
         if len(row) >= 2 and str(row[1] or "").strip()
     ]
-    user_messages = [content for role, content in conversation if role == "user"]
-    if (
-        len(conversation) >= 2
-        and conversation[-1][0] == "user"
-        and conversation[-2][0] == "agent"
-        and _is_explicit_confirmation_message(conversation[-1][1])
-    ):
-        # Keep the confirmed summary before the latest user message so the
-        # confirmation validator still sees the real user reply as the last
-        # item. This supports fields the user explicitly delegated to Arthur
-        # with "sesuaikan aja", without trusting arbitrary assistant text.
-        return [
-            *user_messages[:-1],
-            conversation[-2][1],
-            user_messages[-1],
-        ]
-    return user_messages
+    evidence_messages: list[str] = []
+    for index, (role, content) in enumerate(conversation):
+        if role != "user":
+            continue
+        previous = conversation[index - 1] if index > 0 else None
+        if previous and previous[0] == "agent":
+            agent_text = previous[1]
+            if _is_explicit_confirmation_message(content):
+                # A summary becomes evidence only when the immediately
+                # following user turn explicitly confirms it.
+                evidence_messages.append(
+                    _CONFIRMED_SUMMARY_PREFIX + agent_text
+                )
+            elif (
+                "?" in agent_text
+                and len(_normalize_evidence_text(content).split()) <= 12
+            ):
+                # Preserve the question context for terse replies such as
+                # "Perlu" or "puluhan". Keep the raw user reply as a separate
+                # final item so confirmation still must be the latest message.
+                evidence_messages.append(
+                    f"Pertanyaan Arthur: {agent_text}\nJawaban user: {content}"
+                )
+        evidence_messages.append(content)
+    return evidence_messages
 
 
 def _parse_answers(value: Any) -> tuple[dict[str, Any], str | None]:
@@ -363,6 +390,13 @@ def _evidence_supports_answer(field: str, answer: Any, quotes: list[str]) -> boo
         if str(answer or "") == "personal":
             return bool(re.search(r"\b(personal|pribadi|sendiri)\b", quote_text))
         return bool(re.search(r"\b(pekerjaan|kerja|bisnis|business|work|profesional)\b", quote_text))
+    if field in _DELEGATABLE_FIELDS and any(
+        marker in quote_text for marker in _DELEGATION_MARKERS
+    ):
+        # Arthur may draft safe presentation details when the user delegates
+        # them, but the full resulting summary still needs a fresh explicit
+        # confirmation before create_agent can pass.
+        return True
     answer_tokens = _answer_evidence_tokens(answer)
     quote_tokens = _answer_evidence_tokens(quote_text)
     return bool(answer_tokens & quote_tokens)
@@ -371,11 +405,18 @@ def _evidence_supports_answer(field: str, answer: Any, quotes: list[str]) -> boo
 def _confirmation_evidence_is_valid(
     evidence: dict[str, Any],
     user_messages: list[str],
+    *,
+    require_confirmed_summary: bool = False,
 ) -> bool:
     if not user_messages:
         return False
     latest_user_message = _normalize_evidence_text(user_messages[-1])
     if not _is_explicit_confirmation_message(latest_user_message):
+        return False
+    if require_confirmed_summary and not any(
+        str(message).startswith(_CONFIRMED_SUMMARY_PREFIX)
+        for message in user_messages[:-1]
+    ):
         return False
     return any(
         _normalize_evidence_text(quote) in latest_user_message
@@ -473,7 +514,13 @@ def discovery_file_capability(answers: dict[str, Any] | None) -> str:
     )
     # Concrete positive workflows win over a local negative such as "tidak
     # perlu gambar" when another answer explicitly requires a PDF/Excel file.
-    receives_files = any(marker in text for marker in receive_markers)
+    receives_files = any(marker in text for marker in receive_markers) or bool(
+        re.search(
+            r"\b(?:terima|menerima|baca|membaca|lihat|melihat|analisis|menganalisis|"
+            r"olah|mengolah)\b(?:\s+\w+){0,3}\s+\b(?:file|dokumen|gambar|foto)\b",
+            text,
+        )
+    )
     generates_files = any(marker in text for marker in generate_markers)
     if receives_files and generates_files:
         return "both"
@@ -542,6 +589,17 @@ def _whatsapp_scale_is_detailed(value: Any) -> bool:
     return number_scope and user_pattern
 
 
+def _daily_chat_volume_is_estimated(value: Any) -> bool:
+    text = _normalize_evidence_text(value)
+    return bool(
+        re.search(r"\d", text)
+        or re.search(
+            r"\b(?:sedikit|belasan|puluhan|ratusan|ribuan)\b",
+            text,
+        )
+    )
+
+
 def _phone_from_escalation(value: Any) -> str:
     if isinstance(value, dict):
         for key in ("whatsapp_number", "phone", "number", "operator_phone"):
@@ -594,6 +652,7 @@ def validate_agent_discovery(
     require_confirmation: bool = True,
     user_messages: list[str] | None = None,
     require_evidence: bool = False,
+    require_confirmed_summary: bool = False,
 ) -> dict[str, Any]:
     """Validate Arthur's six discovery groups without asking for active hours."""
     answers, parse_error = _parse_answers(discovery_answers)
@@ -686,11 +745,13 @@ def validate_agent_discovery(
         validation_errors.append(
             "whatsapp_scale harus menjelaskan jumlah nomor dan pola satu nomor-banyak user atau tiap user-punya nomor."
         )
-    if _is_answered(answers.get("daily_chat_volume")) and not re.search(
-        r"\d", str(answers.get("daily_chat_volume"))
+    if _is_answered(answers.get("daily_chat_volume")) and not _daily_chat_volume_is_estimated(
+        answers.get("daily_chat_volume")
     ):
         invalid_fields.append("daily_chat_volume")
-        validation_errors.append("daily_chat_volume harus memuat estimasi angka atau rentang chat per hari.")
+        validation_errors.append(
+            "daily_chat_volume harus memuat estimasi angka, rentang, atau kategori seperti puluhan/ratusan chat per hari."
+        )
     if usage_context == "work" and _is_answered(answers.get("escalation_target")):
         if not _work_escalation_is_detailed(answers.get("escalation_target"), operator_phone):
             invalid_fields.append("escalation_target")
@@ -715,10 +776,12 @@ def validate_agent_discovery(
         confirmation_evidence_valid = _confirmation_evidence_is_valid(
             evidence,
             list(user_messages or []),
+            require_confirmed_summary=require_confirmed_summary,
         )
         if not confirmation_evidence_valid:
             invalid_fields.append("user_confirmed")
             missing_evidence_fields.append("user_confirmed")
+            answers.pop("user_confirmed", None)
             validation_errors.append(
                 "Konfirmasi akhir belum terbukti dari pesan user terakhir. Tampilkan rangkuman lengkap dan "
                 "minta user membalas eksplisit seperti 'sudah', 'sesuai', atau 'sudah sesuai'."
@@ -798,6 +861,7 @@ def validate_agent_discovery(
         "ignored_fields": ignored_fields,
         "operational_hours_requested": False,
         "file_capability": file_capability,
+        "confirmation_evidence_valid": confirmation_evidence_valid,
     }
 
 

@@ -2,7 +2,7 @@ import asyncio
 import json
 import uuid
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.core.tools.builder_create_tools import build_builder_create_tools
 from app.core.tools.builder_discovery import (
@@ -152,6 +152,20 @@ def test_confirmed_file_workflow_is_derived_from_discovery():
     assert result["file_capability"] == "receive_only"
 
 
+def test_natural_volume_and_image_phrasing_are_valid():
+    result = validate_agent_discovery(
+        _work_discovery(
+            capabilities="Jawab survey, terima gambar dan text ajaaaa.",
+            daily_chat_volume="Puluhan",
+            vision_requirement="Perlu bisa baca gambar.",
+        )
+    )
+
+    assert result["complete"] is True
+    assert result["file_capability"] == "receive_only"
+    assert "daily_chat_volume" not in result["invalid_fields"]
+
+
 def test_problem_must_be_a_pain_point_not_only_an_agent_feature():
     result = validate_agent_discovery(
         {
@@ -296,6 +310,63 @@ def test_plan_agent_is_ready_with_confirmed_personal_discovery():
     assert payload["recommended_config"]["tools_config"]["whatsapp_media"] is False
 
 
+def test_plan_agent_reuses_persisted_facts_when_confirmation_payload_is_partial():
+    async def preview_agent_creation_entitlement(**_kwargs):
+        return {"checked": True, "allowed": True}
+
+    prior_answers = _personal_discovery()
+    prior_answers.pop("user_confirmed")
+    prior_evidence = {}
+    messages = []
+    for field, value in prior_answers.items():
+        quote = f"Jawaban {field}: {json.dumps(value, ensure_ascii=False)}"
+        prior_evidence[field] = quote
+        messages.append(quote)
+    messages.extend(
+        [
+            "Rangkuman Arthur yang dikonfirmasi user: Rangkuman final IngatAku.",
+            "sudah",
+        ]
+    )
+    persisted_facts = {
+        "discovery_answers": prior_answers,
+        "discovery_evidence": prior_evidence,
+    }
+
+    with (
+        patch(
+            "app.core.tools.builder_planning_tools.load_discovery_user_messages",
+            new=AsyncMock(return_value=messages),
+        ),
+        patch(
+            "app.core.tools.builder_planning_tools.load_build_discovery_facts",
+            new=AsyncMock(return_value=persisted_facts),
+        ),
+    ):
+        plan = build_builder_planning_tools(
+            preview_agent_creation_entitlement=preview_agent_creation_entitlement,
+            db_factory=MagicMock(),
+            session_id=str(uuid.uuid4()),
+        )["plan_agent"]
+        payload = json.loads(
+            _run(
+                plan.ainvoke(
+                    {
+                        "user_goal": "Agent pengingat pribadi",
+                        "agent_name": "IngatAku",
+                        "discovery_answers": {
+                            "user_confirmed": True,
+                            "_evidence": {"user_confirmed": "sudah"},
+                        },
+                    }
+                )
+            )
+        )
+
+    assert payload["plan_status"] == "ready"
+    assert payload["confirmed_discovery"]["daily_chat_volume"] == "Sekitar 10-20 chat per hari."
+
+
 def test_arthur_create_agent_hard_blocks_without_discovery():
     create_agent = build_builder_create_tools(
         None,
@@ -423,6 +494,22 @@ def test_short_sudah_is_valid_only_as_latest_explicit_confirmation():
     assert changed_result["next_group"]["id"] == "confirmation"
 
 
+def test_runtime_confirmation_requires_an_immediately_confirmed_summary():
+    answers, messages = _discovery_with_persisted_evidence(_personal_discovery())
+    messages[-1] = "sudah"
+    answers["_evidence"]["user_confirmed"] = "sudah"
+
+    result = validate_agent_discovery(
+        answers,
+        user_messages=messages,
+        require_evidence=True,
+        require_confirmed_summary=True,
+    )
+
+    assert result["complete"] is False
+    assert result["next_group"]["id"] == "confirmation"
+
+
 def test_confirmed_final_summary_can_evidence_a_user_delegated_detail():
     answers, messages = _discovery_with_persisted_evidence(_personal_discovery())
     original_quote = answers["_evidence"]["ideal_conversations"]
@@ -464,7 +551,7 @@ def test_runtime_evidence_includes_only_the_summary_immediately_confirmed_by_use
 
     assert evidence == [
         "Tolong sesuaikan contoh percakapannya.",
-        "Rangkuman: contoh ideal A dan B.",
+        "Rangkuman Arthur yang dikonfirmasi user: Rangkuman: contoh ideal A dan B.",
         "sudah",
     ]
 
@@ -480,6 +567,115 @@ def test_runtime_evidence_includes_only_the_summary_immediately_confirmed_by_use
         "Tolong sesuaikan contoh percakapannya.",
         "Tapi ubah contoh A dulu.",
     ]
+
+
+def test_runtime_evidence_keeps_question_context_for_terse_answers():
+    session_id = str(uuid.uuid4())
+    db = MagicMock()
+    db.execute = AsyncMock(
+        return_value=SimpleNamespace(
+            all=lambda: [
+                ("agent", "Agent perlu bisa lihat dan analisis gambar?"),
+                ("user", "Perlu"),
+            ]
+        )
+    )
+    db_factory = MagicMock()
+    db_factory.return_value.__aenter__ = AsyncMock(return_value=db)
+    db_factory.return_value.__aexit__ = AsyncMock(return_value=None)
+
+    evidence = _run(load_discovery_user_messages(db_factory, session_id))
+
+    assert evidence[-1] == "Perlu"
+    assert "lihat dan analisis gambar" in evidence[0]
+    assert "Jawaban user: Perlu" in evidence[0]
+
+
+def test_confirmed_summary_remains_evidence_after_later_discovery_turns():
+    session_id = str(uuid.uuid4())
+    db = MagicMock()
+    db.execute = AsyncMock(
+        return_value=SimpleNamespace(
+            all=lambda: [
+                ("user", "lu atur aja contoh idealnya"),
+                ("agent", "Rangkuman: contoh ideal A dan B."),
+                ("user", "sudah"),
+                ("agent", "Hasil survey disimpan di mana?"),
+                ("user", "Di Google Sheets"),
+            ]
+        )
+    )
+    db_factory = MagicMock()
+    db_factory.return_value.__aenter__ = AsyncMock(return_value=db)
+    db_factory.return_value.__aexit__ = AsyncMock(return_value=None)
+
+    evidence = _run(load_discovery_user_messages(db_factory, session_id))
+
+    assert (
+        "Rangkuman Arthur yang dikonfirmasi user: Rangkuman: contoh ideal A dan B."
+        in evidence
+    )
+    assert evidence[-1] == "Di Google Sheets"
+
+
+def test_minsel_replay_advances_from_delegated_examples_to_one_confirmation():
+    answers, messages = _discovery_with_persisted_evidence(
+        _work_discovery(
+            capabilities="Jawab survey, terima gambar dan text ajaaaa.",
+            daily_chat_volume="Puluhan",
+            vision_requirement="Perlu bisa baca gambar.",
+            ideal_conversations=[
+                {"user": "Bagaimana produknya?", "agent": "Boleh ceritakan pengalaman Kakak?"}
+            ],
+        )
+    )
+    answers.pop("user_confirmed")
+    answers["_evidence"].pop("user_confirmed")
+    messages.pop()
+
+    first = validate_agent_discovery(
+        answers,
+        user_messages=messages,
+        require_evidence=True,
+        require_confirmed_summary=True,
+    )
+    assert first["next_questions"][0]["topic"] == "ideal_conversations"
+
+    old_example_quote = answers["_evidence"]["ideal_conversations"]
+    messages.remove(old_example_quote)
+    messages.append("lu atur aja deh")
+    answers["ideal_conversations"] = [
+        {"user": "Puas dengan produknya.", "agent": "Senang mendengarnya. Apa yang paling disukai?"},
+        {"user": "Kirim foto produk.", "agent": "Terima kasih, saya bantu analisis gambar itu."},
+    ]
+    answers["_evidence"]["ideal_conversations"] = "lu atur aja deh"
+
+    delegated = validate_agent_discovery(
+        answers,
+        user_messages=messages,
+        require_evidence=True,
+        require_confirmed_summary=True,
+    )
+    assert delegated["next_group"]["id"] == "confirmation"
+    assert delegated["invalid_fields"] == []
+
+    messages.extend(
+        [
+            "Rangkuman Arthur yang dikonfirmasi user: Semua kebutuhan Minsel termasuk dua contoh di atas.",
+            "sudah",
+        ]
+    )
+    answers["user_confirmed"] = True
+    answers["_evidence"]["user_confirmed"] = "sudah"
+    confirmed = validate_agent_discovery(
+        answers,
+        user_messages=messages,
+        require_evidence=True,
+        require_confirmed_summary=True,
+    )
+
+    assert confirmed["complete"] is True
+    assert confirmed["confirmation_evidence_valid"] is True
 
 
 def test_discovery_rejects_model_invented_answers_without_user_evidence():

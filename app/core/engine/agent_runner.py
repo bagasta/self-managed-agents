@@ -2648,6 +2648,7 @@ async def run_agent(
             final_reply,
             _arthur_skill_context.draft.question_history_json,
             _arthur_skill_context.draft.evidence_json,
+            _arthur_skill_context.draft.facts_json,
         )
         if _removed_repeated_questions:
             log.warning(

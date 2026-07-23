@@ -252,6 +252,17 @@ def _builder_clarification_reply(data: dict[str, Any]) -> str | None:
     return None
 
 
+def _plan_agent_clarification_reply(steps: list[dict[str, Any]]) -> str | None:
+    for step in reversed(steps or []):
+        if step.get("tool") != "plan_agent":
+            continue
+        data = _parse_step_result(step.get("result"))
+        if not data or str(data.get("plan_status") or "").strip().lower() != "needs_clarification":
+            continue
+        return _builder_clarification_reply(data)
+    return None
+
+
 def _builder_fallback_reply(steps: list[dict[str, Any]]) -> str | None:
     entitlement_retry = _builder_entitlement_retry_reply(steps)
     if entitlement_retry:
@@ -316,15 +327,9 @@ def _builder_fallback_reply(steps: list[dict[str, Any]]) -> str | None:
     # A discovery question is a normal builder state, not a technical failure.
     # If the model produced an empty/progress-like reply, reconstruct the exact
     # user-facing questions from plan_agent instead of saying "coba lagi".
-    for step in reversed(steps or []):
-        if step.get("tool") != "plan_agent":
-            continue
-        data = _parse_step_result(step.get("result"))
-        if not data or str(data.get("plan_status") or "").strip().lower() != "needs_clarification":
-            continue
-        clarification_reply = _builder_clarification_reply(data)
-        if clarification_reply:
-            return clarification_reply
+    clarification_reply = _plan_agent_clarification_reply(steps)
+    if clarification_reply:
+        return clarification_reply
 
     for step in reversed(steps or []):
         if step.get("tool") != "create_agent":
@@ -428,6 +433,15 @@ def ensure_non_empty_reply(
         retry_markers = ("coba ulang", "coba lagi", "retry", "sesuaikan konfigurasi")
         if not text or not any(marker in normalized for marker in retry_markers):
             return entitlement_retry
+
+    # plan_agent is the deterministic source of the next unresolved field.
+    # Do not let a non-empty model progress note or internal "evidence format"
+    # explanation replace it and send the user into another discovery loop.
+    plan_clarification = _plan_agent_clarification_reply(steps)
+    if plan_clarification:
+        if plan_clarification.casefold() in text.casefold():
+            return text
+        return plan_clarification
 
     if text:
         if _is_builder_context(steps, active_groups):

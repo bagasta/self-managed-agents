@@ -528,6 +528,32 @@ def test_malformed_plan_result_does_not_override_real_confirmation_question():
     assert ensure_non_empty_reply(reply, steps) == reply
 
 
+def test_plan_clarification_overrides_non_empty_internal_evidence_progress_note():
+    question = "Berikan 2-3 contoh percakapan ideal."
+    steps = [
+        {
+            "tool": "plan_agent",
+            "result": json.dumps(
+                {
+                    "plan_status": "needs_clarification",
+                    "capability_clarifications": [
+                        {"topic": "ideal_conversations", "question": question}
+                    ],
+                }
+            ),
+        }
+    ]
+
+    out = ensure_non_empty_reply(
+        "Sistem butuh format evidence yang lebih detail. Aku ajukan lagi ke plan_agent.",
+        steps,
+    )
+
+    assert out == question
+    assert "evidence" not in out.lower()
+    assert "plan_agent" not in out
+
+
 def test_builder_entitlement_error_forces_retry_reply():
     steps = [
         {
