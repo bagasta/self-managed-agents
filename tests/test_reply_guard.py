@@ -516,6 +516,18 @@ def test_builder_create_discovery_blocker_returns_capability_questions():
     assert "belum berhasil" not in out.lower()
 
 
+def test_malformed_plan_result_does_not_override_real_confirmation_question():
+    steps = [
+        {
+            "tool": "plan_agent",
+            "result": '{"plan_status":"needs_clarification","next_questions":[' + ("x" * 4000),
+        }
+    ]
+    reply = "Sebelum saya buat, boleh konfirmasi apakah rangkuman ini sudah sesuai?"
+
+    assert ensure_non_empty_reply(reply, steps) == reply
+
+
 def test_builder_entitlement_error_forces_retry_reply():
     steps = [
         {

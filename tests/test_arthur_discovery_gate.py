@@ -8,6 +8,7 @@ from app.core.tools.builder_create_tools import build_builder_create_tools
 from app.core.tools.builder_discovery import (
     discovery_escalation_policy,
     discovery_operator_phone,
+    load_discovery_user_messages,
     validate_agent_discovery,
 )
 from app.core.tools.builder_planning_tools import build_builder_planning_tools
@@ -376,6 +377,109 @@ def test_evidence_backed_discovery_accepts_only_persisted_user_quotes():
     assert result["missing_evidence_fields"] == []
     assert set(result["verified_evidence_fields"]) == set(result["required_fields"])
     assert "_evidence" not in result["normalized_answers"]
+
+
+def test_evidence_accepts_close_paraphrase_but_resolves_to_persisted_user_message():
+    answers, messages = _discovery_with_persisted_evidence(_work_discovery())
+    raw_user_message = (
+        "Tugasnya jawab pertanyaan produk, catat detail order, lalu teruskan ke admin."
+    )
+    messages[4] = raw_user_message
+    answers["_evidence"]["main_tasks"] = (
+        "Menjawab pertanyaan produk, mencatat order, dan meneruskannya kepada admin."
+    )
+
+    result = validate_agent_discovery(
+        answers,
+        user_messages=messages,
+        require_evidence=True,
+    )
+
+    assert result["complete"] is True
+    assert "main_tasks" in result["verified_evidence_fields"]
+
+
+def test_short_sudah_is_valid_only_as_latest_explicit_confirmation():
+    answers, messages = _discovery_with_persisted_evidence(_personal_discovery())
+    answers["user_confirmed"] = "sudah"
+    answers["_evidence"]["user_confirmed"] = "sudah"
+    messages[-1] = "sudah"
+
+    result = validate_agent_discovery(
+        answers,
+        user_messages=messages,
+        require_evidence=True,
+    )
+
+    assert result["complete"] is True
+
+    messages.append("Tapi ubah tugas utamanya dulu.")
+    changed_result = validate_agent_discovery(
+        answers,
+        user_messages=messages,
+        require_evidence=True,
+    )
+    assert changed_result["complete"] is False
+    assert changed_result["next_group"]["id"] == "confirmation"
+
+
+def test_confirmed_final_summary_can_evidence_a_user_delegated_detail():
+    answers, messages = _discovery_with_persisted_evidence(_personal_discovery())
+    original_quote = answers["_evidence"]["ideal_conversations"]
+    messages.remove(original_quote)
+    confirmed_summary = (
+        "Rangkuman contoh percakapan ideal: "
+        + json.dumps(answers["ideal_conversations"], ensure_ascii=False)
+    )
+    messages.insert(-1, confirmed_summary)
+    answers["_evidence"]["ideal_conversations"] = confirmed_summary
+
+    result = validate_agent_discovery(
+        answers,
+        user_messages=messages,
+        require_evidence=True,
+    )
+
+    assert result["complete"] is True
+    assert "ideal_conversations" in result["verified_evidence_fields"]
+
+
+def test_runtime_evidence_includes_only_the_summary_immediately_confirmed_by_user():
+    session_id = str(uuid.uuid4())
+    db = MagicMock()
+    db.execute = AsyncMock(
+        return_value=SimpleNamespace(
+            all=lambda: [
+                ("user", "Tolong sesuaikan contoh percakapannya."),
+                ("agent", "Rangkuman: contoh ideal A dan B."),
+                ("user", "sudah"),
+            ]
+        )
+    )
+    db_factory = MagicMock()
+    db_factory.return_value.__aenter__ = AsyncMock(return_value=db)
+    db_factory.return_value.__aexit__ = AsyncMock(return_value=None)
+
+    evidence = _run(load_discovery_user_messages(db_factory, session_id))
+
+    assert evidence == [
+        "Tolong sesuaikan contoh percakapannya.",
+        "Rangkuman: contoh ideal A dan B.",
+        "sudah",
+    ]
+
+    db.execute.return_value = SimpleNamespace(
+        all=lambda: [
+            ("user", "Tolong sesuaikan contoh percakapannya."),
+            ("agent", "Rangkuman: contoh ideal A dan B."),
+            ("user", "Tapi ubah contoh A dulu."),
+        ]
+    )
+    unconfirmed_evidence = _run(load_discovery_user_messages(db_factory, session_id))
+    assert unconfirmed_evidence == [
+        "Tolong sesuaikan contoh percakapannya.",
+        "Tapi ubah contoh A dulu.",
+    ]
 
 
 def test_discovery_rejects_model_invented_answers_without_user_evidence():

@@ -174,9 +174,10 @@ def _discovery_clarification_payload(discovery: dict[str, Any]) -> dict[str, Any
             f"{next_group.get('label') or 'grup discovery berikutnya'} dalam satu pesan yang ringkas, "
             "simpan jawaban faktualnya, lalu panggil plan_agent lagi dengan discovery_answers lengkap "
             "(jawaban grup sebelumnya tetap disertakan). Isi `_evidence` untuk setiap field dengan kutipan "
-            "persis dari pesan user; jangan membuat atau memparafrasekan kutipan. Jangan menanyakan jam "
+            "pesan user yang tersimpan. Jika user meminta Arthur menyesuaikan suatu detail, detail itu baru "
+            "boleh dipakai setelah ditampilkan pada rangkuman akhir dan dikonfirmasi user. Jangan menanyakan jam "
             "aktif/jam operasional agent. Setelah semua grup lengkap, rangkum dan minta user membalas "
-            "secara eksplisit `sudah sesuai` sebagai konfirmasi akhir."
+            "secara eksplisit `sudah`, `sesuai`, atau `sudah sesuai` sebagai konfirmasi akhir."
         ),
     }
 
@@ -235,8 +236,10 @@ def build_builder_planning_tools(
                 integrations, expected_outputs, vision_requirement, go_live_approver (work),
                 dan user_confirmed=true setelah rangkuman akhir disetujui. Selalu kirim ulang
                 jawaban lengkap yang sudah terkumpul. Sertakan `_evidence` berupa mapping setiap
-                field ke kutipan persis dari pesan user yang mendukung jawaban tersebut. Untuk
-                user_confirmed, kutip pesan konfirmasi terakhir seperti `sudah sesuai`. Jangan
+                field ke kutipan pesan user yang mendukung jawaban tersebut. Jika user meminta Arthur
+                menyesuaikan suatu detail, kutip bagian rangkuman akhir yang memuat detail itu setelah
+                user mengonfirmasinya. Untuk user_confirmed, kutip pesan konfirmasi terakhir seperti
+                `sudah`, `sesuai`, atau `sudah sesuai`. Jangan
                 menyertakan operational_hours/jam aktif dan jangan membuat kutipan sendiri.
         """
         policy_reason = _blocked_agent_policy_reason(

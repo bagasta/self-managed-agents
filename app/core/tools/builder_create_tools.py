@@ -135,7 +135,8 @@ def build_builder_create_tools(
             discovery_answers: Salinan JSON/object discovery enam grup yang sudah lengkap dan dikonfirmasi user.
                 Untuk Arthur (self_agent_id tersedia), create diblokir jika ada jawaban wajib yang kosong,
                 contoh ideal kurang dari dua, eskalasi bisnis tidak detail, atau user_confirmed belum true.
-                Wajib menyertakan `_evidence` untuk setiap field berupa kutipan persis pesan user.
+                Wajib menyertakan `_evidence` untuk setiap field dari pesan user tersimpan atau dari
+                rangkuman akhir Arthur yang langsung dikonfirmasi user.
                 Jam aktif/jam operasional agent tidak diminta dan tidak menjadi bagian schema discovery.
         """
         if not name or len(name.strip()) < 2:

@@ -71,8 +71,8 @@ def test_arthur_prompt_forbids_assumptions_for_crud() -> None:
     assert "keluhan/reset/edit bukan izin hapus" in prompt
     assert "kata itu bukan izin mengarang detail" in prompt
     assert "`_evidence`" in prompt
-    assert "kutipan persis pesan user" in prompt
-    assert "membalas eksplisit `sudah sesuai`" in prompt
+    assert "pesan user tersimpan atau bagian rangkuman akhir" in prompt
+    assert "`sudah`, `sesuai`, atau `sudah sesuai`" in prompt
     assert "Jangan mengira detail produk sebagai jawaban kemampuan agent" in prompt
     assert "hanya chat teks, menerima file/gambar, membuat file/laporan, atau keduanya" in prompt
     assert 'DILARANG membalas "Belum berhasil dibuat"' in prompt

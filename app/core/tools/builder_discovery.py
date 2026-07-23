@@ -134,6 +134,10 @@ _EXPLICIT_CONFIRMATION_MARKERS = (
     "oke buat",
     "buat sekarang",
 )
+_SHORT_EXPLICIT_CONFIRMATIONS = {
+    "sudah",
+    "sesuai",
+}
 _EVIDENCE_STOPWORDS = {
     "agent",
     "agen",
@@ -164,15 +168,28 @@ class DiscoveryEvidenceUnavailable(RuntimeError):
     """Raised when runtime conversation evidence cannot be loaded safely."""
 
 
+def _is_explicit_confirmation_message(value: Any) -> bool:
+    normalized = _normalize_evidence_text(value)
+    return (
+        normalized in _SHORT_EXPLICIT_CONFIRMATIONS
+        or any(
+            _normalize_evidence_text(marker) in normalized
+            for marker in _EXPLICIT_CONFIRMATION_MARKERS
+        )
+    )
+
+
 async def load_discovery_user_messages(
     db_factory: Any,
     session_id: str | None,
 ) -> list[str]:
-    """Load immutable user messages used to prove discovery answers.
+    """Load persisted evidence used to prove confirmed discovery answers.
 
     Arthur's model supplies ``discovery_answers``. Without checking those values
     against persisted user messages, the model can fill unanswered fields with
-    plausible assumptions and still satisfy the structural validator.
+    plausible assumptions and still satisfy the structural validator. The one
+    allowed non-user source is Arthur's immediately preceding summary when the
+    latest user message explicitly confirms that summary.
     """
     if db_factory is None or not session_id:
         return []
@@ -181,20 +198,41 @@ async def load_discovery_user_messages(
         async with db_factory() as db:
             rows = (
                 await db.execute(
-                    select(Message.content)
+                    select(Message.role, Message.content)
                     .where(
                         Message.session_id == parsed_session_id,
-                        Message.role == "user",
+                        Message.role.in_(("user", "agent")),
                         Message.content.is_not(None),
                     )
                     .order_by(Message.timestamp.asc(), Message.step_index.asc())
                 )
-            ).scalars().all()
+            ).all()
     except Exception as exc:  # Fail closed: never create from unverified assumptions.
         raise DiscoveryEvidenceUnavailable(
             "Riwayat jawaban user belum dapat diverifikasi."
         ) from exc
-    return [str(item).strip() for item in rows if str(item or "").strip()]
+    conversation = [
+        (str(row[0]), str(row[1]).strip())
+        for row in rows
+        if len(row) >= 2 and str(row[1] or "").strip()
+    ]
+    user_messages = [content for role, content in conversation if role == "user"]
+    if (
+        len(conversation) >= 2
+        and conversation[-1][0] == "user"
+        and conversation[-2][0] == "agent"
+        and _is_explicit_confirmation_message(conversation[-1][1])
+    ):
+        # Keep the confirmed summary before the latest user message so the
+        # confirmation validator still sees the real user reply as the last
+        # item. This supports fields the user explicitly delegated to Arthur
+        # with "sesuaikan aja", without trusting arbitrary assistant text.
+        return [
+            *user_messages[:-1],
+            conversation[-2][1],
+            user_messages[-1],
+        ]
+    return user_messages
 
 
 def _parse_answers(value: Any) -> tuple[dict[str, Any], str | None]:
@@ -246,14 +284,23 @@ def _verified_evidence_quotes(
     evidence: dict[str, Any],
     user_messages: list[str],
 ) -> list[str]:
-    normalized_messages = [_normalize_evidence_text(message) for message in user_messages]
     verified: list[str] = []
     for quote in _evidence_quotes(evidence.get(field)):
         normalized_quote = _normalize_evidence_text(quote)
         if len(normalized_quote) < 3:
             continue
-        if any(normalized_quote in message for message in normalized_messages):
-            verified.append(quote)
+        for message in user_messages:
+            normalized_message = _normalize_evidence_text(message)
+            exact_match = normalized_quote in normalized_message
+            if field == "user_confirmed":
+                matched = exact_match
+            else:
+                matched = exact_match or _evidence_quote_matches_message(quote, message)
+            if matched and message not in verified:
+                # Always return the persisted source text, never the model's
+                # paraphrase. Downstream validation still checks that this
+                # source actually supports the normalized answer.
+                verified.append(message)
     return verified
 
 
@@ -274,6 +321,35 @@ def _answer_evidence_tokens(value: Any) -> set[str]:
         for token in _normalize_evidence_text(text).split()
         if len(token) >= 3 and token not in _EVIDENCE_STOPWORDS
     }
+
+
+def _evidence_quote_matches_message(quote: str, message: str) -> bool:
+    """Resolve a close paraphrase back to an immutable persisted user message."""
+    quote_tokens = _answer_evidence_tokens(quote)
+    message_tokens = _answer_evidence_tokens(message)
+    if not quote_tokens or not message_tokens:
+        return False
+
+    # Never fuzzy-match a changed phone, amount, count, or other numeric fact.
+    quote_numbers = {token for token in quote_tokens if any(char.isdigit() for char in token)}
+    if quote_numbers and not quote_numbers.issubset(message_tokens):
+        return False
+
+    shared = quote_tokens & message_tokens
+    if len(shared) >= 2:
+        quote_coverage = len(shared) / len(quote_tokens)
+        message_coverage = len(shared) / len(message_tokens)
+        return quote_coverage >= 0.5 or message_coverage >= 0.5
+
+    # Short replies such as "saya sendiri" or "mungkin ratusan" often carry
+    # one distinctive fact. Accept only when that fact covers the whole short
+    # persisted reply; the answer-support check below still has to pass.
+    return (
+        len(shared) == 1
+        and len(message_tokens) == 1
+        and len(next(iter(shared))) >= 5
+        and len(_normalize_evidence_text(message).split()) <= 4
+    )
 
 
 def _evidence_supports_answer(field: str, answer: Any, quotes: list[str]) -> bool:
@@ -299,10 +375,7 @@ def _confirmation_evidence_is_valid(
     if not user_messages:
         return False
     latest_user_message = _normalize_evidence_text(user_messages[-1])
-    if not any(
-        _normalize_evidence_text(marker) in latest_user_message
-        for marker in _EXPLICIT_CONFIRMATION_MARKERS
-    ):
+    if not _is_explicit_confirmation_message(latest_user_message):
         return False
     return any(
         _normalize_evidence_text(quote) in latest_user_message
@@ -328,6 +401,10 @@ def _confirmed(value: Any) -> bool:
         "yes",
         "ya",
         "iya",
+        "sudah",
+        "sesuai",
+        "sudah sesuai",
+        "sudah benar",
         "setuju",
         "confirmed",
         "dikonfirmasi",
@@ -644,7 +721,7 @@ def validate_agent_discovery(
             missing_evidence_fields.append("user_confirmed")
             validation_errors.append(
                 "Konfirmasi akhir belum terbukti dari pesan user terakhir. Tampilkan rangkuman lengkap dan "
-                "minta user membalas dengan frasa eksplisit seperti 'sudah sesuai'."
+                "minta user membalas eksplisit seperti 'sudah', 'sesuai', atau 'sudah sesuai'."
             )
 
     unresolved_set = {*missing_fields, *invalid_fields}

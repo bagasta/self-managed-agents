@@ -42,8 +42,6 @@ _INCOMPLETE_BUILDER_REPLY_MARKERS = (
     "masih saya proses",
     "cek dulu konfigurasi",
     "placeholder",
-    "setuju",
-    "konfirmasi",
     "lanjut buat",
     "lanjutkan buat",
 )
