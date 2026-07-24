@@ -27,6 +27,7 @@ from app.core.engine.agent_step_utils import (
 from app.core.engine.google_mcp_support import (
     _candidate_external_user_ids,
     _fetch_google_auth_link,
+    _is_google_resource_not_found_error,
 )
 from app.core.utils.phone_utils import normalize_phone
 from app.models.session import Session
@@ -165,14 +166,14 @@ def _remove_google_workspace_mcp_server(tools_config: dict[str, Any]) -> dict[st
 def _google_workspace_customer_blocker_reply(*, notified_owner: bool) -> str:
     if notified_owner:
         return (
-            "Maaf, jadwalnya belum bisa saya finalkan otomatis sekarang. "
-            "Data pesanan Anda sudah saya catat dan sudah saya teruskan ke Owner untuk dicek. "
-            "Nanti akan dikonfirmasi kembali."
+            "Maaf, permintaan ini belum bisa saya proses otomatis karena ada kendala internal. "
+            "Kendalanya sudah saya teruskan ke Owner untuk ditangani. "
+            "Anda tidak perlu mengurus konfigurasi teknisnya."
         )
     return (
-        "Maaf, jadwalnya belum bisa saya finalkan otomatis sekarang. "
-        "Data pesanan Anda sudah saya catat, tapi saya perlu Owner mengecek sistem penjadwalan dulu. "
-        "Nanti akan dikonfirmasi kembali."
+        "Maaf, permintaan ini belum bisa saya proses otomatis karena ada kendala internal. "
+        "Owner perlu memeriksa konfigurasi agent terlebih dahulu. "
+        "Anda tidak perlu mengurus konfigurasi teknisnya."
     )
 
 
@@ -215,7 +216,17 @@ async def _route_google_workspace_blocker_to_owner_if_customer(
     if policy.is_builder:
         return reply
 
+    resource_missing = _is_google_resource_not_found_error(error_text)
     if not _is_customer_whatsapp_session(session, agent_model):
+        sender = _session_sender_phone(session)
+        if resource_missing and sender in _normalized_agent_operator_ids(agent_model):
+            agent_name = str(getattr(agent_model, "name", "") or "agent ini").strip()
+            return (
+                f"Koneksi Google untuk {agent_name} aktif, tetapi Sheet/resource yang dibutuhkan "
+                "belum dikonfigurasi atau tidak ditemukan. Jangan gunakan ID placeholder. "
+                f"Buka chat Arthur dan kirim: “siapkan Google Sheet survey untuk {agent_name}”. "
+                "Arthur akan membuat atau memilih Sheet, menyimpan ID yang valid ke agent, lalu menguji penulisannya."
+            )
         return reply
 
     cfg = session.channel_config if isinstance(session.channel_config, dict) else {}
@@ -226,23 +237,35 @@ async def _route_google_workspace_blocker_to_owner_if_customer(
     if device_id and owner_target:
         agent_name = str(getattr(agent_model, "name", "") or "agent").strip()
         sender = _session_sender_phone(session)
-        owner_text = (
-            f"Perlu tindakan Owner untuk {agent_name}.\n\n"
-            "Ada customer yang sedang dibantu, tapi aksi Google/Calendar belum bisa dijalankan karena koneksi akun perlu dicek.\n\n"
-            f"Customer: {sender or '-'}\n"
-            f"Pesan terakhir: {user_message.strip()[:500] or '-'}\n"
-            f"Error ringkas: {str(error_text or '').strip()[:500] or '-'}"
-        )
-        if auth_url:
+        if resource_missing:
+            owner_text = (
+                f"Perlu tindakan Owner untuk {agent_name}.\n\n"
+                "Koneksi Google aktif, tetapi Sheet/resource yang dibutuhkan agent belum dikonfigurasi "
+                "atau tidak ditemukan. Customer tidak diminta mengurus masalah ini.\n\n"
+                f"Customer: {sender or '-'}\n"
+                f"Pesan terakhir: {user_message.strip()[:500] or '-'}\n"
+                f"Error ringkas: {str(error_text or '').strip()[:500] or '-'}\n\n"
+                f"Buka chat Arthur dan kirim: “siapkan Google Sheet survey untuk {agent_name}”. "
+                "Arthur harus membuat/memilih Sheet, menyimpan ID valid ke agent, dan menjalankan tes tulis."
+            )
+        else:
+            owner_text = (
+                f"Perlu tindakan Owner untuk {agent_name}.\n\n"
+                "Ada customer yang sedang dibantu, tapi aksi Google belum bisa dijalankan karena koneksi akun perlu dicek.\n\n"
+                f"Customer: {sender or '-'}\n"
+                f"Pesan terakhir: {user_message.strip()[:500] or '-'}\n"
+                f"Error ringkas: {str(error_text or '').strip()[:500] or '-'}"
+            )
+        if auth_url and not resource_missing:
             owner_text += (
                 "\n\nBuka link ini untuk hubungkan ulang Google:\n"
                 f"{auth_url}\n\n"
-                "Setelah selesai, balas customer atau minta agent melanjutkan jadwalnya."
+                "Setelah selesai, minta agent melanjutkan proses customer."
             )
-        else:
+        elif not resource_missing:
             owner_text += (
                 "\n\nLink reconnect belum berhasil dibuat otomatis. "
-                "Cek pengaturan integrasi Google agent ini, lalu lanjutkan konfirmasi ke customer."
+                "Buka chat Arthur dan minta Arthur membuat link login ulang untuk agent ini."
             )
         try:
             from app.core.infra.channel_service import send_message

@@ -19,7 +19,7 @@ from app.models.agent_build_draft import AgentBuildDraft
 from app.models.message import Message
 
 ARTHUR_ENGINE_VERSION = "arthur-progressive-v1"
-ARTHUR_PROMPT_VERSION = "arthur-kernel-v6"
+ARTHUR_PROMPT_VERSION = "arthur-kernel-v7"
 
 _BUILDER_TOOL_NAMES = {
     "get_self_config", "get_platform_capabilities", "list_available_wa_devices", "get_presets",
@@ -69,6 +69,26 @@ _MIXIN_TOOL_ALLOWLISTS = {
     },
 }
 
+_MIXIN_SUPPORTING_TOOL_ALLOWLISTS = {
+    # These are MCP tools, not builder tools.  Without this allowlist the
+    # progressive-disclosure filter removed them even though the Google skill
+    # requires Arthur to create/select and verify the resource after OAuth.
+    "arthur-google-workspace": {
+        "create_drive_file",
+        "manage_drive_access",
+        "manage_event",
+        "read_sheet_values",
+        "modify_sheet_values",
+        "create_spreadsheet",
+        "create_survey_form",
+        "create_presentation",
+        "batch_update_presentation",
+        "list_sheet_tables",
+        "append_table_rows",
+        "create_sheet",
+    },
+}
+
 _SKILL_SUPPORTING_TOOL_ALLOWLISTS = {
     "arthur-discovery": {"tavily_search", "tavily_extract", "recall"},
     "arthur-create-agent": {
@@ -103,6 +123,7 @@ def scope_arthur_builder_tools(
     allowed_supporting = set(_SKILL_SUPPORTING_TOOL_ALLOWLISTS.get(primary_skill, set()))
     for mixin in mixin_skills:
         allowed.update(_MIXIN_TOOL_ALLOWLISTS.get(mixin, set()))
+        allowed_supporting.update(_MIXIN_SUPPORTING_TOOL_ALLOWLISTS.get(mixin, set()))
     kept: list[Any] = []
     removed: list[str] = []
     for tool in tools:

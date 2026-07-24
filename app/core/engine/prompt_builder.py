@@ -208,6 +208,7 @@ def build_mcp_tool_priority_notice(
         "- Jika request user menyangkut layanan eksternal yang tersedia lewat integrasi resmi (Google Workspace, Gmail, Calendar, Drive, Docs, Sheets, Slides, Forms, atau service lain), panggil tool integrasi yang relevan sebagai sumber kebenaran.\n"
         "- Jangan memakai sandbox untuk mensimulasikan, membuat file lokal pengganti, scraping manual, atau menjawab normatif jika tool integrasi tersedia untuk aksi tersebut.\n"
         "- Jika integrasi membutuhkan auth, scope, atau sedang error, sampaikan blocker/auth flow yang benar; jangan diam-diam fallback ke sandbox seolah task berhasil.\n"
+        "- Jangan pernah mengarang ID, URL, nama tab, atau range resource Google. Gunakan hanya nilai dari user, runtime state, atau hasil tool yang berhasil. Jika resource wajib belum ada, buat/pilih resource dengan tool resmi saat Owner mengizinkan; untuk chat customer, eskalasi ke Owner dan jangan meminta customer mengurus konfigurasi internal.\n"
         "- Jangan menyebut istilah teknis internal/protokol tool kepada user."
         f"{sandbox_line}"
     )

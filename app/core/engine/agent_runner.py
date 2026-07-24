@@ -115,11 +115,13 @@ from app.core.engine.google_mcp_support import (
     _candidate_external_user_ids,
     _contains_google_workspace_artifact,
     _extract_google_mcp_step_error,
+    _extract_google_mcp_resource_error,
     _extract_requested_slide_count,
     _fetch_google_auth_link,
     _has_google_mcp_step,
     _has_google_workspace_artifact_step,
     _is_google_auth_or_scope_error,
+    _is_google_resource_not_found_error,
     _is_google_forms_authoring_intent,
     _is_google_mcp_intent,
     _is_google_sheets_authoring_intent,
@@ -150,6 +152,7 @@ settings = get_settings()
 
 
 from app.core.engine.agent_reply_guards import (
+    _owner_identity_reply_guard,
     _operator_escalation_reply_guard,
     _task_result_guard_reply,
     _whatsapp_media_delivery_guard_reply,
@@ -2808,6 +2811,14 @@ async def run_agent(
         (mcp_errors.get("google_workspace") if isinstance(mcp_errors, dict) else None)
         or _extract_google_mcp_step_error(steps)
     )
+    _google_mcp_runtime_error = (
+        mcp_errors.get("google_workspace") if isinstance(mcp_errors, dict) else None
+    )
+    _google_mcp_resource_err_before_override = (
+        str(_google_mcp_runtime_error)
+        if _is_google_resource_not_found_error(str(_google_mcp_runtime_error or ""))
+        else _extract_google_mcp_resource_error(steps)
+    )
     final_reply, steps, _google_mcp_auth_url = await apply_google_mcp_reply_overrides(
         final_reply=final_reply,
         steps=steps,
@@ -2839,6 +2850,29 @@ async def run_agent(
             auth_url=_google_mcp_auth_url,
             log=log,
         )
+    _google_mcp_resource_err = (
+        _google_mcp_resource_err_before_override
+        or _extract_google_mcp_resource_error(steps)
+    )
+    if _google_mcp_resource_err and not _google_mcp_has_artifact:
+        final_reply = await _route_google_workspace_blocker_to_owner_if_customer(
+            reply=final_reply,
+            session=session,
+            agent_model=agent_model,
+            user_message=execution_user_message,
+            error_text=str(_google_mcp_resource_err),
+            auth_url=None,
+            log=log,
+        )
+    guarded_reply = _owner_identity_reply_guard(
+        final_reply,
+        execution_user_message,
+        session,
+        agent_model,
+    )
+    if guarded_reply != final_reply:
+        log.info("agent_run.final_reply_overridden_by_owner_identity_guard")
+        final_reply = guarded_reply
     guarded_reply = _task_result_guard_reply(final_reply, steps, execution_user_message)
     if guarded_reply != final_reply:
         log.warning("agent_run.final_reply_overridden_by_task_guard")

@@ -279,6 +279,40 @@ def _extract_google_mcp_step_error(steps: list[dict[str, Any]]) -> str | None:
     return None
 
 
+def _is_google_resource_not_found_error(error_text: str | None) -> bool:
+    """Distinguish a missing Google resource from an OAuth failure."""
+    text = str(error_text or "").casefold()
+    if not text:
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "requested entity was not found",
+            "resource not found",
+            "spreadsheet not found",
+            "file not found",
+            '"code": 404',
+            '"status_code": 404',
+            "status code 404",
+            "http 404",
+        )
+    )
+
+
+def _extract_google_mcp_resource_error(steps: list[dict[str, Any]]) -> str | None:
+    for step in steps:
+        tool_name = str((step or {}).get("tool", "")).lower()
+        result = str((step or {}).get("result", "") or "")
+        if (
+            tool_name
+            and result
+            and _is_google_mcp_tool_name(tool_name)
+            and _is_google_resource_not_found_error(result)
+        ):
+            return result
+    return None
+
+
 def _looks_like_progress_claim(reply_text: str) -> bool:
     if not reply_text:
         return False

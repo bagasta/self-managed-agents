@@ -969,6 +969,11 @@ def _is_low_information_wa_text(message: str | None) -> bool:
     text = sanitize_user_input(message or "").strip()
     if not text or text.startswith("/"):
         return False
+    # A one-digit answer is a normal response to ratings, quantities, menu
+    # choices, and OTP-style questions.  Do not let the anti-spam shortcut
+    # swallow valid survey answers such as "5".
+    if text.isdigit():
+        return False
     return len(text) == 1
 
 

@@ -247,6 +247,31 @@ def test_google_mixin_adds_auth_tool_without_exposing_create():
     assert [tool.name for tool in kept] == ["plan_agent", "generate_google_auth_link"]
 
 
+def test_google_mixin_keeps_resource_setup_and_verification_tools():
+    tools = [
+        SimpleNamespace(name="get_agent_detail"),
+        SimpleNamespace(name="update_agent"),
+        SimpleNamespace(name="create_spreadsheet"),
+        SimpleNamespace(name="modify_sheet_values"),
+        SimpleNamespace(name="read_sheet_values"),
+        SimpleNamespace(name="send_agent_wa_qr"),
+    ]
+    kept, removed = scope_arthur_builder_tools(
+        tools,
+        primary_skill="arthur-create-agent",
+        mixin_skills=["arthur-google-workspace"],
+    )
+
+    assert [tool.name for tool in kept] == [
+        "get_agent_detail",
+        "update_agent",
+        "create_spreadsheet",
+        "modify_sheet_values",
+        "read_sheet_values",
+    ]
+    assert removed == ["send_agent_wa_qr"]
+
+
 def test_question_history_uses_canonical_deduplication():
     reply = "Apa tujuan utama agent?\nApa tujuan utama agent?\nSiapa pengguna agent ini?"
     assert extract_questions(reply) == ["Apa tujuan utama agent?", "Siapa pengguna agent ini?"]

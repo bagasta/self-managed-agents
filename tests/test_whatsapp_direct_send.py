@@ -24,6 +24,7 @@ from app.core.engine.wa_outbound_guard import (
     clear_wa_outbound_direct_memory,
     looks_like_outbound_wa_spam_request,
 )
+from app.core.engine.agent_reply_guards import _owner_identity_reply_guard
 from app.core.engine.prompt_builder import build_system_prompt
 from app.core.tools.escalation_tool import build_escalation_tools
 from app.api.channels import (
@@ -49,6 +50,61 @@ def _agent(**overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def test_verified_owner_identity_question_uses_platform_identity():
+    agent = _agent(
+        name="Minsel",
+        owner_external_id="62895626765423",
+        operator_ids=["62895626765423"],
+        escalation_config={
+            "operator_phone": "62895626765423",
+            "operator_name": "Bagas",
+        },
+    )
+    session = SimpleNamespace(
+        channel_type="whatsapp",
+        external_user_id="62895626765423",
+        channel_config={
+            "phone_number": "62895626765423",
+            "sender_name": "Bagas Tri Adiwira",
+        },
+    )
+
+    reply = _owner_identity_reply_guard(
+        "Maaf, saya belum tahu nama Anda.",
+        (
+            "<OWNER>\nRole: OWNER/SUPERADMIN\nName WA: Bagas\n"
+            "No Telepon/WA/Id: 62895626765423\nPesan: gua siapa?"
+        ),
+        session,
+        agent,
+    )
+
+    assert reply == "Kamu adalah Bagas Tri Adiwira, Owner dan superadmin Minsel."
+
+
+def test_customer_cannot_trigger_owner_identity_guard():
+    agent = _agent(
+        name="Minsel",
+        owner_external_id="628owner",
+        operator_ids=["628owner"],
+    )
+    session = SimpleNamespace(
+        channel_type="whatsapp",
+        external_user_id="628customer",
+        channel_config={"phone_number": "628customer", "sender_name": "Customer"},
+    )
+
+    assert (
+        _owner_identity_reply_guard(
+            "Boleh saya tahu nama Anda?",
+            "gua siapa?",
+            session,
+            agent,
+        )
+        == "Boleh saya tahu nama Anda?"
+    )
 
 
 def _session(**overrides):

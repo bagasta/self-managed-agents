@@ -16,6 +16,8 @@ from app.core.engine.google_mcp_support import (
     _fetch_google_auth_link,
     _google_integration_runtime_url,
     _has_google_mcp_step,
+    _extract_google_mcp_resource_error,
+    _is_google_resource_not_found_error,
     _is_google_mcp_intent,
     _sanitize_user_facing_google_terms,
     _looks_like_google_auth_recovery_reply,
@@ -30,6 +32,15 @@ from app.core.engine.google_mcp_support import (
 def test_google_scope_error_markers_include_google_api_scope_messages() -> None:
     err = "Request had insufficient authentication scopes. Required scope: https://www.googleapis.com/auth/presentations"
     assert _is_google_auth_or_scope_error(err) is True
+
+
+def test_google_resource_404_is_not_misclassified_as_oauth_failure() -> None:
+    err = '{"error": {"code": 404, "message": "Requested entity was not found."}}'
+    steps = [{"tool": "read_sheet_values", "result": err}]
+
+    assert _is_google_resource_not_found_error(err) is True
+    assert _extract_google_mcp_resource_error(steps) == err
+    assert _is_google_auth_or_scope_error(err) is False
 
 
 def test_google_term_sanitizer_preserves_mcp_auth_url_hostname() -> None:
@@ -204,6 +215,104 @@ async def test_owner_google_auth_blocker_keeps_auth_reply(monkeypatch) -> None:
     )
 
     assert reply == original
+
+
+@pytest.mark.asyncio
+async def test_owner_google_resource_blocker_routes_to_arthur_without_oauth(monkeypatch) -> None:
+    async def fail_send_message(*args, **kwargs):
+        raise AssertionError("owner chat should receive direct setup guidance")
+
+    monkeypatch.setattr("app.core.infra.channel_service.send_message", fail_send_message)
+    agent = type(
+        "Agent",
+        (),
+        {
+            "name": "Minsel",
+            "owner_external_id": "62895626765423",
+            "operator_ids": ["62895626765423"],
+            "escalation_config": {"operator_phone": "62895626765423"},
+            "wa_device_id": "dev-1",
+        },
+    )()
+    session = type(
+        "Session",
+        (),
+        {
+            "channel_type": "whatsapp",
+            "external_user_id": "62895626765423",
+            "channel_config": {
+                "device_id": "dev-1",
+                "phone_number": "62895626765423",
+            },
+        },
+    )()
+    log = type("Log", (), {"info": lambda *args, **kwargs: None, "warning": lambda *args, **kwargs: None})()
+
+    reply = await _route_google_workspace_blocker_to_owner_if_customer(
+        reply="Berikan link atau ID Google Sheets.",
+        session=session,
+        agent_model=agent,
+        user_message="ya",
+        error_text='{"code": 404, "message": "Requested entity was not found."}',
+        auth_url=None,
+        log=log,
+    )
+
+    assert "Koneksi Google untuk Minsel aktif" in reply
+    assert "siapkan Google Sheet survey untuk Minsel" in reply
+    assert "login" not in reply.casefold()
+
+
+@pytest.mark.asyncio
+async def test_customer_google_resource_blocker_notifies_owner_without_oauth_link(monkeypatch) -> None:
+    sent = []
+
+    async def fake_send_message(*, channel_type, channel_config, text, to_override=None):
+        sent.append(text)
+        return {"message_id": "m-resource"}
+
+    monkeypatch.setattr("app.core.infra.channel_service.send_message", fake_send_message)
+    agent = type(
+        "Agent",
+        (),
+        {
+            "name": "Minsel",
+            "owner_external_id": "628owner",
+            "operator_ids": ["628owner"],
+            "escalation_config": {"operator_phone": "628owner"},
+            "wa_device_id": "dev-1",
+        },
+    )()
+    session = type(
+        "Session",
+        (),
+        {
+            "channel_type": "whatsapp",
+            "external_user_id": "628customer",
+            "channel_config": {
+                "device_id": "dev-1",
+                "phone_number": "628customer",
+            },
+        },
+    )()
+    log = type("Log", (), {"info": lambda *args, **kwargs: None, "warning": lambda *args, **kwargs: None})()
+
+    reply = await _route_google_workspace_blocker_to_owner_if_customer(
+        reply="Tolong kirim ID Sheet.",
+        session=session,
+        agent_model=agent,
+        user_message="ya",
+        error_text="Requested entity was not found. HTTP 404",
+        auth_url=None,
+        log=log,
+    )
+
+    assert sent
+    assert "Koneksi Google aktif" in sent[0]
+    assert "siapkan Google Sheet survey untuk Minsel" in sent[0]
+    assert "reconnect" not in sent[0].casefold()
+    assert "Owner" in reply
+    assert "konfigurasi teknis" in reply
 
 
 def test_google_auth_error_markers_include_preflight_not_connected_message() -> None:
