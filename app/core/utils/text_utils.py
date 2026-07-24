@@ -62,19 +62,58 @@ def markdown_to_wa(text: str) -> str:
     # 8. Link: [teks](url) → teks (url)
     text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 (\2)", text)
 
-    # 9. Horizontal rule: --- atau *** atau ___ → separator sederhana
+    # 9. Markdown tables are hard to read on a phone and WhatsApp does not
+    # render them. Convert a conventional header/separator/body block into
+    # compact bullet lines before processing ordinary bullets.
+    lines = text.splitlines()
+    converted_lines: list[str] = []
+    index = 0
+    while index < len(lines):
+        if (
+            index + 1 < len(lines)
+            and "|" in lines[index]
+            and re.match(
+                r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$",
+                lines[index + 1],
+            )
+        ):
+            headers = [cell.strip() for cell in lines[index].strip().strip("|").split("|")]
+            index += 2
+            body_rows: list[list[str]] = []
+            while index < len(lines) and "|" in lines[index] and lines[index].strip():
+                body_rows.append(
+                    [cell.strip() for cell in lines[index].strip().strip("|").split("|")]
+                )
+                index += 1
+            for row in body_rows:
+                if len(headers) == 2 and len(row) >= 2:
+                    converted_lines.append(f"• {row[0]}: {row[1]}")
+                else:
+                    values = [
+                        f"{headers[pos]}: {value}"
+                        for pos, value in enumerate(row)
+                        if pos < len(headers) and value
+                    ]
+                    if values:
+                        converted_lines.append("• " + " — ".join(values))
+            continue
+        converted_lines.append(lines[index])
+        index += 1
+    text = "\n".join(converted_lines)
+
+    # 10. Horizontal rule: --- atau *** atau ___ → separator sederhana
     text = re.sub(r"^(\s*[-*_]{3,}\s*)$", "─────────────────────", text, flags=re.MULTILINE)
 
-    # 10. Bullet list: baris diawali - / * / + (bukan dalam kode) → •
+    # 11. Bullet list: baris diawali - / * / + (bukan dalam kode) → •
     text = re.sub(r"^[ \t]*[-*+]\s+", "• ", text, flags=re.MULTILINE)
 
-    # 11. Blockquote: > teks → teks (WA tidak punya blockquote markdown style)
+    # 12. Blockquote: > teks → teks (WA tidak punya blockquote markdown style)
     text = re.sub(r"^>\s?", "", text, flags=re.MULTILINE)
 
-    # 12. Hapus HTML tag jika ada
+    # 13. Hapus HTML tag jika ada
     text = re.sub(r"<[^>]+>", "", text)
 
-    # 13. Normalisasi blank lines berlebih (maks 2 baris kosong berturut-turut)
+    # 14. Normalisasi blank lines berlebih (maks 2 baris kosong berturut-turut)
     text = re.sub(r"\n{3,}", "\n\n", text)
 
     return text.strip()

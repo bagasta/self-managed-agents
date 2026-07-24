@@ -53,6 +53,17 @@ def test_plan_word_without_billing_context_does_not_hijack_intent():
     assert resolve_builder_payment_plan_selection("buat gaya profesional", "") is None
 
 
+def test_payment_boundary_answer_does_not_hijack_active_agent_build():
+    assert (
+        classify_builder_intent(
+            "mencatat pesanan boleh, mengonfirmasi pembayaran tidak boleh.",
+            prior_evidence="Saya mau buat agent CS untuk bisnis mukena.",
+        )
+        == "create"
+    )
+    assert classify_builder_intent("saya mau bayar paket Pro") == "subscription"
+
+
 def test_prior_demo_evidence_does_not_hijack_confirmation_turn():
     prior = (
         "Buat agent CS Veselmate untuk Veselka. "
@@ -243,6 +254,7 @@ def test_google_and_file_mixins_are_limited_to_one():
 def test_tool_scoping_removes_material_tools_during_discovery():
     tools = [
         SimpleNamespace(name="plan_agent"),
+        SimpleNamespace(name="list_my_agents"),
         SimpleNamespace(name="create_agent"),
         SimpleNamespace(name="delete_agent"),
         SimpleNamespace(name="tavily_search"),
@@ -253,7 +265,7 @@ def test_tool_scoping_removes_material_tools_during_discovery():
         mixin_skills=[],
     )
     assert [tool.name for tool in kept] == ["plan_agent", "tavily_search"]
-    assert removed == ["create_agent", "delete_agent"]
+    assert removed == ["create_agent", "delete_agent", "list_my_agents"]
 
 
 def test_google_mixin_adds_auth_tool_without_exposing_create():

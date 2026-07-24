@@ -3092,6 +3092,37 @@ async def run_agent(
                 count=len(_removed_repeated_questions),
             )
 
+        # The model may emit progress text before a tool call and the runtime
+        # may later replace it with the deterministic discovery question or
+        # verified tool result that is actually delivered to WhatsApp. Keep the
+        # persisted last assistant turn identical to that delivered reply.
+        # Otherwise the next skill selector and confirmation-evidence loader see
+        # a message the user never received (the root cause of "rangkuman mana?"
+        # and several wrong progressive-skill transitions).
+        _persisted_final_synced = False
+        for _message_record in reversed(parsed["db_messages"]):
+            if getattr(_message_record, "role", "") == "agent":
+                _message_record.content = final_reply
+                _persisted_final_synced = True
+                break
+        if not _persisted_final_synced:
+            _max_persisted_step = max(
+                [
+                    int(getattr(_record, "step_index", 0) or 0)
+                    for _record in parsed["db_messages"]
+                ]
+                + [step_counter]
+            )
+            _final_message_record = Message(
+                session_id=session.id,
+                role="agent",
+                content=final_reply,
+                step_index=_max_persisted_step + 1,
+                run_id=run_id,
+            )
+            parsed["db_messages"].append(_final_message_record)
+            db.add(_final_message_record)
+
     if _is_enabled(tools_config, "memory", default=True):
         _memory_artifact_path = _current_shared_artifact_path or _remember_latest_shared_artifact(
             session,

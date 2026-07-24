@@ -176,6 +176,11 @@ _OPTIONAL_DISCOVERY_FIELDS = {
     # do not restart an otherwise confirmed agent build when the owner did not
     # define one.
     "sensitive_data_policy",
+    # One agent is attached to one WhatsApp number by platform contract.
+    # Daily volume and audience are useful discovery facts; forcing owners to
+    # restate the one-number/many-customers topology adds no build permission
+    # and caused otherwise complete CS builds to loop.
+    "whatsapp_scale",
 }
 _EVIDENCE_STOPWORDS = {
     "agent",
@@ -892,6 +897,30 @@ def validate_agent_discovery(
             if not _is_answered(answers.get(field)):
                 continue
             verified_quotes = _verified_evidence_quotes(field, evidence, persisted_user_messages)
+            if not verified_quotes:
+                # Recover evidence deterministically from immutable conversation
+                # history when a small model omitted the _evidence entry but its
+                # normalized answer itself closely matches a real user message.
+                # Numeric facts remain protected by
+                # _evidence_quote_matches_message.
+                verified_quotes = _verified_evidence_quotes(
+                    field,
+                    {field: answers.get(field)},
+                    persisted_user_messages,
+                )
+            if not verified_quotes and field in _DELEGATABLE_FIELDS:
+                # "Sesuaikan saja" is an explicit delegation for safe copy
+                # details.  It is not permission for external actions; the
+                # drafted value still has to appear in the final confirmed
+                # summary.
+                verified_quotes = [
+                    message
+                    for message in persisted_user_messages
+                    if any(
+                        marker in _normalize_evidence_text(message)
+                        for marker in _DELEGATION_MARKERS
+                    )
+                ][-1:]
             if verified_quotes and _evidence_supports_answer(
                 field,
                 answers.get(field),

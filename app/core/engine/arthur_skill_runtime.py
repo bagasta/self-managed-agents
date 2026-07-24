@@ -19,7 +19,7 @@ from app.models.agent_build_draft import AgentBuildDraft
 from app.models.message import Message
 
 ARTHUR_ENGINE_VERSION = "arthur-progressive-v1"
-ARTHUR_PROMPT_VERSION = "arthur-kernel-v8"
+ARTHUR_PROMPT_VERSION = "arthur-kernel-v9"
 
 _BUILDER_TOOL_NAMES = {
     "get_self_config", "get_platform_capabilities", "list_available_wa_devices", "get_presets",
@@ -34,7 +34,7 @@ _BUILDER_TOOL_NAMES = {
 _SKILL_TOOL_ALLOWLISTS = {
     "arthur-discovery": {
         "get_self_config", "get_platform_capabilities", "get_presets", "plan_agent",
-        "get_user_subscription", "list_my_agents", "get_agent_detail",
+        "get_user_subscription",
     },
     "arthur-create-agent": {
         "get_self_config", "get_platform_capabilities", "get_presets", "plan_agent",
@@ -314,7 +314,26 @@ def classify_builder_intent(
         return "lifecycle"
     if resolve_builder_payment_plan_selection(current, prior_agent_message):
         return "subscription"
-    if _contains(current, ("upgrade", "langganan", "subscription", "bayar", "payment", "kuota", "slot")):
+    # Keep ordinary business answers inside the active build.  In particular,
+    # "mengonfirmasi pembayaran tidak boleh" is a discovery boundary, not a
+    # request to buy/upgrade a Clevio plan.  Billing intent must be explicit and
+    # token-bounded; substring matching "bayar" inside "pembayaran" previously
+    # switched Arthur to the payment skill and removed every create tool.
+    explicit_subscription_intent = bool(
+        re.search(
+            r"\b(?:upgrade|langganan|subscription|kuota|slot)\b",
+            current,
+        )
+        or re.search(
+            r"\b(?:bayar|payment)\b.{0,32}\b(?:paket|plan|langganan|subscription|clevio)\b",
+            current,
+        )
+        or re.search(
+            r"\b(?:paket|plan|langganan|subscription|clevio)\b.{0,32}\b(?:bayar|payment)\b",
+            current,
+        )
+    )
+    if explicit_subscription_intent:
         return "subscription"
     if classify_builder_whatsapp_action(
         current,
