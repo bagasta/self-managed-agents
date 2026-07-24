@@ -15,6 +15,7 @@ from app.core.engine.arthur_skill_runtime import (
     classify_builder_intent,
     classify_builder_whatsapp_action,
     normalize_builder_language,
+    resolve_builder_payment_plan_selection,
     resolve_policy_mixins,
     resolve_primary_skill,
     scope_arthur_builder_tools,
@@ -28,6 +29,28 @@ def test_intent_and_primary_skill_routing_are_not_beechat_specific():
     assert classify_builder_intent("Berapa kuota paket saya?") == "subscription"
     assert resolve_primary_skill("create", "discovery") == "arthur-discovery"
     assert resolve_primary_skill("create", "awaiting_confirmation") == "arthur-create-agent"
+
+
+def test_payment_plan_selection_keeps_subscription_skill_on_short_followup():
+    prior = (
+        "Mau ambil paket yang mana? Starter, Pro, atau Enterprise. "
+        "Sebutkan pilihanmu, nanti saya buatkan link pembayaran."
+    )
+
+    assert resolve_builder_payment_plan_selection("mau yang enterprise", prior) == "tier_3"
+    assert resolve_builder_payment_plan_selection("Pro", prior) == "tier_2"
+    assert resolve_builder_payment_plan_selection("Starter", prior) == "tier_1"
+    assert (
+        classify_builder_intent(
+            "mau yang enterprise",
+            prior_agent_message=prior,
+        )
+        == "subscription"
+    )
+
+
+def test_plan_word_without_billing_context_does_not_hijack_intent():
+    assert resolve_builder_payment_plan_selection("buat gaya profesional", "") is None
 
 
 def test_prior_demo_evidence_does_not_hijack_confirmation_turn():

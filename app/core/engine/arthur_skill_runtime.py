@@ -19,7 +19,7 @@ from app.models.agent_build_draft import AgentBuildDraft
 from app.models.message import Message
 
 ARTHUR_ENGINE_VERSION = "arthur-progressive-v1"
-ARTHUR_PROMPT_VERSION = "arthur-kernel-v7"
+ARTHUR_PROMPT_VERSION = "arthur-kernel-v8"
 
 _BUILDER_TOOL_NAMES = {
     "get_self_config", "get_platform_capabilities", "list_available_wa_devices", "get_presets",
@@ -108,6 +108,7 @@ class ArthurSkillContext:
     mixin_skills: list[str] = field(default_factory=list)
     skill_versions: dict[str, str] = field(default_factory=dict)
     whatsapp_action: str | None = None
+    payment_plan: str | None = None
     prompt_block: str = ""
     draft: AgentBuildDraft | None = None
 
@@ -311,6 +312,8 @@ def classify_builder_intent(
     current = normalize_builder_language(user_message)
     if _contains(current, ("hapus agent", "delete agent", "reset user", "reset agent", "nonaktifkan agent")):
         return "lifecycle"
+    if resolve_builder_payment_plan_selection(current, prior_agent_message):
+        return "subscription"
     if _contains(current, ("upgrade", "langganan", "subscription", "bayar", "payment", "kuota", "slot")):
         return "subscription"
     if classify_builder_whatsapp_action(
@@ -375,6 +378,50 @@ def classify_builder_intent(
     if _contains(prior, ("buat", "bikin", "mau agent", "mau ai", "butuh ai", "cs ", "asisten")):
         return "create"
     return "discover"
+
+
+def resolve_builder_payment_plan_selection(
+    user_message: str,
+    prior_agent_message: str = "",
+) -> str | None:
+    """Resolve a concrete paid tier without treating unrelated words as billing."""
+    current = normalize_builder_language(user_message)
+    prior = normalize_builder_language(prior_agent_message)
+    plan_patterns = (
+        ("tier_1", r"\b(?:starter|tier[\s_-]?1)\b"),
+        ("tier_2", r"\b(?:pro|growth|tier[\s_-]?2)\b"),
+        ("tier_3", r"\b(?:enterprise|business|tier[\s_-]?3)\b"),
+    )
+    selected = next(
+        (plan for plan, pattern in plan_patterns if re.search(pattern, current)),
+        None,
+    )
+    if selected is None:
+        return None
+
+    explicit_selection = bool(
+        re.search(
+            r"\b(?:mau|pilih|ambil|upgrade|bayar|beli|paket|plan|yang)\b",
+            current,
+        )
+    )
+    prior_offered_payment = any(
+        marker in prior
+        for marker in (
+            "paket yang tersedia",
+            "paket clevio",
+            "mau ambil paket",
+            "mau yang mana",
+            "link pembayaran",
+            "upgrade plan",
+            "starter",
+            "enterprise",
+        )
+    )
+    short_plan_reply = len(current.split()) <= 4
+    if explicit_selection or (prior_offered_payment and short_plan_reply):
+        return selected
+    return None
 
 
 async def _latest_agent_message(session_id: uuid.UUID, db: AsyncSession) -> str:
@@ -495,6 +542,10 @@ async def prepare_arthur_skill_context(
     # The initial classifier only determines which state/skill to load. It never
     # grants permission or turns derived text into confirmed facts.
     prior_agent_message = await _latest_agent_message(session_id, db)
+    payment_plan = resolve_builder_payment_plan_selection(
+        user_message,
+        prior_agent_message,
+    )
     whatsapp_action = classify_builder_whatsapp_action(
         user_message,
         prior_agent_message,
@@ -521,6 +572,10 @@ async def prepare_arthur_skill_context(
             prior_agent_message,
         )
         whatsapp_action = classify_builder_whatsapp_action(
+            user_message,
+            prior_agent_message,
+        )
+        payment_plan = resolve_builder_payment_plan_selection(
             user_message,
             prior_agent_message,
         )
@@ -570,6 +625,7 @@ async def prepare_arthur_skill_context(
         mixin_skills=mixins,
         skill_versions=versions,
         whatsapp_action=whatsapp_action,
+        payment_plan=payment_plan,
         prompt_block="\n\n".join(parts),
         draft=draft,
     )

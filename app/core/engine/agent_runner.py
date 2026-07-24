@@ -108,6 +108,10 @@ from app.core.engine.reply_guard import ensure_non_empty_reply
 from app.core.utils.phone_utils import normalize_phone
 from app.core.domain.agent_quota_service import get_owner_subscription, is_quota_exempt_builder_agent
 from app.core.domain.subscription_service import QuotaExceeded, assert_token_quota_available
+from app.core.tools.builder_payment_tools import (
+    payment_user_reply,
+    verified_payment_payload,
+)
 from app.core.engine.google_mcp_support import (
     _build_google_mcp_auth_failure_reply,
     _build_google_mcp_unavailable_reply,
@@ -748,6 +752,115 @@ async def _invoke_builder_whatsapp_action_tool(
     return True
 
 
+async def _ensure_builder_payment_link(
+    *,
+    tools: list[Any],
+    plan_code: str,
+    parsed: ParsedResult,
+    session_id: uuid.UUID,
+    run_id: uuid.UUID,
+    step_index: int,
+    log: Any,
+) -> str:
+    """Create and return a verified checkout link for a selected paid tier."""
+    for step in reversed(parsed.get("steps", [])):
+        if str(step.get("tool") or "") != "get_payment_link":
+            continue
+        payload = verified_payment_payload(
+            step.get("result"),
+            expected_plan=plan_code,
+        )
+        if payload is not None:
+            return payment_user_reply(payload)
+
+    payment_tool = next(
+        (
+            tool
+            for tool in tools
+            if getattr(tool, "name", "") == "get_payment_link"
+        ),
+        None,
+    )
+    if payment_tool is None:
+        log.error(
+            "agent_run.builder_payment_tool_missing",
+            plan_code=plan_code,
+        )
+        return (
+            "Link pembayaran belum dapat dibuat karena layanan checkout tidak tersedia "
+            "pada sesi ini. Pilihan paketmu sudah tercatat; saya tidak akan mengarang link."
+        )
+
+    args = {"plan": plan_code}
+    try:
+        raw_result = await payment_tool.ainvoke(args)
+    except Exception as exc:
+        raw_result = json.dumps(
+            {
+                "error": type(exc).__name__,
+                "message": str(exc),
+            },
+            ensure_ascii=False,
+        )
+        log.warning(
+            "agent_run.builder_payment_direct_exception",
+            plan_code=plan_code,
+            error=str(exc)[:300],
+        )
+
+    result_text = str(raw_result or "")
+    step_no = max(
+        [int(step.get("step") or 0) for step in parsed.get("steps", [])] + [0]
+    ) + 1
+    parsed["steps"].append(
+        {
+            "step": step_no,
+            "tool": "get_payment_link",
+            "args": args,
+            "result": result_text[:4000],
+            "tool_call_id": "deterministic_builder_payment_link",
+        }
+    )
+    parsed["db_messages"].append(
+        Message(
+            session_id=session_id,
+            role="tool",
+            tool_name="get_payment_link",
+            tool_args=args,
+            tool_result=result_text[:2000],
+            step_index=step_index,
+            run_id=run_id,
+        )
+    )
+    payload = verified_payment_payload(
+        raw_result,
+        expected_plan=plan_code,
+    )
+    if payload is not None:
+        log.info(
+            "agent_run.builder_payment_link_direct_done",
+            plan_code=plan_code,
+        )
+        return payment_user_reply(payload)
+
+    error_payload = _parse_step_result_json(raw_result)
+    error_message = (
+        str(error_payload.get("message") or error_payload.get("error") or "")
+        if isinstance(error_payload, dict)
+        else ""
+    )
+    log.warning(
+        "agent_run.builder_payment_link_invalid",
+        plan_code=plan_code,
+        result=result_text[:300],
+    )
+    return (
+        "Link pembayaran belum berhasil dibuat"
+        + (f": {error_message}" if error_message else ".")
+        + " Pilihan paketmu tetap tercatat; saya tidak akan mengarang link checkout."
+    )
+
+
 def _shared_artifact_record(shared_path: str, *, sent: bool = False) -> dict[str, Any]:
     filename = (shared_path or "").rsplit("/", 1)[-1] or "file"
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
@@ -987,6 +1100,7 @@ async def run_agent(
             "mixin_skills": list(_arthur_skill_context.mixin_skills),
             "skill_versions": dict(_arthur_skill_context.skill_versions),
             "whatsapp_action": _arthur_skill_context.whatsapp_action,
+            "payment_plan": _arthur_skill_context.payment_plan,
             "build_id": (
                 str(_arthur_skill_context.draft.id)
                 if _arthur_skill_context.draft is not None
@@ -2554,6 +2668,23 @@ async def run_agent(
             )
             if _direct_channel_done:
                 steps = parsed["steps"]
+
+        _builder_payment_plan = (
+            _arthur_skill_context.payment_plan
+            if _arthur_skill_context is not None
+            else None
+        )
+        if runtime_policy.is_builder and _builder_payment_plan:
+            final_reply = await _ensure_builder_payment_link(
+                tools=tools,
+                plan_code=str(_builder_payment_plan),
+                parsed=parsed,
+                session_id=session.id,
+                run_id=run_id,
+                step_index=step_counter + len(parsed["db_messages"]),
+                log=log,
+            )
+            steps = parsed["steps"]
 
         if _needs_deploy_followup(execution_user_message, tools_config, steps, final_reply):
             log.warning(
