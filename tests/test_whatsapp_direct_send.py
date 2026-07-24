@@ -24,6 +24,7 @@ from app.core.engine.wa_outbound_guard import (
     clear_wa_outbound_direct_memory,
     looks_like_outbound_wa_spam_request,
 )
+from app.core.engine.agent_reply_guards import _owner_identity_reply_guard
 from app.core.engine.prompt_builder import build_system_prompt
 from app.core.tools.escalation_tool import build_escalation_tools
 from app.api.channels import (
@@ -49,6 +50,61 @@ def _agent(**overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def test_verified_owner_identity_question_uses_platform_identity():
+    agent = _agent(
+        name="Minsel",
+        owner_external_id="62895626765423",
+        operator_ids=["62895626765423"],
+        escalation_config={
+            "operator_phone": "62895626765423",
+            "operator_name": "Bagas",
+        },
+    )
+    session = SimpleNamespace(
+        channel_type="whatsapp",
+        external_user_id="62895626765423",
+        channel_config={
+            "phone_number": "62895626765423",
+            "sender_name": "Bagas Tri Adiwira",
+        },
+    )
+
+    reply = _owner_identity_reply_guard(
+        "Maaf, saya belum tahu nama Anda.",
+        (
+            "<OWNER>\nRole: OWNER/SUPERADMIN\nName WA: Bagas\n"
+            "No Telepon/WA/Id: 62895626765423\nPesan: gua siapa?"
+        ),
+        session,
+        agent,
+    )
+
+    assert reply == "Kamu adalah Bagas Tri Adiwira, Owner dan superadmin Minsel."
+
+
+def test_customer_cannot_trigger_owner_identity_guard():
+    agent = _agent(
+        name="Minsel",
+        owner_external_id="628owner",
+        operator_ids=["628owner"],
+    )
+    session = SimpleNamespace(
+        channel_type="whatsapp",
+        external_user_id="628customer",
+        channel_config={"phone_number": "628customer", "sender_name": "Customer"},
+    )
+
+    assert (
+        _owner_identity_reply_guard(
+            "Boleh saya tahu nama Anda?",
+            "gua siapa?",
+            session,
+            agent,
+        )
+        == "Boleh saya tahu nama Anda?"
+    )
 
 
 def _session(**overrides):
@@ -240,7 +296,16 @@ async def test_wa_dev_shared_incoming_requires_explicit_agent_or_code():
 @pytest.mark.asyncio
 async def test_wa_dev_claim_code_returns_virtual_device_id(monkeypatch):
     agent_id = uuid.uuid4()
-    agent = SimpleNamespace(id=agent_id, name="Demo Agent")
+    agent = SimpleNamespace(
+        id=agent_id,
+        name="Demo Agent",
+        active_until=None,
+        token_quota=0,
+        tokens_used=0,
+        owner_external_id=None,
+        capabilities=[],
+        tools_config={},
+    )
 
     async def fake_find_agent(_db, _code):
         return agent
@@ -258,6 +323,35 @@ async def test_wa_dev_claim_code_returns_virtual_device_id(monkeypatch):
     assert result["agent_id"] == str(agent_id)
     assert result["device_id"] == f"wadev_{agent_id}"
     assert result["routing"]["agent_id"] == str(agent_id)
+
+
+@pytest.mark.asyncio
+async def test_wa_dev_claim_code_rejects_expired_agent_before_routing(monkeypatch):
+    agent = SimpleNamespace(id=uuid.uuid4(), name="Expired Agent")
+
+    async def fake_find_agent(_db, _code):
+        return agent
+
+    async def fake_quota_check(_agent, _db):
+        return SimpleNamespace(
+            allowed=False,
+            user_message="Maaf, masa aktif agent ini sudah habis.",
+        )
+
+    monkeypatch.setattr(
+        "app.core.domain.wa_dev_trial_service.find_agent_by_wa_dev_trial_code",
+        fake_find_agent,
+    )
+    monkeypatch.setattr("app.api.channels.check_agent_quota", fake_quota_check)
+
+    with pytest.raises(Exception) as exc_info:
+        await wa_dev_claim_code(
+            WADevClaimCodeRequest(code="AB12C3"),
+            db=SimpleNamespace(),
+        )
+
+    assert getattr(exc_info.value, "status_code", None) == 409
+    assert "masa aktif agent" in str(getattr(exc_info.value, "detail", ""))
 
 
 def test_wa_owner_message_gets_explicit_owner_label():
@@ -553,35 +647,41 @@ def test_builder_prompt_blocks_repeated_continue_questions():
     )
 
     assert "## Arthur Builder Mode" in prompt
-    assert "plan_agent -> compose_agent_blueprint -> compose_agent_operating_manual -> compose_agent_instructions -> validate_agent_config -> compose_agent_soul -> create_agent -> verify_agent" in prompt
+    assert "konsultan kebutuhan sekaligus pembuat AI Staff dari Clevio" in prompt
+    assert "rangkuman kebutuhan yang lengkap dan tidak ambigu" in prompt
+    assert "plan_agent -> compose_agent_blueprint -> compose_agent_operating_manual -> compose_agent_instructions -> validate_agent_config -> compose_agent_soul -> create_agent(discovery_answers yang sama) -> verify_agent" in prompt
     assert "## Arthur Tool Categories" in prompt
     assert "Agent Builder" in prompt
     assert "Agent Management" in prompt
     assert "Channel Management" in prompt
     assert "Workspace/App Connectors" in prompt
     assert "sampai user tahu langkah berikutnya" in prompt
-    assert "cara test, cara connect Google, cara pasang WhatsApp" in prompt
-    assert "brief minimal sudah jelas" in prompt
-    assert "Wawancara singkat dulu" in prompt
-    assert "maksimal 3 hal paling penting" in prompt
+    assert "inisiatif hanya boleh mengikuti kebutuhan yang sudah dikonfirmasi" in prompt
+    assert "discovery enam grup secara lengkap" in prompt
+    assert "Mulai dari Grup 1" in prompt
+    assert "Discovery dilakukan satu grup per pesan" in prompt
     assert "minta pembayaran, bukti apa yang diminta" in prompt
-    assert "Jangan berhenti hanya untuk menampilkan rencana" in prompt
+    assert "Rangkuman dan konfirmasi kebutuhan adalah gerbang wajib" in prompt
     assert "Jangan mengunci preset hanya dari satu kata kunci" in prompt
     assert "jangan menyebut label preset internal" in prompt
     assert "google_workspace_option.should_offer=true" in prompt
     assert "Mau sekalian dihubungkan ke Google" in prompt
     assert "user membalas nama seperti `Travgent`" in prompt
-    assert "Jangan mengulang plan_agent/compose_agent_instructions" in prompt
+    assert "anggap hanya nama itu yang terkonfirmasi" in prompt
+    assert "Jangan mengulang composer jika kebutuhan tidak berubah" in prompt
     assert "jangan menyebut nama tool internal" in prompt
-    assert "Mau agent ini langsung dipasang ke nomor WhatsApp kamu sendiri" in prompt
+    assert "nomor demo Arthur" in prompt
+    assert "nomor khusus milik user" in prompt
+    assert "jangan pernah mengarahkan user ke dashboard" in prompt.lower()
     assert "nomor demo Arthur" in prompt
     assert "jangan berhenti hanya dengan `agent sudah jadi` atau ID agent" in prompt
     assert "terus gimana pakenya?" in prompt
     assert "bukan `QR`" in prompt
     assert "jangan fallback ke agent terbaru" in prompt
     assert "agent_name atau agent_id" in prompt
-    assert "langsung cari agent terkait lalu panggil create_wa_dev_trial_link" in prompt
-    assert "jangan menjawab `langsung aku betulin`" in prompt
+    assert "pastikan active_until masih aktif sebelum memanggil create_wa_dev_trial_link" in prompt
+    assert "jangan kirim kode dulu: list_my_agents/get_agent_detail, panggil renew_agent" in prompt
+    assert "Jangan menjawab `langsung aku betulin`" in prompt
     assert "DILARANG memakai task, subagent, sandbox, read_file, edit_file, atau write_file" in prompt
     assert "get_agent_detail(include_instructions=true)" in prompt
     # Launch-safe temporary-limits block is only present when the kill switch is OFF.
@@ -623,7 +723,7 @@ def test_arthur_builder_mode_knows_crud_is_primary_job():
     )
 
     assert "## Arthur Builder Mode" in prompt
-    assert "membuat, mengubah, mengecek, dan menyiapkan agent user" in prompt
+    assert "memahami workflow user, menjelaskan eskalasi" in prompt
     assert "Arthur Builder: aktif" in prompt
     assert "membuat, membaca, mengubah, dan menghapus agent platform milik Owner" in prompt
 
@@ -898,6 +998,30 @@ async def test_send_whatsapp_image_uses_current_attachment_without_sandbox(tmp_p
     assert base64.b64decode(sent["image_b64"]) == raw
     assert sent["caption"] == "Promo hari ini"
     assert sent["mimetype"] == "image/png"
+
+
+@pytest.mark.asyncio
+async def test_send_whatsapp_image_hides_unverified_local_path_without_sandbox():
+    from app.core.engine.tool_builder import build_whatsapp_media_tools
+
+    session = SimpleNamespace(
+        channel_config={"device_id": "arthur-device", "user_phone": "628123@s.whatsapp.net"},
+        metadata_={},
+    )
+    tool = next(
+        item
+        for item in build_whatsapp_media_tools(
+            session,
+            sandbox=None,
+            allow_workspace_paths=False,
+        )
+        if item.name == "send_whatsapp_image"
+    )
+
+    result = await tool.ainvoke({"image_path_or_base64": "career_survey_chart.png"})
+
+    assert result.startswith("[MEDIA_SOURCE_UNAVAILABLE]")
+    assert "sandbox" not in result.lower()
 
 
 def test_current_image_attachment_delivery_request_extracts_caption():

@@ -44,9 +44,9 @@ def build_builder_blueprint_tools(
         Blueprint berisi workflow, data yang wajib dikumpulkan, knowledge yang dibutuhkan,
         aturan eskalasi, tool plan, dan checklist validasi. Gunakan ini untuk agent bisnis
         yang butuh SOP/custom workflow, terutama CS, ecommerce, HR, data, dan personal assistant.
-        Jangan tampilkan blueprint ke user untuk minta approval mikro. Setelah tool ini sukses,
-        lanjutkan langsung ke compose_agent_instructions kecuali ada data kritis yang benar-benar
-        tidak bisa diinfer dari pesan, dokumen, atau konteks percakapan.
+        Jangan mengarang bagian yang belum diberikan user. Setelah tool ini sukses, lanjutkan
+        hanya jika tidak ada assumptions atau missing_info_questions; jika ada, Arthur wajib
+        menanyakannya dan menunggu jawaban user.
 
         Args:
             preset_id: Preset yang dipilih dari plan_agent
@@ -85,7 +85,7 @@ def build_builder_blueprint_tools(
             "Schema JSON wajib:\n"
             "{\n"
             '  "agent_summary": "...",\n'
-            '  "assumptions": ["..."],\n'
+            '  "assumptions": [],\n'
             '  "workflow_steps": [{"step": 1, "name": "...", "agent_action": "...", "required_user_data": ["..."], "success_criteria": "..."}],\n'
             '  "knowledge_plan": {"must_have": ["..."], "nice_to_have": ["..."], "needs_upload": true},\n'
             '  "tool_plan": [{"tool": "...", "why": "...", "when_to_use": "..."}],\n'
@@ -99,7 +99,8 @@ def build_builder_blueprint_tools(
             "}\n\n"
             "Pastikan workflow berbeda untuk tiap konteks bisnis. Jangan isi generik seperti 'jawab pertanyaan user' saja. "
             "Jika ada pembayaran/approval/deliverable, state_plan harus memuat minimal: intake, waiting_payment, payment_review, approved, delivery, aftercare. "
-            "Jika tidak relevan, buat state_plan yang sesuai preset dan tujuan user."
+            "Jika tidak relevan, buat state_plan yang sesuai preset dan tujuan user. "
+            "DILARANG mengisi assumptions. Informasi yang belum dinyatakan harus masuk ke missing_info_questions, bukan ditebak."
         )
 
         def _fallback_response(parse_status: str) -> str:
@@ -114,10 +115,18 @@ def build_builder_blueprint_tools(
                 known_constraints=known_constraints,
                 tools_config=tc,
             )
+            assumptions = list(fallback.get("assumptions") or [])
+            missing_questions = list(fallback.get("missing_info_questions") or [])
             return json.dumps({
                 "blueprint": fallback,
                 "parse_status": parse_status,
-                "next_step": "Gunakan blueprint fallback ini untuk compose_agent_instructions jika konteks user sudah cukup; jangan minta approval mikro.",
+                "requires_user_input": True,
+                "assumptions_detected": assumptions,
+                "missing_info_questions": missing_questions,
+                "next_step": (
+                    "Jangan lanjut create/update dari blueprint fallback. "
+                    "Minta user mengonfirmasi kebutuhan yang belum pasti, lalu panggil compose_agent_blueprint lagi."
+                ),
             }, ensure_ascii=False, indent=2)
 
         try:
@@ -125,12 +134,18 @@ def build_builder_blueprint_tools(
                 user_msg,
                 system_msg,
                 model=_BLUEPRINT_WRITER_MODEL,
-                max_tokens=6000,
+                max_tokens=3000,
                 temperature=0.2,
                 json_mode=True,
             )
         except Exception as exc:
-            _get_logger().error("builder_tools.compose_agent_blueprint.error", error=str(exc))
+            _get_logger().error(
+                "builder_tools.compose_agent_blueprint.error",
+                error_type=type(exc).__name__,
+                error=repr(exc),
+                preset_id=preset_id,
+                agent_name=agent_name,
+            )
             return _fallback_response("deterministic_fallback")
 
         try:
@@ -145,12 +160,23 @@ def build_builder_blueprint_tools(
             )
             return _fallback_response("deterministic_fallback")
 
+        assumptions = list(blueprint.get("assumptions") or [])
+        missing_questions = list(blueprint.get("missing_info_questions") or [])
+        requires_user_input = bool(assumptions or missing_questions)
+        if assumptions:
+            blueprint["missing_info_questions"] = [
+                *missing_questions,
+                *[f"Mohon konfirmasi, jangan diasumsikan: {item}" for item in assumptions],
+            ]
+            blueprint["assumptions"] = []
+
         payload = {
             "blueprint": blueprint,
+            "requires_user_input": requires_user_input,
             "next_step": (
-                "Gunakan blueprint ini sebagai agent_blueprint saat compose_agent_instructions. "
-                "Jangan minta user menyetujui blueprint. Tanya user hanya jika missing_info_questions "
-                "berisi blocker kritis yang tidak bisa diinfer; selain itu lanjutkan create flow."
+                "Tanyakan missing_info_questions dan tunggu jawaban user; jangan lanjut compose/create."
+                if requires_user_input
+                else "Gunakan blueprint ini sebagai agent_blueprint saat menyusun SOP dan instructions."
             ),
         }
         if repaired_json:

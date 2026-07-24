@@ -1,3 +1,8 @@
+import asyncio
+import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
 from app.core.engine.reply_guard import ensure_non_empty_reply
 
 
@@ -8,6 +13,23 @@ def test_builder_google_auth_agent_id_detects_update_needs_auth():
     steps = [
         {
             "tool": "update_agent",
+            "result": (
+                '{"success": true, "agent_id": "%s", "google_workspace_enabled": true, '
+                '"needs_google_auth": true}'
+            ) % agent_id,
+        }
+    ]
+
+    assert _builder_google_auth_agent_id(steps) == agent_id
+
+
+def test_builder_google_auth_agent_id_detects_create_needs_auth():
+    from app.core.engine.agent_runner import _builder_google_auth_agent_id
+
+    agent_id = "11111111-1111-4111-8111-111111111111"
+    steps = [
+        {
+            "tool": "create_agent",
             "result": (
                 '{"success": true, "agent_id": "%s", "google_workspace_enabled": true, '
                 '"needs_google_auth": true}'
@@ -32,14 +54,74 @@ def test_builder_google_auth_agent_id_skips_when_tool_already_called():
     assert _builder_google_auth_agent_id(steps) is None
 
 
+def test_builder_google_auth_link_is_appended_after_create_even_if_model_skips_tool():
+    from app.core.engine.agent_google_routing import _append_builder_google_auth_link_if_needed
+
+    agent_id = "11111111-1111-4111-8111-111111111111"
+    steps = [
+        {
+            "tool": "create_agent",
+            "result": (
+                '{"success": true, "agent_id": "%s", "google_workspace_enabled": true, '
+                '"needs_google_auth": true}'
+            ) % agent_id,
+        }
+    ]
+    session = SimpleNamespace(
+        external_user_id="+628111111111",
+        channel_type="whatsapp",
+        channel_config={"phone_number": "+628111111111"},
+    )
+    settings = SimpleNamespace(
+        google_integration_service_url="https://integration.example.test",
+        api_key="test-key",
+    )
+    log = MagicMock()
+
+    with patch(
+        "app.core.engine.agent_google_routing._fetch_google_auth_link",
+        new=AsyncMock(return_value="https://accounts.example.test/oauth"),
+    ) as fetch_auth:
+        out = asyncio.run(_append_builder_google_auth_link_if_needed(
+            "Veselka Care sudah jadi.",
+            steps=steps,
+            session=session,
+            settings_obj=settings,
+            log=log,
+        ))
+
+    fetch_auth.assert_awaited_once()
+    assert "https://accounts.example.test/oauth" in out
+    assert "Buka link ini dulu" in out
+
+
 def test_needs_builder_create_completion_when_planned_but_not_created():
     from app.core.engine.agent_runner import _needs_builder_create_completion
 
     steps = [
-        {"tool": "plan_agent", "result": "ok"},
+        {"tool": "plan_agent", "result": '{"plan_status": "ready", "creation_entitlement_check": {"checked": true, "allowed": true}}'},
         {"tool": "compose_agent_instructions", "result": "ok"},
     ]
     assert _needs_builder_create_completion(steps, is_builder=True) is True
+
+
+def test_needs_builder_create_completion_false_when_discovery_needs_clarification():
+    from app.core.engine.agent_runner import _needs_builder_create_completion
+
+    steps = [
+        {
+            "tool": "plan_agent",
+            "result": '{"plan_status": "needs_clarification", "next_group": {"id": "agent_behavior"}}',
+        }
+    ]
+    assert _needs_builder_create_completion(steps, is_builder=True) is False
+
+
+def test_needs_builder_create_completion_false_for_unstructured_plan_output():
+    from app.core.engine.agent_runner import _needs_builder_create_completion
+
+    steps = [{"tool": "plan_agent", "result": "ok"}]
+    assert _needs_builder_create_completion(steps, is_builder=True) is False
 
 
 def test_needs_builder_create_completion_false_when_created():
@@ -84,6 +166,30 @@ def test_keep_existing_reply():
     assert ensure_non_empty_reply("Halo jadi", []) == "Halo jadi"
 
 
+def test_builder_clarification_fallback_returns_questions_not_system_error():
+    steps = [
+        {
+            "tool": "plan_agent",
+            "result": json.dumps(
+                {
+                    "plan_status": "needs_clarification",
+                    "capability_clarifications": [
+                        {"topic": "problem", "question": "Masalah utama apa yang ingin diselesaikan?"},
+                        {"topic": "audience", "question": "Siapa yang akan memakai agent ini?"},
+                    ],
+                }
+            ),
+        }
+    ]
+
+    out = ensure_non_empty_reply("", steps)
+
+    assert out == "Masalah utama apa yang ingin diselesaikan?"
+    assert "Siapa yang akan memakai" not in out
+    assert "kendala sistem" not in out.lower()
+    assert "coba kirim lagi" not in out.lower()
+
+
 def test_build_reply_from_url_in_steps():
     steps = [{"tool": "task", "result": "done https://abc.trycloudflare.com"}]
     out = ensure_non_empty_reply("", steps)
@@ -125,7 +231,7 @@ def test_builder_create_agent_success_overrides_unclear_non_empty_reply():
     assert out == "Travgent sudah jadi. ID agent: agent-123."
 
 
-def test_builder_create_whatsapp_agent_success_includes_onboarding_options():
+def test_builder_create_whatsapp_agent_success_offers_two_whatsapp_paths():
     steps = [
         {
             "tool": "create_agent",
@@ -134,8 +240,8 @@ def test_builder_create_whatsapp_agent_success_includes_onboarding_options():
     ]
     out = ensure_non_empty_reply("", steps)
     assert "CVin aja sudah jadi" in out
-    assert "nomor WhatsApp kamu sendiri" in out
-    assert "nomor demo Arthur" in out
+    assert "Nomor demo Arthur" in out
+    assert "Nomor khusus milikmu" in out
     assert "agent-123" not in out
 
 
@@ -148,9 +254,110 @@ def test_builder_create_whatsapp_agent_overrides_id_only_reply():
     ]
     out = ensure_non_empty_reply("CVin aja sudah jadi. ID agent: agent-123.", steps)
     assert out == (
-        "CVin aja sudah jadi. Sekarang mau agent ini langsung dipasang ke nomor WhatsApp kamu sendiri, "
-        "atau dicoba dulu lewat nomor demo Arthur yang sudah siap pakai?"
+        "CVin aja sudah jadi. Pilih cara menghubungkannya lewat WhatsApp:\n"
+        "1. Nomor demo Arthur — saya kirim link wa.me dan kode untuk langsung mencoba.\n"
+        "2. Nomor khusus milikmu — saya kirim scan sekali dari WhatsApp untuk menghubungkannya.\n"
+        "Balas `nomor demo` atau `nomor khusus`."
     )
+
+
+def test_builder_create_whatsapp_agent_offers_demo_and_dedicated_number_options():
+    steps = [
+        {
+            "tool": "create_agent",
+            "result": '{"success": true, "name": "Veselka Care", "agent_id": "agent-123", "channel_type": "whatsapp"}',
+        }
+    ]
+    reply = (
+        "Veselka Care sudah jadi. Sekarang mau agent ini langsung dipasang ke nomor WhatsApp kamu sendiri, "
+        "atau dicoba dulu lewat nomor demo Arthur?"
+    )
+
+    out = ensure_non_empty_reply(reply, steps)
+
+    assert "Nomor demo Arthur" in out
+    assert "Nomor khusus milikmu" in out
+    assert "wa.me" in out
+    assert "scan sekali" in out
+
+
+def test_generic_whatsapp_install_question_returns_two_options_without_dashboard():
+    out = ensure_non_empty_reply(
+        "Buka Dashboard Clevio lalu pilih Hubungkan WhatsApp.",
+        [{"tool": "get_agent_detail", "result": '{"id":"agent-1","name":"Minsel"}'}],
+        active_groups=["builder"],
+        user_message="gimana cara pasang ke whatsappnya?",
+    )
+
+    assert "Nomor demo Arthur" in out
+    assert "Nomor khusus milikmu" in out
+    assert "wa.me" in out
+    assert "dashboard" not in out.lower()
+
+
+def test_builder_dashboard_install_hallucination_is_sanitized():
+    out = ensure_non_empty_reply(
+        "Buka Dashboard Clevio, masuk Settings, lalu klik Hubungkan WhatsApp.",
+        [{"tool": "get_agent_detail", "result": '{"id":"agent-1"}'}],
+        active_groups=["builder"],
+    )
+
+    assert "Semua pengaturan agent dilakukan lewat chat WhatsApp ini" in out
+    assert "link wa.me" in out
+    assert "dashboard" not in out.lower()
+    assert "menu settings" not in out.lower()
+
+
+def test_builder_reversed_clevio_dashboard_phrase_is_sanitized():
+    out = ensure_non_empty_reply(
+        "Langsung Pasang ke Clevio Dashboard lalu scan QR di sana.",
+        [],
+        active_groups=["builder"],
+        user_message="minta qr",
+        builder_whatsapp_action="dedicated_qr",
+    )
+
+    assert "dashboard" not in out.lower()
+    assert "Semua pengaturan agent dilakukan lewat chat WhatsApp ini" in out
+
+
+def test_qr_tool_success_has_verified_whatsapp_only_reply():
+    out = ensure_non_empty_reply(
+        "QR akan saya kirim.",
+        [
+            {
+                "tool": "send_agent_wa_qr",
+                "result": "[QR_SENT] QR untuk agent 'agent-1' dikirim ke 62811.",
+            }
+        ],
+        active_groups=["builder"],
+    )
+
+    assert "sudah saya kirim" in out
+    assert "Perangkat tertaut" in out
+    assert "dashboard" not in out.lower()
+
+
+def test_demo_request_never_exposes_invalid_qr_tool_error():
+    out = ensure_non_empty_reply(
+        "Saya sedang menyiapkan kode demo Minsel.",
+        [
+            {
+                "tool": "send_agent_wa_qr",
+                "result": (
+                    "Error: send_agent_wa_qr is not a valid tool, "
+                    "try one of [get_agent_detail]"
+                ),
+            }
+        ],
+        active_groups=["builder"],
+        user_message="kodenya mana?",
+        builder_whatsapp_action="trial_link",
+    )
+
+    assert out == "Saya sedang menyiapkan kode demo Minsel."
+    assert "send_agent_wa_qr" not in out
+    assert "Scan WhatsApp belum berhasil" not in out
 
 
 def test_builder_trial_link_ambiguous_target_asks_agent_name():
@@ -224,9 +431,10 @@ def test_builder_trial_link_reply_without_code_or_link_is_replaced():
 
     out = ensure_non_empty_reply("Kode demo untuk Baas sudah saya kirim ke WhatsApp kamu.", steps)
 
-    assert "Kontak Demo Baas sudah saya kirim" in out
+    assert "kontak Demo Baas juga sudah saya kirim" in out
     assert "8EX446" in out
     assert "https://wa.me/6282221000062" in out
+    assert out.index("https://wa.me/6282221000062") < out.index("kontak Demo Baas")
 
 
 def test_builder_trial_link_success_wins_over_later_blocked_stale_target():
@@ -252,7 +460,7 @@ def test_builder_trial_link_success_wins_over_later_blocked_stale_target():
 
     out = ensure_non_empty_reply("", steps)
 
-    assert "Kontak Demo Baas sudah saya kirim" in out
+    assert "kontak Demo Baas juga sudah saya kirim" in out
     assert "8EX446" in out
     assert "Mas Brew" not in out
 
@@ -274,7 +482,7 @@ def test_builder_reply_sanitizes_webchat_channel_offer():
     assert "Fokus risetnya" in out
     assert "Channelnya saya set ke WhatsApp" in out
     assert "nomor demo Arthur" in out
-    assert "nomor WhatsApp kamu sendiri" in out
+    assert "nomor WhatsApp kamu sendiri" not in out
 
 
 def test_builder_update_agent_success_reply_is_natural():
@@ -334,6 +542,127 @@ def test_builder_create_agent_entitlement_reply_is_rewritten_to_retry():
     assert "coba ulang" in out.lower()
     assert "preset" not in out.lower()
     assert "upgrade" not in out.lower()
+
+
+def test_builder_create_file_blocker_is_rendered_as_discovery_question():
+    steps = [
+        {
+            "tool": "create_agent",
+            "result": json.dumps(
+                {"error": "Kemampuan file belum diputuskan — jangan menebak."},
+                ensure_ascii=False,
+            ),
+        }
+    ]
+
+    out = ensure_non_empty_reply(
+        "Masih saya proses ya. Saya akan kirim hasilnya begitu selesai.",
+        steps,
+    )
+
+    assert "hanya chat teks" in out
+    assert "menerima file/gambar" in out
+    assert "membuat file/laporan" in out
+    assert "belum berhasil" not in out.lower()
+    assert "proses" not in out.lower()
+
+
+def test_builder_create_discovery_blocker_returns_capability_questions():
+    steps = [
+        {
+            "tool": "create_agent",
+            "result": json.dumps(
+                {
+                    "error": "Discovery kebutuhan agent belum lengkap atau belum dikonfirmasi user.",
+                    "discovery_progress": {
+                        "next_questions": [
+                            {
+                                "topic": "main_tasks",
+                                "question": "Apa saja tugas utama agent dari awal sampai selesai?",
+                            },
+                            {
+                                "topic": "capabilities",
+                                "question": "Kemampuan apa yang dibutuhkan, termasuk keputusan file?",
+                            },
+                        ]
+                    },
+                },
+                ensure_ascii=False,
+            ),
+        }
+    ]
+
+    out = ensure_non_empty_reply("Belum berhasil dibuat.", steps)
+
+    assert out == "Apa saja tugas utama agent dari awal sampai selesai?"
+    assert "Kemampuan apa yang dibutuhkan" not in out
+    assert "belum berhasil" not in out.lower()
+
+
+def test_malformed_plan_result_does_not_override_real_confirmation_question():
+    steps = [
+        {
+            "tool": "plan_agent",
+            "result": '{"plan_status":"needs_clarification","next_questions":[' + ("x" * 4000),
+        }
+    ]
+    reply = "Sebelum saya buat, boleh konfirmasi apakah rangkuman ini sudah sesuai?"
+
+    assert ensure_non_empty_reply(reply, steps) == reply
+
+
+def test_plan_clarification_overrides_non_empty_internal_evidence_progress_note():
+    question = "Berikan 2-3 contoh percakapan ideal."
+    steps = [
+        {
+            "tool": "plan_agent",
+            "result": json.dumps(
+                {
+                    "plan_status": "needs_clarification",
+                    "capability_clarifications": [
+                        {"topic": "ideal_conversations", "question": question}
+                    ],
+                }
+            ),
+        }
+    ]
+
+    out = ensure_non_empty_reply(
+        "Sistem butuh format evidence yang lebih detail. Aku ajukan lagi ke plan_agent.",
+        steps,
+    )
+
+    assert out == question
+    assert "evidence" not in out.lower()
+    assert "plan_agent" not in out
+
+
+def test_confirmation_clarification_never_leaks_internal_instruction_over_summary():
+    summary = (
+        "Rangkuman Minsel: survey pelanggan, hasil ke Google Sheets. "
+        "Kalau sesuai, balas setuju."
+    )
+    steps = [
+        {
+            "tool": "plan_agent",
+            "result": json.dumps(
+                {
+                    "plan_status": "needs_clarification",
+                    "capability_clarifications": [
+                        {
+                            "topic": "user_confirmed",
+                            "question": (
+                                "Saya akan merangkum seluruh jawaban discovery. "
+                                "Setelah rangkumannya benar, minta user menyatakan setuju."
+                            ),
+                        }
+                    ],
+                }
+            ),
+        }
+    ]
+
+    assert ensure_non_empty_reply(summary, steps) == summary
 
 
 def test_builder_entitlement_error_forces_retry_reply():

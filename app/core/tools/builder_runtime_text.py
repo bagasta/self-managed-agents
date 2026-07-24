@@ -6,17 +6,32 @@ from app.core.utils.phone_utils import normalize_phone
 
 def _append_google_workspace_instruction(instructions: str | None) -> tuple[str, bool]:
     base = (instructions or "").rstrip()
-    if "Google Workspace tools aktif" in base or "Google Docs" in base and "Google Drive" in base:
-        return base, False
-    block = (
-        "\n\nKEMAMPUAN GOOGLE WORKSPACE\n"
-        "Jika user meminta membuat atau mengedit Google Docs, Google Sheets, Google Drive, Gmail, Calendar, Slides, atau Forms, "
-        "gunakan integrasi Google Workspace yang tersedia. Jangan mengatakan tidak punya akses jika integrasi Google aktif. "
-        "Untuk laporan riset di Google Docs, lakukan riset terlebih dahulu, susun konten lengkap, lalu buat dokumen Google Docs dan kirim link dokumennya. "
-        "Jika akun Google Owner belum terhubung atau perlu izin ulang, jelaskan secara natural bahwa Owner perlu menghubungkan Google lagi dan berikan link otentikasi jika tersedia. "
-        "Jangan menyebut istilah teknis internal/protokol tool kepada user."
+    has_workspace_instruction = (
+        "Google Workspace tools aktif" in base
+        or "Google Docs" in base and "Google Drive" in base
     )
-    return f"{base}{block}" if base else block.strip(), True
+    has_sheets_safety_rule = "ATURAN GOOGLE SHEETS" in base
+    if has_workspace_instruction and has_sheets_safety_rule:
+        return base, False
+    blocks: list[str] = []
+    if not has_workspace_instruction:
+        blocks.append(
+            "KEMAMPUAN GOOGLE WORKSPACE\n"
+            "Jika user meminta membuat atau mengedit Google Docs, Google Sheets, Google Drive, Gmail, Calendar, Slides, atau Forms, "
+            "gunakan integrasi Google Workspace yang tersedia. Jangan mengatakan tidak punya akses jika integrasi Google aktif. "
+            "Untuk laporan riset di Google Docs, lakukan riset terlebih dahulu, susun konten lengkap, lalu buat dokumen Google Docs dan kirim link dokumennya. "
+            "Jika akun Google Owner belum terhubung atau perlu izin ulang, jelaskan secara natural bahwa Owner perlu menghubungkan Google lagi dan berikan link otentikasi jika tersedia. "
+            "Jangan menyebut istilah teknis internal/protokol tool kepada user."
+        )
+    if not has_sheets_safety_rule:
+        blocks.append(
+            "ATURAN GOOGLE SHEETS\n"
+            "Untuk permintaan menambah, mencatat, atau mengimpor record ke sheet yang sudah ada: wajib baca struktur/header sheet terlebih dahulu dengan read_sheet_values, "
+            "lalu gunakan append_table_rows dengan object yang key-nya persis nama header. Jangan gunakan modify_sheet_values atau memilih range A1/A2 untuk menambah record. "
+            "modify_sheet_values hanya untuk perubahan pada range yang user sebutkan secara eksplisit. Jika header tidak ada, ambigu, atau data tidak cocok dengan kolom, jangan menulis dan minta klarifikasi."
+        )
+    addition = "\n\n".join(blocks)
+    return f"{base}\n\n{addition}" if base else addition, True
 
 
 def _platform_staff_identity_block(

@@ -6,10 +6,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -48,8 +50,37 @@ type DeviceManager struct {
 	mu            sync.RWMutex
 	devices       map[string]*DeviceInfo
 	pythonWebhook string
+	httpClient    *http.Client
+	webhookSlots  chan struct{}
 	storeDir      string
 	typingCancels sync.Map // key: "deviceID:chatJID" → context.CancelFunc
+}
+
+func newPythonWebhookClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 128
+	transport.MaxIdleConnsPerHost = 64
+	transport.MaxConnsPerHost = 128
+	transport.IdleConnTimeout = 90 * time.Second
+	transport.TLSHandshakeTimeout = 10 * time.Second
+	transport.ExpectContinueTimeout = time.Second
+	transport.ForceAttemptHTTP2 = true
+
+	return &http.Client{
+		Transport: transport,
+		// Agent runs may legitimately take several minutes. This is still finite so
+		// a broken API cannot leak webhook goroutines forever.
+		Timeout: 330 * time.Second,
+	}
+}
+
+func webhookMaxInFlight() int {
+	const fallback = 48
+	value, err := strconv.Atoi(os.Getenv("WEBHOOK_MAX_IN_FLIGHT"))
+	if err != nil || value < 1 {
+		return fallback
+	}
+	return value
 }
 
 func quotedMessageText(ctx *waE2E.ContextInfo) string {
@@ -152,6 +183,8 @@ func NewDeviceManager(pythonWebhook, storeDir string) (*DeviceManager, error) {
 	dm := &DeviceManager{
 		devices:       make(map[string]*DeviceInfo),
 		pythonWebhook: pythonWebhook,
+		httpClient:    newPythonWebhookClient(),
+		webhookSlots:  make(chan struct{}, webhookMaxInFlight()),
 		storeDir:      storeDir,
 	}
 	dm.loadExistingDevices()
@@ -482,6 +515,7 @@ func (dm *DeviceManager) Close() {
 		info.Container.Close()
 		log.Printf("[%s] disconnected on shutdown", id)
 	}
+	dm.httpClient.CloseIdleConnections()
 }
 
 // loadExistingDevices reconnects all persisted devices on startup.
@@ -963,11 +997,16 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 	data, _ := json.Marshal(payload)
 
 	go func() {
-		resp, err := http.Post(dm.pythonWebhook, "application/json", bytes.NewReader(data))
+		dm.webhookSlots <- struct{}{}
+		defer func() { <-dm.webhookSlots }()
+
+		resp, err := dm.httpClient.Post(dm.pythonWebhook, "application/json", bytes.NewReader(data))
 		if err != nil {
 			log.Printf("[%s] forward to python err: %v", deviceID, err)
+			dm.stopTypingKeepAlive(deviceID, chatJID)
 			return
 		}
+		_, _ = io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 		if resp.StatusCode >= 400 {
 			log.Printf("[%s] python webhook returned HTTP %d for msg from %s (chat: %s)", deviceID, resp.StatusCode, from, chatID)

@@ -81,6 +81,14 @@ def test_owner_is_operator_identity():
     assert is_operator_message("628owner", "628owner@s.whatsapp.net", agent) is True
 
 
+def test_single_digit_survey_answer_is_not_treated_as_short_noise():
+    from app.api.channels import _is_low_information_wa_text
+
+    assert _is_low_information_wa_text("5") is False
+    assert _is_low_information_wa_text("0") is False
+    assert _is_low_information_wa_text("x") is True
+
+
 def test_configured_operator_phone_is_escalation_operator_even_if_owner_differs():
     from app.api.wa_helpers import is_operator_message
 

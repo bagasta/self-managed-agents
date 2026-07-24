@@ -668,10 +668,11 @@ def build_agent_operating_manual_from_blueprint(
         maturity = "needs_review"
         owner_review_required = True
 
-    assumptions = _as_text_list(payload.get("assumptions"), fallback=[
-        "SOP dibuat dari blueprint Arthur dan harus diikuti sebagai kontrak kerja agent.",
-        "Jika data bisnis belum pasti, agent harus bertanya, memakai tool yang tersedia, atau eskalasi.",
-    ])
+    # A missing assumptions key means the blueprint did not declare any
+    # assumptions. Meta guidance such as "follow this SOP" is a runtime rule,
+    # not an unverified business fact, and must not block a valid deterministic
+    # fallback manual.
+    assumptions = _as_text_list(payload.get("assumptions"))
 
     return {
         "manual_id": "agent_operating_manual",

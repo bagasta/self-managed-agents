@@ -60,7 +60,9 @@ def build_builder_instruction_tools(
         Args:
             preset_id: Preset yang digunakan (coding_deploy_agent, cs_whatsapp_basic, dll)
             agent_name: Nama agent
-            business_context: Info bisnis lengkap: produk, layanan, jam buka, kebijakan, harga, dll.
+            business_context: Info bisnis lengkap dari discovery: problem, produk/layanan, workflow,
+                kebijakan, harga, data, batas wewenang, knowledge, integrasi, dan output. Jangan meminta
+                atau mengarang jam aktif/jam operasional agent.
                               Semakin detail semakin baik. Kosong hanya untuk agent coding/general.
             persona: Gaya bicara dan karakter agent (misal: "hangat, sabar, suka bercanda")
             channel: Channel: 'whatsapp'
@@ -315,8 +317,8 @@ def build_builder_instruction_tools(
                     "Gunakan 'instructions' di atas sebagai parameter create_agent untuk agent baru, "
                     "atau update_agent untuk agent existing yang sedang diperbaiki. "
                     "Jika remaining_placeholders tidak kosong, perbaiki secara manual atau panggil ulang maksimal satu kali. "
-                    "Jika valid untuk agent baru, langsung create_agent tanpa tanya approval lagi. "
-                    "Jika valid untuk agent existing, langsung update_agent tanpa tanya approval lagi."
+                    "Eksekusi hanya jika user sudah mengonfirmasi rangkuman workflow dan eskalasi yang lengkap; "
+                    "jangan gunakan instructions ini untuk mengisi kebutuhan yang belum dinyatakan user."
                 ),
             }
             if fallback_status:

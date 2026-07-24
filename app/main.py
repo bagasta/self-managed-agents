@@ -15,13 +15,15 @@ from prometheus_fastapi_instrumentator import Instrumentator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api import agents, auth, channels, custom_tools, documents, history, memory, messages, models, runs, sessions, skills, stream, subscriptions, users
 from app.config import get_settings
-from app.database import get_db
+from app.database import engine, get_db
 from app.middleware.request_id import RequestIDMiddleware
+from app.models.agent import Agent
+from app.models.skill import Skill
 
 settings = get_settings()
 HEALTH_DB_TIMEOUT_SECONDS = 2.0
@@ -113,9 +115,18 @@ async def lifespan(_app: FastAPI):
     except asyncio.TimeoutError:
         structlog.get_logger(__name__).warning("startup.abandon_running_runs.timeout")
 
-    # Start proactive agent scheduler (only in non-worker deployments)
+    # Create the bounded Redis pool before burst traffic reaches the process.
+    # Consumers still degrade to their existing in-memory fallbacks when Redis
+    # is unavailable.
+    from app.core.infra.redis_client import close_redis, get_redis
+    await get_redis()
+
+    # Local/dev deployments can keep the scheduler embedded. Production runs a
+    # dedicated scheduler container so API capacity stays focused on chat.
     from app.core.workers.scheduler_service import start_scheduler, stop_scheduler
-    start_scheduler()
+
+    if settings.embedded_scheduler_enabled:
+        start_scheduler()
 
     from app.core.infra.deployment_service import (
         cleanup_expired_deployments,
@@ -160,7 +171,10 @@ async def lifespan(_app: FastAPI):
             await _t
         except asyncio.CancelledError:
             pass
-    stop_scheduler()
+    if settings.embedded_scheduler_enabled:
+        stop_scheduler()
+    await close_redis()
+    await engine.dispose()
 
 
 app = FastAPI(
@@ -209,12 +223,31 @@ Instrumentator().instrument(app).expose(app, endpoint="/metrics", tags=["meta"])
 
 @app.get("/health", tags=["meta"])
 async def health() -> dict:
-    return {"status": "ok", "version": "0.2.0"}
+    return {
+        "status": "ok",
+        "version": "0.2.0",
+        "commit": settings.app_commit_sha,
+        "arthur_runtime": {
+            "engine_version": settings.arthur_engine_version,
+            "prompt_version": settings.arthur_prompt_version,
+            "primary_model": settings.arthur_primary_model,
+            "document_model": settings.arthur_document_model,
+            "image_model": settings.arthur_image_model,
+        },
+    }
 
 
 @app.get("/health/detailed", tags=["meta"])
 async def health_detailed(db: AsyncSession = Depends(get_db)) -> dict:
     checks: dict[str, str] = {}
+    arthur_runtime: dict[str, object] = {
+        "engine_version": settings.arthur_engine_version,
+        "prompt_version": settings.arthur_prompt_version,
+        "primary_model": settings.arthur_primary_model,
+        "document_model": settings.arthur_document_model,
+        "image_model": settings.arthur_image_model,
+        "active_system_skills": 0,
+    }
 
     try:
         await asyncio.wait_for(
@@ -222,13 +255,52 @@ async def health_detailed(db: AsyncSession = Depends(get_db)) -> dict:
             timeout=HEALTH_DB_TIMEOUT_SECONDS,
         )
         checks["database"] = "ok"
+        _arthur_result = await db.execute(
+            select(Agent).where(
+                Agent.name == "Arthur",
+                Agent.capabilities.contains(["system"]),
+                Agent.is_deleted.is_(False),
+            )
+        )
+        arthur = (
+            _arthur_result.scalar_one_or_none()
+            if hasattr(_arthur_result, "scalar_one_or_none")
+            else None
+        )
+        if arthur is not None:
+            active_skills = list(
+                (
+                    await db.execute(
+                        select(Skill).where(
+                            Skill.agent_id == arthur.id,
+                            Skill.trust_level == "system",
+                            Skill.enabled.is_(True),
+                        )
+                    )
+                ).scalars()
+            )
+            runtime_cfg = (
+                arthur.tools_config.get("arthur_runtime", {})
+                if isinstance(arthur.tools_config, dict)
+                else {}
+            )
+            arthur_runtime.update({
+                "primary_model": arthur.model,
+                "engine_version": runtime_cfg.get("engine_version", settings.arthur_engine_version),
+                "prompt_version": runtime_cfg.get("prompt_version", settings.arthur_prompt_version),
+                "skill_bundle_version": runtime_cfg.get("skill_bundle_version"),
+                "active_system_skills": len(active_skills),
+            })
     except asyncio.TimeoutError:
         checks["database"] = "error: timeout"
     except Exception as exc:
         checks["database"] = f"error: {exc}"
 
     from app.core.workers.scheduler_service import is_scheduler_running
-    checks["scheduler"] = "ok" if is_scheduler_running() else "stopped"
+    if settings.embedded_scheduler_enabled:
+        checks["scheduler"] = "ok" if is_scheduler_running() else "stopped"
+    else:
+        checks["scheduler"] = "external"
 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -237,10 +309,16 @@ async def health_detailed(db: AsyncSession = Depends(get_db)) -> dict:
     except Exception:
         checks["wa_service"] = "unreachable"
 
-    all_ok = all(v == "ok" for v in checks.values())
+    all_ok = all(v in {"ok", "external"} for v in checks.values())
     return JSONResponse(
         status_code=200 if all_ok else 503,
-        content={"status": "ok" if all_ok else "degraded", "checks": checks, "version": "0.2.0"},
+        content={
+            "status": "ok" if all_ok else "degraded",
+            "checks": checks,
+            "version": "0.2.0",
+            "commit": settings.app_commit_sha,
+            "arthur_runtime": arthur_runtime,
+        },
     )
 
 

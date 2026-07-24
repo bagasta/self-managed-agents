@@ -73,20 +73,6 @@ META_BUILDER_AGENT_POLICY_PATTERNS = (
         r"[^.\n]{0,15}\b(?:kamu|dirimu|kau|arthur|you|yourself)\b",
         re.IGNORECASE,
     ),
-    # Tujuan = membangun AI agent / LLM agent (walau dibingkai "asisten coding").
-    # Verb membangun + target "AI agent / agentic / LLM agent / chatbot AI".
-    re.compile(
-        r"\b(?:bikin|bikinin|buat|buatk?\w*|membuat|bangun|membangun|develop\w*|ngoding|coding|"
-        r"nulis\s+kode|menulis\s+kode|create|build\w*|generate)\b[^.\n]{0,45}\b"
-        r"(?:ai\s*agent|agent\s*ai|ai\s*agents|llm\s*agent|agentic|chatbot\s*ai|ai\s*chatbot)\b",
-        re.IGNORECASE,
-    ),
-    # "bantu(in) ... bikin/develop ... AI agent" (framing developer minta coding helper)
-    re.compile(
-        r"\bbantu\w*\b[^.\n]{0,40}\b(?:bikin|buat|membuat|bangun|membangun|develop\w*|coding|ngoding|"
-        r"create|build\w*)\b[^.\n]{0,30}\b(?:ai\s*agent|agent\s*ai|llm\s*agent|agentic)\b",
-        re.IGNORECASE,
-    ),
     # Framework agentic = sinyal kuat tujuan membangun AI agent.
     re.compile(
         r"\b(?:langchain|langgraph|auto[\s-]?gen|crew\s*ai|crewai|"

@@ -16,20 +16,30 @@ import os
 import pathlib
 import sys
 
+import yaml
+
 # Add project root to path
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
 
-RULEBOOK_PATH = pathlib.Path(__file__).parent.parent / "system-message-builder.md"
+PROJECT_ROOT = pathlib.Path(__file__).parent.parent
+ARTHUR_SKILLS_ROOT = PROJECT_ROOT / "arthur-skills"
+RULEBOOK_PATH = ARTHUR_SKILLS_ROOT / "KERNEL.md"
+ARTHUR_SKILL_BUNDLE_VERSION = "arthur-skills-2026-07-24-v11"
 
 ARTHUR_SOUL = """\
 Kamu adalah Arthur, AI Agent Builder.
 
-Tugasmu adalah membantu user merancang, membuat, dan mengelola AI agent di platform ini.
-Kamu bekerja seperti seorang arsitek sistem — memahami kebutuhan user, merekomendasikan konfigurasi yang tepat, dan mengeksekusi pembuatan agent secara langsung via tools.
+Tugasmu adalah membantu user memahami, merancang, membuat, menguji, dan mengelola AI agent di platform ini.
+Kamu bekerja seperti konsultan dan arsitek sistem: pahami bisnis serta workflow user lebih dulu, jelaskan eskalasi sejak awal, rangkum kebutuhan faktual, lalu eksekusi hanya setelah user mengonfirmasi bahwa rangkuman itu benar.
 
 PRINSIP KERJAMU:
 - Resourceful dulu — gunakan get_platform_capabilities(), get_presets(), dan plan_agent() sebelum create
+- Dilarang membuat asumsi untuk create, edit, atau delete; detail yang belum jelas harus ditanyakan, bukan diisi dengan default atau tebakan
+- Sebelum membuat agent, selesaikan discovery enam grup: konteks/tujuan, perilaku, eskalasi/batas pengetahuan, data/knowledge, skala/integrasi, dan approver go-live untuk kebutuhan pekerjaan. Tanyakan satu grup per pesan, beri contoh untuk tone serta percakapan ideal/red line, lalu rangkum dan minta konfirmasi akhir
+- Jangan menanyakan jam aktif agent, jam operasional, business hours, atau pilihan 24/7 pada discovery pembuatan agent
+- Untuk pekerjaan/bisnis, eskalasi wajib berisi kondisi pemicu, nama/role penerima, dan nomor WhatsApp; untuk personal cukup tentukan respons saat agent tidak tahu/fallback, sedangkan nomor eskalasi dan approver boleh dilewati
+- Setelah agent dibuat, tawarkan dua jalur WhatsApp yang setara: nomor demo Arthur atau pemasangan ke nomor khusus milik user. Jalankan tool jalur yang dipilih pada turn yang sama
 - Jika butuh riset eksternal atau info terbaru, gunakan Tavily browsing tools; jangan gunakan HTTP/ngrok untuk operasi platform internal
 - Tolak pembuatan atau update agent untuk buzzer, kampanye politik, propaganda politik, atau manipulasi opini publik
 - Setiap agent yang kamu buat WAJIB punya soul yang jelas — lebih efisien kirim soul langsung lewat create_agent(soul=...), atau fallback via set_agent_memory(agent_id, key="soul", value=...)
@@ -38,16 +48,16 @@ PRINSIP KERJAMU:
 
 CARA BICARA:
 - Bahasa: Indonesia, profesional tapi santai
-- Jangan berulang kali minta konfirmasi jika user sudah bilang lanjut/buat/langsung
+- Kata lanjut/buat/langsung bukan izin mengarang detail yang belum diberikan; tetap pastikan workflow dan eskalasi sudah jelas
 - Berikan penjelasan singkat kenapa kamu memilih konfigurasi tertentu
 """
 
 ARTHUR_CONFIG = {
     "name": "Arthur",
     "description": "AI Agent Builder — bantu user buat dan kelola AI agent via WhatsApp",
-    "model": "openai/gpt-4.1-mini",
+    "model": "deepseek/deepseek-v4-flash",
     "temperature": 0.2,
-    "max_tokens": 2048,         # Arthur butuh ruang lebih untuk nulis instructions agent
+    "max_tokens": 8192,
     "capabilities": ["system", "builder"],
     "allowed_senders": None,  # terbuka untuk siapapun
     "token_quota": 0,            # 0 = unlimited; Arthur adalah control-plane agent
@@ -67,6 +77,19 @@ ARTHUR_CONFIG = {
         "wa_agent_manager": True,
         "subagents": {"enabled": False},  # disabled — hemat ~250 tokens/request
         "builder": True,        # marker, dimuat via is_system_agent flag
+        "arthur_runtime": {
+            "enabled": True,
+            "progressive_skills": True,
+            "build_state": True,
+            "image_routing": True,
+            "document_routing": True,
+            "primary_model": "deepseek/deepseek-v4-flash",
+            "document_model": "mistral-ocr-latest",
+            "image_model": "openai/gpt-4.1-mini",
+            "engine_version": "arthur-progressive-v1",
+            "prompt_version": "arthur-kernel-v9",
+            "skill_bundle_version": ARTHUR_SKILL_BUNDLE_VERSION,
+        },
     },
     "escalation_config": {},
     "operator_ids": [
@@ -84,7 +107,39 @@ async def seed(dry_run: bool = False) -> None:
         sys.exit(1)
 
     instructions = RULEBOOK_PATH.read_text(encoding="utf-8")
-    print(f"[OK] Rulebook dimuat: {len(instructions)} karakter")
+    print(f"[OK] Compact kernel dimuat: {len(instructions)} karakter")
+    if len(instructions) > 10_000:
+        print("[ERROR] Arthur kernel melebihi batas 10.000 karakter")
+        sys.exit(1)
+
+    skill_sources: list[dict] = []
+    for skill_path in sorted(ARTHUR_SKILLS_ROOT.glob("*/SKILL.md")):
+        runtime_path = skill_path.parent / "runtime.yaml"
+        if not runtime_path.exists():
+            print(f"[ERROR] runtime.yaml tidak ditemukan untuk {skill_path.parent.name}")
+            sys.exit(1)
+        content = skill_path.read_text(encoding="utf-8")
+        if "[TODO" in content:
+            print(f"[ERROR] Skill masih berisi TODO: {skill_path}")
+            sys.exit(1)
+        if not content.startswith("---\n") or "\n---\n" not in content[4:]:
+            print(f"[ERROR] Frontmatter skill invalid: {skill_path}")
+            sys.exit(1)
+        _frontmatter, body = content[4:].split("\n---\n", 1)
+        metadata = yaml.safe_load(_frontmatter) or {}
+        runtime = yaml.safe_load(runtime_path.read_text(encoding="utf-8")) or {}
+        skill_sources.append({
+            "name": metadata.get("name"),
+            "description": metadata.get("description"),
+            "content_md": body.strip(),
+            "version": str(runtime.get("version") or "1.0.0"),
+            "triggers": list(runtime.get("triggers") or []),
+            "supported_states": list(runtime.get("supported_states") or []),
+            "allowed_tool_groups": list(runtime.get("allowed_tool_groups") or []),
+        })
+    if len(skill_sources) != 8 or any(not item["name"] or not item["description"] for item in skill_sources):
+        print(f"[ERROR] Bundle skill Arthur tidak lengkap/invalid: {len(skill_sources)} skill")
+        sys.exit(1)
 
     if dry_run:
         print("\n=== DRY RUN — config yang akan di-seed ===")
@@ -94,6 +149,7 @@ async def seed(dry_run: bool = False) -> None:
         print(f"  tools_config  : {ARTHUR_CONFIG['tools_config']}")
         print(f"  operator_ids  : {ARTHUR_CONFIG['operator_ids']}")
         print(f"  instructions  : {instructions[:200]}...")
+        print(f"  skill_bundle  : {ARTHUR_SKILL_BUNDLE_VERSION} ({len(skill_sources)} skills)")
         print("\n[DRY RUN] Tidak ada perubahan ke database.")
         return
 
@@ -136,7 +192,7 @@ async def seed(dry_run: bool = False) -> None:
             await db.commit()
             print(f"[UPDATED] Arthur diupdate ke versi {existing.version}")
             print(f"  id     : {existing.id}")
-            print(f"  api_key: {existing.api_key}")
+            print("  api_key: [REDACTED — existing key preserved]")
             arthur_id = existing.id
         else:
             arthur = Agent(
@@ -163,7 +219,7 @@ async def seed(dry_run: bool = False) -> None:
             await db.refresh(arthur)
             print(f"[CREATED] Arthur berhasil dibuat!")
             print(f"  id     : {arthur.id}")
-            print(f"  api_key: {arthur.api_key}")
+            print("  api_key: [REDACTED — stored in database]")
             arthur_id = arthur.id
 
     # Seed Arthur's soul ke agent_memories (scope=None → global per agent)
@@ -172,6 +228,19 @@ async def seed(dry_run: bool = False) -> None:
         await upsert_memory(arthur_id, "soul", ARTHUR_SOUL, db, scope=None)
         await db.commit()
     print(f"[OK] Arthur's soul di-seed ke agent_memories")
+
+    from app.core.domain.skill_service import publish_system_skill
+    async with AsyncSessionLocal() as db:
+        for source in skill_sources:
+            await publish_system_skill(
+                agent_id=arthur_id,
+                bundle_version=ARTHUR_SKILL_BUNDLE_VERSION,
+                publisher="scripts/seed_arthur.py",
+                db=db,
+                **source,
+            )
+        await db.commit()
+    print(f"[OK] {len(skill_sources)} system skills Arthur dipublish: {ARTHUR_SKILL_BUNDLE_VERSION}")
 
     print("\n=== Langkah selanjutnya ===")
     print("1. Pastikan Arthur terhubung ke channel WhatsApp yang dipakai user.")

@@ -6,7 +6,27 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 )
+
+const maxMediaDownloadBytes int64 = 64 << 20
+
+var mediaDownloadClient = newMediaDownloadClient()
+
+func newMediaDownloadClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 32
+	transport.MaxIdleConnsPerHost = 8
+	transport.MaxConnsPerHost = 16
+	transport.IdleConnTimeout = 90 * time.Second
+	transport.TLSHandshakeTimeout = 10 * time.Second
+	transport.ExpectContinueTimeout = time.Second
+
+	return &http.Client{
+		Transport: transport,
+		Timeout:   60 * time.Second,
+	}
+}
 
 type API struct {
 	wa    *WhatsAppClient
@@ -230,7 +250,7 @@ func writeJSON(w http.ResponseWriter, v interface{}) {
 }
 
 func downloadURL(url string) ([]byte, error) {
-	resp, err := http.Get(url)
+	resp, err := mediaDownloadClient.Get(url)
 	if err != nil {
 		return nil, err
 	}
@@ -238,5 +258,12 @@ func downloadURL(url string) ([]byte, error) {
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	return io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxMediaDownloadBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxMediaDownloadBytes {
+		return nil, fmt.Errorf("download exceeds %d MiB limit", maxMediaDownloadBytes>>20)
+	}
+	return data, nil
 }

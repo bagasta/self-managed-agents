@@ -1,0 +1,4 @@
+interface:
+  display_name: "Arthur Edit Agent"
+  short_description: "Ubah agent tanpa merusak konfigurasi"
+  default_prompt: "Use $arthur-edit-agent to safely update and verify an existing AI agent."

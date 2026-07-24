@@ -1,0 +1,650 @@
+"""Deterministic progressive-skill selection for Arthur."""
+from __future__ import annotations
+
+import hashlib
+import re
+import uuid
+from dataclasses import dataclass, field
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.domain.agent_build_state_service import (
+    build_state_prompt,
+    ensure_build_draft,
+)
+from app.core.domain.skill_service import list_active_system_skills
+from app.models.agent_build_draft import AgentBuildDraft
+from app.models.message import Message
+
+ARTHUR_ENGINE_VERSION = "arthur-progressive-v1"
+ARTHUR_PROMPT_VERSION = "arthur-kernel-v9"
+
+_BUILDER_TOOL_NAMES = {
+    "get_self_config", "get_platform_capabilities", "list_available_wa_devices", "get_presets",
+    "plan_agent", "compose_agent_blueprint", "compose_agent_operating_manual",
+    "compose_agent_instructions", "compose_agent_soul", "validate_agent_config", "create_agent",
+    "verify_agent", "update_agent", "generate_google_auth_link", "set_agent_memory", "delete_agent",
+    "get_agent_detail", "list_my_agents", "renew_agent", "add_agent_knowledge",
+    "get_user_subscription", "link_dashboard_account", "get_payment_link", "create_wa_dev_trial_link",
+    "send_agent_wa_qr",
+}
+
+_SKILL_TOOL_ALLOWLISTS = {
+    "arthur-discovery": {
+        "get_self_config", "get_platform_capabilities", "get_presets", "plan_agent",
+        "get_user_subscription",
+    },
+    "arthur-create-agent": {
+        "get_self_config", "get_platform_capabilities", "get_presets", "plan_agent",
+        "compose_agent_blueprint", "compose_agent_operating_manual", "compose_agent_instructions",
+        "compose_agent_soul", "validate_agent_config", "create_agent", "verify_agent",
+        "get_agent_detail", "get_user_subscription", "set_agent_memory",
+    },
+    "arthur-edit-agent": {
+        "list_my_agents", "get_agent_detail", "update_agent", "verify_agent",
+        "validate_agent_config", "compose_agent_blueprint", "compose_agent_operating_manual",
+        "compose_agent_instructions", "compose_agent_soul", "set_agent_memory", "add_agent_knowledge",
+    },
+    "arthur-whatsapp-demo-channel": {
+        "list_my_agents", "get_agent_detail", "verify_agent", "list_available_wa_devices",
+        "create_wa_dev_trial_link", "send_agent_wa_qr",
+    },
+    "arthur-subscription-payment": {
+        "get_user_subscription", "get_payment_link",
+    },
+    "arthur-lifecycle-safety": {
+        "list_my_agents", "get_agent_detail", "delete_agent", "renew_agent", "verify_agent",
+    },
+}
+
+_MIXIN_TOOL_ALLOWLISTS = {
+    "arthur-google-workspace": {
+        "generate_google_auth_link", "update_agent", "get_agent_detail", "verify_agent",
+    },
+    "arthur-files-knowledge": {
+        "update_agent", "get_agent_detail", "verify_agent", "add_agent_knowledge",
+        "compose_agent_instructions", "compose_agent_operating_manual",
+    },
+}
+
+_MIXIN_SUPPORTING_TOOL_ALLOWLISTS = {
+    # These are MCP tools, not builder tools.  Without this allowlist the
+    # progressive-disclosure filter removed them even though the Google skill
+    # requires Arthur to create/select and verify the resource after OAuth.
+    "arthur-google-workspace": {
+        "create_drive_file",
+        "manage_drive_access",
+        "manage_event",
+        "read_sheet_values",
+        "modify_sheet_values",
+        "create_spreadsheet",
+        "create_survey_form",
+        "create_presentation",
+        "batch_update_presentation",
+        "list_sheet_tables",
+        "append_table_rows",
+        "create_sheet",
+    },
+}
+
+_SKILL_SUPPORTING_TOOL_ALLOWLISTS = {
+    "arthur-discovery": {"tavily_search", "tavily_extract", "recall"},
+    "arthur-create-agent": {
+        "tavily_search", "tavily_extract", "recall", "remember", "update_daily", "update_longterm",
+    },
+    "arthur-edit-agent": {"tavily_search", "tavily_extract", "recall", "remember", "update_daily"},
+    "arthur-whatsapp-demo-channel": set(),
+    "arthur-subscription-payment": set(),
+    "arthur-lifecycle-safety": set(),
+}
+
+
+@dataclass(slots=True)
+class ArthurSkillContext:
+    enabled: bool = False
+    primary_skill: str | None = None
+    mixin_skills: list[str] = field(default_factory=list)
+    skill_versions: dict[str, str] = field(default_factory=dict)
+    whatsapp_action: str | None = None
+    payment_plan: str | None = None
+    prompt_block: str = ""
+    draft: AgentBuildDraft | None = None
+
+
+def scope_arthur_builder_tools(
+    tools: list[Any],
+    *,
+    primary_skill: str,
+    mixin_skills: list[str],
+    whatsapp_action: str | None = None,
+) -> tuple[list[Any], list[str]]:
+    allowed = set(_SKILL_TOOL_ALLOWLISTS.get(primary_skill, set()))
+    allowed_supporting = set(_SKILL_SUPPORTING_TOOL_ALLOWLISTS.get(primary_skill, set()))
+    for mixin in mixin_skills:
+        allowed.update(_MIXIN_TOOL_ALLOWLISTS.get(mixin, set()))
+        allowed_supporting.update(_MIXIN_SUPPORTING_TOOL_ALLOWLISTS.get(mixin, set()))
+    kept: list[Any] = []
+    removed: list[str] = []
+    for tool in tools:
+        name = str(getattr(tool, "name", "") or "")
+        if (
+            primary_skill == "arthur-whatsapp-demo-channel"
+            and whatsapp_action == "trial_link"
+            and name == "send_agent_wa_qr"
+        ):
+            removed.append(name)
+            continue
+        if (
+            primary_skill == "arthur-whatsapp-demo-channel"
+            and whatsapp_action == "dedicated_qr"
+            and name == "create_wa_dev_trial_link"
+        ):
+            removed.append(name)
+            continue
+        if name in _BUILDER_TOOL_NAMES and name not in allowed:
+            removed.append(name)
+            continue
+        if name not in _BUILDER_TOOL_NAMES and name not in allowed_supporting:
+            removed.append(name)
+            continue
+        kept.append(tool)
+    return kept, sorted(set(removed))
+
+
+def arthur_runtime_config(tools_config: dict[str, Any] | None) -> dict[str, Any]:
+    raw = (tools_config or {}).get("arthur_runtime")
+    return raw if isinstance(raw, dict) else {}
+
+
+def arthur_runtime_enabled(tools_config: dict[str, Any] | None, feature: str) -> bool:
+    config = arthur_runtime_config(tools_config)
+    return bool(config.get("enabled", False) and config.get(feature, False))
+
+
+def _contains(text: str, terms: tuple[str, ...]) -> bool:
+    return any(term in text for term in terms)
+
+
+def normalize_builder_language(text: str) -> str:
+    """Normalize common informal WhatsApp spellings used in builder intents."""
+    normalized = str(text or "").casefold()
+    substitutions = (
+        (r"\bnomer(?=\b|nya\b)", "nomor"),
+        (r"\bno wa\b", "nomor whatsapp"),
+        (r"\btes\b", "coba"),
+        (r"\btest\b", "coba"),
+        (r"\bngetes\b", "coba"),
+        (r"\bpake\b", "pakai"),
+        (r"\bpakek\b", "pakai"),
+        (r"\bwhats app\b", "whatsapp"),
+        (r"\bkonekin\b", "hubungkan"),
+        (r"\bkonekkan\b", "hubungkan"),
+    )
+    for pattern, replacement in substitutions:
+        normalized = re.sub(pattern, replacement, normalized)
+    return " ".join(normalized.split())
+
+
+def classify_builder_whatsapp_action(
+    user_message: str,
+    prior_agent_message: str = "",
+) -> str | None:
+    """Resolve an explicitly selected demo or own-number WhatsApp path."""
+    current = normalize_builder_language(user_message)
+    prior_agent = normalize_builder_language(prior_agent_message)
+
+    dedicated_markers = (
+        "nomor saya sendiri",
+        "nomor whatsapp saya",
+        "nomor khusus",
+        "pasang ke nomor",
+        "kirim qr",
+        "qr baru",
+        "scan qr",
+    )
+    explicit_dedicated_number = bool(
+        re.search(
+            r"\bnomor\b.{0,24}\b(?:khusus|sendiri|pribadi)\b",
+            current,
+        )
+    )
+    explicit_qr_request = (
+        current == "qr"
+        or bool(
+            re.search(
+                r"\b(?:minta|kirim|mau|butuh|mana|kasih)\b.{0,16}\bqr\b",
+                current,
+            )
+        )
+    )
+    if (
+        _contains(current, dedicated_markers)
+        or explicit_dedicated_number
+        or explicit_qr_request
+    ):
+        return "dedicated_qr"
+
+    trial_markers = (
+        "nomor demo",
+        "kode demo",
+        "kode trial",
+        "link trial",
+        "trial link",
+        "link coba",
+        "mau coba agent",
+        "coba agentnya",
+        "cobain agent",
+        "coba pakai nomor demo",
+    )
+    if _contains(current, trial_markers):
+        return "trial_link"
+
+    prior_offered_demo = _contains(
+        prior_agent,
+        (
+            "nomor demo",
+            "kode demo",
+            "kode trial",
+            "link trial",
+            "link coba",
+            "wa.me",
+            "mau aku buatin link",
+            "mau saya buatkan link",
+        ),
+    )
+    prior_offered_dedicated = _contains(
+        prior_agent,
+        (
+            "nomor khusus",
+            "nomor whatsapp khusus",
+            "nomor sendiri",
+            "scan sekali",
+            "pasang ke nomor",
+            "menghubungkan agent ke nomor",
+        ),
+    )
+    short_affirmative = current in {
+        "iya",
+        "iya mau",
+        "mau",
+        "ok",
+        "oke",
+        "ok sudah",
+        "sudah",
+        "lanjut",
+    }
+    missing_demo_artifact = _contains(
+        current,
+        (
+            "kodenya mana",
+            "mana kodenya",
+            "kode mana",
+            "linknya mana",
+            "mana linknya",
+            "kirim kodenya",
+            "kirim linknya",
+        ),
+    )
+    if prior_offered_demo and (short_affirmative or missing_demo_artifact):
+        return "trial_link"
+    has_owned_number_followup = bool(
+        re.search(
+            r"\b(?:saya|aku)?\s*(?:sudah|udah|telah)?\s*(?:punya|ada)\b.{0,20}\bnomor(?:nya)?\b",
+            current,
+        )
+        or re.search(
+            r"\bnomor(?:nya)?\b.{0,20}\b(?:sudah|udah)?\s*ada\b",
+            current,
+        )
+    )
+    if prior_offered_dedicated and has_owned_number_followup:
+        return "dedicated_qr"
+    return None
+
+
+def classify_builder_intent(
+    user_message: str,
+    prior_evidence: str = "",
+    prior_agent_message: str = "",
+) -> str:
+    current = normalize_builder_language(user_message)
+    if _contains(current, ("hapus agent", "delete agent", "reset user", "reset agent", "nonaktifkan agent")):
+        return "lifecycle"
+    if resolve_builder_payment_plan_selection(current, prior_agent_message):
+        return "subscription"
+    # Keep ordinary business answers inside the active build.  In particular,
+    # "mengonfirmasi pembayaran tidak boleh" is a discovery boundary, not a
+    # request to buy/upgrade a Clevio plan.  Billing intent must be explicit and
+    # token-bounded; substring matching "bayar" inside "pembayaran" previously
+    # switched Arthur to the payment skill and removed every create tool.
+    explicit_subscription_intent = bool(
+        re.search(
+            r"\b(?:upgrade|langganan|subscription|kuota|slot)\b",
+            current,
+        )
+        or re.search(
+            r"\b(?:bayar|payment)\b.{0,32}\b(?:paket|plan|langganan|subscription|clevio)\b",
+            current,
+        )
+        or re.search(
+            r"\b(?:paket|plan|langganan|subscription|clevio)\b.{0,32}\b(?:bayar|payment)\b",
+            current,
+        )
+    )
+    if explicit_subscription_intent:
+        return "subscription"
+    if classify_builder_whatsapp_action(
+        current,
+        prior_agent_message,
+    ) or _contains(
+        current,
+        (
+            "coba demo",
+            "mau coba",
+            "coba agent",
+            "nomor demo",
+            "kode demo",
+            "kode trial",
+            "trial link",
+            "link trial",
+            "link coba",
+            "pasang nomor",
+            "pasang ke whatsapp",
+            "pasang whatsapp",
+            "hubungkan whatsapp",
+            "nomor khusus",
+            "nomor sendiri",
+            "scan qr",
+            "qr code",
+        ),
+    ):
+        return "demo"
+    if _contains(current, ("edit agent", "ubah agent", "update agent", "ganti agent", "perbaiki agent")):
+        return "edit"
+    if _contains(current, ("buat", "bikin", "mau agent", "mau ai", "butuh ai", "cs ", "asisten")):
+        return "create"
+    # Prior evidence may keep a multi-turn build anchored to create intent, but
+    # must never turn an old mention of demo/payment/edit into the current turn's
+    # explicit intent. Workflow state decides whether a short reply such as
+    # "sesuai" advances the active build.
+    prior = (prior_evidence or "").casefold()
+    prior_agent = normalize_builder_language(prior_agent_message)
+    short_affirmative = " ".join(current.split()) in {
+        "iya",
+        "iya mau",
+        "mau",
+        "ok",
+        "oke",
+        "ok sudah",
+        "sudah",
+        "lanjut",
+    }
+    if short_affirmative and _contains(
+        prior_agent,
+        (
+            "mau link trial",
+            "mau link coba",
+            "mau nomor demo",
+            "mau aku buatin link trial",
+            "mau saya buatkan link trial",
+            "coba agent",
+            "cobain agent",
+        ),
+    ):
+        return "demo"
+    if _contains(prior, ("buat", "bikin", "mau agent", "mau ai", "butuh ai", "cs ", "asisten")):
+        return "create"
+    return "discover"
+
+
+def resolve_builder_payment_plan_selection(
+    user_message: str,
+    prior_agent_message: str = "",
+) -> str | None:
+    """Resolve a concrete paid tier without treating unrelated words as billing."""
+    current = normalize_builder_language(user_message)
+    prior = normalize_builder_language(prior_agent_message)
+    plan_patterns = (
+        ("tier_1", r"\b(?:starter|tier[\s_-]?1)\b"),
+        ("tier_2", r"\b(?:pro|growth|tier[\s_-]?2)\b"),
+        ("tier_3", r"\b(?:enterprise|business|tier[\s_-]?3)\b"),
+    )
+    selected = next(
+        (plan for plan, pattern in plan_patterns if re.search(pattern, current)),
+        None,
+    )
+    if selected is None:
+        return None
+
+    explicit_selection = bool(
+        re.search(
+            r"\b(?:mau|pilih|ambil|upgrade|bayar|beli|paket|plan|yang)\b",
+            current,
+        )
+    )
+    prior_offered_payment = any(
+        marker in prior
+        for marker in (
+            "paket yang tersedia",
+            "paket clevio",
+            "mau ambil paket",
+            "mau yang mana",
+            "link pembayaran",
+            "upgrade plan",
+            "starter",
+            "enterprise",
+        )
+    )
+    short_plan_reply = len(current.split()) <= 4
+    if explicit_selection or (prior_offered_payment and short_plan_reply):
+        return selected
+    return None
+
+
+async def _latest_agent_message(session_id: uuid.UUID, db: AsyncSession) -> str:
+    result = await db.execute(
+        select(Message.content)
+        .where(
+            Message.session_id == session_id,
+            Message.role == "agent",
+            Message.content.is_not(None),
+        )
+        .order_by(Message.timestamp.desc(), Message.step_index.desc())
+        .limit(1)
+    )
+    return str(result.scalar_one_or_none() or "")
+
+
+def _is_explicit_build_confirmation(user_message: str) -> bool:
+    normalized = " ".join((user_message or "").casefold().split())
+    return normalized in {
+        "ok",
+        "oke",
+        "sudah",
+        "sesuai",
+        "setuju",
+        "buat",
+        "buatkan",
+        "buat agentnya",
+        "sudah sesuai",
+        "sudah benar",
+    } or any(
+        marker in normalized
+        for marker in (
+            "semuanya sesuai",
+            "saya setuju",
+            "setuju dibuat",
+            "lanjut buat",
+            "lanjutkan buat",
+            "buat sekarang",
+        )
+    ) or bool(
+        re.search(
+            r"\b(?:langsung|lanjut|lanjutkan|bisa|boleh)\b.{0,40}\b(?:di)?buat(?:kan)?\b.{0,30}\bagent",
+            normalized,
+        )
+    )
+
+
+def resolve_primary_skill(
+    intent: str,
+    workflow_state: str,
+    *,
+    user_message: str = "",
+) -> str:
+    if intent == "edit":
+        return "arthur-edit-agent"
+    if intent == "demo":
+        return "arthur-whatsapp-demo-channel"
+    if intent == "subscription":
+        return "arthur-subscription-payment"
+    if intent == "lifecycle":
+        return "arthur-lifecycle-safety"
+    # The shadow state is updated only after a turn completes. An explicit
+    # confirmation must expose compose/create tools in this same turn; the hard
+    # discovery gate still verifies every answer before material creation.
+    if intent in {"create", "discover"} and _is_explicit_build_confirmation(user_message):
+        return "arthur-create-agent"
+    if intent in {"create", "discover"} and workflow_state in {
+        "awaiting_confirmation",
+        "ready_to_create",
+        "creating",
+        "verifying",
+        "agent_created",
+        "setup_pending",
+    }:
+        return "arthur-create-agent"
+    return "arthur-discovery"
+
+
+def resolve_policy_mixins(text: str, primary: str) -> list[str]:
+    low = text.casefold()
+    mixins: list[str] = []
+    if primary != "arthur-google-workspace" and _contains(
+        low,
+        ("google", "oauth", "spreadsheet", "sheets", "drive", "docs", "forms", "slides", "calendar", "gmail"),
+    ):
+        mixins.append("arthur-google-workspace")
+    if primary != "arthur-files-knowledge" and _contains(
+        low,
+        ("file", "dokumen", "document", "pdf", "docx", "pptx", "gambar", "image", "knowledge", "website"),
+    ):
+        mixins.append("arthur-files-knowledge")
+    return mixins[:1]
+
+
+def _recent_evidence_text(draft: AgentBuildDraft | None) -> str:
+    if draft is None:
+        return ""
+    return "\n".join(
+        str(item.get("value") or "")
+        for item in list(draft.evidence_json or [])[-8:]
+        if isinstance(item, dict)
+    )
+
+
+async def prepare_arthur_skill_context(
+    *,
+    agent_id: uuid.UUID,
+    session_id: uuid.UUID,
+    owner_external_id: str,
+    user_message: str,
+    message_id: str,
+    tools_config: dict[str, Any],
+    db: AsyncSession,
+) -> ArthurSkillContext:
+    if not arthur_runtime_enabled(tools_config, "progressive_skills"):
+        return ArthurSkillContext()
+
+    # The initial classifier only determines which state/skill to load. It never
+    # grants permission or turns derived text into confirmed facts.
+    prior_agent_message = await _latest_agent_message(session_id, db)
+    payment_plan = resolve_builder_payment_plan_selection(
+        user_message,
+        prior_agent_message,
+    )
+    whatsapp_action = classify_builder_whatsapp_action(
+        user_message,
+        prior_agent_message,
+    )
+    intent = classify_builder_intent(
+        user_message,
+        prior_agent_message=prior_agent_message,
+    )
+    draft: AgentBuildDraft | None = None
+    if arthur_runtime_enabled(tools_config, "build_state"):
+        draft = await ensure_build_draft(
+            session_id=session_id,
+            owner_external_id=owner_external_id,
+            intent=intent,
+            message_id=message_id,
+            user_message=user_message,
+            prompt_version=ARTHUR_PROMPT_VERSION,
+            engine_version=ARTHUR_ENGINE_VERSION,
+            db=db,
+        )
+        intent = classify_builder_intent(
+            user_message,
+            _recent_evidence_text(draft),
+            prior_agent_message,
+        )
+        whatsapp_action = classify_builder_whatsapp_action(
+            user_message,
+            prior_agent_message,
+        )
+        payment_plan = resolve_builder_payment_plan_selection(
+            user_message,
+            prior_agent_message,
+        )
+
+    workflow_state = draft.workflow_state if draft is not None else "idle"
+    primary = resolve_primary_skill(
+        intent,
+        workflow_state,
+        user_message=user_message,
+    )
+    mixins = resolve_policy_mixins(
+        f"{_recent_evidence_text(draft)}\n{user_message}",
+        primary,
+    )
+    requested_names = [primary, *mixins]
+    loaded = await list_active_system_skills(agent_id, db, names=requested_names)
+    by_name = {skill.name: skill for skill in loaded}
+    missing = [name for name in requested_names if name not in by_name]
+    if missing:
+        raise RuntimeError(
+            "Arthur system skill bundle is incomplete: " + ", ".join(missing)
+        )
+
+    parts: list[str] = []
+    if draft is not None:
+        parts.append(build_state_prompt(draft))
+    versions: dict[str, str] = {}
+    for name in requested_names:
+        skill = by_name[name]
+        actual_checksum = hashlib.sha256(skill.content_md.encode("utf-8")).hexdigest()
+        if not skill.immutable or skill.trust_level != "system":
+            raise RuntimeError(f"Untrusted Arthur skill rejected: {name}")
+        if skill.checksum != actual_checksum:
+            raise RuntimeError(f"Arthur skill checksum mismatch: {name}@{skill.version}")
+        label = "Primary Workflow Skill" if name == primary else "Policy Mixin Skill"
+        parts.append(f"## {label}: {name}@{skill.version}\n{skill.content_md}")
+        versions[name] = skill.version
+
+    parts.append(
+        "## Runtime Skill Contract\n"
+        f"Gunakan `{primary}` sebagai satu-satunya primary workflow skill pada turn ini. "
+        "Policy mixin hanya menambah kewajiban connector/file dan tidak boleh mengganti state contract."
+    )
+    return ArthurSkillContext(
+        enabled=True,
+        primary_skill=primary,
+        mixin_skills=mixins,
+        skill_versions=versions,
+        whatsapp_action=whatsapp_action,
+        payment_plan=payment_plan,
+        prompt_block="\n\n".join(parts),
+        draft=draft,
+    )

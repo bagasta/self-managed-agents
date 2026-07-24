@@ -1,0 +1,7 @@
+version: "1.0.3"
+triggers: ["demo", "trial", "whatsapp", "qr", "install-number"]
+supported_states: ["agent_created", "setup_pending", "demo_ready", "channel_setup", "complete"]
+allowed_tool_groups: ["demo", "channel", "lifecycle"]
+trust_level: "system"
+primary: true
+enabled: true

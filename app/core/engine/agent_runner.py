@@ -29,6 +29,10 @@ from app.core.engine.context_service import (
     db_messages_to_lc,
     load_history,
 )
+from app.core.domain.agent_build_state_service import (
+    guard_repeated_questions,
+    record_build_outcome,
+)
 from app.core.domain.agent_sop_service import get_latest_agent_operating_manual
 from app.core.domain.memory_service import (
     build_memory_context,
@@ -47,7 +51,16 @@ from app.core.engine.agent_callbacks import AgentStepLogger
 from app.core.engine.agent_hitl import handle_graph_interrupt, handle_pending_interrupt
 from app.core.engine.agent_input import build_input_messages
 from app.core.engine.agent_llm import build_agent_llms
+from app.core.engine.arthur_skill_runtime import (
+    ARTHUR_ENGINE_VERSION,
+    ARTHUR_PROMPT_VERSION,
+    arthur_runtime_enabled,
+    prepare_arthur_skill_context,
+    scope_arthur_builder_tools,
+)
+from app.core.engine.attachment_evidence import extract_image_evidence
 from app.core.engine.agent_recovery import send_agent_recovery_message
+from app.core.engine.run_capacity import bounded_agent_run
 from app.core.engine.agent_google_routing import (
     _append_builder_google_auth_link_if_needed,
     _builder_google_auth_agent_id,
@@ -95,18 +108,26 @@ from app.core.engine.reply_guard import ensure_non_empty_reply
 from app.core.utils.phone_utils import normalize_phone
 from app.core.domain.agent_quota_service import get_owner_subscription, is_quota_exempt_builder_agent
 from app.core.domain.subscription_service import QuotaExceeded, assert_token_quota_available
+from app.core.tools.builder_payment_tools import (
+    payment_user_reply,
+    verified_payment_payload,
+)
 from app.core.engine.google_mcp_support import (
     _build_google_mcp_auth_failure_reply,
     _build_google_mcp_unavailable_reply,
     _build_google_mcp_validation_reply,
     _candidate_external_user_ids,
     _contains_google_workspace_artifact,
+    build_customer_survey_append_tools,
+    customer_survey_google_resource,
     _extract_google_mcp_step_error,
+    _extract_google_mcp_resource_error,
     _extract_requested_slide_count,
     _fetch_google_auth_link,
     _has_google_mcp_step,
     _has_google_workspace_artifact_step,
     _is_google_auth_or_scope_error,
+    _is_google_resource_not_found_error,
     _is_google_forms_authoring_intent,
     _is_google_mcp_intent,
     _is_google_sheets_authoring_intent,
@@ -137,12 +158,15 @@ settings = get_settings()
 
 
 from app.core.engine.agent_reply_guards import (
+    _owner_identity_reply_guard,
     _operator_escalation_reply_guard,
     _task_result_guard_reply,
     _whatsapp_media_delivery_guard_reply,
 )
 from app.core.engine.agent_followups import (
     _builder_create_completion_directive,
+    _builder_retryable_plan_directive,
+    _builder_whatsapp_action_directive,
     _BUILD_PROGRESS_TOOLS,
     _deploy_followup_message,
     _extract_shared_workspace_file_from_steps,
@@ -152,8 +176,11 @@ from app.core.engine.agent_followups import (
     _has_public_url_in_text,
     _is_website_or_app_request,
     _needs_builder_create_completion,
+    _needs_builder_retryable_plan,
+    _needs_builder_whatsapp_action_completion,
     _needs_deploy_followup,
     _needs_whatsapp_file_delivery_followup,
+    _requested_builder_whatsapp_action,
 )
 
 
@@ -566,6 +593,274 @@ async def _deliver_shared_whatsapp_file_via_tool(
     return True, f"File {filename} sudah saya kirim ke WhatsApp."
 
 
+def _builder_channel_agent_id_from_steps(steps: list[dict[str, Any]]) -> str:
+    for step in reversed(steps or []):
+        if str(step.get("tool") or "") not in {
+            "create_agent",
+            "get_agent_detail",
+            "verify_agent",
+        }:
+            continue
+        data = _parse_step_result_json(step.get("result"))
+        if not isinstance(data, dict):
+            continue
+        agent_id = str(data.get("agent_id") or data.get("id") or "").strip()
+        if agent_id:
+            return agent_id
+    return ""
+
+
+async def _invoke_builder_whatsapp_action_tool(
+    *,
+    tools: list[Any],
+    action: str,
+    parsed: ParsedResult,
+    session_id: uuid.UUID,
+    run_id: uuid.UUID,
+    step_index: int,
+    log: Any,
+) -> bool:
+    """Deterministically finish an authorized demo/QR action missed by the LLM."""
+    tool_name = (
+        "create_wa_dev_trial_link"
+        if action == "trial_link"
+        else "send_agent_wa_qr"
+    )
+    selected_tool = next(
+        (tool for tool in tools if getattr(tool, "name", "") == tool_name),
+        None,
+    )
+    if selected_tool is None:
+        log.error(
+            "agent_run.builder_whatsapp_action_tool_missing",
+            action=action,
+            tool=tool_name,
+        )
+        return False
+
+    if action == "trial_link":
+        args: dict[str, Any] = {"send_contact": True}
+    else:
+        agent_id = _builder_channel_agent_id_from_steps(parsed.get("steps", []))
+        if not agent_id:
+            list_tool = next(
+                (
+                    tool
+                    for tool in tools
+                    if getattr(tool, "name", "") == "list_my_agents"
+                ),
+                None,
+            )
+            if list_tool is not None:
+                try:
+                    list_result = str(await list_tool.ainvoke({}) or "")
+                except Exception as exc:
+                    list_result = f"[error] {type(exc).__name__}: {exc}"
+                list_data = _parse_step_result_json(list_result)
+                agents = (
+                    list_data.get("agents")
+                    if isinstance(list_data, dict)
+                    and isinstance(list_data.get("agents"), list)
+                    else []
+                )
+                if len(agents) == 1 and isinstance(agents[0], dict):
+                    agent_id = str(agents[0].get("id") or "").strip()
+                list_step_no = max(
+                    [
+                        int(step.get("step") or 0)
+                        for step in parsed.get("steps", [])
+                    ]
+                    + [0]
+                ) + 1
+                parsed["steps"].append(
+                    {
+                        "step": list_step_no,
+                        "tool": "list_my_agents",
+                        "args": {},
+                        "result": list_result[:4000],
+                        "tool_call_id": "deterministic_builder_whatsapp_target",
+                    }
+                )
+                parsed["db_messages"].append(
+                    Message(
+                        session_id=session_id,
+                        role="tool",
+                        tool_name="list_my_agents",
+                        tool_args={},
+                        tool_result=list_result[:2000],
+                        step_index=step_index,
+                        run_id=run_id,
+                    )
+                )
+                step_index += 1
+            if not agent_id:
+                log.warning(
+                    "agent_run.builder_whatsapp_action_target_missing",
+                    action=action,
+                    tool=tool_name,
+                )
+                return False
+        args = {
+            "agent_id": agent_id,
+            "caption": (
+                "Scan sekali dari WhatsApp untuk memasang agent ke nomor kamu. "
+                "Berlaku sekitar 20 detik."
+            ),
+        }
+
+    try:
+        raw_result = await selected_tool.ainvoke(args)
+    except Exception as exc:
+        raw_result = f"[error] {type(exc).__name__}: {exc}"
+        log.warning(
+            "agent_run.builder_whatsapp_action_direct_exception",
+            action=action,
+            tool=tool_name,
+            error=str(exc)[:300],
+        )
+
+    result_text = str(raw_result or "")
+    step_no = max(
+        [int(step.get("step") or 0) for step in parsed.get("steps", [])] + [0]
+    ) + 1
+    parsed["steps"].append(
+        {
+            "step": step_no,
+            "tool": tool_name,
+            "args": args,
+            "result": result_text[:4000],
+            "tool_call_id": "deterministic_builder_whatsapp_action",
+        }
+    )
+    parsed["db_messages"].append(
+        Message(
+            session_id=session_id,
+            role="tool",
+            tool_name=tool_name,
+            tool_args=args,
+            tool_result=result_text[:2000],
+            step_index=step_index,
+            run_id=run_id,
+        )
+    )
+    log.info(
+        "agent_run.builder_whatsapp_action_direct_done",
+        action=action,
+        tool=tool_name,
+        result_preview=result_text[:220],
+    )
+    return True
+
+
+async def _ensure_builder_payment_link(
+    *,
+    tools: list[Any],
+    plan_code: str,
+    parsed: ParsedResult,
+    session_id: uuid.UUID,
+    run_id: uuid.UUID,
+    step_index: int,
+    log: Any,
+) -> str:
+    """Create and return a verified checkout link for a selected paid tier."""
+    for step in reversed(parsed.get("steps", [])):
+        if str(step.get("tool") or "") != "get_payment_link":
+            continue
+        payload = verified_payment_payload(
+            step.get("result"),
+            expected_plan=plan_code,
+        )
+        if payload is not None:
+            return payment_user_reply(payload)
+
+    payment_tool = next(
+        (
+            tool
+            for tool in tools
+            if getattr(tool, "name", "") == "get_payment_link"
+        ),
+        None,
+    )
+    if payment_tool is None:
+        log.error(
+            "agent_run.builder_payment_tool_missing",
+            plan_code=plan_code,
+        )
+        return (
+            "Link pembayaran belum dapat dibuat karena layanan checkout tidak tersedia "
+            "pada sesi ini. Pilihan paketmu sudah tercatat; saya tidak akan mengarang link."
+        )
+
+    args = {"plan": plan_code}
+    try:
+        raw_result = await payment_tool.ainvoke(args)
+    except Exception as exc:
+        raw_result = json.dumps(
+            {
+                "error": type(exc).__name__,
+                "message": str(exc),
+            },
+            ensure_ascii=False,
+        )
+        log.warning(
+            "agent_run.builder_payment_direct_exception",
+            plan_code=plan_code,
+            error=str(exc)[:300],
+        )
+
+    result_text = str(raw_result or "")
+    step_no = max(
+        [int(step.get("step") or 0) for step in parsed.get("steps", [])] + [0]
+    ) + 1
+    parsed["steps"].append(
+        {
+            "step": step_no,
+            "tool": "get_payment_link",
+            "args": args,
+            "result": result_text[:4000],
+            "tool_call_id": "deterministic_builder_payment_link",
+        }
+    )
+    parsed["db_messages"].append(
+        Message(
+            session_id=session_id,
+            role="tool",
+            tool_name="get_payment_link",
+            tool_args=args,
+            tool_result=result_text[:2000],
+            step_index=step_index,
+            run_id=run_id,
+        )
+    )
+    payload = verified_payment_payload(
+        raw_result,
+        expected_plan=plan_code,
+    )
+    if payload is not None:
+        log.info(
+            "agent_run.builder_payment_link_direct_done",
+            plan_code=plan_code,
+        )
+        return payment_user_reply(payload)
+
+    error_payload = _parse_step_result_json(raw_result)
+    error_message = (
+        str(error_payload.get("message") or error_payload.get("error") or "")
+        if isinstance(error_payload, dict)
+        else ""
+    )
+    log.warning(
+        "agent_run.builder_payment_link_invalid",
+        plan_code=plan_code,
+        result=result_text[:300],
+    )
+    return (
+        "Link pembayaran belum berhasil dibuat"
+        + (f": {error_message}" if error_message else ".")
+        + " Pilihan paketmu tetap tercatat; saya tidak akan mengarang link checkout."
+    )
+
+
 def _shared_artifact_record(shared_path: str, *, sent: bool = False) -> dict[str, Any]:
     filename = (shared_path or "").rsplit("/", 1)[-1] or "file"
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
@@ -627,6 +922,7 @@ def _remember_latest_shared_artifact(
 # keyword matching against the user's message.
 
 
+@bounded_agent_run
 async def run_agent(
     *,
     agent_model: AgentModel,
@@ -684,6 +980,13 @@ async def run_agent(
         session_id=session.id,
         status="running",
         started_at=_now,
+        runtime_metadata={
+            "model": str(agent_model.model or ""),
+            "engine_version": "legacy",
+            "prompt_version": "legacy",
+            "skill_versions": {},
+            "attachment_route": None,
+        },
     )
     db.add(run_record)
 
@@ -745,6 +1048,87 @@ async def run_agent(
     _memory_scope = tool_setup.memory_scope
 
     runtime_policy = build_agent_runtime_policy(agent_model, tools_config)
+    _current_attachment_meta = (
+        session.metadata_.get("current_attachment")
+        if isinstance(getattr(session, "metadata_", None), dict)
+        else None
+    )
+    _last_incoming_media = (
+        session.metadata_.get("last_incoming_media")
+        if isinstance(getattr(session, "metadata_", None), dict)
+        else None
+    )
+    if (
+        runtime_policy.is_builder
+        and isinstance(_current_attachment_meta, dict)
+        and _current_attachment_meta.get("media_type") == "document"
+    ):
+        run_record.runtime_metadata = {
+            **dict(run_record.runtime_metadata or {}),
+            "attachment_route": "document",
+            "attachment_model": (
+                _last_incoming_media.get("processor_model")
+                if isinstance(_last_incoming_media, dict)
+                else settings.arthur_document_model
+            ),
+            "attachment_status": (
+                _last_incoming_media.get("processing_status")
+                if isinstance(_last_incoming_media, dict)
+                else "unknown"
+            ),
+        }
+    _arthur_skill_context = None
+    if runtime_policy.is_builder and arthur_runtime_enabled(tools_config, "progressive_skills"):
+        _arthur_skill_context = await prepare_arthur_skill_context(
+            agent_id=agent_id,
+            session_id=session.id,
+            owner_external_id=(
+                str(getattr(session, "external_user_id", None) or "")
+                or str((getattr(session, "channel_config", None) or {}).get("user_phone") or "")
+                or f"session:{session.id}"
+            ),
+            user_message=user_message,
+            message_id=str(run_id),
+            tools_config=tools_config,
+            db=db,
+        )
+        run_record.runtime_metadata = {
+            **dict(run_record.runtime_metadata or {}),
+            "engine_version": ARTHUR_ENGINE_VERSION,
+            "prompt_version": ARTHUR_PROMPT_VERSION,
+            "primary_skill": _arthur_skill_context.primary_skill,
+            "mixin_skills": list(_arthur_skill_context.mixin_skills),
+            "skill_versions": dict(_arthur_skill_context.skill_versions),
+            "whatsapp_action": _arthur_skill_context.whatsapp_action,
+            "payment_plan": _arthur_skill_context.payment_plan,
+            "build_id": (
+                str(_arthur_skill_context.draft.id)
+                if _arthur_skill_context.draft is not None
+                else None
+            ),
+        }
+        log.info(
+            "agent_run.arthur_skill_context_ready",
+            primary_skill=_arthur_skill_context.primary_skill,
+            mixin_skills=_arthur_skill_context.mixin_skills,
+            skill_versions=_arthur_skill_context.skill_versions,
+            whatsapp_action=_arthur_skill_context.whatsapp_action,
+            engine_version=ARTHUR_ENGINE_VERSION,
+            prompt_version=ARTHUR_PROMPT_VERSION,
+        )
+        tools, _arthur_removed_tools = scope_arthur_builder_tools(
+            tools,
+            primary_skill=_arthur_skill_context.primary_skill or "arthur-discovery",
+            mixin_skills=_arthur_skill_context.mixin_skills,
+            whatsapp_action=_arthur_skill_context.whatsapp_action,
+        )
+        log.info(
+            "agent_run.arthur_tools_scoped",
+            primary_skill=_arthur_skill_context.primary_skill,
+            whatsapp_action=_arthur_skill_context.whatsapp_action,
+            removed_tools=_arthur_removed_tools,
+            remaining_tools=len(tools),
+        )
     google_mcp_parent_only = should_use_google_workspace_parent_only(
         policy=runtime_policy,
         user_message=user_message,
@@ -833,6 +1217,8 @@ async def run_agent(
         is_operator_message=is_op_msg,
         user_message=user_message,
     )
+    if _arthur_skill_context is not None and _arthur_skill_context.prompt_block:
+        system_prompt += "\n\n" + _arthur_skill_context.prompt_block
     if abandoned_before_current is not None:
         system_prompt += (
             "\n\n## Restart Recovery\n"
@@ -914,9 +1300,11 @@ async def run_agent(
 
     await _start_wa_run_typing()
     google_mcp_tools_config = tools_config
+    customer_survey_resource = customer_survey_google_resource(session, agent_model)
     google_mcp_role_denied = (
         is_google_workspace_mcp_configured(tools_config)
         and not _is_google_workspace_mcp_authorized_for_session(session, agent_model)
+        and customer_survey_resource is None
     )
     if google_mcp_role_denied:
         google_mcp_tools_config = _remove_google_workspace_mcp_server(tools_config)
@@ -986,6 +1374,12 @@ async def run_agent(
     )
     system_prompt = google_mcp.system_prompt
     _google_mcp_auth_url = google_mcp.auth_url
+    if customer_survey_resource is not None:
+        tools = [
+            tool
+            for tool in tools
+            if getattr(tool, "name", "") != "get_google_workspace_auth_link"
+        ]
     mcp_tools_config = google_mcp_tools_config
     if (
         google_mcp.enabled
@@ -1005,7 +1399,19 @@ async def run_agent(
             mcp_errors["google_workspace"] = google_mcp.preflight_error
         if mcp_tools:
             mcp_tools = sanitize_google_forms_tools(mcp_tools, log)
-            if getattr(session, "channel_type", None) == "whatsapp":
+            if customer_survey_resource is not None:
+                mcp_tools = build_customer_survey_append_tools(
+                    mcp_tools,
+                    resource=customer_survey_resource,
+                    customer_phone=_session_sender_phone(session),
+                    log=log,
+                )
+                log.info(
+                    "agent_run.google_mcp_customer_survey_delegated",
+                    tool_count=len(mcp_tools),
+                    resource_bound=True,
+                )
+            elif getattr(session, "channel_type", None) == "whatsapp":
                 mcp_tools = _filter_whatsapp_unsafe_mcp_tools(
                     mcp_tools,
                     user_message=user_message,
@@ -1232,15 +1638,43 @@ async def run_agent(
                 checkpointer=_checkpointer,
             )
 
-        human_content: Any = _build_human_content_for_model(
-            user_message=user_message,
-            model=getattr(agent_model, "model", None),
-            media_image_b64=media_image_b64,
-            media_image_mime=media_image_mime,
-            google_auth_recovery_followup=google_auth_recovery_followup,
-            google_auth_recovery_request=google_auth_recovery_request,
-            log=log,
-        )
+        _attachment_evidence = None
+        if (
+            runtime_policy.is_builder
+            and arthur_runtime_enabled(tools_config, "image_routing")
+            and media_image_b64
+            and media_image_mime
+        ):
+            _attachment_evidence = await extract_image_evidence(
+                image_b64=media_image_b64,
+                mime_type=media_image_mime,
+                filename=current_attachment_name,
+                user_request=user_message,
+                settings=settings,
+                log=log,
+            )
+            human_content = (user_message or "").strip() + "\n\n" + _attachment_evidence.to_prompt()
+            _session_meta = dict(session.metadata_ or {})
+            _session_meta["arthur_attachment_evidence"] = _attachment_evidence.to_dict()
+            session.metadata_ = _session_meta
+            db.add(session)
+            run_record.runtime_metadata = {
+                **dict(run_record.runtime_metadata or {}),
+                "attachment_route": _attachment_evidence.route,
+                "attachment_model": _attachment_evidence.model,
+                "attachment_status": _attachment_evidence.status,
+                "attachment_id": _attachment_evidence.attachment_id,
+            }
+        else:
+            human_content = _build_human_content_for_model(
+                user_message=user_message,
+                model=getattr(agent_model, "model", None),
+                media_image_b64=media_image_b64,
+                media_image_mime=media_image_mime,
+                google_auth_recovery_followup=google_auth_recovery_followup,
+                google_auth_recovery_request=google_auth_recovery_request,
+                log=log,
+            )
 
         input_messages: list[BaseMessage] = build_input_messages(
             prior_messages=prior_messages,
@@ -1256,85 +1690,7 @@ async def run_agent(
         )
         step_counter = step_base + 1
 
-        _progress_last_sent_at: float = 0.0
-        _progress_sent_count: int = 0
-        _progress_important_tools = {
-            "task",
-            "deploy_app",
-            "execute",
-            "send_whatsapp_document",
-            "send_whatsapp_image",
-            "plan_agent",
-            "compose_agent_blueprint",
-            "compose_agent_instructions",
-            "compose_agent_soul",
-            "validate_agent_config",
-            "create_agent",
-            "update_agent",
-        }
-        _progress_notice_task: asyncio.Task | None = None
-        _progress_notice_sent: bool = False
-        _progress_finished: bool = False
-        _long_progress_notice_seconds = max(
-            5.0,
-            float(getattr(settings, "wa_long_progress_notice_seconds", 25.0) or 25.0),
-        )
-
-        async def _schedule_wa_long_progress_notice(reason: str) -> None:
-            nonlocal _progress_last_sent_at, _progress_sent_count, _progress_notice_task, _progress_notice_sent
-            if not _is_wa_session:
-                return
-
-            import time as _time
-            now_ts = _time.monotonic()
-            if _progress_notice_task is not None or _progress_notice_sent:
-                return
-            _progress_last_sent_at = now_ts
-
-            async def _send_delayed_notice() -> None:
-                nonlocal _progress_sent_count, _progress_notice_sent
-                try:
-                    await asyncio.sleep(_long_progress_notice_seconds)
-                    if _progress_finished or _progress_notice_sent:
-                        return
-                    from app.core.infra.wa_client import send_wa_message, start_wa_typing
-
-                    message = "Masih saya proses ya. Saya akan kirim hasilnya begitu selesai."
-                    await send_wa_message(_wa_device_id, _wa_target, message)
-                    with contextlib.suppress(Exception):
-                        await start_wa_typing(_wa_device_id, _wa_target)
-                    _progress_notice_sent = True
-                    _progress_sent_count += 1
-                    log.info("agent_run.wa_long_progress_notice_sent", reason=reason)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    log.warning("agent_run.wa_long_progress_notice_failed", reason=reason, error=str(exc)[:200])
-
-            _progress_notice_task = asyncio.create_task(_send_delayed_notice())
-
-        async def _wa_progress_callback(tool_name: str, input_payload: Any, phase: str, output: Any | None) -> None:
-            if tool_name == "notify_user":
-                return
-            if tool_name not in _progress_important_tools:
-                return
-            if phase != "start":
-                return
-            await _schedule_wa_long_progress_notice(tool_name)
-
-        async def _cancel_wa_long_progress_notice() -> None:
-            nonlocal _progress_finished, _progress_notice_task
-            _progress_finished = True
-            if _progress_notice_task is None:
-                return
-            _progress_notice_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await _progress_notice_task
-            _progress_notice_task = None
-
-        _agent_logger = AgentStepLogger(log,
-            progress_callback=_wa_progress_callback if _is_wa_session else None,
-        )
+        _agent_logger = AgentStepLogger(log)
 
         def _usage_summary() -> dict[str, Any]:
             return {
@@ -1631,7 +1987,6 @@ async def run_agent(
                 status="cancelled",
                 error_message="Cancelled because a newer user message interrupted this run.",
             )
-            await _cancel_wa_long_progress_notice()
             await _cleanup_sandboxes()
             raise  # propagate so the task is properly marked cancelled
         except asyncio.TimeoutError:
@@ -1646,7 +2001,6 @@ async def run_agent(
                 status="timed_out",
                 error_message=f"Timeout after {_timeout}s",
             )
-            await _cancel_wa_long_progress_notice()
             await _cleanup_sandboxes()
             await send_agent_recovery_message(
                 is_wa_session=_is_wa_session,
@@ -1693,7 +2047,6 @@ async def run_agent(
                     run_record.error_message = str(_retry_json_exc)[:2000]
                     _apply_run_usage(_agent_logger.total_tokens_from_callbacks)
                     await db.flush()
-                    await _cancel_wa_long_progress_notice()
                     await _cleanup_sandboxes()
                     await send_agent_recovery_message(
                         is_wa_session=_is_wa_session,
@@ -2048,7 +2401,6 @@ async def run_agent(
                         status="failed",
                         error_message=err_str,
                     )
-                    await _cancel_wa_long_progress_notice()
                     await _cleanup_sandboxes()
                     await send_agent_recovery_message(
                         is_wa_session=_is_wa_session,
@@ -2148,10 +2500,52 @@ async def run_agent(
                     error=str(_mcp_retry_exc)[:300],
                 )
 
-        if _needs_builder_create_completion(steps, is_builder=runtime_policy.is_builder):
+        if _needs_builder_retryable_plan(steps, is_builder=runtime_policy.is_builder):
+            log.warning("agent_run.builder_plan_evidence_retry", steps=len(steps))
+            _plan_retry_input = _sanitize_input_messages(input_messages)
+            _plan_retry_input.append(HumanMessage(content=_builder_retryable_plan_directive()))
+            try:
+                async with asyncio.timeout(_timeout):
+                    _plan_retry_output = await graph.ainvoke(
+                        {"messages": _plan_retry_input},
+                        config=_graph_config,
+                        version="v2",
+                    )
+                    result = await _graph_result_from_output(
+                        graph=graph,
+                        graph_config=_graph_config,
+                        graph_output=_plan_retry_output,
+                        log=log,
+                    )
+                parsed = parse_agent_result(
+                    result=result,
+                    input_messages=input_messages,
+                    session_id=session.id,
+                    run_id=run_id,
+                    step_start=step_counter,
+                    log=log,
+                )
+                final_reply = parsed["final_reply"]
+                steps = parsed["steps"]
+                total_tokens_used = _agent_logger.total_tokens_from_callbacks or parsed["total_tokens_used"]
+                log.info("agent_run.builder_plan_evidence_retry_ok")
+            except Exception as _plan_retry_exc:
+                log.warning(
+                    "agent_run.builder_plan_evidence_retry_failed",
+                    error=str(_plan_retry_exc)[:300],
+                )
+
+        # A ready plan should finish without asking the user to type "coba lagi".
+        # Give the model one additional internal recovery attempt when the first
+        # continuation still stops before create_agent. Clarification plans never
+        # enter this loop; _needs_builder_create_completion enforces plan_status=ready.
+        for _create_completion_attempt in range(1, 3):
+            if not _needs_builder_create_completion(steps, is_builder=runtime_policy.is_builder):
+                break
             log.warning(
                 "agent_run.builder_create_completion_continue",
                 steps=len(steps),
+                attempt=_create_completion_attempt,
             )
             _create_completion_input = _sanitize_input_messages(input_messages)
             _create_completion_input.append(
@@ -2183,13 +2577,114 @@ async def run_agent(
                 total_tokens_used = _agent_logger.total_tokens_from_callbacks or parsed["total_tokens_used"]
                 log.info(
                     "agent_run.builder_create_completion_continue_ok",
+                    attempt=_create_completion_attempt,
                     created=any(str(s.get("tool", "")) == "create_agent" for s in steps),
                 )
             except Exception as _create_completion_exc:
                 log.warning(
                     "agent_run.builder_create_completion_continue_failed",
+                    attempt=_create_completion_attempt,
                     error=str(_create_completion_exc)[:300],
                 )
+                break
+
+        _builder_whatsapp_action = _requested_builder_whatsapp_action(
+            execution_user_message,
+            input_messages,
+        )
+        if _needs_builder_whatsapp_action_completion(
+            _builder_whatsapp_action,
+            steps,
+            is_builder=runtime_policy.is_builder,
+        ):
+            log.warning(
+                "agent_run.builder_whatsapp_action_continue",
+                action=_builder_whatsapp_action,
+                steps=len(steps),
+            )
+            _channel_completion_input = _sanitize_input_messages(input_messages)
+            _channel_completion_input.append(
+                HumanMessage(
+                    content=_builder_whatsapp_action_directive(
+                        str(_builder_whatsapp_action)
+                    )
+                )
+            )
+            try:
+                async with asyncio.timeout(_timeout):
+                    _channel_completion_output = await graph.ainvoke(
+                        {"messages": _channel_completion_input},
+                        config=_graph_config,
+                        version="v2",
+                    )
+                    result = await _graph_result_from_output(
+                        graph=graph,
+                        graph_config=_graph_config,
+                        graph_output=_channel_completion_output,
+                        log=log,
+                    )
+                parsed = parse_agent_result(
+                    result=result,
+                    input_messages=input_messages,
+                    session_id=session.id,
+                    run_id=run_id,
+                    step_start=step_counter,
+                    log=log,
+                )
+                final_reply = parsed["final_reply"]
+                steps = parsed["steps"]
+                total_tokens_used = (
+                    _agent_logger.total_tokens_from_callbacks
+                    or parsed["total_tokens_used"]
+                )
+                log.info(
+                    "agent_run.builder_whatsapp_action_continue_ok",
+                    action=_builder_whatsapp_action,
+                    completed=not _needs_builder_whatsapp_action_completion(
+                        _builder_whatsapp_action,
+                        steps,
+                        is_builder=True,
+                    ),
+                )
+            except Exception as _channel_completion_exc:
+                log.warning(
+                    "agent_run.builder_whatsapp_action_continue_failed",
+                    action=_builder_whatsapp_action,
+                    error=str(_channel_completion_exc)[:300],
+                )
+        if _needs_builder_whatsapp_action_completion(
+            _builder_whatsapp_action,
+            steps,
+            is_builder=runtime_policy.is_builder,
+        ):
+            _direct_channel_done = await _invoke_builder_whatsapp_action_tool(
+                tools=tools,
+                action=str(_builder_whatsapp_action),
+                parsed=parsed,
+                session_id=session.id,
+                run_id=run_id,
+                step_index=step_counter + len(parsed["db_messages"]),
+                log=log,
+            )
+            if _direct_channel_done:
+                steps = parsed["steps"]
+
+        _builder_payment_plan = (
+            _arthur_skill_context.payment_plan
+            if _arthur_skill_context is not None
+            else None
+        )
+        if runtime_policy.is_builder and _builder_payment_plan:
+            final_reply = await _ensure_builder_payment_link(
+                tools=tools,
+                plan_code=str(_builder_payment_plan),
+                parsed=parsed,
+                session_id=session.id,
+                run_id=run_id,
+                step_index=step_counter + len(parsed["db_messages"]),
+                log=log,
+            )
+            steps = parsed["steps"]
 
         if _needs_deploy_followup(execution_user_message, tools_config, steps, final_reply):
             log.warning(
@@ -2446,8 +2941,6 @@ async def run_agent(
                 scope=_memory_scope,
             )
 
-    await _cancel_wa_long_progress_notice()
-
     # cleanup
     await _cleanup_sandboxes()
 
@@ -2470,6 +2963,14 @@ async def run_agent(
     _google_mcp_auth_err_before_override = (
         (mcp_errors.get("google_workspace") if isinstance(mcp_errors, dict) else None)
         or _extract_google_mcp_step_error(steps)
+    )
+    _google_mcp_runtime_error = (
+        mcp_errors.get("google_workspace") if isinstance(mcp_errors, dict) else None
+    )
+    _google_mcp_resource_err_before_override = (
+        str(_google_mcp_runtime_error)
+        if _is_google_resource_not_found_error(str(_google_mcp_runtime_error or ""))
+        else _extract_google_mcp_resource_error(steps)
     )
     final_reply, steps, _google_mcp_auth_url = await apply_google_mcp_reply_overrides(
         final_reply=final_reply,
@@ -2502,6 +3003,29 @@ async def run_agent(
             auth_url=_google_mcp_auth_url,
             log=log,
         )
+    _google_mcp_resource_err = (
+        _google_mcp_resource_err_before_override
+        or _extract_google_mcp_resource_error(steps)
+    )
+    if _google_mcp_resource_err and not _google_mcp_has_artifact:
+        final_reply = await _route_google_workspace_blocker_to_owner_if_customer(
+            reply=final_reply,
+            session=session,
+            agent_model=agent_model,
+            user_message=execution_user_message,
+            error_text=str(_google_mcp_resource_err),
+            auth_url=None,
+            log=log,
+        )
+    guarded_reply = _owner_identity_reply_guard(
+        final_reply,
+        execution_user_message,
+        session,
+        agent_model,
+    )
+    if guarded_reply != final_reply:
+        log.info("agent_run.final_reply_overridden_by_owner_identity_guard")
+        final_reply = guarded_reply
     guarded_reply = _task_result_guard_reply(final_reply, steps, execution_user_message)
     if guarded_reply != final_reply:
         log.warning("agent_run.final_reply_overridden_by_task_guard")
@@ -2526,6 +3050,8 @@ async def run_agent(
         steps,
         tools_config=tools_config,
         active_groups=active_groups,
+        user_message=execution_user_message,
+        builder_whatsapp_action=_builder_whatsapp_action,
     )
     if final_reply != _reply_before_non_empty_guard:
         log.warning(
@@ -2553,6 +3079,50 @@ async def run_agent(
             after_preview=(final_reply or "")[:220],
         )
 
+    if _arthur_skill_context is not None and _arthur_skill_context.draft is not None:
+        final_reply, _removed_repeated_questions = guard_repeated_questions(
+            final_reply,
+            _arthur_skill_context.draft.question_history_json,
+            _arthur_skill_context.draft.evidence_json,
+            _arthur_skill_context.draft.facts_json,
+        )
+        if _removed_repeated_questions:
+            log.warning(
+                "agent_run.arthur_repeated_questions_removed",
+                count=len(_removed_repeated_questions),
+            )
+
+        # The model may emit progress text before a tool call and the runtime
+        # may later replace it with the deterministic discovery question or
+        # verified tool result that is actually delivered to WhatsApp. Keep the
+        # persisted last assistant turn identical to that delivered reply.
+        # Otherwise the next skill selector and confirmation-evidence loader see
+        # a message the user never received (the root cause of "rangkuman mana?"
+        # and several wrong progressive-skill transitions).
+        _persisted_final_synced = False
+        for _message_record in reversed(parsed["db_messages"]):
+            if getattr(_message_record, "role", "") == "agent":
+                _message_record.content = final_reply
+                _persisted_final_synced = True
+                break
+        if not _persisted_final_synced:
+            _max_persisted_step = max(
+                [
+                    int(getattr(_record, "step_index", 0) or 0)
+                    for _record in parsed["db_messages"]
+                ]
+                + [step_counter]
+            )
+            _final_message_record = Message(
+                session_id=session.id,
+                role="agent",
+                content=final_reply,
+                step_index=_max_persisted_step + 1,
+                run_id=run_id,
+            )
+            parsed["db_messages"].append(_final_message_record)
+            db.add(_final_message_record)
+
     if _is_enabled(tools_config, "memory", default=True):
         _memory_artifact_path = _current_shared_artifact_path or _remember_latest_shared_artifact(
             session,
@@ -2571,10 +3141,37 @@ async def run_agent(
             log=log,
         )
 
+    if (
+        _arthur_skill_context is not None
+        and _arthur_skill_context.draft is not None
+        and arthur_runtime_enabled(tools_config, "build_state")
+    ):
+        try:
+            await record_build_outcome(
+                draft=_arthur_skill_context.draft,
+                final_reply=final_reply,
+                steps=steps,
+                skill_versions=_arthur_skill_context.skill_versions,
+                db=db,
+            )
+        except Exception as _build_state_exc:
+            log.error(
+                "agent_run.arthur_build_state_outcome_failed",
+                error=str(_build_state_exc)[:300],
+                build_id=str(_arthur_skill_context.draft.id),
+            )
+            run_record.runtime_metadata = {
+                **dict(run_record.runtime_metadata or {}),
+                "build_state_error": f"{type(_build_state_exc).__name__}: {str(_build_state_exc)[:200]}",
+            }
+
+    _completed_at = datetime.now(timezone.utc)
+    _duration_ms = max(0, int((_completed_at - _now).total_seconds() * 1000))
     log.info(
         "agent_run.complete",
         steps=len(steps),
         reply_len=len(final_reply),
+        duration_ms=_duration_ms,
         tokens_used=total_tokens_used,
         prompt_tokens=_agent_logger.prompt_tokens_from_callbacks,
         completion_tokens=_agent_logger.completion_tokens_from_callbacks,
@@ -2583,7 +3180,7 @@ async def run_agent(
 
     # Update Run → completed
     run_record.status = "completed"
-    run_record.completed_at = datetime.now(timezone.utc)
+    run_record.completed_at = _completed_at
     _apply_run_usage(total_tokens_used)
     await db.flush()
 

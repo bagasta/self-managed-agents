@@ -11,6 +11,7 @@ import re
 import os
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from langchain_core.tools import StructuredTool, tool
@@ -64,6 +65,18 @@ class CreateDriveFileArgs(BaseModel):
     mime_type: str = "text/plain"
     fileUrl: str | None = None
     file_url: str | None = None
+
+
+class AppendSurveyResponseArgs(BaseModel):
+    """Customer-safe payload; Google resource identifiers are never model input."""
+
+    customer_name: str = ""
+    satisfaction_score: int = Field(ge=1, le=10)
+    expectations_met: str = ""
+    liked: str = ""
+    improvement: str = ""
+    notes: str = ""
+    escalation_status: str = "Tidak"
 
 
 @dataclass
@@ -277,6 +290,194 @@ def _extract_google_mcp_step_error(steps: list[dict[str, Any]]) -> str | None:
         if _is_google_auth_or_scope_error(result):
             return result
     return None
+
+
+def _is_google_resource_not_found_error(error_text: str | None) -> bool:
+    """Distinguish a missing Google resource from an OAuth failure."""
+    text = str(error_text or "").casefold()
+    if not text:
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "requested entity was not found",
+            "resource not found",
+            "spreadsheet not found",
+            "file not found",
+            '"code": 404',
+            '"status_code": 404',
+            "status code 404",
+            "http 404",
+        )
+    )
+
+
+def _extract_google_mcp_resource_error(steps: list[dict[str, Any]]) -> str | None:
+    for step in steps:
+        tool_name = str((step or {}).get("tool", "")).lower()
+        result = str((step or {}).get("result", "") or "")
+        if (
+            tool_name
+            and result
+            and _is_google_mcp_tool_name(tool_name)
+            and _is_google_resource_not_found_error(result)
+        ):
+            return result
+    return None
+
+
+def customer_survey_google_resource(
+    session: Any,
+    agent_model: Any,
+) -> dict[str, Any] | None:
+    """Return a verified append-only survey resource for customer sessions."""
+    from app.core.engine.agent_identity import _is_customer_whatsapp_session
+
+    if not _is_customer_whatsapp_session(session, agent_model):
+        return None
+    tools_config = getattr(agent_model, "tools_config", None)
+    tools_config = tools_config if isinstance(tools_config, dict) else {}
+    resource = tools_config.get("google_workspace_resources")
+    if not isinstance(resource, dict):
+        return None
+    spreadsheet_id = str(resource.get("survey_spreadsheet_id") or "").strip()
+    tab_name = str(resource.get("survey_sheet_name") or "").strip()
+    headers = resource.get("survey_headers")
+    if (
+        resource.get("verified") is not True
+        or resource.get("customer_append_enabled") is not True
+        or not spreadsheet_id
+        or not re.fullmatch(r"[\w .-]{1,100}", tab_name)
+        or not isinstance(headers, list)
+        or len(headers) != 9
+    ):
+        return None
+    return {
+        "spreadsheet_id": spreadsheet_id,
+        "sheet_name": tab_name,
+        "headers": [str(value) for value in headers],
+    }
+
+
+def build_customer_survey_append_tools(
+    mcp_tools: list[Any],
+    *,
+    resource: dict[str, Any],
+    customer_phone: str,
+    log: Any,
+) -> list[Any]:
+    """Expose one append-only Sheet tool instead of the Owner's Google tools."""
+    read_tool = next(
+        (tool for tool in mcp_tools if getattr(tool, "name", "") == "read_sheet_values"),
+        None,
+    )
+    modify_tool = next(
+        (tool for tool in mcp_tools if getattr(tool, "name", "") == "modify_sheet_values"),
+        None,
+    )
+    spreadsheet_id = str(resource.get("spreadsheet_id") or "").strip()
+    sheet_name = str(resource.get("sheet_name") or "").strip()
+    if not read_tool or not modify_tool or not spreadsheet_id or not sheet_name:
+        return []
+
+    async def _append_sheet_survey_response(
+        customer_name: str = "",
+        satisfaction_score: int = 1,
+        expectations_met: str = "",
+        liked: str = "",
+        improvement: str = "",
+        notes: str = "",
+        escalation_status: str = "Tidak",
+    ) -> str:
+        # Serialize read-next-row-write across all API replicas. The model never
+        # receives or supplies a spreadsheet ID/range, so prompt injection
+        # cannot redirect this delegated write to another Owner resource.
+        from sqlalchemy import text
+
+        from app.database import AsyncSessionLocal
+
+        lock_key = f"survey-sheet:{spreadsheet_id}:{sheet_name}"
+        async with AsyncSessionLocal() as db:
+            await db.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                {"lock_key": lock_key},
+            )
+            current = await read_tool.ainvoke(
+                {
+                    "spreadsheet_id": spreadsheet_id,
+                    "range_name": f"{sheet_name}!A1:I10000",
+                }
+            )
+            current_text = str(current)
+            if (
+                _is_google_auth_or_scope_error(current_text)
+                or _is_google_resource_not_found_error(current_text)
+            ):
+                raise RuntimeError(current_text)
+            match = re.search(r"Successfully read\s+(\d+)\s+rows?", current_text, re.I)
+            if not match:
+                raise RuntimeError(
+                    "SURVEY_SHEET_READ_FAILED: jumlah baris Sheet tidak dapat diverifikasi"
+                )
+            next_row = max(2, int(match.group(1)) + 1)
+            row_values = [
+                datetime.now(timezone.utc).isoformat(),
+                customer_phone,
+                customer_name.strip(),
+                str(satisfaction_score),
+                expectations_met.strip(),
+                liked.strip(),
+                improvement.strip(),
+                notes.strip(),
+                escalation_status.strip() or "Tidak",
+            ]
+            target_range = f"{sheet_name}!A{next_row}:I{next_row}"
+            written = await modify_tool.ainvoke(
+                {
+                    "spreadsheet_id": spreadsheet_id,
+                    "range_name": target_range,
+                    "values": [row_values],
+                    "value_input_option": "USER_ENTERED",
+                }
+            )
+            written_text = str(written)
+            if (
+                _is_google_auth_or_scope_error(written_text)
+                or _is_google_resource_not_found_error(written_text)
+                or "error" in written_text.casefold()
+            ):
+                raise RuntimeError(written_text)
+            verified = await read_tool.ainvoke(
+                {
+                    "spreadsheet_id": spreadsheet_id,
+                    "range_name": target_range,
+                }
+            )
+            verified_text = str(verified)
+            if customer_phone not in verified_text:
+                raise RuntimeError(
+                    "SURVEY_SHEET_VERIFY_FAILED: hasil tulis tidak ditemukan saat readback"
+                )
+            await db.commit()
+        log.info(
+            "agent_run.customer_survey_response_appended",
+            sheet_name=sheet_name,
+            row=next_row,
+        )
+        return "SURVEY_RESPONSE_SAVED: Jawaban survey berhasil disimpan dan diverifikasi."
+
+    return [
+        StructuredTool.from_function(
+            coroutine=_append_sheet_survey_response,
+            name="append_sheet_survey_response",
+            description=(
+                "Simpan satu hasil survey customer ke Sheet bisnis yang sudah ditetapkan Owner. "
+                "Panggil tepat sekali setelah jawaban survey lengkap. Tool ini append-only dan "
+                "tidak dapat membaca atau menulis resource Google lain."
+            ),
+            args_schema=AppendSurveyResponseArgs,
+        )
+    ]
 
 
 def _looks_like_progress_claim(reply_text: str) -> bool:
@@ -1393,6 +1594,10 @@ def build_google_mcp_usage_notice(user_message: str) -> str:
         "modify_sheet_values memakai argumen range_name (bukan range); "
         "draft_gmail_message.to/cc/bcc berupa string tunggal; "
         "manage_contact.emails/phones berupa list of objects; "
+        "UNTUK SPREADSHEET YANG SUDAH ADA: jangan buat spreadsheet baru dan jangan panggil manage_drive_access hanya agar agent bisa menulis. "
+        "Panggil read_sheet_values dulu untuk membaca nama sheet, header, dan data yang ada; gunakan append_table_rows untuk menambah record, "
+        "atau modify_sheet_values hanya setelah struktur/range target sudah terbaca. Jangan menebak Sheet1, header, atau range A1/A2. "
+        "manage_drive_access hanya boleh dipakai bila Owner secara eksplisit meminta perubahan akses dan penerimanya adalah alamat email Google, bukan nomor WhatsApp. "
         "UNTUK GOOGLE DRIVE: create_drive_folder dipakai untuk membuat folder. create_drive_file hanya untuk upload file jika ada content teks atau fileUrl/file_url valid; "
         "jangan panggil create_drive_file dengan content null dan fileUrl null. Untuk laporan spreadsheet/xlsx baru, gunakan create_spreadsheet + modify_sheet_values, lalu pindahkan file ke folder dengan update_drive_file(add_parents=<folder_id>); "
         "UNTUK GOOGLE CALENDAR: manage_event action update/delete/rsvp WAJIB memakai event_id asli dari Google Calendar. "
@@ -1825,6 +2030,11 @@ def sanitize_google_forms_tools(mcp_tools: list, log: Any) -> list:
     sanitized_tool_names: list[str] = []
     get_events_tool = next((tool for tool in mcp_tools if getattr(tool, "name", "") == "get_events"), None)
     create_sheet_tool = next((tool for tool in mcp_tools if getattr(tool, "name", "") == "create_sheet"), None)
+    read_sheet_values_available = any(
+        getattr(tool, "name", "") == "read_sheet_values" for tool in mcp_tools
+    )
+    inspected_spreadsheet_ids: set[str] = set()
+    created_spreadsheet_ids: set[str] = set()
     for mcp_tool in mcp_tools:
         tool_name = getattr(mcp_tool, "name", "")
         if tool_name == "create_spreadsheet":
@@ -1844,7 +2054,11 @@ def sanitize_google_forms_tools(mcp_tools: list, log: Any) -> list:
                         kwargs.pop("sheet_names", None)
                     elif "sheet_names" in kwargs:
                         kwargs["sheet_names"] = _normalize_string_list_arg(kwargs.get("sheet_names"))
-                    return await tool_to_call.ainvoke(kwargs)
+                    result = await tool_to_call.ainvoke(kwargs)
+                    spreadsheet_id = _extract_spreadsheet_id_from_text(str(result))
+                    if spreadsheet_id:
+                        created_spreadsheet_ids.add(spreadsheet_id)
+                    return result
 
                 return _create_spreadsheet_guarded
 
@@ -2095,9 +2309,44 @@ def sanitize_google_forms_tools(mcp_tools: list, log: Any) -> list:
             sanitized_tool_names.append(tool_name)
             continue
 
+        if tool_name == "read_sheet_values":
+            def _build_read_sheet_values_guarded(tool_to_call: Any):
+                async def _read_sheet_values_guarded(**kwargs):
+                    result = await tool_to_call.ainvoke(kwargs)
+                    spreadsheet_id = str(kwargs.get("spreadsheet_id") or "").strip()
+                    if spreadsheet_id:
+                        inspected_spreadsheet_ids.add(spreadsheet_id)
+                    return result
+
+                return _read_sheet_values_guarded
+
+            wrapped_tools.append(
+                StructuredTool.from_function(
+                    coroutine=_build_read_sheet_values_guarded(mcp_tool),
+                    name=mcp_tool.name,
+                    description=getattr(mcp_tool, "description", None),
+                    args_schema=getattr(mcp_tool, "args_schema", None),
+                )
+            )
+            sanitized_tool_names.append(tool_name)
+            continue
+
         if tool_name == "modify_sheet_values":
             def _build_modify_sheet_values_guarded(tool_to_call: Any):
                 async def _modify_sheet_values_guarded(**kwargs):
+                    spreadsheet_id = str(kwargs.get("spreadsheet_id") or "").strip()
+                    if (
+                        read_sheet_values_available
+                        and spreadsheet_id
+                        and spreadsheet_id not in inspected_spreadsheet_ids
+                        and spreadsheet_id not in created_spreadsheet_ids
+                    ):
+                        return (
+                            "SHEETS_STRUCTURE_REQUIRED: Sebelum mengubah spreadsheet yang sudah ada, "
+                            "panggil read_sheet_values(spreadsheet_id=..., range_name='A1:ZZ20') untuk "
+                            "membaca nama sheet, header, dan baris yang tersedia. Jangan menebak Sheet1, "
+                            "range A1, atau posisi baris."
+                        )
                     range_alias = kwargs.pop("range", None)
                     if not kwargs.get("range_name") and range_alias:
                         kwargs["range_name"] = range_alias
@@ -2169,6 +2418,34 @@ def sanitize_google_forms_tools(mcp_tools: list, log: Any) -> list:
                     name=mcp_tool.name,
                     description=getattr(mcp_tool, "description", None),
                     args_schema=ModifySheetValuesArgs,
+                )
+            )
+            sanitized_tool_names.append(tool_name)
+            continue
+
+        if tool_name == "manage_drive_access":
+            def _build_manage_drive_access_guarded(tool_to_call: Any):
+                async def _manage_drive_access_guarded(**kwargs):
+                    action = str(kwargs.get("action") or "").strip().lower()
+                    share_type = str(kwargs.get("share_type") or "").strip().lower()
+                    share_with = str(kwargs.get("share_with") or "").strip()
+                    if action == "grant" and share_type == "user" and (not share_with or "@" not in share_with):
+                        return (
+                            "DRIVE_EMAIL_REQUIRED: manage_drive_access untuk share_type='user' hanya menerima "
+                            "alamat email Google yang valid. Nomor WhatsApp/telepon tidak dapat diberi permission "
+                            "Google Drive. Jangan ubah akses hanya agar agent dapat menulis ke spreadsheet yang "
+                            "sudah disediakan; gunakan koneksi Google Owner yang aktif."
+                        )
+                    return await tool_to_call.ainvoke(kwargs)
+
+                return _manage_drive_access_guarded
+
+            wrapped_tools.append(
+                StructuredTool.from_function(
+                    coroutine=_build_manage_drive_access_guarded(mcp_tool),
+                    name=mcp_tool.name,
+                    description=getattr(mcp_tool, "description", None),
+                    args_schema=getattr(mcp_tool, "args_schema", None),
                 )
             )
             sanitized_tool_names.append(tool_name)
@@ -2365,6 +2642,15 @@ async def prepare_google_mcp_runtime(
         memory_scope or getattr(session, "external_user_id", None) or fallback_external_user_id,
         channel_cfg.get("user_phone") or fallback_external_user_id,
     )
+    # Operational customer workflows may use one explicitly delegated,
+    # resource-bound tool. In that case authentication still belongs to the
+    # Owner, never to the customer identity.
+    for owner_candidate in _candidate_external_user_ids(
+        fallback_external_user_id,
+        fallback_external_user_id,
+    ):
+        if owner_candidate not in candidate_ids:
+            candidate_ids.append(owner_candidate)
 
     connected_user_id: str | None = None
     auth_url: str | None = None

@@ -244,6 +244,7 @@ def build_builder_tools(
     default_target: str = "",
     session_id: str | None = None,
     sender_name: str | None = None,
+    current_user_message: str = "",
 ) -> list:
     """
     Build semua builder tools untuk system agent.
@@ -266,9 +267,13 @@ def build_builder_tools(
 
     planning_tools = build_builder_planning_tools(
         preview_agent_creation_entitlement=_preview_agent_creation_entitlement,
+        db_factory=db_factory,
+        session_id=session_id,
+        trusted_owner_phone=owner_phone or "",
+        current_user_message=current_user_message,
     )
-    # plan_agent contract kept visible in this facade for legacy source-inspection tests:
-    # Ini bukan approval gate. Jangan minta user menyetujui blueprint; langsung create_agent tanpa tanya approval lagi.
+    # plan_agent contract kept visible in this facade for source-inspection tests:
+    # Brief, workflow, and escalation must be confirmed once before create; internal artifacts need no micro-approval.
 
     async def _call_builder_instruction_writer(*args: Any, **kwargs: Any) -> str:
         return await _call_instruction_writer(*args, **kwargs)
@@ -326,12 +331,12 @@ def build_builder_tools(
         owner_phone=owner_phone,
         self_agent_id=self_agent_id,
         agent_model=Agent,
-        preview_agent_creation_entitlement=_preview_agent_creation_entitlement,
-        call_instruction_writer=_call_builder_instruction_writer,
         append_platform_staff_identity_instruction=_append_platform_staff_identity_instruction,
         append_google_workspace_instruction=_append_google_workspace_instruction,
         platform_staff_identity_block=_platform_staff_identity_block,
         get_logger=_get_builder_logger,
+        session_id=session_id,
+        current_user_message=current_user_message,
     )
     update_tools = build_builder_update_tools(
         db_factory,
@@ -387,7 +392,7 @@ def build_builder_tools(
 
     # update_agent lives in app.core.tools.builder_update_tools.
 
-    # delete_agent/get_agent_detail/list_my_agents live in app.core.tools.builder_management_tools.
+    # delete_agent/get_agent_detail/list_my_agents/renew_agent live in app.core.tools.builder_management_tools.
     # generate_google_auth_link lives in app.core.tools.builder_connector_tools.
 
     return [
@@ -413,5 +418,6 @@ def build_builder_tools(
         management_tools["delete_agent"],
         management_tools["get_agent_detail"],
         management_tools["list_my_agents"],
+        management_tools["renew_agent"],
         connector_tools["generate_google_auth_link"],
     ]

@@ -1,0 +1,7 @@
+version: "1.0.0"
+triggers: ["edit", "update", "change-agent"]
+supported_states: ["idle", "discovery", "awaiting_confirmation", "updating", "verifying"]
+allowed_tool_groups: ["lifecycle", "compose", "create"]
+trust_level: "system"
+primary: true
+enabled: true

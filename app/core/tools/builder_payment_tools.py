@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from uuid import uuid4
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import structlog
 from langchain_core.tools import tool
@@ -33,6 +33,11 @@ PLAN_LABELS = {
     "tier_2": "Pro",
     "tier_3": "Enterprise",
 }
+PLAN_CAPACITY = {
+    "tier_1": 1,
+    "tier_2": 2,
+    "tier_3": None,
+}
 
 
 def resolve_payment_plan(plan: str | None) -> str | None:
@@ -43,6 +48,56 @@ def resolve_payment_plan(plan: str | None) -> str | None:
 def build_payment_link(plan_code: str, phone: str) -> str:
     query = urlencode({"plan": plan_code, "wa": phone, "request": uuid4().hex})
     return f"{PAYMENT_BASE_URL}?{query}"
+
+
+def verified_payment_payload(
+    raw_result: Any,
+    *,
+    expected_plan: str,
+) -> dict[str, Any] | None:
+    """Accept only a payment URL emitted for the requested plan and host."""
+    try:
+        payload = (
+            raw_result
+            if isinstance(raw_result, dict)
+            else json.loads(str(raw_result or ""))
+        )
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("error"):
+        return None
+    if str(payload.get("plan_code") or "") != expected_plan:
+        return None
+    payment_link = str(payload.get("payment_link") or "").strip()
+    parsed = urlparse(payment_link)
+    query = parse_qs(parsed.query)
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "chiefaiofficer.id"
+        or parsed.path != "/pay"
+        or query.get("plan") != [expected_plan]
+        or not query.get("wa")
+        or not query.get("request")
+    ):
+        return None
+    return payload
+
+
+def payment_user_reply(payload: dict[str, Any]) -> str:
+    plan_label = str(payload.get("plan_label") or "paket pilihanmu")
+    payment_link = str(payload.get("payment_link") or "")
+    max_agents = payload.get("max_agents")
+    capacity = (
+        "agent tanpa batas"
+        if max_agents is None
+        else f"maksimal {int(max_agents)} agent"
+    )
+    return (
+        f"Berikut link pembayaran paket {plan_label} ({capacity}):\n"
+        f"{payment_link}\n\n"
+        "Harga dan periode yang berlaku ditampilkan di halaman checkout. "
+        "Setelah pembayaran berhasil dan notifikasinya diterima, paket akan aktif otomatis."
+    )
 
 
 def build_builder_payment_tools(
@@ -91,6 +146,7 @@ def build_builder_payment_tools(
             return json.dumps({
                 "plan_code": plan_code,
                 "plan_label": PLAN_LABELS[plan_code],
+                "max_agents": PLAN_CAPACITY[plan_code],
                 "phone": normalized_phone,
                 "payment_link": payment_link,
                 "message": (

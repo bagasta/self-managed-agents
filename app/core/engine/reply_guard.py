@@ -16,6 +16,7 @@ _BUILDER_TOOLS = {
     "create_agent",
     "verify_agent",
     "create_wa_dev_trial_link",
+    "send_agent_wa_qr",
     "set_agent_memory",
     "update_agent",
     "delete_agent",
@@ -42,8 +43,6 @@ _INCOMPLETE_BUILDER_REPLY_MARKERS = (
     "masih saya proses",
     "cek dulu konfigurasi",
     "placeholder",
-    "setuju",
-    "konfirmasi",
     "lanjut buat",
     "lanjutkan buat",
 )
@@ -95,6 +94,17 @@ def _builder_entitlement_retry_reply(steps: list[dict[str, Any]]) -> str | None:
 
 def _builder_success_reply_is_clear(reply: str) -> bool:
     normalized = reply.lower()
+    if any(
+        marker in normalized
+        for marker in (
+            "belum berhasil",
+            "tidak berhasil",
+            "gagal dibuat",
+            "gagal diupdate",
+            "belum selesai",
+        )
+    ):
+        return False
     return any(
         marker in normalized
         for marker in (
@@ -117,10 +127,14 @@ def _builder_success_reply_is_clear(reply: str) -> bool:
 
 def _has_whatsapp_onboarding(reply: str) -> bool:
     normalized = reply.lower()
-    return (
-        "nomor demo arthur" in normalized
-        and "nomor whatsapp kamu sendiri" in normalized
+    if "nomor demo arthur" not in normalized:
+        return False
+    premature_dedicated_number_markers = (
+        "nomor whatsapp kamu sendiri",
+        "nomor khusus",
+        "langsung dipasang",
     )
+    return not any(marker in normalized for marker in premature_dedicated_number_markers)
 
 
 def _looks_like_incomplete_builder_reply(reply: str) -> bool:
@@ -155,6 +169,18 @@ def _is_builder_context(
 def _sanitize_builder_channel_reply(reply: str) -> str:
     text = (reply or "").strip()
     normalized = text.lower()
+    if "dashboard" in normalized or any(
+        marker in normalized
+        for marker in (
+            "settings → hubungkan whatsapp",
+            "settings -> hubungkan whatsapp",
+        )
+    ):
+        return (
+            "Semua pengaturan agent dilakukan lewat chat WhatsApp ini. "
+            "Untuk mencoba agent, pilih nomor demo Arthur agar saya kirim link wa.me dan kode. "
+            "Untuk memasang ke nomor khusus milikmu, pilih nomor khusus agar saya kirim scan sekali dari WhatsApp."
+        )
     if "webchat" not in normalized and "web chat" not in normalized:
         return text
     if "channel" not in normalized and "whatsapp" not in normalized:
@@ -174,14 +200,14 @@ def _sanitize_builder_channel_reply(reply: str) -> str:
 
     sanitized = "\n".join(kept_lines).strip()
     channel_note = (
-        "Channelnya saya set ke WhatsApp. Setelah jadi, bisa dicoba lewat nomor demo Arthur "
-        "atau dipasang ke nomor WhatsApp kamu sendiri."
+        "Channelnya saya set ke WhatsApp. Setelah jadi, kita uji dulu lewat nomor demo Arthur "
+        "supaya kualitas jawaban dan alurnya bisa dicek tanpa setup nomor sendiri."
     )
     if not removed_channel_offer:
         return sanitized or channel_note
     if not sanitized:
         return channel_note
-    if "nomor demo arthur" in sanitized.lower() and "nomor whatsapp kamu sendiri" in sanitized.lower():
+    if "nomor demo arthur" in sanitized.lower() and "nomor whatsapp kamu sendiri" not in sanitized.lower():
         return sanitized
     return f"{sanitized}\n\n{channel_note}"
 
@@ -193,16 +219,73 @@ def _create_agent_success_reply(data: dict[str, Any]) -> str:
 
     if channel == "whatsapp":
         return (
-            f"{name} sudah jadi. "
-            "Sekarang mau agent ini langsung dipasang ke nomor WhatsApp kamu sendiri, "
-            "atau dicoba dulu lewat nomor demo Arthur yang sudah siap pakai?"
+            f"{name} sudah jadi. Pilih cara menghubungkannya lewat WhatsApp:\n"
+            "1. Nomor demo Arthur — saya kirim link wa.me dan kode untuk langsung mencoba.\n"
+            "2. Nomor khusus milikmu — saya kirim scan sekali dari WhatsApp untuk menghubungkannya.\n"
+            "Balas `nomor demo` atau `nomor khusus`."
         )
     if agent_id:
         return f"{name} sudah jadi. ID agent: {agent_id}."
     return f"{name} sudah jadi."
 
 
-def _builder_fallback_reply(steps: list[dict[str, Any]]) -> str | None:
+def _render_builder_questions(questions: Any) -> str | None:
+    if not isinstance(questions, list):
+        return None
+    question_texts = [
+        str(item.get("question") or "").strip()
+        for item in questions
+        if (
+            isinstance(item, dict)
+            and str(item.get("topic") or "").strip() != "user_confirmed"
+            and str(item.get("question") or "").strip()
+        )
+    ]
+    if not question_texts:
+        return None
+    # The discovery validator returns every missing field in the current group,
+    # but WhatsApp should reveal them progressively. Asking only the first
+    # highest-priority question keeps the exchange short and lets later turns
+    # incorporate information the user volunteers without repeating a checklist.
+    return question_texts[0]
+
+
+def _builder_clarification_reply(data: dict[str, Any]) -> str | None:
+    """Turn deterministic builder blockers into questions, never failure text."""
+    questions = data.get("capability_clarifications") or []
+    if not questions:
+        progress = data.get("discovery_progress")
+        if isinstance(progress, dict):
+            questions = progress.get("next_questions") or []
+    rendered = _render_builder_questions(questions)
+    if rendered:
+        return rendered
+
+    error = str(data.get("error") or "").strip().lower()
+    if "kemampuan file belum diputuskan" in error or "keputusan kemampuan file" in error:
+        return (
+            "Sebelum saya buat, pilih kebutuhan file agent ini: hanya chat teks, menerima "
+            "file/gambar dari user, membuat file/laporan untuk dikirim, atau keduanya?"
+        )
+    return None
+
+
+def _plan_agent_clarification_reply(steps: list[dict[str, Any]]) -> str | None:
+    for step in reversed(steps or []):
+        if step.get("tool") != "plan_agent":
+            continue
+        data = _parse_step_result(step.get("result"))
+        if not data or str(data.get("plan_status") or "").strip().lower() != "needs_clarification":
+            continue
+        return _builder_clarification_reply(data)
+    return None
+
+
+def _builder_fallback_reply(
+    steps: list[dict[str, Any]],
+    *,
+    whatsapp_action: str | None = None,
+) -> str | None:
     entitlement_retry = _builder_entitlement_retry_reply(steps)
     if entitlement_retry:
         return entitlement_retry
@@ -253,12 +336,40 @@ def _builder_fallback_reply(steps: list[dict[str, Any]]) -> str | None:
             agent_name = str(data.get("agent_name") or "agent").strip()
             contact_name = str(data.get("shared_whatsapp_name") or "").strip()
             if data.get("contact_sent") and contact_name:
-                return f"Kontak {contact_name} sudah saya kirim. Kode trial {agent_name}: {code}. Link: {link}"
+                return (
+                    f"Link demo {agent_name}: {link}\n"
+                    f"Kode: {code}. Setelah link dan kode ini, kontak {contact_name} juga sudah saya kirim."
+                )
             return f"Kode trial {agent_name}: {code}. Link: {link}"
         if link:
             return f"Agent-nya sudah siap dicoba. Link: {link}"
     if trial_link_error_reply:
         return trial_link_error_reply
+
+    for step in reversed(steps or []):
+        if whatsapp_action == "trial_link":
+            break
+        if step.get("tool") != "send_agent_wa_qr":
+            continue
+        result_text = str(step.get("result") or "").strip()
+        if "[QR_SENT]" in result_text:
+            return (
+                "Scan sekali dari WhatsApp sudah saya kirim ke chat kamu. "
+                "Buka WhatsApp di nomor khusus yang akan dipasang, pilih Perangkat tertaut, "
+                "lalu scan sekarang karena kodenya berlaku singkat."
+            )
+        if "[INFO]" in result_text:
+            return "Nomor WhatsApp khusus itu sudah terhubung ke agent; tidak perlu scan ulang."
+        if "[error]" in result_text.lower() or result_text.lower().startswith("error:"):
+            detail = re.sub(r"^\[error\]\s*", "", result_text, flags=re.IGNORECASE)
+            return f"Scan WhatsApp belum berhasil dikirim: {detail}"
+
+    # A discovery question is a normal builder state, not a technical failure.
+    # If the model produced an empty/progress-like reply, reconstruct the exact
+    # user-facing questions from plan_agent instead of saying "coba lagi".
+    clarification_reply = _plan_agent_clarification_reply(steps)
+    if clarification_reply:
+        return clarification_reply
 
     for step in reversed(steps or []):
         if step.get("tool") != "create_agent":
@@ -268,6 +379,9 @@ def _builder_fallback_reply(steps: list[dict[str, Any]]) -> str | None:
             continue
         if data.get("success") is True:
             return _create_agent_success_reply(data)
+        clarification_reply = _builder_clarification_reply(data)
+        if clarification_reply:
+            return clarification_reply
         error = str(data.get("error") or "").strip()
         if error:
             return f"Belum berhasil dibuat: {error}"
@@ -351,6 +465,8 @@ def ensure_non_empty_reply(
     *,
     tools_config: dict[str, Any] | None = None,
     active_groups: list[str] | tuple[str, ...] | set[str] | None = None,
+    user_message: str = "",
+    builder_whatsapp_action: str | None = None,
 ) -> str:
     text = (reply or "").strip()
     entitlement_retry = _builder_entitlement_retry_reply(steps)
@@ -360,15 +476,79 @@ def ensure_non_empty_reply(
         if not text or not any(marker in normalized for marker in retry_markers):
             return entitlement_retry
 
+    # plan_agent is the deterministic source of the next unresolved field.
+    # Do not let a non-empty model progress note or internal "evidence format"
+    # explanation replace it and send the user into another discovery loop.
+    plan_clarification = _plan_agent_clarification_reply(steps)
+    if plan_clarification:
+        if plan_clarification.casefold() in text.casefold():
+            return text
+        return plan_clarification
+
+    normalized_request = " ".join(str(user_message or "").casefold().split())
+    generic_whatsapp_setup = (
+        any(
+            marker in normalized_request
+            for marker in (
+                "cara pasang",
+                "gimana pasang",
+                "gimana cara pasang",
+                "cara hubungkan",
+                "cara menghubungkan",
+                "pasang ke whatsapp",
+            )
+        )
+        and not any(
+            marker in normalized_request
+            for marker in (
+                "nomor demo",
+                "nomor khusus",
+                "nomor saya sendiri",
+                "nomor whatsapp saya",
+                "kirim qr",
+                "scan qr",
+            )
+        )
+        and not any(
+            step.get("tool") in {"create_wa_dev_trial_link", "send_agent_wa_qr"}
+            for step in steps or []
+        )
+    )
+    if generic_whatsapp_setup and _is_builder_context(steps, active_groups):
+        return (
+            "Ada dua pilihan lewat WhatsApp:\n"
+            "1. Nomor demo Arthur — saya kirim link wa.me dan kode supaya agent bisa langsung dicoba.\n"
+            "2. Nomor khusus milikmu — saya kirim scan sekali dari WhatsApp untuk menghubungkan agent ke nomor itu.\n"
+            "Balas `nomor demo` atau `nomor khusus`. Semua proses dilakukan di chat ini."
+        )
+
     if text:
         if _is_builder_context(steps, active_groups):
             text = _sanitize_builder_channel_reply(text)
-        builder_reply = _builder_fallback_reply(steps)
+        builder_reply = _builder_fallback_reply(
+            steps,
+            whatsapp_action=builder_whatsapp_action,
+        )
         tool_names = _step_tool_names(steps)
         if (
             builder_reply
             and "create_wa_dev_trial_link" in tool_names
             and not _trial_link_reply_is_complete(text, steps)
+        ):
+            return builder_reply
+        if (
+            builder_reply
+            and "send_agent_wa_qr" in tool_names
+            and builder_whatsapp_action != "trial_link"
+        ):
+            return builder_reply
+        if (
+            builder_reply
+            and "create_agent" in tool_names
+            and not (
+                "nomor demo arthur" in text.casefold()
+                and "nomor khusus" in text.casefold()
+            )
         ):
             return builder_reply
         missing_whatsapp_onboarding = (
@@ -395,7 +575,10 @@ def ensure_non_empty_reply(
         )
         return disabled_guard_reply or text
 
-    builder_reply = _builder_fallback_reply(steps)
+    builder_reply = _builder_fallback_reply(
+        steps,
+        whatsapp_action=builder_whatsapp_action,
+    )
     if builder_reply:
         return builder_reply
 

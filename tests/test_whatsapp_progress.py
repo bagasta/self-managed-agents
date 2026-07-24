@@ -72,7 +72,7 @@ def test_media_send_success_final_reply_without_url_is_suppressed():
 
 
 @pytest.mark.asyncio
-async def test_notify_user_is_single_use_per_run(monkeypatch):
+async def test_notify_user_suppresses_generic_progress_placeholder(monkeypatch):
     from app.core.engine.tool_builder import build_wa_notify_tool
 
     sent: list[str] = []
@@ -93,9 +93,35 @@ async def test_notify_user_is_single_use_per_run(monkeypatch):
     first = await notify.ainvoke({"message": "Masih saya proses ya. Saya akan kirim hasilnya begitu selesai."})
     second = await notify.ainvoke({"message": "Mohon tunggu sebentar, masih saya proses."})
 
-    assert first == "notifikasi terkirim"
+    assert "suppressed" in first
     assert "suppressed" in second
-    assert sent == ["Masih saya proses ya. Saya akan kirim hasilnya begitu selesai."]
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_notify_user_allows_specific_blocker_update(monkeypatch):
+    from app.core.engine.tool_builder import build_wa_notify_tool
+
+    sent: list[str] = []
+
+    async def fake_send_wa_message(_device_id, _target, message):
+        sent.append(message)
+
+    async def fake_start_typing(_device_id, _target):
+        return None
+
+    monkeypatch.setattr("app.core.infra.wa_client.send_wa_message", fake_send_wa_message)
+    monkeypatch.setattr("app.core.infra.wa_client.start_wa_typing", fake_start_typing)
+
+    notify = build_wa_notify_tool(
+        SimpleNamespace(channel_config={"device_id": "wa-device", "user_phone": "628111"})
+    )[0]
+    message = "Koneksi Google terputus; saya sedang menyiapkan link hubungkan ulang."
+
+    result = await notify.ainvoke({"message": message})
+
+    assert result == "notifikasi terkirim"
+    assert sent == [message]
 
 
 @pytest.mark.asyncio

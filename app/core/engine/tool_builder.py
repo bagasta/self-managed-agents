@@ -530,16 +530,47 @@ def build_wa_notify_tool(session: Any) -> list:
             )
         )
 
+    def _looks_like_generic_progress_placeholder(message: str) -> bool:
+        lowered = " ".join((message or "").lower().split())
+        progress_markers = (
+            "masih saya proses",
+            "masih diproses",
+            "sedang saya proses",
+            "lagi saya proses",
+            "akan saya kirim hasilnya begitu selesai",
+            "saya kabari begitu selesai",
+            "mohon tunggu",
+        )
+        blocker_markers = (
+            "gagal",
+            "error",
+            "terputus",
+            "izin",
+            "login",
+            "hubungkan ulang",
+            "reconnect",
+            "tidak tersedia",
+            "butuh",
+        )
+        return any(marker in lowered for marker in progress_markers) and not any(
+            marker in lowered for marker in blocker_markers
+        )
+
     @tool
     async def notify_user(message: str) -> str:
-        """Kirim pesan progress/update ke user WhatsApp saat sedang mengerjakan task panjang.
-        Gunakan ini untuk memberi tahu user bahwa pekerjaan masih berjalan, BUKAN sebagai reply final.
-        Contoh: notify_user('Sedang menulis file HTML...'), notify_user('Deploy sedang berjalan, hampir selesai...')
+        """Kirim update blocker konkret ke user WhatsApp selama agent masih running.
+        Jangan gunakan pesan placeholder generik bahwa pekerjaan masih diproses.
+        Contoh: notify_user('Koneksi Google terputus; saya sedang menyiapkan link hubungkan ulang.')
         """
         nonlocal notify_attempted
         if notify_attempted:
             return "[notify_user] suppressed: progress notification already attempted for this run"
         notify_attempted = True
+        if _looks_like_generic_progress_placeholder(message):
+            return (
+                "[notify_user] suppressed: pesan progress generik dinonaktifkan; "
+                "kirim hanya blocker atau retry yang konkret"
+            )
         if _looks_like_delivery_claim(message):
             return (
                 "[notify_user] suppressed: jangan pakai notify_user untuk klaim file siap/terkirim. "
@@ -711,6 +742,7 @@ def build_whatsapp_media_tools(
     *,
     device_id: str = "",
     default_target: str = "",
+    allow_workspace_paths: bool = True,
 ) -> list:
     """
     Tools untuk mengirim gambar dan dokumen ke WhatsApp.
@@ -718,6 +750,11 @@ def build_whatsapp_media_tools(
 
     device_id / default_target: kw-args opsional — dipakai saat session=None (misal subagent).
     Jika session diberikan, device_id/default_target diambil dari session.channel_config.
+
+    ``allow_workspace_paths`` hanya berlaku untuk file path lokal. Base64 dan media
+    attachment yang terdaftar pada session tetap dapat dikirim tanpa sandbox. Builder
+    seperti Arthur sengaja tidak diberi akses path workspace agar nama file hasil
+    halusinasi tidak berubah menjadi percobaan membaca artifact agent lain.
     """
     if session is not None:
         _raw_cfg = session.channel_config
@@ -770,8 +807,16 @@ def build_whatsapp_media_tools(
                 if resolved_mimetype and (not mimetype or mimetype == "image/jpeg"):
                     mimetype = resolved_mimetype
             else:
+                if not allow_workspace_paths:
+                    return (
+                        "[MEDIA_SOURCE_UNAVAILABLE] Tidak ada gambar tervalidasi untuk "
+                        "dikirim pada percakapan ini."
+                    )
                 if sandbox is None:
-                    return "[error] Tool send_whatsapp_image membutuhkan sandbox aktif untuk membaca file. Gunakan base64 langsung atau attachment WA terbaru."
+                    return (
+                        "[MEDIA_SOURCE_UNAVAILABLE] Tidak ada gambar tervalidasi untuk "
+                        "dikirim pada percakapan ini."
+                    )
                 path = image_path_or_base64 if image_path_or_base64.startswith("/workspace/") else f"/workspace/{image_path_or_base64}"
                 import shlex as _shlex
 
@@ -836,8 +881,16 @@ def build_whatsapp_media_tools(
                 if resolved_mimetype and (not mimetype or mimetype == "application/octet-stream"):
                     mimetype = resolved_mimetype
             else:
+                if not allow_workspace_paths:
+                    return (
+                        "[MEDIA_SOURCE_UNAVAILABLE] Tidak ada dokumen tervalidasi untuk "
+                        "dikirim pada percakapan ini."
+                    )
                 if sandbox is None:
-                    return "[error] Tool send_whatsapp_document membutuhkan sandbox aktif untuk membaca file."
+                    return (
+                        "[MEDIA_SOURCE_UNAVAILABLE] Tidak ada dokumen tervalidasi untuk "
+                        "dikirim pada percakapan ini."
+                    )
                 path = file_path_or_base64 if file_path_or_base64.startswith("/workspace/") else f"/workspace/{file_path_or_base64}"
                 import shlex as _shlex
 
@@ -1032,6 +1085,7 @@ def build_builder_tools(
     default_target: str = "",
     session_id: str | None = None,
     sender_name: str | None = None,
+    current_user_message: str = "",
 ) -> list:
     """
     Build tools eksklusif untuk system agent (Agent Builder / Arthur).
@@ -1053,6 +1107,7 @@ def build_builder_tools(
         default_target=default_target,
         session_id=session_id,
         sender_name=sender_name,
+        current_user_message=current_user_message,
     )
 
 

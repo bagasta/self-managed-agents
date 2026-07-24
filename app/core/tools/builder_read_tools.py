@@ -85,7 +85,10 @@ def build_builder_read_tools(
             "important_tools": {
                 "builder": "create_agent/update_agent/delete_agent/get_agent_detail/list_my_agents/set_agent_memory",
                 "payment": "get_payment_link untuk link pembayaran Starter/tier_1, Pro/tier_2, dan Enterprise/tier_3",
-                "whatsapp": "send_agent_wa_qr untuk kirim QR agent baru",
+                "whatsapp": (
+                    "create_wa_dev_trial_link untuk nomor demo Arthur; "
+                    "send_agent_wa_qr untuk nomor khusus milik user"
+                ),
                 "coding": "sandbox + deploy + subagents sys_coder",
                 "browsing": "tavily_search/tavily_extract untuk web search dan baca URL",
                 "productivity": "scheduler untuk reminder, integrasi Google Workspace untuk Docs/Sheets/Drive/Gmail/Calendar",

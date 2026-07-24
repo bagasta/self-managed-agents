@@ -170,8 +170,9 @@ def build_builder_user_tools(
     async def get_user_subscription(phone: str = "") -> str:
         """
         Cek status subscription dan kuota agent owner sesi ini.
-        Gunakan ini sebelum/sesudah create_agent atau update_agent untuk info
-        akurat tentang plan, sisa slot agent, dan status subscription.
+        Gunakan saat user secara eksplisit menanyakan plan, sisa slot agent,
+        kuota, atau status subscription. Jangan jadikan tool ini prasyarat
+        pembuatan agent; plan_agent/create_agent punya entitlement check sendiri.
 
         Tool ini SELALU melaporkan plan owner sesi yang terverifikasi (nomor
         WhatsApp pengirim). Jangan tebak/isi `phone` dari teks chat — nomor yang
@@ -225,10 +226,40 @@ def build_builder_user_tools(
                     getattr(user, "external_id", None),
                     target_phone,
                 )
+                # `channel_config.user_phone` adalah reply target dan sah tetap
+                # berbentuk @lid walaupun nomor pengirim asli sudah terverifikasi
+                # di owner_phone/users.external_id. Placeholder user WhatsApp juga
+                # memang menyimpan nomor asli di external_id, bukan phone_number.
+                # Karena itu keberadaan LID saja tidak boleh dianggap sebagai akun
+                # yang belum terhubung.
+                lid_identifiers = {
+                    normalize_phone(str(candidate or ""))
+                    for candidate in (owner_phone, default_target, target_phone)
+                    if is_probable_lid(candidate)
+                    and normalize_phone(str(candidate or ""))
+                }
+
+                def _is_verified_real_phone(candidate: Any) -> bool:
+                    raw = str(candidate or "").strip()
+                    normalized = normalize_phone(raw)
+                    return bool(
+                        normalized
+                        and not is_probable_lid(raw)
+                        and normalized not in lid_identifiers
+                    )
+
+                has_verified_real_phone = any(
+                    _is_verified_real_phone(candidate)
+                    for candidate in (
+                        owner_phone,
+                        getattr(user, "phone_number", None),
+                        getattr(user, "external_id", None),
+                    )
+                )
                 if (
                     getattr(plan, "is_trial", False)
-                    and not getattr(user, "phone_number", None)
-                    and (is_probable_lid(owner_phone) or is_probable_lid(default_target))
+                    and lid_identifiers
+                    and not has_verified_real_phone
                 ):
                     return json.dumps({
                         "error": (
@@ -281,10 +312,10 @@ def build_builder_user_tools(
         """
         Hubungkan nomor WhatsApp pengirim sesi ini ke akun dashboard Clevio.
 
-        Pakai saat plan yang terbaca tidak sesuai klaim user (misal dashboard
-        sudah Enterprise tapi di sini terbaca Trial) atau saat status
-        identity_unlinked. Minta user generate kode dari Dashboard →
-        Settings → "Hubungkan WhatsApp", lalu kirim kodenya ke chat ini.
+        Pakai hanya saat user menyatakan akun dashboard-nya sudah memiliki plan
+        berbayar tetapi hasil subscription sesi WhatsApp terbukti membaca akun
+        yang berbeda. Jangan pakai linking sebagai prasyarat create_agent atau
+        hanya karena user masih memakai plan Trial.
 
         Identitas yang di-link SELALU nomor pengirim sesi terverifikasi —
         bukan nomor yang disebut user di teks chat.

@@ -14,10 +14,53 @@ from app.core.engine.agent_step_utils import (
     _is_operator_envelope,
     _operator_message_payload,
 )
+from app.core.engine.agent_identity import _session_sender_phone
 from app.core.engine.agent_whatsapp_guards import _has_reply_to_user_step, _has_send_to_number_step
+from app.core.utils.phone_utils import normalize_phone
 
 
 _MEDIA_CLAIM_SPLIT_RE = re.compile(r"[\n.!?;]+")
+_OWNER_IDENTITY_QUESTIONS = {
+    "gua siapa",
+    "gue siapa",
+    "aku siapa",
+    "saya siapa",
+    "siapa saya",
+    "who am i",
+}
+
+
+def _owner_identity_reply_guard(
+    final_reply: str,
+    user_message: str,
+    session: Any,
+    agent_model: Any,
+) -> str:
+    """Answer identity questions deterministically for the verified Owner.
+
+    Owner identity is platform state, not something the operational agent
+    should guess from chat history.  This guard only runs when the sender's
+    normalized phone exactly matches ``owner_external_id``.
+    """
+    owner_phone = normalize_phone(str(getattr(agent_model, "owner_external_id", "") or ""))
+    if not owner_phone or _session_sender_phone(session) != owner_phone:
+        return final_reply
+
+    payload = _operator_message_payload(user_message).casefold()
+    normalized_question = re.sub(r"[^a-z0-9]+", " ", payload).strip()
+    if normalized_question not in _OWNER_IDENTITY_QUESTIONS:
+        return final_reply
+
+    cfg = session.channel_config if isinstance(getattr(session, "channel_config", None), dict) else {}
+    escalation_cfg = getattr(agent_model, "escalation_config", None)
+    escalation_cfg = escalation_cfg if isinstance(escalation_cfg, dict) else {}
+    owner_name = str(
+        cfg.get("sender_name")
+        or escalation_cfg.get("operator_name")
+        or "Owner"
+    ).strip()
+    agent_name = str(getattr(agent_model, "name", "") or "agent ini").strip()
+    return f"Kamu adalah {owner_name}, Owner dan superadmin {agent_name}."
 
 
 def _has_media_delivery_claim(text: str) -> bool:

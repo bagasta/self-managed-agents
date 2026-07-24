@@ -1,0 +1,7 @@
+version: "1.0.3"
+triggers: ["create", "new-agent", "requirements", "clarification"]
+supported_states: ["idle", "discovery", "awaiting_confirmation"]
+allowed_tool_groups: ["discovery", "compose"]
+trust_level: "system"
+primary: true
+enabled: true

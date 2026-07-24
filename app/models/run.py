@@ -48,6 +48,7 @@ class Run(Base):
         Numeric(18, 8), nullable=False, default=Decimal("0")
     )
     usage_details: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    runtime_metadata: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
