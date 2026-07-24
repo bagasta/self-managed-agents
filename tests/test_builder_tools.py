@@ -943,6 +943,50 @@ class TestGetUserSubscription:
         assert data["read_only"] is True
         assert "LID" in data["error"]
 
+    def test_get_user_subscription_accepts_verified_phone_with_lid_reply_target(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        sub = SimpleNamespace(
+            status="trial",
+            is_usable=True,
+            plan_id=uuid.uuid4(),
+            token_quota=5_000_000,
+            tokens_used=0,
+            tokens_remaining=5_000_000,
+            expires_at=None,
+        )
+        plan = SimpleNamespace(id=sub.plan_id, code="trial", label="Trial", max_agents=1, is_trial=True)
+        user = SimpleNamespace(
+            id=uuid.uuid4(),
+            external_id="62895626765423",
+            phone_number=None,
+            wa_lid="74350933852232",
+        )
+        agents_result = MagicMock()
+        agents_result.scalars.return_value.all.return_value = []
+        db.execute = AsyncMock(return_value=agents_result)
+
+        async def _fake_get_best(identifiers, _db, **_kwargs):
+            assert "62895626765423" in identifiers
+            assert "74350933852232@lid" in identifiers
+            return user, sub, plan
+
+        with patch("app.core.domain.subscription_service.get_best_subscription_by_external_ids", _fake_get_best):
+            tools = build_builder_tools(
+                db_factory=db,
+                owner_phone="62895626765423",
+                default_target="74350933852232@lid",
+            )
+            tool = next(t for t in tools if t.name == "get_user_subscription")
+            result = _run(tool.ainvoke({}))
+
+        data = json.loads(result)
+        assert data["status"] == "trial"
+        assert data["plan_code"] == "trial"
+        assert data["phone"] == "62895626765423"
+        assert data.get("status") != "identity_unlinked"
+
 
 class TestComposeAgentBlueprint:
     def test_writer_timeout_log_keeps_exception_type_when_message_is_empty(self):
