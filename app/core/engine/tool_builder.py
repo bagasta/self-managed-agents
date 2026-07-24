@@ -1085,6 +1085,7 @@ def build_builder_tools(
     default_target: str = "",
     session_id: str | None = None,
     sender_name: str | None = None,
+    current_user_message: str = "",
 ) -> list:
     """
     Build tools eksklusif untuk system agent (Agent Builder / Arthur).
@@ -1106,6 +1107,7 @@ def build_builder_tools(
         default_target=default_target,
         session_id=session_id,
         sender_name=sender_name,
+        current_user_message=current_user_message,
     )
 
 

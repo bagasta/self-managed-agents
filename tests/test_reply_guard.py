@@ -554,6 +554,34 @@ def test_plan_clarification_overrides_non_empty_internal_evidence_progress_note(
     assert "plan_agent" not in out
 
 
+def test_confirmation_clarification_never_leaks_internal_instruction_over_summary():
+    summary = (
+        "Rangkuman Minsel: survey pelanggan, hasil ke Google Sheets. "
+        "Kalau sesuai, balas setuju."
+    )
+    steps = [
+        {
+            "tool": "plan_agent",
+            "result": json.dumps(
+                {
+                    "plan_status": "needs_clarification",
+                    "capability_clarifications": [
+                        {
+                            "topic": "user_confirmed",
+                            "question": (
+                                "Saya akan merangkum seluruh jawaban discovery. "
+                                "Setelah rangkumannya benar, minta user menyatakan setuju."
+                            ),
+                        }
+                    ],
+                }
+            ),
+        }
+    ]
+
+    assert ensure_non_empty_reply(summary, steps) == summary
+
+
 def test_builder_entitlement_error_forces_retry_reply():
     steps = [
         {

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -16,7 +17,7 @@ from app.core.domain.skill_service import list_active_system_skills
 from app.models.agent_build_draft import AgentBuildDraft
 
 ARTHUR_ENGINE_VERSION = "arthur-progressive-v1"
-ARTHUR_PROMPT_VERSION = "arthur-kernel-v2"
+ARTHUR_PROMPT_VERSION = "arthur-kernel-v3"
 
 _BUILDER_TOOL_NAMES = {
     "get_self_config", "get_platform_capabilities", "list_available_wa_devices", "get_presets",
@@ -149,7 +150,18 @@ def classify_builder_intent(user_message: str, prior_evidence: str = "") -> str:
 
 def _is_explicit_build_confirmation(user_message: str) -> bool:
     normalized = " ".join((user_message or "").casefold().split())
-    return normalized in {"sudah", "sesuai", "sudah sesuai", "sudah benar"} or any(
+    return normalized in {
+        "ok",
+        "oke",
+        "sudah",
+        "sesuai",
+        "setuju",
+        "buat",
+        "buatkan",
+        "buat agentnya",
+        "sudah sesuai",
+        "sudah benar",
+    } or any(
         marker in normalized
         for marker in (
             "semuanya sesuai",
@@ -158,6 +170,11 @@ def _is_explicit_build_confirmation(user_message: str) -> bool:
             "lanjut buat",
             "lanjutkan buat",
             "buat sekarang",
+        )
+    ) or bool(
+        re.search(
+            r"\b(?:langsung|lanjut|lanjutkan|bisa|boleh)\b.{0,40}\b(?:di)?buat(?:kan)?\b.{0,30}\bagent",
+            normalized,
         )
     )
 

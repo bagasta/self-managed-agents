@@ -731,6 +731,36 @@ def test_runtime_evidence_includes_only_the_summary_immediately_confirmed_by_use
     ]
 
 
+def test_runtime_evidence_includes_uncommitted_current_confirmation_turn():
+    session_id = str(uuid.uuid4())
+    db = MagicMock()
+    db.execute = AsyncMock(
+        return_value=SimpleNamespace(
+            all=lambda: [
+                ("user", "Tolong buat agent survey."),
+                ("agent", "Rangkuman final Minsel: survey pelanggan ke Google Sheets."),
+            ]
+        )
+    )
+    db_factory = MagicMock()
+    db_factory.return_value.__aenter__ = AsyncMock(return_value=db)
+    db_factory.return_value.__aexit__ = AsyncMock(return_value=None)
+
+    evidence = _run(
+        load_discovery_user_messages(
+            db_factory,
+            session_id,
+            current_user_message="setuju",
+        )
+    )
+
+    assert evidence[-1] == "setuju"
+    assert (
+        "Rangkuman Arthur yang dikonfirmasi user: "
+        "Rangkuman final Minsel: survey pelanggan ke Google Sheets."
+    ) in evidence
+
+
 def test_runtime_evidence_keeps_question_context_for_terse_answers():
     session_id = str(uuid.uuid4())
     db = MagicMock()

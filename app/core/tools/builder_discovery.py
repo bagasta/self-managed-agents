@@ -135,12 +135,20 @@ _EXPLICIT_CONFIRMATION_MARKERS = (
     "setuju, buat",
     "lanjut buat",
     "lanjutkan buat",
+    "langsung buat",
+    "langsung saja buat",
     "oke buat",
     "buat sekarang",
 )
 _SHORT_EXPLICIT_CONFIRMATIONS = {
+    "ok",
+    "oke",
     "sudah",
     "sesuai",
+    "setuju",
+    "buat",
+    "buatkan",
+    "buat agentnya",
 }
 _DELEGATION_MARKERS = (
     "atur aja",
@@ -277,6 +285,8 @@ def _is_explicit_confirmation_message(value: Any) -> bool:
 async def load_discovery_user_messages(
     db_factory: Any,
     session_id: str | None,
+    *,
+    current_user_message: str = "",
 ) -> list[str]:
     """Load persisted evidence used to prove confirmed discovery answers.
 
@@ -311,6 +321,17 @@ async def load_discovery_user_messages(
         for row in rows
         if len(row) >= 2 and str(row[1] or "").strip()
     ]
+    current_message = str(current_user_message or "").strip()
+    if current_message and (
+        not conversation
+        or conversation[-1] != ("user", current_message)
+    ):
+        # Builder tools use a separate DB session. The active inbound message is
+        # still uncommitted there, so explicitly attach the trusted runtime input
+        # to the evidence stream. Treating it as the next conversation row also
+        # binds confirmations such as "setuju" to Arthur's immediately preceding
+        # summary instead of asking for the same confirmation forever.
+        conversation.append(("user", current_message))
     evidence_messages: list[str] = []
     for index, (role, content) in enumerate(conversation):
         if role != "user":
@@ -558,8 +579,11 @@ def _is_safe_confirmation_continuation(value: Any) -> bool:
     return normalized in {
         "ok",
         "oke",
+        "setuju",
         "lanjut",
         "lanjutkan",
+        "buat",
+        "buatkan",
         "langsung buat",
         "buat agentnya",
         "langsung buat agentnya",

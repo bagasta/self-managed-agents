@@ -195,6 +195,7 @@ def build_builder_planning_tools(
     db_factory: Any = None,
     session_id: str | None = None,
     trusted_owner_phone: str = "",
+    current_user_message: str = "",
 ) -> dict[str, Any]:
     _preview_agent_creation_entitlement = preview_agent_creation_entitlement
 
@@ -266,7 +267,11 @@ def build_builder_planning_tools(
 
         evidence_required = bool(db_factory is not None and session_id)
         try:
-            user_messages = await load_discovery_user_messages(db_factory, session_id)
+            user_messages = await load_discovery_user_messages(
+                db_factory,
+                session_id,
+                current_user_message=current_user_message,
+            )
             persisted_facts = await load_build_discovery_facts(db_factory, session_id)
         except DiscoveryEvidenceUnavailable as exc:
             return json.dumps(

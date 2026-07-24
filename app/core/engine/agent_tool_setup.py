@@ -278,6 +278,7 @@ async def build_agent_tool_setup(
             default_target=channel_cfg.get("user_phone", "") or "",
             session_id=str(session.id),
             sender_name=channel_cfg.get("sender_name") or "",
+            current_user_message=user_message,
         ))
         active_groups.append("builder")
 

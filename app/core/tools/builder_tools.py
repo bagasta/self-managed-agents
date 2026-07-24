@@ -244,6 +244,7 @@ def build_builder_tools(
     default_target: str = "",
     session_id: str | None = None,
     sender_name: str | None = None,
+    current_user_message: str = "",
 ) -> list:
     """
     Build semua builder tools untuk system agent.
@@ -269,6 +270,7 @@ def build_builder_tools(
         db_factory=db_factory,
         session_id=session_id,
         trusted_owner_phone=owner_phone or "",
+        current_user_message=current_user_message,
     )
     # plan_agent contract kept visible in this facade for source-inspection tests:
     # Brief, workflow, and escalation must be confirmed once before create; internal artifacts need no micro-approval.
@@ -334,6 +336,7 @@ def build_builder_tools(
         platform_staff_identity_block=_platform_staff_identity_block,
         get_logger=_get_builder_logger,
         session_id=session_id,
+        current_user_message=current_user_message,
     )
     update_tools = build_builder_update_tools(
         db_factory,

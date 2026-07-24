@@ -45,6 +45,19 @@ def test_explicit_confirmation_exposes_create_skill_even_if_shadow_state_lags():
     )
 
 
+def test_setuju_and_direct_create_requests_expose_create_tooling_immediately():
+    for message in (
+        "setuju",
+        "buat",
+        "Langsung saja buatkan agentnya",
+        "udah bisa dibuat agentnya?",
+    ):
+        assert (
+            resolve_primary_skill("discover", "discovery", user_message=message)
+            == "arthur-create-agent"
+        )
+
+
 def test_explicit_current_demo_request_still_wins_over_build_history():
     prior = "Buat agent CS Veselmate untuk Veselka."
 

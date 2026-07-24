@@ -221,7 +221,11 @@ def _render_builder_questions(questions: Any) -> str | None:
     question_texts = [
         str(item.get("question") or "").strip()
         for item in questions
-        if isinstance(item, dict) and str(item.get("question") or "").strip()
+        if (
+            isinstance(item, dict)
+            and str(item.get("topic") or "").strip() != "user_confirmed"
+            and str(item.get("question") or "").strip()
+        )
     ]
     if not question_texts:
         return None

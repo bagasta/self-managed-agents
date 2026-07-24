@@ -77,6 +77,7 @@ def build_builder_create_tools(
     platform_staff_identity_block: BlockProvider,
     get_logger: LoggerProvider | None = None,
     session_id: str | None = None,
+    current_user_message: str = "",
 ) -> dict[str, Any]:
     _get_logger = get_logger or (lambda: logger)
     logger = _LoggerProxy(_get_logger)
@@ -170,7 +171,11 @@ def build_builder_create_tools(
         if self_agent_id:
             evidence_required = bool(db_factory is not None and session_id)
             try:
-                user_messages = await load_discovery_user_messages(db_factory, session_id)
+                user_messages = await load_discovery_user_messages(
+                    db_factory,
+                    session_id,
+                    current_user_message=current_user_message,
+                )
                 persisted_facts = await load_build_discovery_facts(db_factory, session_id)
             except DiscoveryEvidenceUnavailable as exc:
                 return json.dumps(
