@@ -8,6 +8,7 @@ from app.core.domain.agent_build_state_service import (
     guard_repeated_questions,
     infer_workflow_state,
     merge_discovery_answers,
+    persisted_confirmation_applies,
     question_topic,
 )
 from app.core.engine.arthur_skill_runtime import (
@@ -35,6 +36,13 @@ def test_prior_demo_evidence_does_not_hijack_confirmation_turn():
 
     assert classify_builder_intent("Sesuai", prior) == "create"
     assert resolve_primary_skill("discover", "awaiting_confirmation") == "arthur-create-agent"
+
+
+def test_explicit_confirmation_exposes_create_skill_even_if_shadow_state_lags():
+    assert (
+        resolve_primary_skill("create", "discovery", user_message="sudah sesuai")
+        == "arthur-create-agent"
+    )
 
 
 def test_explicit_current_demo_request_still_wins_over_build_history():
@@ -227,14 +235,48 @@ def test_plan_result_persists_facts_and_confirmation_status():
     assert facts["discovery_answers"]["user_confirmed"] is True
     assert facts["discovery_evidence"]["daily_chat_volume"] == "Puluhan"
     assert facts["unresolved_fields"] == []
+    assert facts["confirmation_verified"] is True
     assert confirmation == "confirmed"
 
 
+def test_verified_confirmation_is_reused_only_when_confirmed_facts_are_unchanged():
+    facts = {
+        "confirmation_verified": True,
+        "discovery_answers": {
+            "agent_name": "Minsel",
+            "tone_style": "Professional",
+            "user_confirmed": True,
+        },
+        "discovery_evidence": {"user_confirmed": "sudah sesuai"},
+    }
+
+    unchanged = {"agent_name": "Minsel", "tone_style": "Professional"}
+    changed = {"agent_name": "Minsel Baru", "tone_style": "Professional"}
+
+    assert persisted_confirmation_applies(unchanged, facts) is True
+    assert merge_discovery_answers(unchanged, facts)["user_confirmed"] is True
+    assert persisted_confirmation_applies(changed, facts) is False
+    assert "user_confirmed" not in merge_discovery_answers(changed, facts)
+
+
 def test_workflow_state_comes_from_verified_steps():
-    assert infer_workflow_state("discovery", [{"tool": "create_agent", "result": "{}"}], "") == "agent_created"
+    assert infer_workflow_state(
+        "discovery",
+        [{"tool": "create_agent", "result": '{"success":true,"agent_id":"agent-1"}'}],
+        "",
+    ) == "agent_created"
+    assert infer_workflow_state(
+        "discovery",
+        [{"tool": "create_agent", "result": "Error: create_agent is not a valid tool"}],
+        "",
+    ) == "discovery"
     assert infer_workflow_state(
         "discovery",
         [{"tool": "plan_agent", "result": '{"plan_status":"ready"}'}],
         "Silakan konfirmasi.",
     ) == "ready_to_create"
-    assert infer_workflow_state("agent_created", [{"tool": "create_wa_dev_trial_link"}], "") == "demo_ready"
+    assert infer_workflow_state(
+        "agent_created",
+        [{"tool": "create_wa_dev_trial_link", "result": '{"success":true}'}],
+        "",
+    ) == "demo_ready"

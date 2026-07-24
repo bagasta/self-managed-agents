@@ -149,13 +149,25 @@ _DELEGATION_MARKERS = (
     "kamu sesuaikan",
     "lu atur",
     "terserah kamu",
+    "buat aja",
     "buatkan aja",
+    "saya percayain",
+    "cocok kaya gitu",
+    "cocok kayak gitu",
+    "cocok seperti itu",
 )
 _DELEGATABLE_FIELDS = {
     "ideal_conversations",
     "avoided_conversations",
     "tone_style",
     "expected_outputs",
+}
+_OPTIONAL_DISCOVERY_FIELDS = {
+    # Data minimization and secret-handling are enforced by the platform safety
+    # baseline. Ask for a business-specific retention policy when relevant, but
+    # do not restart an otherwise confirmed agent build when the owner did not
+    # define one.
+    "sensitive_data_policy",
 }
 _EVIDENCE_STOPWORDS = {
     "agent",
@@ -185,6 +197,70 @@ _EVIDENCE_STOPWORDS = {
 
 class DiscoveryEvidenceUnavailable(RuntimeError):
     """Raised when runtime conversation evidence cannot be loaded safely."""
+
+
+def owner_escalation_phone_selected(user_messages: list[str] | None) -> bool:
+    """Resolve the latest explicit escalation-phone choice from user history."""
+    owner_markers = (
+        "nomor wa saya sendiri",
+        "nomer wa saya sendiri",
+        "nomor saya sendiri",
+        "nomer saya sendiri",
+        "wa saya sendiri",
+        "nomor wa gua sendiri",
+        "nomer wa gua sendiri",
+    )
+    for message in reversed(user_messages or []):
+        text = _normalize_evidence_text(message)
+        if any(marker in text for marker in owner_markers):
+            return True
+        if re.search(r"(?:\+?62|0)\d[\d\s-]{7,16}", str(message or "")):
+            return False
+        if re.search(
+            r"\b(nomor|nomer|wa)\b(?:\s+\w+){0,5}\s+\b(admin|operator|manager|tim)\b",
+            text,
+        ):
+            return False
+    return False
+
+
+def bind_owner_escalation_phone(
+    discovery_answers: Any,
+    *,
+    user_messages: list[str] | None,
+    owner_phone: str,
+) -> Any:
+    """Bind "nomor saya sendiri" to the authenticated session owner.
+
+    This prevents a model typo from silently changing the escalation recipient.
+    Explicitly supplied admin/operator numbers are left unchanged.
+    """
+    trusted_phone = re.sub(r"\D", "", str(owner_phone or ""))
+    if len(trusted_phone) < 8 or not owner_escalation_phone_selected(user_messages):
+        return discovery_answers
+    answers, parse_error = _parse_answers(discovery_answers)
+    if parse_error:
+        return discovery_answers
+    target = answers.get("escalation_target")
+    if isinstance(target, dict):
+        target = dict(target)
+        phone_key = next(
+            (
+                key
+                for key in ("whatsapp_number", "phone", "number", "operator_phone")
+                if key in target
+            ),
+            "whatsapp_number",
+        )
+        target[phone_key] = trusted_phone
+        answers["escalation_target"] = target
+    elif _is_answered(target):
+        answers["escalation_target"] = {
+            "conditions": str(target),
+            "recipient": "Owner",
+            "whatsapp_number": trusted_phone,
+        }
+    return answers
 
 
 def _is_explicit_confirmation_message(value: Any) -> bool:
@@ -306,13 +382,43 @@ def _evidence_quotes(value: Any) -> list[str]:
     return []
 
 
+def _evidence_quote_candidates(value: Any) -> list[str]:
+    """Accept natural evidence wrappers while still matching persisted text.
+
+    Small models commonly send values such as ``Pesan user: 'Professional'``.
+    The immutable source remains the database message; this helper only extracts
+    the quoted span that should be looked up in that source.
+    """
+    candidates: list[str] = []
+    for raw in _evidence_quotes(value):
+        variants = [raw]
+        variants.extend(
+            match.strip()
+            for match in re.findall(r"""['"`]([^'"`]{2,1000})['"`]""", raw)
+            if match.strip()
+        )
+        without_prefix = re.sub(
+            r"^\s*(?:pesan|jawaban|kutipan)\s+user\s*:\s*",
+            "",
+            raw,
+            flags=re.IGNORECASE,
+        ).strip().strip("'\"`")
+        if without_prefix:
+            variants.append(without_prefix)
+        for candidate in variants:
+            candidate = candidate.strip()
+            if candidate and candidate not in candidates:
+                candidates.append(candidate)
+    return candidates
+
+
 def _verified_evidence_quotes(
     field: str,
     evidence: dict[str, Any],
     user_messages: list[str],
 ) -> list[str]:
     verified: list[str] = []
-    for quote in _evidence_quotes(evidence.get(field)):
+    for quote in _evidence_quote_candidates(evidence.get(field)):
         normalized_quote = _normalize_evidence_text(quote)
         if len(normalized_quote) < 3:
             continue
@@ -390,6 +496,29 @@ def _evidence_supports_answer(field: str, answer: Any, quotes: list[str]) -> boo
         if str(answer or "") == "personal":
             return bool(re.search(r"\b(personal|pribadi|sendiri)\b", quote_text))
         return bool(re.search(r"\b(pekerjaan|kerja|bisnis|business|work|profesional)\b", quote_text))
+    if field == "daily_chat_volume":
+        answer_numbers = re.findall(r"\d+", _normalize_evidence_text(answer))
+        quote_numbers = re.findall(r"\d+", quote_text)
+        if answer_numbers and quote_numbers:
+            return any(
+                answer_number == quote_number
+                or quote_number.startswith(answer_number)
+                or answer_number.startswith(quote_number)
+                for answer_number in answer_numbers
+                for quote_number in quote_numbers
+            )
+    if field == "whatsapp_scale":
+        answer_text = _normalize_evidence_text(answer)
+        if "inbound" in answer_text and re.search(
+            r"\b(nunggu|menunggu|chat duluan|menghubungi duluan|inbound)\b",
+            quote_text,
+        ):
+            return True
+    if field == "escalation_target" and re.search(
+        r"\b(nomor|nomer|wa)\b.*\b(saya|sendiri)\b",
+        quote_text,
+    ):
+        return True
     if field in _DELEGATABLE_FIELDS and any(
         marker in quote_text for marker in _DELEGATION_MARKERS
     ):
@@ -422,6 +551,21 @@ def _confirmation_evidence_is_valid(
         _normalize_evidence_text(quote) in latest_user_message
         for quote in _verified_evidence_quotes("user_confirmed", evidence, user_messages)
     )
+
+
+def _is_safe_confirmation_continuation(value: Any) -> bool:
+    normalized = _normalize_evidence_text(value)
+    return normalized in {
+        "ok",
+        "oke",
+        "lanjut",
+        "lanjutkan",
+        "langsung buat",
+        "buat agentnya",
+        "langsung buat agentnya",
+        "ok langsung buat agentnya",
+        "oke langsung buat agentnya",
+    }
 
 
 def _normalize_usage_context(value: Any) -> str:
@@ -578,6 +722,8 @@ def _problem_is_pain_point(value: Any) -> bool:
 
 def _whatsapp_scale_is_detailed(value: Any) -> bool:
     text = " ".join(str(value or "").strip().lower().split())
+    if re.search(r"\b(inbound|menunggu pelanggan|nunggu pelanggan|pelanggan chat duluan)\b", text):
+        return True
     number_scope = bool(re.search(r"\b(1|satu|banyak|beberapa|multi)\b", text))
     user_pattern = bool(
         re.search(
@@ -653,6 +799,7 @@ def validate_agent_discovery(
     user_messages: list[str] | None = None,
     require_evidence: bool = False,
     require_confirmed_summary: bool = False,
+    persisted_confirmation_verified: bool = False,
 ) -> dict[str, Any]:
     """Validate Arthur's six discovery groups without asking for active hours."""
     answers, parse_error = _parse_answers(discovery_answers)
@@ -678,13 +825,39 @@ def validate_agent_discovery(
     unsupported_evidence_fields: list[str] = []
     verified_evidence_fields: list[str] = []
 
+    # Optional business policy must never be invented. If the model supplies an
+    # optional value without matching user evidence, drop it and keep the
+    # platform safety baseline instead of blocking or silently trusting it.
+    if require_evidence:
+        persisted_user_messages = list(user_messages or [])
+        for field in _OPTIONAL_DISCOVERY_FIELDS:
+            if not _is_answered(answers.get(field)):
+                continue
+            verified_quotes = _verified_evidence_quotes(
+                field,
+                evidence,
+                persisted_user_messages,
+            )
+            if not (
+                verified_quotes
+                and _evidence_supports_answer(
+                    field,
+                    answers.get(field),
+                    verified_quotes,
+                )
+            ):
+                answers.pop(field, None)
+
     required_fields: list[str] = []
     for group in _GROUPS:
         for field in group["fields"]:
             if usage_context == "personal" and field in {"escalation_target", "go_live_approver"}:
                 continue
+            if field in _OPTIONAL_DISCOVERY_FIELDS:
+                continue
             required_fields.append(field)
 
+    delegated_fields: set[str] = set()
     for field in required_fields:
         if not _is_answered(answers.get(field)):
             missing_fields.append(field)
@@ -701,6 +874,10 @@ def validate_agent_discovery(
                 verified_quotes,
             ):
                 verified_evidence_fields.append(field)
+                if field in _DELEGATABLE_FIELDS:
+                    quote_text = _normalize_evidence_text(" ".join(verified_quotes))
+                    if any(marker in quote_text for marker in _DELEGATION_MARKERS):
+                        delegated_fields.add(field)
             elif verified_quotes:
                 unsupported_evidence_fields.append(field)
                 invalid_fields.append(field)
@@ -733,8 +910,10 @@ def validate_agent_discovery(
             "capabilities harus menjelaskan tugas konkret dan memilih kemampuan file secara eksplisit: "
             "hanya chat teks, menerima file/gambar, membuat file/laporan, atau keduanya."
         )
-    if _is_answered(answers.get("ideal_conversations")) and not _has_two_to_three_conversation_examples(
-        answers.get("ideal_conversations")
+    if (
+        _is_answered(answers.get("ideal_conversations"))
+        and "ideal_conversations" not in delegated_fields
+        and not _has_two_to_three_conversation_examples(answers.get("ideal_conversations"))
     ):
         invalid_fields.append("ideal_conversations")
         validation_errors.append("ideal_conversations harus berisi 2-3 contoh percakapan.")
@@ -773,7 +952,12 @@ def validate_agent_discovery(
 
     confirmation_evidence_valid = True
     if require_evidence and require_confirmation and _confirmed(answers.get("user_confirmed")):
-        confirmation_evidence_valid = _confirmation_evidence_is_valid(
+        persisted_continuation = bool(
+            persisted_confirmation_verified
+            and user_messages
+            and _is_safe_confirmation_continuation(user_messages[-1])
+        )
+        confirmation_evidence_valid = persisted_continuation or _confirmation_evidence_is_valid(
             evidence,
             list(user_messages or []),
             require_confirmed_summary=require_confirmed_summary,
@@ -816,6 +1000,10 @@ def validate_agent_discovery(
             field
             for field in group["fields"]
             if not (usage_context == "personal" and field in {"escalation_target", "go_live_approver"})
+            and not (
+                field in _OPTIONAL_DISCOVERY_FIELDS
+                and not _is_answered(answers.get(field))
+            )
         ]
         pending = [field for field in applicable if field in unresolved_fields]
         progress.append(

@@ -165,9 +165,8 @@ def merge_discovery_answers(
 
     Models may omit old fields once chat history is summarized. Persisted facts
     are authoritative, while values and evidence explicitly supplied on the
-    current call replace their prior versions. Final confirmation is never
-    inherited: it must be proven by the latest user message on every create
-    attempt.
+    current call replace their prior versions. A verified confirmation is
+    inherited only when the incoming payload does not change a confirmed fact.
     """
     if isinstance(discovery_answers, str):
         try:
@@ -185,7 +184,9 @@ def merge_discovery_answers(
     prior_answers = snapshot.get("discovery_answers")
     prior_evidence = snapshot.get("discovery_evidence")
     merged = dict(prior_answers) if isinstance(prior_answers, dict) else {}
-    merged.pop("user_confirmed", None)
+    confirmation_applies = persisted_confirmation_applies(incoming, snapshot)
+    if not confirmation_applies:
+        merged.pop("user_confirmed", None)
 
     incoming_evidence = incoming.pop("_evidence", {})
     merged.update(incoming)
@@ -196,6 +197,36 @@ def merge_discovery_answers(
     if evidence:
         merged["_evidence"] = evidence
     return merged
+
+
+def persisted_confirmation_applies(
+    discovery_answers: Any,
+    facts: dict[str, Any] | None,
+) -> bool:
+    """Return whether a DB-verified confirmation still covers this payload."""
+    snapshot = facts if isinstance(facts, dict) else {}
+    if snapshot.get("confirmation_verified") is not True:
+        return False
+    prior = snapshot.get("discovery_answers")
+    if not isinstance(prior, dict) or prior.get("user_confirmed") is not True:
+        return False
+    if isinstance(discovery_answers, str):
+        try:
+            incoming = json.loads(discovery_answers)
+        except (TypeError, ValueError):
+            return False
+    elif isinstance(discovery_answers, dict):
+        incoming = discovery_answers
+    elif discovery_answers in (None, ""):
+        incoming = {}
+    else:
+        return False
+    for field, value in incoming.items():
+        if field in {"_evidence", "user_confirmed"}:
+            continue
+        if field not in prior or prior[field] != value:
+            return False
+    return True
 
 
 async def load_build_discovery_facts(
@@ -299,6 +330,7 @@ def discovery_snapshot_from_steps(
                 discovery.get("verified_evidence_fields") or []
             ),
             "file_capability": str(discovery.get("file_capability") or ""),
+            "confirmation_verified": complete,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         break
@@ -408,20 +440,34 @@ def infer_workflow_state(
     steps: list[dict[str, Any]],
     final_reply: str,
 ) -> str:
+    def succeeded(tool_name: str) -> bool:
+        for step in reversed(steps or []):
+            if str(step.get("tool") or "") != tool_name:
+                continue
+            result = _step_result(step)
+            if result.get("success") is True:
+                return True
+            if tool_name == "create_agent" and result.get("agent_id") and not result.get("error"):
+                return True
+        return False
+
     tool_names = [str(step.get("tool") or "") for step in steps]
-    if "delete_agent" in tool_names:
+    if "delete_agent" in tool_names and succeeded("delete_agent"):
         return "complete"
-    if "create_agent" in tool_names:
+    if "create_agent" in tool_names and succeeded("create_agent"):
         if any("auth" in name or "oauth" in name for name in tool_names):
             return "integration_auth_pending"
-        if "create_wa_dev_trial_link" in tool_names:
+        if "create_wa_dev_trial_link" in tool_names and succeeded("create_wa_dev_trial_link"):
             return "demo_ready"
         return "agent_created"
-    if any(name in {"update_agent", "set_agent_memory"} for name in tool_names):
+    if any(
+        name in {"update_agent", "set_agent_memory"} and succeeded(name)
+        for name in tool_names
+    ):
         return "verifying"
     if any("auth" in name or "oauth" in name for name in tool_names):
         return "integration_auth_pending"
-    if "create_wa_dev_trial_link" in tool_names:
+    if "create_wa_dev_trial_link" in tool_names and succeeded("create_wa_dev_trial_link"):
         return "demo_ready"
     for step in steps:
         if str(step.get("tool") or "") != "plan_agent":

@@ -96,15 +96,25 @@ def build_builder_manual_tools(
                     tools_config=tc,
                 )
             manual = manual or {}
+            assumptions = list(manual.get("assumptions") or [])
+            missing_context = list(manual.get("missing_context") or [])
+            maturity = str(manual.get("maturity") or "").strip().lower()
+            requires_user_input = bool(
+                assumptions
+                or missing_context
+                or maturity in {"draft", "needs_review"}
+                or not manual.get("workflows")
+            )
             return json.dumps({
                 "operating_manual": manual,
                 "summary": summarize_operating_manual(manual),
                 "parse_status": parse_status,
-                "requires_user_input": True,
+                "requires_user_input": requires_user_input,
                 "prompt_preview": format_operating_manual_for_prompt(manual)[:1800],
                 "next_step": (
-                    "Jangan gunakan SOP fallback untuk create/update karena dapat berisi asumsi. "
-                    "Minta user melengkapi workflow lalu susun ulang operating manual."
+                    "Tanyakan hanya missing_context yang tercantum, lalu susun ulang operating manual."
+                    if requires_user_input
+                    else "Gunakan operating_manual deterministik ini untuk create_agent/update_agent."
                 ),
             }, ensure_ascii=False, indent=2)
 

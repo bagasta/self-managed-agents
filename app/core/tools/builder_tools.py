@@ -268,6 +268,7 @@ def build_builder_tools(
         preview_agent_creation_entitlement=_preview_agent_creation_entitlement,
         db_factory=db_factory,
         session_id=session_id,
+        trusted_owner_phone=owner_phone or "",
     )
     # plan_agent contract kept visible in this facade for source-inspection tests:
     # Brief, workflow, and escalation must be confirmed once before create; internal artifacts need no micro-approval.

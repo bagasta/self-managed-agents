@@ -10,6 +10,7 @@ from app.core.engine.google_mcp_support import _is_plain_google_form_link_refere
 from app.core.domain.agent_build_state_service import (
     load_build_discovery_facts,
     merge_discovery_answers,
+    persisted_confirmation_applies,
 )
 from app.core.launch_safety import (
     SANDBOX_DISABLED_NOTICE,
@@ -19,9 +20,11 @@ from app.core.launch_safety import (
 from app.core.tools.builder_catalog import AGENT_PRESETS, RUNTIME_LIMITATIONS, _DEFAULT_MODEL
 from app.core.tools.builder_discovery import (
     DiscoveryEvidenceUnavailable,
+    bind_owner_escalation_phone,
     discovery_escalation_policy,
     discovery_operator_phone,
     load_discovery_user_messages,
+    owner_escalation_phone_selected,
     validate_agent_discovery,
 )
 from app.core.tools.builder_google import (
@@ -191,6 +194,7 @@ def build_builder_planning_tools(
     preview_agent_creation_entitlement: PreviewEntitlement,
     db_factory: Any = None,
     session_id: str | None = None,
+    trusted_owner_phone: str = "",
 ) -> dict[str, Any]:
     _preview_agent_creation_entitlement = preview_agent_creation_entitlement
 
@@ -292,10 +296,21 @@ def build_builder_planning_tools(
                 ensure_ascii=False,
                 indent=2,
             )
+        persisted_confirmation_verified = persisted_confirmation_applies(
+            discovery_answers,
+            persisted_facts,
+        )
         discovery_answers = merge_discovery_answers(
             discovery_answers,
             persisted_facts,
         )
+        discovery_answers = bind_owner_escalation_phone(
+            discovery_answers,
+            user_messages=user_messages,
+            owner_phone=trusted_owner_phone,
+        )
+        if trusted_owner_phone and owner_escalation_phone_selected(user_messages):
+            operator_phone = "".join(char for char in trusted_owner_phone if char.isdigit())
         discovery = validate_agent_discovery(
             discovery_answers,
             agent_name=agent_name,
@@ -304,6 +319,7 @@ def build_builder_planning_tools(
             user_messages=user_messages,
             require_evidence=evidence_required,
             require_confirmed_summary=evidence_required,
+            persisted_confirmation_verified=persisted_confirmation_verified,
         )
         if not discovery.get("complete"):
             # Check the basic creation slot before making the user complete a long discovery.

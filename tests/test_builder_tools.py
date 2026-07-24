@@ -1216,6 +1216,57 @@ class TestComposeAgentBlueprint:
         assert manual["workflows"][0]["required_inputs"] == ["tanggal acara", "lokasi", "item yang disewa", "jumlah tamu"]
         assert "SOP Workflow Detail" in data["prompt_preview"]
 
+    def test_operating_manual_fallback_is_usable_when_confirmed_blueprint_is_complete(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "compose_agent_operating_manual")
+        blueprint = {
+            "agent_summary": "Minsel melakukan survey kepuasan pelanggan melalui WhatsApp.",
+            "assumptions": [],
+            "workflow_steps": [
+                {
+                    "name": "Survey pelanggan",
+                    "agent_action": "Tanyakan persetujuan, kumpulkan jawaban, lalu simpan ke Google Sheets.",
+                    "required_user_data": ["persetujuan survey", "jawaban survey"],
+                    "success_criteria": "Jawaban survey tersimpan dan pelanggan menerima ucapan terima kasih.",
+                }
+            ],
+            "escalation_rules": [
+                {
+                    "condition": "Pertanyaan di luar survey",
+                    "action": "Eskalasi ke Bagas.",
+                }
+            ],
+        }
+
+        with patch(
+            "app.core.tools.builder_tools._call_instruction_writer",
+            new=AsyncMock(return_value=""),
+        ):
+            result = _run(tool.ainvoke({
+                "preset_id": "cs_whatsapp_basic",
+                "user_goal": "Survey kepuasan pelanggan dan simpan hasil ke Google Sheets",
+                "agent_name": "Minsel",
+                "business_context": (
+                    "Pelanggan umum menghubungi satu nomor WhatsApp. Minsel meminta persetujuan, "
+                    "mengajukan survey, menyimpan hasil ke Google Sheets, dan eskalasi ke Bagas."
+                ),
+                "agent_blueprint": json.dumps(blueprint),
+                "target_users": "Pelanggan umum",
+                "channel": "whatsapp",
+            }))
+
+        data = json.loads(result)
+        manual = data["operating_manual"]
+
+        assert data["parse_status"] == "deterministic_fallback"
+        assert data["requires_user_input"] is False
+        assert manual["maturity"] == "usable"
+        assert manual["assumptions"] == []
+        assert manual["missing_context"] == []
+
 
 class TestComposeAgentInstructions:
     def test_event_cs_fallback_does_not_invent_payment_or_file_delivery(self):

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.core.domain.agent_build_state_service import (
     load_build_discovery_facts,
     merge_discovery_answers,
+    persisted_confirmation_applies,
 )
 from app.core.domain.agent_sop_service import ensure_operating_manual_in_tools_config, summarize_operating_manual, upsert_agent_operating_manual
 from app.core.launch_safety import (
@@ -22,9 +23,11 @@ from app.core.launch_safety import (
 )
 from app.core.tools.builder_discovery import (
     DiscoveryEvidenceUnavailable,
+    bind_owner_escalation_phone,
     discovery_file_capability,
     discovery_operator_phone,
     load_discovery_user_messages,
+    owner_escalation_phone_selected,
     validate_agent_discovery,
 )
 from app.core.tools.builder_google import has_google_workspace_tools as _has_google_workspace_tools
@@ -195,10 +198,21 @@ def build_builder_create_tools(
                     ensure_ascii=False,
                     indent=2,
                 )
+            persisted_confirmation_verified = persisted_confirmation_applies(
+                discovery_answers,
+                persisted_facts,
+            )
             discovery_answers = merge_discovery_answers(
                 discovery_answers,
                 persisted_facts,
             )
+            discovery_answers = bind_owner_escalation_phone(
+                discovery_answers,
+                user_messages=user_messages,
+                owner_phone=owner_phone,
+            )
+            if owner_phone and owner_escalation_phone_selected(user_messages):
+                operator_phone = "".join(char for char in owner_phone if char.isdigit())
             discovery = validate_agent_discovery(
                 discovery_answers,
                 agent_name=name,
@@ -207,6 +221,7 @@ def build_builder_create_tools(
                 user_messages=user_messages,
                 require_evidence=evidence_required,
                 require_confirmed_summary=evidence_required,
+                persisted_confirmation_verified=persisted_confirmation_verified,
             )
             if not discovery.get("complete"):
                 return json.dumps(

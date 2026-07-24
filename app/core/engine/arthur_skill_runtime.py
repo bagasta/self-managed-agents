@@ -147,7 +147,27 @@ def classify_builder_intent(user_message: str, prior_evidence: str = "") -> str:
     return "discover"
 
 
-def resolve_primary_skill(intent: str, workflow_state: str) -> str:
+def _is_explicit_build_confirmation(user_message: str) -> bool:
+    normalized = " ".join((user_message or "").casefold().split())
+    return normalized in {"sudah", "sesuai", "sudah sesuai", "sudah benar"} or any(
+        marker in normalized
+        for marker in (
+            "semuanya sesuai",
+            "saya setuju",
+            "setuju dibuat",
+            "lanjut buat",
+            "lanjutkan buat",
+            "buat sekarang",
+        )
+    )
+
+
+def resolve_primary_skill(
+    intent: str,
+    workflow_state: str,
+    *,
+    user_message: str = "",
+) -> str:
     if intent == "edit":
         return "arthur-edit-agent"
     if intent == "demo":
@@ -156,6 +176,11 @@ def resolve_primary_skill(intent: str, workflow_state: str) -> str:
         return "arthur-subscription-payment"
     if intent == "lifecycle":
         return "arthur-lifecycle-safety"
+    # The shadow state is updated only after a turn completes. An explicit
+    # confirmation must expose compose/create tools in this same turn; the hard
+    # discovery gate still verifies every answer before material creation.
+    if intent in {"create", "discover"} and _is_explicit_build_confirmation(user_message):
+        return "arthur-create-agent"
     if intent in {"create", "discover"} and workflow_state in {
         "awaiting_confirmation",
         "ready_to_create",
@@ -225,7 +250,11 @@ async def prepare_arthur_skill_context(
         intent = classify_builder_intent(user_message, _recent_evidence_text(draft))
 
     workflow_state = draft.workflow_state if draft is not None else "idle"
-    primary = resolve_primary_skill(intent, workflow_state)
+    primary = resolve_primary_skill(
+        intent,
+        workflow_state,
+        user_message=user_message,
+    )
     mixins = resolve_policy_mixins(
         f"{_recent_evidence_text(draft)}\n{user_message}",
         primary,

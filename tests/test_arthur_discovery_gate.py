@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.core.tools.builder_create_tools import build_builder_create_tools
 from app.core.tools.builder_discovery import (
+    bind_owner_escalation_phone,
     discovery_escalation_policy,
     discovery_operator_phone,
     load_discovery_user_messages,
@@ -124,6 +125,151 @@ def test_group_two_questions_include_examples_for_hard_to_answer_items():
     assert "Contoh:" in questions["tone_style"]
     assert "2-3 contoh" in questions["ideal_conversations"]
     assert "red line" in questions["avoided_conversations"]
+
+
+def test_minsel_confirmed_discovery_accepts_real_user_answers_without_reasking():
+    """Regression: the 2026-07-24 Minsel build stalled after final confirmation."""
+    answers = {
+        "problem": "Kewalahan chat manual 1 per 1 untuk survey kepuasan pelanggan di WhatsApp",
+        "usage_context": "work",
+        "agent_name": "Minsel",
+        "audience": "Pelanggan umum",
+        "main_tasks": "Melakukan survey kepuasan pelanggan dan menyimpan hasil ke Google Sheets",
+        "capabilities": "chat teks, menerima file/gambar",
+        "prohibited_actions": "Tidak boleh memberikan diskon atau roleplay di luar tugas survey",
+        "allowed_actions": "Boleh menanyakan ulang jika jawaban terlalu singkat",
+        "tone_style": "Professional",
+        "ideal_conversations": (
+            "Agent menyapa pelanggan, menawarkan survey, lalu menanyakan pertanyaan satu per satu"
+        ),
+        "avoided_conversations": "Jangan debat atau memaksa pelanggan",
+        "unknown_handling": "Pertanyaan di luar survey diteruskan ke Bagas",
+        "escalation_target": {
+            "conditions": "Pertanyaan di luar survey kepuasan",
+            "recipient": "Bagas",
+            "whatsapp_number": "62895626765423",
+        },
+        "knowledge_sources": "Data tambahan dapat diberikan Admin",
+        "whatsapp_scale": "inbound",
+        "daily_chat_volume": 50,
+        "integrations": "Google Sheets",
+        "expected_outputs": "Hasil survey tersimpan rapi di Google Sheets",
+        "vision_requirement": "Bisa menerima gambar/file dari pelanggan",
+        "go_live_approver": "Bagas sendiri",
+        "user_confirmed": True,
+        "_evidence": {
+            "problem": "Pesan user: 'Kewalahan jika harus chat manual ke semua customer 1 persatu'",
+            "usage_context": "Pesan user: 'Untuk bisnis'",
+            "agent_name": "Pesan user: 'Minsel'",
+            "audience": "Pesan user: 'Pelanggan umum'",
+            "main_tasks": "Pesan user: 'CS yang bisa handle survey kepuasan pelanggan'",
+            "capabilities": "Pesan user: 'bisa kirim gambar'",
+            "prohibited_actions": (
+                "Pesan user: 'Tidak boleh memberikan diskon, tidak boleh disuruh roleplay'"
+            ),
+            "allowed_actions": (
+                "Pesan user: 'kalo ada jawaban yang terlalu singkat boleh diberi pertanyaan lagi'"
+            ),
+            "tone_style": "Pesan user: 'Professional'",
+            "ideal_conversations": "Pesan user: 'Cocok kaya gitu'",
+            "avoided_conversations": "Pesan user: 'jangan debat, jangan paksa'",
+            "unknown_handling": "Pesan user: 'bisa diteruskan aja ke saya'",
+            "escalation_target": "Pesan user: 'Nomer wa saya sendiri'",
+            "knowledge_sources": "Pesan user: 'nanti bisa diberi sama Admin langsung'",
+            "whatsapp_scale": "Pesan user: 'Nunggu pelanggan chat duluan'",
+            "daily_chat_volume": "Pesan user: '50an orang'",
+            "integrations": "Pesan user: 'hasilnya simpan ke google sheets'",
+            "expected_outputs": "Pesan user: 'hasil survey disimpan ke Google Sheets'",
+            "vision_requirement": "Pesan user: 'bisa kirim gambar'",
+            "go_live_approver": "Pesan user: 'Gua sendiri'",
+            "user_confirmed": "Pesan user: 'sudah sesuai'",
+        },
+    }
+    messages = [
+        "1. Untuk bisnis. 2. Minsel. 3. Pelanggan umum. "
+        "Kewalahan jika harus chat manual ke semua customer 1 persatu.",
+        "CS yang bisa handle survey kepuasan pelanggan di WhatsApp, hasilnya simpan ke google sheets",
+        "Professional. Cocok kaya gitu. Tidak boleh memberikan diskon, tidak boleh disuruh roleplay. "
+        "jangan debat, jangan paksa, kalo ada jawaban yang terlalu singkat boleh diberi pertanyaan lagi",
+        "Kalo ada yang tanya begitu bisa diteruskan aja ke saya. Nomer wa saya sendiri",
+        "Nunggu pelanggan chat duluan. nanti bisa diberi sama Admin langsung",
+        "50an orang. Formatnya kamu yang atur. bisa kirim gambar",
+        "Gua sendiri",
+        (
+            "Rangkuman Arthur yang dikonfirmasi user: Minsel adalah CS survey pelanggan untuk bisnis. "
+            "Tone Professional, contoh alur disetujui, hasil disimpan ke Google Sheets, menerima gambar, "
+            "dan eskalasi ke Bagas 62895626765423."
+        ),
+        "sudah sesuai",
+    ]
+
+    result = validate_agent_discovery(
+        answers,
+        agent_name="Minsel",
+        operator_phone="62895626765423",
+        user_messages=messages,
+        require_evidence=True,
+        require_confirmed_summary=True,
+    )
+
+    assert result["complete"] is True
+    assert result["next_group"] is None
+    assert result["invalid_fields"] == []
+
+
+def test_owner_escalation_phone_cannot_be_changed_by_model_typo():
+    answers = {
+        "escalation_target": {
+            "conditions": "Pertanyaan di luar survey",
+            "recipient": "Bagas",
+            "whatsapp_number": "62895626765426",
+        }
+    }
+
+    bound = bind_owner_escalation_phone(
+        answers,
+        user_messages=["Nomer wa saya sendiri"],
+        owner_phone="62895626765423",
+    )
+
+    assert bound["escalation_target"]["whatsapp_number"] == "62895626765423"
+
+
+def test_unverified_optional_sensitive_policy_is_dropped_not_reasked():
+    answers, messages = _discovery_with_persisted_evidence(_work_discovery())
+    answers["sensitive_data_policy"] = "Kebijakan buatan model yang tidak pernah diberikan user."
+    answers["_evidence"].pop("sensitive_data_policy")
+
+    result = validate_agent_discovery(
+        answers,
+        user_messages=messages,
+        require_evidence=True,
+    )
+
+    assert result["complete"] is True
+    assert "sensitive_data_policy" not in result["normalized_answers"]
+    assert "sensitive_data_policy" not in result["missing_evidence_fields"]
+
+
+def test_later_explicit_admin_phone_is_not_overridden_by_owner_phone():
+    answers = {
+        "escalation_target": {
+            "conditions": "Pertanyaan di luar survey",
+            "recipient": "Admin",
+            "whatsapp_number": "628111111111",
+        }
+    }
+
+    bound = bind_owner_escalation_phone(
+        answers,
+        user_messages=[
+            "Awalnya pakai nomer WA saya sendiri",
+            "Ganti ke admin di nomor 628111111111",
+        ],
+        owner_phone="62895626765423",
+    )
+
+    assert bound["escalation_target"]["whatsapp_number"] == "628111111111"
 
 
 def test_capabilities_must_include_an_explicit_file_decision():
@@ -448,6 +594,22 @@ def test_evidence_backed_discovery_accepts_only_persisted_user_quotes():
     assert result["missing_evidence_fields"] == []
     assert set(result["verified_evidence_fields"]) == set(result["required_fields"])
     assert "_evidence" not in result["normalized_answers"]
+
+
+def test_persisted_confirmation_survives_safe_internal_continuation():
+    answers, messages = _discovery_with_persisted_evidence(_work_discovery())
+    messages.append("ok")
+
+    result = validate_agent_discovery(
+        answers,
+        user_messages=messages,
+        require_evidence=True,
+        require_confirmed_summary=True,
+        persisted_confirmation_verified=True,
+    )
+
+    assert result["complete"] is True
+    assert result["confirmation_evidence_valid"] is True
 
 
 def test_evidence_accepts_close_paraphrase_but_resolves_to_persisted_user_message():

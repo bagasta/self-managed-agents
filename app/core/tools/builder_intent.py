@@ -370,6 +370,13 @@ def _sanitize_unverified_business_name(
         return text, False
 
     sanitized = str(text or "")
+    sanitized = re.sub(
+        r"\[\s*(?:nama\s+)?(?:bisnis|usaha|brand|merek|toko)"
+        r"(?:\s+(?:user|owner|pemilik|bagas|anda|kamu))?\s*\]",
+        "bisnis ini",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
     patterns = (
         (
             r"(Kamu adalah [^.\n]{0,120}?\bdari\s+)([A-Z][A-Za-z0-9&.' -]{2,40})(?=,|\.|\n|\s+yang\b|\s+jasa\b|\s+layanan\b)",

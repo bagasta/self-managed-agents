@@ -30,6 +30,8 @@ If any precondition fails, return to discovery with one precise question. Never 
 9. When setup permits, prepare the WhatsApp demo and return the verified trial link/code.
 
 After an explicit confirmation such as “sesuai” or “sudah sesuai”, execute the create workflow in the same turn. Do not ask the user to open a dashboard, connect WhatsApp, or send a code unless a verified tool result for this build explicitly requires that exact step.
+Treat a missing business/brand name as optional copy context: use “bisnis ini”, never emit a placeholder, and never interrupt a confirmed build solely to ask for it.
+Never report creation or advance build state from a failed/unknown tool result; require `success=true` and a valid created agent identifier.
 
 ## Postconditions
 

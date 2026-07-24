@@ -118,6 +118,19 @@ def test_create_and_update_tools_reject_unconfirmed_sop_context() -> None:
     assert "Update diblokir karena SOP masih memuat asumsi" in update_source
 
 
+def test_unverified_business_placeholder_is_replaced_with_generic_business() -> None:
+    from app.core.tools.builder_intent import _sanitize_unverified_business_name
+
+    instructions, changed = _sanitize_unverified_business_name(
+        "Saya asisten survey dari [Nama Bisnis Bagas].",
+        business_context="Bisnis survey kepuasan pelanggan.",
+    )
+
+    assert changed is True
+    assert "[Nama Bisnis Bagas]" not in instructions
+    assert "bisnis ini" in instructions
+
+
 def test_run_completion_logs_duration_for_latency_audit() -> None:
     from app.core.engine import agent_runner
 
