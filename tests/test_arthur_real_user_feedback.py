@@ -78,12 +78,13 @@ def test_arthur_prompt_forbids_assumptions_for_crud() -> None:
     assert 'DILARANG membalas "Belum berhasil dibuat"' in prompt
 
 
-def test_arthur_onboarding_is_demo_first() -> None:
+def test_arthur_onboarding_offers_both_whatsapp_paths() -> None:
     prompt = _builder_prompt()
 
-    assert "tawarkan hanya uji coba nomor demo Arthur" in prompt
-    assert "setelah user mencoba demo dan menyatakan cocok" in prompt
-    assert "Mau agent ini langsung dipasang ke nomor WhatsApp kamu sendiri" not in prompt
+    assert "tawarkan tepat dua jalur" in prompt
+    assert "nomor demo Arthur" in prompt
+    assert "nomor khusus milik user" in prompt
+    assert "setelah user mencoba demo dan menyatakan cocok" not in prompt
 
 
 def test_rulebook_requires_confirmed_workflow_and_no_assumptions() -> None:
@@ -92,7 +93,8 @@ def test_rulebook_requires_confirmed_workflow_and_no_assumptions() -> None:
     assert "Penjelasan eskalasi WAJIB di awal untuk setiap pembuatan agent" in rulebook
     assert "DILARANG KERAS membuat asumsi saat membuat, mengubah, atau menghapus agent" in rulebook
     assert "Nama saja BUKAN konfirmasi" in rulebook
-    assert "Setelah user benar-benar mencoba demo dan menyatakan puas/cocok" in rulebook
+    assert "Tawarkan tepat dua pilihan" in rulebook
+    assert "nomor khusus milik user" in rulebook
     assert "gunakan default untuk yang belum diisi" not in rulebook
     assert "validator mencocokkannya dengan riwayat pesan tersimpan" in rulebook
     assert "_evidence.user_confirmed" in rulebook

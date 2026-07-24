@@ -157,6 +157,7 @@ from app.core.engine.agent_reply_guards import (
 from app.core.engine.agent_followups import (
     _builder_create_completion_directive,
     _builder_retryable_plan_directive,
+    _builder_whatsapp_action_directive,
     _BUILD_PROGRESS_TOOLS,
     _deploy_followup_message,
     _extract_shared_workspace_file_from_steps,
@@ -167,8 +168,10 @@ from app.core.engine.agent_followups import (
     _is_website_or_app_request,
     _needs_builder_create_completion,
     _needs_builder_retryable_plan,
+    _needs_builder_whatsapp_action_completion,
     _needs_deploy_followup,
     _needs_whatsapp_file_delivery_followup,
+    _requested_builder_whatsapp_action,
 )
 
 
@@ -2283,6 +2286,71 @@ async def run_agent(
                 )
                 break
 
+        _builder_whatsapp_action = _requested_builder_whatsapp_action(
+            execution_user_message,
+            input_messages,
+        )
+        if _needs_builder_whatsapp_action_completion(
+            _builder_whatsapp_action,
+            steps,
+            is_builder=runtime_policy.is_builder,
+        ):
+            log.warning(
+                "agent_run.builder_whatsapp_action_continue",
+                action=_builder_whatsapp_action,
+                steps=len(steps),
+            )
+            _channel_completion_input = _sanitize_input_messages(input_messages)
+            _channel_completion_input.append(
+                HumanMessage(
+                    content=_builder_whatsapp_action_directive(
+                        str(_builder_whatsapp_action)
+                    )
+                )
+            )
+            try:
+                async with asyncio.timeout(_timeout):
+                    _channel_completion_output = await graph.ainvoke(
+                        {"messages": _channel_completion_input},
+                        config=_graph_config,
+                        version="v2",
+                    )
+                    result = await _graph_result_from_output(
+                        graph=graph,
+                        graph_config=_graph_config,
+                        graph_output=_channel_completion_output,
+                        log=log,
+                    )
+                parsed = parse_agent_result(
+                    result=result,
+                    input_messages=input_messages,
+                    session_id=session.id,
+                    run_id=run_id,
+                    step_start=step_counter,
+                    log=log,
+                )
+                final_reply = parsed["final_reply"]
+                steps = parsed["steps"]
+                total_tokens_used = (
+                    _agent_logger.total_tokens_from_callbacks
+                    or parsed["total_tokens_used"]
+                )
+                log.info(
+                    "agent_run.builder_whatsapp_action_continue_ok",
+                    action=_builder_whatsapp_action,
+                    completed=not _needs_builder_whatsapp_action_completion(
+                        _builder_whatsapp_action,
+                        steps,
+                        is_builder=True,
+                    ),
+                )
+            except Exception as _channel_completion_exc:
+                log.warning(
+                    "agent_run.builder_whatsapp_action_continue_failed",
+                    action=_builder_whatsapp_action,
+                    error=str(_channel_completion_exc)[:300],
+                )
+
         if _needs_deploy_followup(execution_user_message, tools_config, steps, final_reply):
             log.warning(
                 "agent_run.deploy_followup_continue",
@@ -2616,6 +2684,7 @@ async def run_agent(
         steps,
         tools_config=tools_config,
         active_groups=active_groups,
+        user_message=execution_user_message,
     )
     if final_reply != _reply_before_non_empty_guard:
         log.warning(

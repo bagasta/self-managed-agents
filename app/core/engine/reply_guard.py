@@ -16,6 +16,7 @@ _BUILDER_TOOLS = {
     "create_agent",
     "verify_agent",
     "create_wa_dev_trial_link",
+    "send_agent_wa_qr",
     "set_agent_memory",
     "update_agent",
     "delete_agent",
@@ -168,6 +169,22 @@ def _is_builder_context(
 def _sanitize_builder_channel_reply(reply: str) -> str:
     text = (reply or "").strip()
     normalized = text.lower()
+    if any(
+        marker in normalized
+        for marker in (
+            "dashboard clevio",
+            "buka dashboard",
+            "masuk ke dashboard",
+            "menu dashboard",
+            "settings → hubungkan whatsapp",
+            "settings -> hubungkan whatsapp",
+        )
+    ):
+        return (
+            "Semua pengaturan agent dilakukan lewat chat WhatsApp ini. "
+            "Untuk mencoba agent, pilih nomor demo Arthur agar saya kirim link wa.me dan kode. "
+            "Untuk memasang ke nomor khusus milikmu, pilih nomor khusus agar saya kirim scan sekali dari WhatsApp."
+        )
     if "webchat" not in normalized and "web chat" not in normalized:
         return text
     if "channel" not in normalized and "whatsapp" not in normalized:
@@ -206,9 +223,10 @@ def _create_agent_success_reply(data: dict[str, Any]) -> str:
 
     if channel == "whatsapp":
         return (
-            f"{name} sudah jadi. "
-            "Kita coba dulu lewat nomor demo Arthur supaya kamu bisa cek kualitas jawaban "
-            "dan alurnya tanpa setup nomor sendiri, ya?"
+            f"{name} sudah jadi. Pilih cara menghubungkannya lewat WhatsApp:\n"
+            "1. Nomor demo Arthur — saya kirim link wa.me dan kode untuk langsung mencoba.\n"
+            "2. Nomor khusus milikmu — saya kirim scan sekali dari WhatsApp untuk menghubungkannya.\n"
+            "Balas `nomor demo` atau `nomor khusus`."
         )
     if agent_id:
         return f"{name} sudah jadi. ID agent: {agent_id}."
@@ -328,6 +346,22 @@ def _builder_fallback_reply(steps: list[dict[str, Any]]) -> str | None:
     if trial_link_error_reply:
         return trial_link_error_reply
 
+    for step in reversed(steps or []):
+        if step.get("tool") != "send_agent_wa_qr":
+            continue
+        result_text = str(step.get("result") or "").strip()
+        if "[QR_SENT]" in result_text:
+            return (
+                "Scan sekali dari WhatsApp sudah saya kirim ke chat kamu. "
+                "Buka WhatsApp di nomor khusus yang akan dipasang, pilih Perangkat tertaut, "
+                "lalu scan sekarang karena kodenya berlaku singkat."
+            )
+        if "[INFO]" in result_text:
+            return "Nomor WhatsApp khusus itu sudah terhubung ke agent; tidak perlu scan ulang."
+        if "[error]" in result_text.lower() or result_text.lower().startswith("error:"):
+            detail = re.sub(r"^\[error\]\s*", "", result_text, flags=re.IGNORECASE)
+            return f"Scan WhatsApp belum berhasil dikirim: {detail}"
+
     # A discovery question is a normal builder state, not a technical failure.
     # If the model produced an empty/progress-like reply, reconstruct the exact
     # user-facing questions from plan_agent instead of saying "coba lagi".
@@ -429,6 +463,7 @@ def ensure_non_empty_reply(
     *,
     tools_config: dict[str, Any] | None = None,
     active_groups: list[str] | tuple[str, ...] | set[str] | None = None,
+    user_message: str = "",
 ) -> str:
     text = (reply or "").strip()
     entitlement_retry = _builder_entitlement_retry_reply(steps)
@@ -447,6 +482,43 @@ def ensure_non_empty_reply(
             return text
         return plan_clarification
 
+    normalized_request = " ".join(str(user_message or "").casefold().split())
+    generic_whatsapp_setup = (
+        any(
+            marker in normalized_request
+            for marker in (
+                "cara pasang",
+                "gimana pasang",
+                "gimana cara pasang",
+                "cara hubungkan",
+                "cara menghubungkan",
+                "pasang ke whatsapp",
+            )
+        )
+        and not any(
+            marker in normalized_request
+            for marker in (
+                "nomor demo",
+                "nomor khusus",
+                "nomor saya sendiri",
+                "nomor whatsapp saya",
+                "kirim qr",
+                "scan qr",
+            )
+        )
+        and not any(
+            step.get("tool") in {"create_wa_dev_trial_link", "send_agent_wa_qr"}
+            for step in steps or []
+        )
+    )
+    if generic_whatsapp_setup and _is_builder_context(steps, active_groups):
+        return (
+            "Ada dua pilihan lewat WhatsApp:\n"
+            "1. Nomor demo Arthur — saya kirim link wa.me dan kode supaya agent bisa langsung dicoba.\n"
+            "2. Nomor khusus milikmu — saya kirim scan sekali dari WhatsApp untuk menghubungkan agent ke nomor itu.\n"
+            "Balas `nomor demo` atau `nomor khusus`. Semua proses dilakukan di chat ini."
+        )
+
     if text:
         if _is_builder_context(steps, active_groups):
             text = _sanitize_builder_channel_reply(text)
@@ -456,6 +528,17 @@ def ensure_non_empty_reply(
             builder_reply
             and "create_wa_dev_trial_link" in tool_names
             and not _trial_link_reply_is_complete(text, steps)
+        ):
+            return builder_reply
+        if builder_reply and "send_agent_wa_qr" in tool_names:
+            return builder_reply
+        if (
+            builder_reply
+            and "create_agent" in tool_names
+            and not (
+                "nomor demo arthur" in text.casefold()
+                and "nomor khusus" in text.casefold()
+            )
         ):
             return builder_reply
         missing_whatsapp_onboarding = (

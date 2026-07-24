@@ -65,6 +65,58 @@ def test_explicit_current_demo_request_still_wins_over_build_history():
     assert resolve_primary_skill("demo", "agent_created") == "arthur-whatsapp-demo-channel"
 
 
+def test_demo_and_channel_followups_route_from_current_or_prior_agent_prompt():
+    assert classify_builder_intent("sudah login saya, mau coba agentnya") == "demo"
+    assert classify_builder_intent("gimana cara pasang ke whatsappnya?") == "demo"
+    assert (
+        classify_builder_intent(
+            "iya mau",
+            prior_agent_message="Mau aku buatin link trial supaya bisa langsung dicoba?",
+        )
+        == "demo"
+    )
+
+
+def test_demo_skill_exposes_trial_link_and_dedicated_qr_tools():
+    tools = [
+        SimpleNamespace(name="get_agent_detail"),
+        SimpleNamespace(name="create_wa_dev_trial_link"),
+        SimpleNamespace(name="send_agent_wa_qr"),
+        SimpleNamespace(name="link_dashboard_account"),
+    ]
+    kept, removed = scope_arthur_builder_tools(
+        tools,
+        primary_skill="arthur-whatsapp-demo-channel",
+        mixin_skills=[],
+    )
+
+    assert [tool.name for tool in kept] == [
+        "get_agent_detail",
+        "create_wa_dev_trial_link",
+        "send_agent_wa_qr",
+    ]
+    assert removed == ["link_dashboard_account"]
+
+
+def test_subscription_skill_does_not_expose_dashboard_linking():
+    tools = [
+        SimpleNamespace(name="get_user_subscription"),
+        SimpleNamespace(name="get_payment_link"),
+        SimpleNamespace(name="link_dashboard_account"),
+    ]
+    kept, removed = scope_arthur_builder_tools(
+        tools,
+        primary_skill="arthur-subscription-payment",
+        mixin_skills=[],
+    )
+
+    assert [tool.name for tool in kept] == [
+        "get_user_subscription",
+        "get_payment_link",
+    ]
+    assert removed == ["link_dashboard_account"]
+
+
 def test_google_and_file_mixins_are_limited_to_one():
     mixins = resolve_policy_mixins(
         "Simpan hasil survey ke Google Sheets dan baca file PDF",

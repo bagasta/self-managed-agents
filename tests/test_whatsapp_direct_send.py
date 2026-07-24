@@ -614,8 +614,9 @@ def test_builder_prompt_blocks_repeated_continue_questions():
     assert "anggap hanya nama itu yang terkonfirmasi" in prompt
     assert "Jangan mengulang composer jika kebutuhan tidak berubah" in prompt
     assert "jangan menyebut nama tool internal" in prompt
-    assert "Kita coba dulu lewat nomor demo Arthur" in prompt
-    assert "Nomor WhatsApp user baru boleh ditawarkan setelah user mencoba demo" in prompt
+    assert "nomor demo Arthur" in prompt
+    assert "nomor khusus milik user" in prompt
+    assert "jangan pernah mengarahkan user ke dashboard" in prompt.lower()
     assert "nomor demo Arthur" in prompt
     assert "jangan berhenti hanya dengan `agent sudah jadi` atau ID agent" in prompt
     assert "terus gimana pakenya?" in prompt

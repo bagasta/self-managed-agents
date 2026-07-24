@@ -231,7 +231,7 @@ def test_builder_create_agent_success_overrides_unclear_non_empty_reply():
     assert out == "Travgent sudah jadi. ID agent: agent-123."
 
 
-def test_builder_create_whatsapp_agent_success_uses_demo_first_onboarding():
+def test_builder_create_whatsapp_agent_success_offers_two_whatsapp_paths():
     steps = [
         {
             "tool": "create_agent",
@@ -240,8 +240,8 @@ def test_builder_create_whatsapp_agent_success_uses_demo_first_onboarding():
     ]
     out = ensure_non_empty_reply("", steps)
     assert "CVin aja sudah jadi" in out
-    assert "nomor WhatsApp kamu sendiri" not in out
-    assert "nomor demo Arthur" in out
+    assert "Nomor demo Arthur" in out
+    assert "Nomor khusus milikmu" in out
     assert "agent-123" not in out
 
 
@@ -254,12 +254,14 @@ def test_builder_create_whatsapp_agent_overrides_id_only_reply():
     ]
     out = ensure_non_empty_reply("CVin aja sudah jadi. ID agent: agent-123.", steps)
     assert out == (
-        "CVin aja sudah jadi. Kita coba dulu lewat nomor demo Arthur supaya kamu bisa cek kualitas jawaban "
-        "dan alurnya tanpa setup nomor sendiri, ya?"
+        "CVin aja sudah jadi. Pilih cara menghubungkannya lewat WhatsApp:\n"
+        "1. Nomor demo Arthur — saya kirim link wa.me dan kode untuk langsung mencoba.\n"
+        "2. Nomor khusus milikmu — saya kirim scan sekali dari WhatsApp untuk menghubungkannya.\n"
+        "Balas `nomor demo` atau `nomor khusus`."
     )
 
 
-def test_builder_create_whatsapp_agent_overrides_dedicated_number_choice():
+def test_builder_create_whatsapp_agent_offers_demo_and_dedicated_number_options():
     steps = [
         {
             "tool": "create_agent",
@@ -273,8 +275,54 @@ def test_builder_create_whatsapp_agent_overrides_dedicated_number_choice():
 
     out = ensure_non_empty_reply(reply, steps)
 
-    assert "nomor WhatsApp kamu sendiri" not in out
-    assert "Kita coba dulu lewat nomor demo Arthur" in out
+    assert "Nomor demo Arthur" in out
+    assert "Nomor khusus milikmu" in out
+    assert "wa.me" in out
+    assert "scan sekali" in out
+
+
+def test_generic_whatsapp_install_question_returns_two_options_without_dashboard():
+    out = ensure_non_empty_reply(
+        "Buka Dashboard Clevio lalu pilih Hubungkan WhatsApp.",
+        [{"tool": "get_agent_detail", "result": '{"id":"agent-1","name":"Minsel"}'}],
+        active_groups=["builder"],
+        user_message="gimana cara pasang ke whatsappnya?",
+    )
+
+    assert "Nomor demo Arthur" in out
+    assert "Nomor khusus milikmu" in out
+    assert "wa.me" in out
+    assert "dashboard" not in out.lower()
+
+
+def test_builder_dashboard_install_hallucination_is_sanitized():
+    out = ensure_non_empty_reply(
+        "Buka Dashboard Clevio, masuk Settings, lalu klik Hubungkan WhatsApp.",
+        [{"tool": "get_agent_detail", "result": '{"id":"agent-1"}'}],
+        active_groups=["builder"],
+    )
+
+    assert "Semua pengaturan agent dilakukan lewat chat WhatsApp ini" in out
+    assert "link wa.me" in out
+    assert "dashboard" not in out.lower()
+    assert "menu settings" not in out.lower()
+
+
+def test_qr_tool_success_has_verified_whatsapp_only_reply():
+    out = ensure_non_empty_reply(
+        "QR akan saya kirim.",
+        [
+            {
+                "tool": "send_agent_wa_qr",
+                "result": "[QR_SENT] QR untuk agent 'agent-1' dikirim ke 62811.",
+            }
+        ],
+        active_groups=["builder"],
+    )
+
+    assert "sudah saya kirim" in out
+    assert "Perangkat tertaut" in out
+    assert "dashboard" not in out.lower()
 
 
 def test_builder_trial_link_ambiguous_target_asks_agent_name():

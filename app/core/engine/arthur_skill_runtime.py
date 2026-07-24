@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.domain.agent_build_state_service import (
@@ -15,9 +16,10 @@ from app.core.domain.agent_build_state_service import (
 )
 from app.core.domain.skill_service import list_active_system_skills
 from app.models.agent_build_draft import AgentBuildDraft
+from app.models.message import Message
 
 ARTHUR_ENGINE_VERSION = "arthur-progressive-v1"
-ARTHUR_PROMPT_VERSION = "arthur-kernel-v3"
+ARTHUR_PROMPT_VERSION = "arthur-kernel-v4"
 
 _BUILDER_TOOL_NAMES = {
     "get_self_config", "get_platform_capabilities", "list_available_wa_devices", "get_presets",
@@ -26,6 +28,7 @@ _BUILDER_TOOL_NAMES = {
     "verify_agent", "update_agent", "generate_google_auth_link", "set_agent_memory", "delete_agent",
     "get_agent_detail", "list_my_agents", "renew_agent", "add_agent_knowledge",
     "get_user_subscription", "link_dashboard_account", "get_payment_link", "create_wa_dev_trial_link",
+    "send_agent_wa_qr",
 }
 
 _SKILL_TOOL_ALLOWLISTS = {
@@ -46,10 +49,10 @@ _SKILL_TOOL_ALLOWLISTS = {
     },
     "arthur-whatsapp-demo-channel": {
         "list_my_agents", "get_agent_detail", "verify_agent", "list_available_wa_devices",
-        "create_wa_dev_trial_link",
+        "create_wa_dev_trial_link", "send_agent_wa_qr",
     },
     "arthur-subscription-payment": {
-        "get_user_subscription", "get_payment_link", "link_dashboard_account",
+        "get_user_subscription", "get_payment_link",
     },
     "arthur-lifecycle-safety": {
         "list_my_agents", "get_agent_detail", "delete_agent", "renew_agent", "verify_agent",
@@ -126,13 +129,38 @@ def _contains(text: str, terms: tuple[str, ...]) -> bool:
     return any(term in text for term in terms)
 
 
-def classify_builder_intent(user_message: str, prior_evidence: str = "") -> str:
+def classify_builder_intent(
+    user_message: str,
+    prior_evidence: str = "",
+    prior_agent_message: str = "",
+) -> str:
     current = (user_message or "").casefold()
     if _contains(current, ("hapus agent", "delete agent", "reset user", "reset agent", "nonaktifkan agent")):
         return "lifecycle"
     if _contains(current, ("upgrade", "langganan", "subscription", "bayar", "payment", "kuota", "slot")):
         return "subscription"
-    if _contains(current, ("coba demo", "nomor demo", "kode trial", "trial link", "pasang nomor", "scan qr")):
+    if _contains(
+        current,
+        (
+            "coba demo",
+            "mau coba",
+            "coba agent",
+            "nomor demo",
+            "kode demo",
+            "kode trial",
+            "trial link",
+            "link trial",
+            "link coba",
+            "pasang nomor",
+            "pasang ke whatsapp",
+            "pasang whatsapp",
+            "hubungkan whatsapp",
+            "nomor khusus",
+            "nomor sendiri",
+            "scan qr",
+            "qr code",
+        ),
+    ):
         return "demo"
     if _contains(current, ("edit agent", "ubah agent", "update agent", "ganti agent", "perbaiki agent")):
         return "edit"
@@ -143,9 +171,47 @@ def classify_builder_intent(user_message: str, prior_evidence: str = "") -> str:
     # explicit intent. Workflow state decides whether a short reply such as
     # "sesuai" advances the active build.
     prior = (prior_evidence or "").casefold()
+    prior_agent = (prior_agent_message or "").casefold()
+    short_affirmative = " ".join(current.split()) in {
+        "iya",
+        "iya mau",
+        "mau",
+        "ok",
+        "oke",
+        "ok sudah",
+        "sudah",
+        "lanjut",
+    }
+    if short_affirmative and _contains(
+        prior_agent,
+        (
+            "mau link trial",
+            "mau link coba",
+            "mau nomor demo",
+            "mau aku buatin link trial",
+            "mau saya buatkan link trial",
+            "coba agent",
+            "cobain agent",
+        ),
+    ):
+        return "demo"
     if _contains(prior, ("buat", "bikin", "mau agent", "mau ai", "butuh ai", "cs ", "asisten")):
         return "create"
     return "discover"
+
+
+async def _latest_agent_message(session_id: uuid.UUID, db: AsyncSession) -> str:
+    result = await db.execute(
+        select(Message.content)
+        .where(
+            Message.session_id == session_id,
+            Message.role == "agent",
+            Message.content.is_not(None),
+        )
+        .order_by(Message.timestamp.desc(), Message.step_index.desc())
+        .limit(1)
+    )
+    return str(result.scalar_one_or_none() or "")
 
 
 def _is_explicit_build_confirmation(user_message: str) -> bool:
@@ -251,7 +317,11 @@ async def prepare_arthur_skill_context(
 
     # The initial classifier only determines which state/skill to load. It never
     # grants permission or turns derived text into confirmed facts.
-    intent = classify_builder_intent(user_message)
+    prior_agent_message = await _latest_agent_message(session_id, db)
+    intent = classify_builder_intent(
+        user_message,
+        prior_agent_message=prior_agent_message,
+    )
     draft: AgentBuildDraft | None = None
     if arthur_runtime_enabled(tools_config, "build_state"):
         draft = await ensure_build_draft(
@@ -264,7 +334,11 @@ async def prepare_arthur_skill_context(
             engine_version=ARTHUR_ENGINE_VERSION,
             db=db,
         )
-        intent = classify_builder_intent(user_message, _recent_evidence_text(draft))
+        intent = classify_builder_intent(
+            user_message,
+            _recent_evidence_text(draft),
+            prior_agent_message,
+        )
 
     workflow_state = draft.workflow_state if draft is not None else "idle"
     primary = resolve_primary_skill(

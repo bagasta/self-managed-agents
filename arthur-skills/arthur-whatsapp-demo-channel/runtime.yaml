@@ -1,4 +1,4 @@
-version: "1.0.0"
+version: "1.0.1"
 triggers: ["demo", "trial", "whatsapp", "qr", "install-number"]
 supported_states: ["agent_created", "setup_pending", "demo_ready", "channel_setup", "complete"]
 allowed_tool_groups: ["demo", "channel", "lifecycle"]

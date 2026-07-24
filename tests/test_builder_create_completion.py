@@ -11,7 +11,14 @@ sistem ... coba lagi" instead of a created agent.
 """
 import json
 
-from app.core.engine.agent_followups import _needs_builder_create_completion
+from langchain_core.messages import AIMessage, HumanMessage
+
+from app.core.engine.agent_followups import (
+    _builder_whatsapp_action_directive,
+    _needs_builder_create_completion,
+    _needs_builder_whatsapp_action_completion,
+    _requested_builder_whatsapp_action,
+)
 
 
 def _plan_step(*, allowed: bool):
@@ -106,3 +113,46 @@ def test_ready_or_clarification_plan_is_not_a_retryable_technical_failure():
         "result": json.dumps({"plan_status": "needs_clarification", "retryable": False}),
     }
     assert _needs_builder_retryable_plan([clarification], is_builder=True) is False
+
+
+def test_affirmative_after_trial_offer_requires_trial_link_tool():
+    messages = [
+        AIMessage(content="Mau aku buatin link trial supaya Minsel bisa langsung dicoba?"),
+        HumanMessage(content="iya mau"),
+    ]
+    action = _requested_builder_whatsapp_action("iya mau", messages)
+
+    assert action == "trial_link"
+    assert _needs_builder_whatsapp_action_completion(
+        action,
+        [{"tool": "get_agent_detail", "result": '{"id":"agent-1"}'}],
+        is_builder=True,
+    )
+    assert not _needs_builder_whatsapp_action_completion(
+        action,
+        [{"tool": "create_wa_dev_trial_link", "result": '{"success":true}'}],
+        is_builder=True,
+    )
+
+
+def test_explicit_dedicated_number_requires_qr_tool():
+    action = _requested_builder_whatsapp_action(
+        "Saya pilih nomor khusus, kirim QR",
+        [],
+    )
+
+    assert action == "dedicated_qr"
+    assert _needs_builder_whatsapp_action_completion(action, [], is_builder=True)
+    directive = _builder_whatsapp_action_directive(action).lower()
+    assert "send_agent_wa_qr" in directive
+    assert "jangan arahkan user ke dashboard" in directive
+
+
+def test_generic_whatsapp_setup_question_does_not_choose_for_user():
+    assert (
+        _requested_builder_whatsapp_action(
+            "gimana cara pasang ke whatsappnya?",
+            [],
+        )
+        is None
+    )

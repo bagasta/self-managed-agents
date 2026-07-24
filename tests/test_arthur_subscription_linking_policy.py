@@ -1,16 +1,16 @@
 from app.core.engine.prompt_builder import _build_arthur_tool_category_guide
 
 
-def test_dashboard_linking_is_not_a_create_agent_prerequisite() -> None:
+def test_arthur_keeps_subscription_and_agent_management_inside_whatsapp() -> None:
     guide = _build_arthur_tool_category_guide()
 
-    assert "linking dashboard bukan prasyarat pembuatan agent" in guide
-    assert "intent membuat agent bukan alasan untuk meminta linking" in guide
-    assert "atau status identity_unlinked: minta user buka Dashboard" not in guide
+    assert "Semua penjelasan dan tindakan dilakukan lewat chat WhatsApp ini" in guide
+    assert "Jangan pernah mengarahkan user membuka dashboard" in guide
+    assert "link_dashboard_account" not in guide
 
 
-def test_dashboard_linking_requires_an_explicit_paid_plan_mismatch() -> None:
+def test_subscription_blocker_uses_verified_tool_result_and_payment_link() -> None:
     guide = _build_arthur_tool_category_guide()
 
-    assert "user secara eksplisit menyatakan plan dashboard sudah berbayar/di-upgrade" in guide
-    assert "hasil tool pada turn yang sama" in guide
+    assert "blocker yang benar-benar dibuktikan tool" in guide
+    assert "payment link bila tersedia" in guide

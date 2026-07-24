@@ -358,6 +358,108 @@ def _builder_create_completion_directive() -> str:
     )
 
 
+def _message_text(message: Any) -> str:
+    if isinstance(message, dict):
+        return str(message.get("content") or "")
+    return str(getattr(message, "content", "") or "")
+
+
+def _latest_agent_text(input_messages: list[Any] | None) -> str:
+    for message in reversed(input_messages or []):
+        role = str(
+            getattr(message, "type", "")
+            or getattr(message, "role", "")
+            or (message.get("role") if isinstance(message, dict) else "")
+        ).lower()
+        if role in {"ai", "agent", "assistant"}:
+            return _message_text(message)
+    return ""
+
+
+def _requested_builder_whatsapp_action(
+    user_message: str,
+    input_messages: list[Any] | None = None,
+) -> str | None:
+    """Return the concrete WhatsApp action explicitly selected by the user."""
+    current = " ".join(str(user_message or "").casefold().split())
+    dedicated_markers = (
+        "nomor saya sendiri",
+        "nomer saya sendiri",
+        "nomor whatsapp saya",
+        "nomer whatsapp saya",
+        "nomor khusus",
+        "pasang ke nomor",
+        "kirim qr",
+        "qr baru",
+        "scan qr",
+    )
+    if any(marker in current for marker in dedicated_markers):
+        return "dedicated_qr"
+
+    trial_markers = (
+        "nomor demo",
+        "kode demo",
+        "kode trial",
+        "link trial",
+        "trial link",
+        "link coba",
+        "mau coba agent",
+        "coba agentnya",
+        "cobain agent",
+    )
+    if any(marker in current for marker in trial_markers):
+        return "trial_link"
+
+    if current in {"iya", "iya mau", "mau", "ok", "oke", "lanjut"}:
+        previous = _latest_agent_text(input_messages).casefold()
+        if any(
+            marker in previous
+            for marker in (
+                "mau link trial",
+                "mau link coba",
+                "mau nomor demo",
+                "mau aku buatin link trial",
+            )
+        ):
+            return "trial_link"
+    return None
+
+
+def _needs_builder_whatsapp_action_completion(
+    action: str | None,
+    steps: list[dict[str, Any]],
+    *,
+    is_builder: bool,
+) -> bool:
+    if not is_builder or action not in {"trial_link", "dedicated_qr"}:
+        return False
+    expected_tool = (
+        "create_wa_dev_trial_link"
+        if action == "trial_link"
+        else "send_agent_wa_qr"
+    )
+    return not any(
+        str(step.get("tool") or "").strip() == expected_tool
+        for step in steps or []
+    )
+
+
+def _builder_whatsapp_action_directive(action: str) -> str:
+    if action == "dedicated_qr":
+        return (
+            "USER SUDAH MEMILIH NOMOR WHATSAPP KHUSUS. Selesaikan sekarang di turn ini: "
+            "temukan agent target yang benar dari konteks, lalu panggil send_agent_wa_qr. "
+            "QR harus dikirim ke identitas owner sesi yang terverifikasi. Jangan arahkan user "
+            "ke dashboard, jangan mengklaim QR terkirim sebelum hasil tool menyatakan QR_SENT."
+        )
+    return (
+        "USER SUDAH MEMILIH NOMOR DEMO ARTHUR. Selesaikan sekarang di turn ini: "
+        "temukan agent target yang benar dari konteks, lalu panggil create_wa_dev_trial_link "
+        "dengan send_contact=true. Jawaban final wajib memuat link wa.me dan kode persis dari "
+        "hasil tool. Jangan hanya menjelaskan cara mencoba dan jangan arahkan user ke dashboard."
+    )
+
+
 def _needs_deploy_followup(
     user_message: str,
     tools_config: dict[str, Any],

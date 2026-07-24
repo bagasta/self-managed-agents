@@ -1,4 +1,4 @@
-version: "1.0.3"
+version: "1.0.4"
 triggers: ["create", "confirmed-build"]
 supported_states: ["awaiting_confirmation", "ready_to_create", "creating", "verifying"]
 allowed_tool_groups: ["discovery", "compose", "create", "lifecycle"]
