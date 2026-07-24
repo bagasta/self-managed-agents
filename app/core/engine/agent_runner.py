@@ -114,6 +114,8 @@ from app.core.engine.google_mcp_support import (
     _build_google_mcp_validation_reply,
     _candidate_external_user_ids,
     _contains_google_workspace_artifact,
+    build_customer_survey_append_tools,
+    customer_survey_google_resource,
     _extract_google_mcp_step_error,
     _extract_google_mcp_resource_error,
     _extract_requested_slide_count,
@@ -1184,9 +1186,11 @@ async def run_agent(
 
     await _start_wa_run_typing()
     google_mcp_tools_config = tools_config
+    customer_survey_resource = customer_survey_google_resource(session, agent_model)
     google_mcp_role_denied = (
         is_google_workspace_mcp_configured(tools_config)
         and not _is_google_workspace_mcp_authorized_for_session(session, agent_model)
+        and customer_survey_resource is None
     )
     if google_mcp_role_denied:
         google_mcp_tools_config = _remove_google_workspace_mcp_server(tools_config)
@@ -1256,6 +1260,12 @@ async def run_agent(
     )
     system_prompt = google_mcp.system_prompt
     _google_mcp_auth_url = google_mcp.auth_url
+    if customer_survey_resource is not None:
+        tools = [
+            tool
+            for tool in tools
+            if getattr(tool, "name", "") != "get_google_workspace_auth_link"
+        ]
     mcp_tools_config = google_mcp_tools_config
     if (
         google_mcp.enabled
@@ -1275,7 +1285,19 @@ async def run_agent(
             mcp_errors["google_workspace"] = google_mcp.preflight_error
         if mcp_tools:
             mcp_tools = sanitize_google_forms_tools(mcp_tools, log)
-            if getattr(session, "channel_type", None) == "whatsapp":
+            if customer_survey_resource is not None:
+                mcp_tools = build_customer_survey_append_tools(
+                    mcp_tools,
+                    resource=customer_survey_resource,
+                    customer_phone=_session_sender_phone(session),
+                    log=log,
+                )
+                log.info(
+                    "agent_run.google_mcp_customer_survey_delegated",
+                    tool_count=len(mcp_tools),
+                    resource_bound=True,
+                )
+            elif getattr(session, "channel_type", None) == "whatsapp":
                 mcp_tools = _filter_whatsapp_unsafe_mcp_tools(
                     mcp_tools,
                     user_message=user_message,

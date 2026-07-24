@@ -11,6 +11,7 @@ import re
 import os
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from langchain_core.tools import StructuredTool, tool
@@ -64,6 +65,18 @@ class CreateDriveFileArgs(BaseModel):
     mime_type: str = "text/plain"
     fileUrl: str | None = None
     file_url: str | None = None
+
+
+class AppendSurveyResponseArgs(BaseModel):
+    """Customer-safe payload; Google resource identifiers are never model input."""
+
+    customer_name: str = ""
+    satisfaction_score: int = Field(ge=1, le=10)
+    expectations_met: str = ""
+    liked: str = ""
+    improvement: str = ""
+    notes: str = ""
+    escalation_status: str = "Tidak"
 
 
 @dataclass
@@ -311,6 +324,160 @@ def _extract_google_mcp_resource_error(steps: list[dict[str, Any]]) -> str | Non
         ):
             return result
     return None
+
+
+def customer_survey_google_resource(
+    session: Any,
+    agent_model: Any,
+) -> dict[str, Any] | None:
+    """Return a verified append-only survey resource for customer sessions."""
+    from app.core.engine.agent_identity import _is_customer_whatsapp_session
+
+    if not _is_customer_whatsapp_session(session, agent_model):
+        return None
+    tools_config = getattr(agent_model, "tools_config", None)
+    tools_config = tools_config if isinstance(tools_config, dict) else {}
+    resource = tools_config.get("google_workspace_resources")
+    if not isinstance(resource, dict):
+        return None
+    spreadsheet_id = str(resource.get("survey_spreadsheet_id") or "").strip()
+    tab_name = str(resource.get("survey_sheet_name") or "").strip()
+    headers = resource.get("survey_headers")
+    if (
+        resource.get("verified") is not True
+        or resource.get("customer_append_enabled") is not True
+        or not spreadsheet_id
+        or not re.fullmatch(r"[\w .-]{1,100}", tab_name)
+        or not isinstance(headers, list)
+        or len(headers) != 9
+    ):
+        return None
+    return {
+        "spreadsheet_id": spreadsheet_id,
+        "sheet_name": tab_name,
+        "headers": [str(value) for value in headers],
+    }
+
+
+def build_customer_survey_append_tools(
+    mcp_tools: list[Any],
+    *,
+    resource: dict[str, Any],
+    customer_phone: str,
+    log: Any,
+) -> list[Any]:
+    """Expose one append-only Sheet tool instead of the Owner's Google tools."""
+    read_tool = next(
+        (tool for tool in mcp_tools if getattr(tool, "name", "") == "read_sheet_values"),
+        None,
+    )
+    modify_tool = next(
+        (tool for tool in mcp_tools if getattr(tool, "name", "") == "modify_sheet_values"),
+        None,
+    )
+    spreadsheet_id = str(resource.get("spreadsheet_id") or "").strip()
+    sheet_name = str(resource.get("sheet_name") or "").strip()
+    if not read_tool or not modify_tool or not spreadsheet_id or not sheet_name:
+        return []
+
+    async def _append_sheet_survey_response(
+        customer_name: str = "",
+        satisfaction_score: int = 1,
+        expectations_met: str = "",
+        liked: str = "",
+        improvement: str = "",
+        notes: str = "",
+        escalation_status: str = "Tidak",
+    ) -> str:
+        # Serialize read-next-row-write across all API replicas. The model never
+        # receives or supplies a spreadsheet ID/range, so prompt injection
+        # cannot redirect this delegated write to another Owner resource.
+        from sqlalchemy import text
+
+        from app.database import AsyncSessionLocal
+
+        lock_key = f"survey-sheet:{spreadsheet_id}:{sheet_name}"
+        async with AsyncSessionLocal() as db:
+            await db.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                {"lock_key": lock_key},
+            )
+            current = await read_tool.ainvoke(
+                {
+                    "spreadsheet_id": spreadsheet_id,
+                    "range_name": f"{sheet_name}!A1:I10000",
+                }
+            )
+            current_text = str(current)
+            if (
+                _is_google_auth_or_scope_error(current_text)
+                or _is_google_resource_not_found_error(current_text)
+            ):
+                raise RuntimeError(current_text)
+            match = re.search(r"Successfully read\s+(\d+)\s+rows?", current_text, re.I)
+            if not match:
+                raise RuntimeError(
+                    "SURVEY_SHEET_READ_FAILED: jumlah baris Sheet tidak dapat diverifikasi"
+                )
+            next_row = max(2, int(match.group(1)) + 1)
+            row_values = [
+                datetime.now(timezone.utc).isoformat(),
+                customer_phone,
+                customer_name.strip(),
+                str(satisfaction_score),
+                expectations_met.strip(),
+                liked.strip(),
+                improvement.strip(),
+                notes.strip(),
+                escalation_status.strip() or "Tidak",
+            ]
+            target_range = f"{sheet_name}!A{next_row}:I{next_row}"
+            written = await modify_tool.ainvoke(
+                {
+                    "spreadsheet_id": spreadsheet_id,
+                    "range_name": target_range,
+                    "values": [row_values],
+                    "value_input_option": "USER_ENTERED",
+                }
+            )
+            written_text = str(written)
+            if (
+                _is_google_auth_or_scope_error(written_text)
+                or _is_google_resource_not_found_error(written_text)
+                or "error" in written_text.casefold()
+            ):
+                raise RuntimeError(written_text)
+            verified = await read_tool.ainvoke(
+                {
+                    "spreadsheet_id": spreadsheet_id,
+                    "range_name": target_range,
+                }
+            )
+            verified_text = str(verified)
+            if customer_phone not in verified_text:
+                raise RuntimeError(
+                    "SURVEY_SHEET_VERIFY_FAILED: hasil tulis tidak ditemukan saat readback"
+                )
+            await db.commit()
+        log.info(
+            "agent_run.customer_survey_response_appended",
+            sheet_name=sheet_name,
+            row=next_row,
+        )
+        return "SURVEY_RESPONSE_SAVED: Jawaban survey berhasil disimpan dan diverifikasi."
+
+    return [
+        StructuredTool.from_function(
+            coroutine=_append_sheet_survey_response,
+            name="append_sheet_survey_response",
+            description=(
+                "Simpan satu hasil survey customer ke Sheet bisnis yang sudah ditetapkan Owner. "
+                "Panggil tepat sekali setelah jawaban survey lengkap. Tool ini append-only dan "
+                "tidak dapat membaca atau menulis resource Google lain."
+            ),
+            args_schema=AppendSurveyResponseArgs,
+        )
+    ]
 
 
 def _looks_like_progress_claim(reply_text: str) -> bool:
@@ -2475,6 +2642,15 @@ async def prepare_google_mcp_runtime(
         memory_scope or getattr(session, "external_user_id", None) or fallback_external_user_id,
         channel_cfg.get("user_phone") or fallback_external_user_id,
     )
+    # Operational customer workflows may use one explicitly delegated,
+    # resource-bound tool. In that case authentication still belongs to the
+    # Owner, never to the customer identity.
+    for owner_candidate in _candidate_external_user_ids(
+        fallback_external_user_id,
+        fallback_external_user_id,
+    ):
+        if owner_candidate not in candidate_ids:
+            candidate_ids.append(owner_candidate)
 
     connected_user_id: str | None = None
     auth_url: str | None = None

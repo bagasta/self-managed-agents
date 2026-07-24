@@ -24,6 +24,12 @@ Treat Google setup as a transaction, not a boolean capability.
 9. Persist the verified resource ID, URL, tab, and schema into the target agent configuration/instructions with `update_agent`, then read the agent back.
 10. Report `production_ready` only after the functional smoke test succeeds and the target agent readback contains the verified resource reference.
 
+For an inbound survey agent that must save customer answers automatically, persist
+`google_workspace_resources` with the verified `survey_spreadsheet_id`,
+`survey_sheet_name`, exactly nine `survey_headers`, `verified: true`, and
+`customer_append_enabled: true`. This grants the operational agent only the
+resource-bound append tool; it does not grant customers general Drive/Sheets access.
+
 ## Google Sheets Survey Contract
 
 For survey agents, confirm columns such as timestamp, customer identity, purchase reference, each answer, score, consent if applicable, escalation status, and notes. The agent must know whether it initiates outbound messages or only responds inbound; do not infer permission to contact customers.

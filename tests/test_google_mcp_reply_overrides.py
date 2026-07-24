@@ -13,6 +13,8 @@ from app.core.engine.agent_runner import (
 )
 from app.core.engine.google_mcp_support import (
     GoogleMcpRuntime,
+    build_customer_survey_append_tools,
+    customer_survey_google_resource,
     _fetch_google_auth_link,
     _google_integration_runtime_url,
     _has_google_mcp_step,
@@ -41,6 +43,73 @@ def test_google_resource_404_is_not_misclassified_as_oauth_failure() -> None:
     assert _is_google_resource_not_found_error(err) is True
     assert _extract_google_mcp_resource_error(steps) == err
     assert _is_google_auth_or_scope_error(err) is False
+
+
+def test_customer_survey_google_delegation_requires_verified_bound_resource() -> None:
+    agent = type(
+        "Agent",
+        (),
+        {
+            "owner_external_id": "628owner",
+            "operator_ids": ["628owner"],
+            "escalation_config": {"operator_phone": "628owner"},
+            "tools_config": {
+                "google_workspace_resources": {
+                    "survey_spreadsheet_id": "verified-sheet-id",
+                    "survey_sheet_name": "Survey",
+                    "survey_headers": [f"Column {index}" for index in range(9)],
+                    "verified": True,
+                    "customer_append_enabled": True,
+                }
+            },
+        },
+    )()
+    customer = type(
+        "Session",
+        (),
+        {
+            "channel_type": "whatsapp",
+            "external_user_id": "628customer",
+            "channel_config": {"phone_number": "628customer"},
+        },
+    )()
+    owner = type(
+        "Session",
+        (),
+        {
+            "channel_type": "whatsapp",
+            "external_user_id": "628owner",
+            "channel_config": {"phone_number": "628owner"},
+        },
+    )()
+
+    resource = customer_survey_google_resource(customer, agent)
+
+    assert resource == {
+        "spreadsheet_id": "verified-sheet-id",
+        "sheet_name": "Survey",
+        "headers": [f"Column {index}" for index in range(9)],
+    }
+    assert customer_survey_google_resource(owner, agent) is None
+
+
+def test_customer_survey_tool_schema_never_exposes_google_resource_arguments() -> None:
+    fake_read = type("Tool", (), {"name": "read_sheet_values"})()
+    fake_modify = type("Tool", (), {"name": "modify_sheet_values"})()
+    log = type("Log", (), {"info": lambda *args, **kwargs: None})()
+
+    tools = build_customer_survey_append_tools(
+        [fake_read, fake_modify],
+        resource={"spreadsheet_id": "secret-id", "sheet_name": "Survey"},
+        customer_phone="628customer",
+        log=log,
+    )
+
+    assert [tool.name for tool in tools] == ["append_sheet_survey_response"]
+    assert "spreadsheet_id" not in tools[0].args
+    assert "range_name" not in tools[0].args
+    assert tools[0].args["satisfaction_score"]["minimum"] == 1
+    assert tools[0].args["satisfaction_score"]["maximum"] == 10
 
 
 def test_google_term_sanitizer_preserves_mcp_auth_url_hostname() -> None:

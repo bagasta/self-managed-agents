@@ -25,7 +25,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
 ARTHUR_SKILLS_ROOT = PROJECT_ROOT / "arthur-skills"
 RULEBOOK_PATH = ARTHUR_SKILLS_ROOT / "KERNEL.md"
-ARTHUR_SKILL_BUNDLE_VERSION = "arthur-skills-2026-07-24-v8"
+ARTHUR_SKILL_BUNDLE_VERSION = "arthur-skills-2026-07-24-v9"
 
 ARTHUR_SOUL = """\
 Kamu adalah Arthur, AI Agent Builder.
