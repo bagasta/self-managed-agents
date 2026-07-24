@@ -381,48 +381,14 @@ def _requested_builder_whatsapp_action(
     input_messages: list[Any] | None = None,
 ) -> str | None:
     """Return the concrete WhatsApp action explicitly selected by the user."""
-    current = " ".join(str(user_message or "").casefold().split())
-    dedicated_markers = (
-        "nomor saya sendiri",
-        "nomer saya sendiri",
-        "nomor whatsapp saya",
-        "nomer whatsapp saya",
-        "nomor khusus",
-        "pasang ke nomor",
-        "kirim qr",
-        "qr baru",
-        "scan qr",
+    from app.core.engine.arthur_skill_runtime import (
+        classify_builder_whatsapp_action,
     )
-    if any(marker in current for marker in dedicated_markers):
-        return "dedicated_qr"
 
-    trial_markers = (
-        "nomor demo",
-        "kode demo",
-        "kode trial",
-        "link trial",
-        "trial link",
-        "link coba",
-        "mau coba agent",
-        "coba agentnya",
-        "cobain agent",
+    return classify_builder_whatsapp_action(
+        user_message,
+        _latest_agent_text(input_messages),
     )
-    if any(marker in current for marker in trial_markers):
-        return "trial_link"
-
-    if current in {"iya", "iya mau", "mau", "ok", "oke", "lanjut"}:
-        previous = _latest_agent_text(input_messages).casefold()
-        if any(
-            marker in previous
-            for marker in (
-                "mau link trial",
-                "mau link coba",
-                "mau nomor demo",
-                "mau aku buatin link trial",
-            )
-        ):
-            return "trial_link"
-    return None
 
 
 def _needs_builder_whatsapp_action_completion(

@@ -10,7 +10,9 @@ check for an entitlement BLOCK. Result: the user got "Maaf, lagi ada kendala
 sistem ... coba lagi" instead of a created agent.
 """
 import json
+import uuid
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from app.core.engine.agent_followups import (
@@ -148,6 +150,30 @@ def test_explicit_dedicated_number_requires_qr_tool():
     assert "jangan arahkan user ke dashboard" in directive
 
 
+def test_informal_demo_request_requires_trial_link_not_qr():
+    action = _requested_builder_whatsapp_action(
+        "mau test pake nomer demo",
+        [],
+    )
+
+    assert action == "trial_link"
+    assert _needs_builder_whatsapp_action_completion(action, [], is_builder=True)
+    directive = _builder_whatsapp_action_directive(action).lower()
+    assert "create_wa_dev_trial_link" in directive
+
+
+def test_code_followup_after_demo_reply_requires_trial_link():
+    messages = [
+        AIMessage(content="Minsel sudah aktif di nomor demo Arthur."),
+        HumanMessage(content="kodenya mana?"),
+    ]
+
+    assert (
+        _requested_builder_whatsapp_action("kodenya mana?", messages)
+        == "trial_link"
+    )
+
+
 def test_generic_whatsapp_setup_question_does_not_choose_for_user():
     assert (
         _requested_builder_whatsapp_action(
@@ -156,3 +182,56 @@ def test_generic_whatsapp_setup_question_does_not_choose_for_user():
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_deterministic_demo_fallback_calls_trial_tool_not_qr():
+    from app.core.engine.agent_runner import (
+        _invoke_builder_whatsapp_action_tool,
+    )
+
+    calls = []
+
+    class FakeTool:
+        def __init__(self, name):
+            self.name = name
+
+        async def ainvoke(self, args):
+            calls.append((self.name, args))
+            return (
+                '{"success":true,"agent_name":"Minsel","code":"ABC123",'
+                '"wa_me_url":"https://wa.me/62822?text=ABC123"}'
+            )
+
+    parsed = {
+        "final_reply": "",
+        "steps": [],
+        "total_tokens_used": 0,
+        "has_output": True,
+        "db_messages": [],
+    }
+    done = await _invoke_builder_whatsapp_action_tool(
+        tools=[
+            FakeTool("create_wa_dev_trial_link"),
+            FakeTool("send_agent_wa_qr"),
+        ],
+        action="trial_link",
+        parsed=parsed,
+        session_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        step_index=1,
+        log=type(
+            "Log",
+            (),
+            {
+                "info": lambda *_args, **_kwargs: None,
+                "warning": lambda *_args, **_kwargs: None,
+                "error": lambda *_args, **_kwargs: None,
+            },
+        )(),
+    )
+
+    assert done is True
+    assert calls == [("create_wa_dev_trial_link", {"send_contact": True})]
+    assert parsed["steps"][0]["tool"] == "create_wa_dev_trial_link"
+    assert parsed["db_messages"][0].tool_name == "create_wa_dev_trial_link"

@@ -285,7 +285,11 @@ def _plan_agent_clarification_reply(steps: list[dict[str, Any]]) -> str | None:
     return None
 
 
-def _builder_fallback_reply(steps: list[dict[str, Any]]) -> str | None:
+def _builder_fallback_reply(
+    steps: list[dict[str, Any]],
+    *,
+    whatsapp_action: str | None = None,
+) -> str | None:
     entitlement_retry = _builder_entitlement_retry_reply(steps)
     if entitlement_retry:
         return entitlement_retry
@@ -347,6 +351,8 @@ def _builder_fallback_reply(steps: list[dict[str, Any]]) -> str | None:
         return trial_link_error_reply
 
     for step in reversed(steps or []):
+        if whatsapp_action == "trial_link":
+            break
         if step.get("tool") != "send_agent_wa_qr":
             continue
         result_text = str(step.get("result") or "").strip()
@@ -464,6 +470,7 @@ def ensure_non_empty_reply(
     tools_config: dict[str, Any] | None = None,
     active_groups: list[str] | tuple[str, ...] | set[str] | None = None,
     user_message: str = "",
+    builder_whatsapp_action: str | None = None,
 ) -> str:
     text = (reply or "").strip()
     entitlement_retry = _builder_entitlement_retry_reply(steps)
@@ -522,7 +529,10 @@ def ensure_non_empty_reply(
     if text:
         if _is_builder_context(steps, active_groups):
             text = _sanitize_builder_channel_reply(text)
-        builder_reply = _builder_fallback_reply(steps)
+        builder_reply = _builder_fallback_reply(
+            steps,
+            whatsapp_action=builder_whatsapp_action,
+        )
         tool_names = _step_tool_names(steps)
         if (
             builder_reply
@@ -530,7 +540,11 @@ def ensure_non_empty_reply(
             and not _trial_link_reply_is_complete(text, steps)
         ):
             return builder_reply
-        if builder_reply and "send_agent_wa_qr" in tool_names:
+        if (
+            builder_reply
+            and "send_agent_wa_qr" in tool_names
+            and builder_whatsapp_action != "trial_link"
+        ):
             return builder_reply
         if (
             builder_reply
@@ -565,7 +579,10 @@ def ensure_non_empty_reply(
         )
         return disabled_guard_reply or text
 
-    builder_reply = _builder_fallback_reply(steps)
+    builder_reply = _builder_fallback_reply(
+        steps,
+        whatsapp_action=builder_whatsapp_action,
+    )
     if builder_reply:
         return builder_reply
 

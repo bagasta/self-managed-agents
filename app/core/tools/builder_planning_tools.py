@@ -48,8 +48,13 @@ def _get_post_create_steps(preset_id: str, channel: str, tc: dict) -> list[str]:
     """Return required actions user/operator must take after agent creation."""
     steps = []
     if channel == "whatsapp" or tc.get("whatsapp_media"):
-        steps.append("Kirim QR ke user: gunakan send_agent_wa_qr(agent_id, caption, phone)")
-        steps.append("Tunggu user scan QR, lalu cek ulang dengan send_agent_wa_qr jika butuh QR baru")
+        steps.append(
+            "Tawarkan dua jalur WhatsApp: nomor demo Arthur atau nomor khusus milik user"
+        )
+        steps.append(
+            "Jika user memilih demo, gunakan create_wa_dev_trial_link; "
+            "jika memilih nomor khusus, gunakan send_agent_wa_qr"
+        )
     if tc.get("rag"):
         steps.append("Upload dokumen: POST /v1/agents/{id}/documents/upload (PDF/DOCX/TXT)")
     if preset_id == "coding_deploy_agent":

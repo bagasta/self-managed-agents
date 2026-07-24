@@ -325,6 +325,28 @@ def test_qr_tool_success_has_verified_whatsapp_only_reply():
     assert "dashboard" not in out.lower()
 
 
+def test_demo_request_never_exposes_invalid_qr_tool_error():
+    out = ensure_non_empty_reply(
+        "Saya sedang menyiapkan kode demo Minsel.",
+        [
+            {
+                "tool": "send_agent_wa_qr",
+                "result": (
+                    "Error: send_agent_wa_qr is not a valid tool, "
+                    "try one of [get_agent_detail]"
+                ),
+            }
+        ],
+        active_groups=["builder"],
+        user_message="kodenya mana?",
+        builder_whatsapp_action="trial_link",
+    )
+
+    assert out == "Saya sedang menyiapkan kode demo Minsel."
+    assert "send_agent_wa_qr" not in out
+    assert "Scan WhatsApp belum berhasil" not in out
+
+
 def test_builder_trial_link_ambiguous_target_asks_agent_name():
     steps = [
         {

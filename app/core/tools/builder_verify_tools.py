@@ -151,10 +151,10 @@ def _build_owner_setup_status(
         add_item(
             "whatsapp",
             "ready" if whatsapp_ready else "needs_setup",
-            "WhatsApp agent sudah punya device/nomor." if whatsapp_ready else "WhatsApp belum punya device/nomor aktif. Pasang nomor WhatsApp atau pakai nomor demo dulu.",
+            "WhatsApp agent sudah punya device/nomor." if whatsapp_ready else "WhatsApp belum punya device/nomor aktif. Owner dapat memilih nomor demo Arthur atau memasang nomor khusus.",
         )
         if not whatsapp_ready:
-            next_steps.append("Uji agent lewat nomor demo Arthur terlebih dahulu.")
+            next_steps.append("Tawarkan nomor demo Arthur atau pemasangan nomor khusus, lalu jalankan pilihan Owner.")
     else:
         add_item("whatsapp", "not_used", "Agent ini bukan channel WhatsApp.")
 

@@ -19,7 +19,7 @@ from app.models.agent_build_draft import AgentBuildDraft
 from app.models.message import Message
 
 ARTHUR_ENGINE_VERSION = "arthur-progressive-v1"
-ARTHUR_PROMPT_VERSION = "arthur-kernel-v4"
+ARTHUR_PROMPT_VERSION = "arthur-kernel-v5"
 
 _BUILDER_TOOL_NAMES = {
     "get_self_config", "get_platform_capabilities", "list_available_wa_devices", "get_presets",
@@ -87,6 +87,7 @@ class ArthurSkillContext:
     primary_skill: str | None = None
     mixin_skills: list[str] = field(default_factory=list)
     skill_versions: dict[str, str] = field(default_factory=dict)
+    whatsapp_action: str | None = None
     prompt_block: str = ""
     draft: AgentBuildDraft | None = None
 
@@ -96,6 +97,7 @@ def scope_arthur_builder_tools(
     *,
     primary_skill: str,
     mixin_skills: list[str],
+    whatsapp_action: str | None = None,
 ) -> tuple[list[Any], list[str]]:
     allowed = set(_SKILL_TOOL_ALLOWLISTS.get(primary_skill, set()))
     allowed_supporting = set(_SKILL_SUPPORTING_TOOL_ALLOWLISTS.get(primary_skill, set()))
@@ -105,6 +107,20 @@ def scope_arthur_builder_tools(
     removed: list[str] = []
     for tool in tools:
         name = str(getattr(tool, "name", "") or "")
+        if (
+            primary_skill == "arthur-whatsapp-demo-channel"
+            and whatsapp_action == "trial_link"
+            and name == "send_agent_wa_qr"
+        ):
+            removed.append(name)
+            continue
+        if (
+            primary_skill == "arthur-whatsapp-demo-channel"
+            and whatsapp_action == "dedicated_qr"
+            and name == "create_wa_dev_trial_link"
+        ):
+            removed.append(name)
+            continue
         if name in _BUILDER_TOOL_NAMES and name not in allowed:
             removed.append(name)
             continue
@@ -129,17 +145,113 @@ def _contains(text: str, terms: tuple[str, ...]) -> bool:
     return any(term in text for term in terms)
 
 
+def normalize_builder_language(text: str) -> str:
+    """Normalize common informal WhatsApp spellings used in builder intents."""
+    normalized = str(text or "").casefold()
+    substitutions = (
+        (r"\bnomer\b", "nomor"),
+        (r"\bno wa\b", "nomor whatsapp"),
+        (r"\btes\b", "coba"),
+        (r"\btest\b", "coba"),
+        (r"\bngetes\b", "coba"),
+        (r"\bpake\b", "pakai"),
+        (r"\bpakek\b", "pakai"),
+        (r"\bwhats app\b", "whatsapp"),
+    )
+    for pattern, replacement in substitutions:
+        normalized = re.sub(pattern, replacement, normalized)
+    return " ".join(normalized.split())
+
+
+def classify_builder_whatsapp_action(
+    user_message: str,
+    prior_agent_message: str = "",
+) -> str | None:
+    """Resolve an explicitly selected demo or own-number WhatsApp path."""
+    current = normalize_builder_language(user_message)
+    prior_agent = normalize_builder_language(prior_agent_message)
+
+    dedicated_markers = (
+        "nomor saya sendiri",
+        "nomor whatsapp saya",
+        "nomor khusus",
+        "pasang ke nomor",
+        "kirim qr",
+        "qr baru",
+        "scan qr",
+    )
+    if _contains(current, dedicated_markers):
+        return "dedicated_qr"
+
+    trial_markers = (
+        "nomor demo",
+        "kode demo",
+        "kode trial",
+        "link trial",
+        "trial link",
+        "link coba",
+        "mau coba agent",
+        "coba agentnya",
+        "cobain agent",
+        "coba pakai nomor demo",
+    )
+    if _contains(current, trial_markers):
+        return "trial_link"
+
+    prior_offered_demo = _contains(
+        prior_agent,
+        (
+            "nomor demo",
+            "kode demo",
+            "kode trial",
+            "link trial",
+            "link coba",
+            "wa.me",
+            "mau aku buatin link",
+            "mau saya buatkan link",
+        ),
+    )
+    short_affirmative = current in {
+        "iya",
+        "iya mau",
+        "mau",
+        "ok",
+        "oke",
+        "ok sudah",
+        "sudah",
+        "lanjut",
+    }
+    missing_demo_artifact = _contains(
+        current,
+        (
+            "kodenya mana",
+            "mana kodenya",
+            "kode mana",
+            "linknya mana",
+            "mana linknya",
+            "kirim kodenya",
+            "kirim linknya",
+        ),
+    )
+    if prior_offered_demo and (short_affirmative or missing_demo_artifact):
+        return "trial_link"
+    return None
+
+
 def classify_builder_intent(
     user_message: str,
     prior_evidence: str = "",
     prior_agent_message: str = "",
 ) -> str:
-    current = (user_message or "").casefold()
+    current = normalize_builder_language(user_message)
     if _contains(current, ("hapus agent", "delete agent", "reset user", "reset agent", "nonaktifkan agent")):
         return "lifecycle"
     if _contains(current, ("upgrade", "langganan", "subscription", "bayar", "payment", "kuota", "slot")):
         return "subscription"
-    if _contains(
+    if classify_builder_whatsapp_action(
+        current,
+        prior_agent_message,
+    ) or _contains(
         current,
         (
             "coba demo",
@@ -171,7 +283,7 @@ def classify_builder_intent(
     # explicit intent. Workflow state decides whether a short reply such as
     # "sesuai" advances the active build.
     prior = (prior_evidence or "").casefold()
-    prior_agent = (prior_agent_message or "").casefold()
+    prior_agent = normalize_builder_language(prior_agent_message)
     short_affirmative = " ".join(current.split()) in {
         "iya",
         "iya mau",
@@ -318,6 +430,10 @@ async def prepare_arthur_skill_context(
     # The initial classifier only determines which state/skill to load. It never
     # grants permission or turns derived text into confirmed facts.
     prior_agent_message = await _latest_agent_message(session_id, db)
+    whatsapp_action = classify_builder_whatsapp_action(
+        user_message,
+        prior_agent_message,
+    )
     intent = classify_builder_intent(
         user_message,
         prior_agent_message=prior_agent_message,
@@ -337,6 +453,10 @@ async def prepare_arthur_skill_context(
         intent = classify_builder_intent(
             user_message,
             _recent_evidence_text(draft),
+            prior_agent_message,
+        )
+        whatsapp_action = classify_builder_whatsapp_action(
+            user_message,
             prior_agent_message,
         )
 
@@ -384,6 +504,7 @@ async def prepare_arthur_skill_context(
         primary_skill=primary,
         mixin_skills=mixins,
         skill_versions=versions,
+        whatsapp_action=whatsapp_action,
         prompt_block="\n\n".join(parts),
         draft=draft,
     )

@@ -25,7 +25,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
 ARTHUR_SKILLS_ROOT = PROJECT_ROOT / "arthur-skills"
 RULEBOOK_PATH = ARTHUR_SKILLS_ROOT / "KERNEL.md"
-ARTHUR_SKILL_BUNDLE_VERSION = "arthur-skills-2026-07-24-v5"
+ARTHUR_SKILL_BUNDLE_VERSION = "arthur-skills-2026-07-24-v6"
 
 ARTHUR_SOUL = """\
 Kamu adalah Arthur, AI Agent Builder.
@@ -39,7 +39,7 @@ PRINSIP KERJAMU:
 - Sebelum membuat agent, selesaikan discovery enam grup: konteks/tujuan, perilaku, eskalasi/batas pengetahuan, data/knowledge, skala/integrasi, dan approver go-live untuk kebutuhan pekerjaan. Tanyakan satu grup per pesan, beri contoh untuk tone serta percakapan ideal/red line, lalu rangkum dan minta konfirmasi akhir
 - Jangan menanyakan jam aktif agent, jam operasional, business hours, atau pilihan 24/7 pada discovery pembuatan agent
 - Untuk pekerjaan/bisnis, eskalasi wajib berisi kondisi pemicu, nama/role penerima, dan nomor WhatsApp; untuk personal cukup tentukan respons saat agent tidak tahu/fallback, sedangkan nomor eskalasi dan approver boleh dilewati
-- Setelah agent dibuat, arahkan user mencoba nomor demo Arthur dulu. Tawarkan pemasangan nomor WhatsApp user hanya setelah user mencoba demo dan menyatakan cocok, kecuali user memintanya sendiri
+- Setelah agent dibuat, tawarkan dua jalur WhatsApp yang setara: nomor demo Arthur atau pemasangan ke nomor khusus milik user. Jalankan tool jalur yang dipilih pada turn yang sama
 - Jika butuh riset eksternal atau info terbaru, gunakan Tavily browsing tools; jangan gunakan HTTP/ngrok untuk operasi platform internal
 - Tolak pembuatan atau update agent untuk buzzer, kampanye politik, propaganda politik, atau manipulasi opini publik
 - Setiap agent yang kamu buat WAJIB punya soul yang jelas — lebih efisien kirim soul langsung lewat create_agent(soul=...), atau fallback via set_agent_memory(agent_id, key="soul", value=...)
@@ -87,7 +87,7 @@ ARTHUR_CONFIG = {
             "document_model": "mistral-ocr-latest",
             "image_model": "openai/gpt-4.1-mini",
             "engine_version": "arthur-progressive-v1",
-            "prompt_version": "arthur-kernel-v4",
+            "prompt_version": "arthur-kernel-v5",
             "skill_bundle_version": ARTHUR_SKILL_BUNDLE_VERSION,
         },
     },

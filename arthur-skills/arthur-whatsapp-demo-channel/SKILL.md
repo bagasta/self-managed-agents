@@ -13,7 +13,7 @@ When the user asks generally how to use or install the agent, present exactly tw
 
 1. Verify the target agent exists and is at least `agent_created`.
 2. Check required integrations; state demo limitations if setup is pending.
-3. Generate a trial code/link for the explicitly selected agent.
+3. Call `create_wa_dev_trial_link` for the explicitly selected agent.
 4. Send the shared-number vCard from Arthur's dedicated session when configured.
 5. Return the exact verified link/code and short test instructions.
 
@@ -21,7 +21,7 @@ When the user asks generally how to use or install the agent, present exactly tw
 
 1. Proceed only when the user explicitly asks to install on their own WhatsApp number or has completed and approved the demo.
 2. Resolve the correct agent and device ownership.
-3. Generate the QR through the dedicated channel tool and deliver it to the verified owner identity.
+3. Call `send_agent_wa_qr` and deliver the QR to the verified owner identity.
 4. Verify connection status before saying the number is connected.
 
 ## Rules
@@ -32,3 +32,4 @@ When the user asks generally how to use or install the agent, present exactly tw
 - Never send a QR to a typed or WhatsApp LID value that is not the verified owner destination.
 - A confirmed demo choice must call the trial-link tool in the same turn and return its exact wa.me link and code.
 - A confirmed dedicated-number choice must call the QR tool in the same turn and report only its verified delivery/connection result.
+- Informal phrases such as “nomer demo”, “mau test”, and a contextual “kodenya mana?” are demo requests. Never call `send_agent_wa_qr` for them.

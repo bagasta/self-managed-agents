@@ -155,10 +155,9 @@ def build_builder_channel_tools(
         """
         Generate kode 6 karakter untuk mencoba agent lewat nomor demo Arthur.
 
-        Gunakan setelah create_agent saat user ingin mencoba agent di WhatsApp tanpa
-        setup nomor sendiri. Arahkan uji coba nomor demo terlebih dahulu; jangan
-        menawarkan nomor khusus sebelum user mencoba demo dan menyatakan cocok,
-        kecuali user sendiri yang meminta pemasangan nomor.
+        Gunakan setelah create_agent saat user memilih mencoba agent di nomor demo
+        Arthur tanpa setup nomor sendiri. Jangan gunakan tool QR untuk permintaan
+        demo, link, kode, atau follow-up kontekstual seperti "kodenya mana?".
 
             Args:
             agent_id: UUID agent yang akan dicoba di nomor shared Arthur. Jika kosong,

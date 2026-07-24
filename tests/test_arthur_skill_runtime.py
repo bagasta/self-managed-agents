@@ -13,6 +13,8 @@ from app.core.domain.agent_build_state_service import (
 )
 from app.core.engine.arthur_skill_runtime import (
     classify_builder_intent,
+    classify_builder_whatsapp_action,
+    normalize_builder_language,
     resolve_policy_mixins,
     resolve_primary_skill,
     scope_arthur_builder_tools,
@@ -77,6 +79,27 @@ def test_demo_and_channel_followups_route_from_current_or_prior_agent_prompt():
     )
 
 
+def test_informal_demo_request_routes_to_demo_skill():
+    message = "mau test pake nomer demo"
+
+    assert normalize_builder_language(message) == "mau coba pakai nomor demo"
+    assert classify_builder_whatsapp_action(message) == "trial_link"
+    assert classify_builder_intent(message) == "demo"
+
+
+def test_missing_code_followup_stays_on_demo_path():
+    prior = "Minsel sudah aktif di nomor demo Arthur dan siap kamu coba."
+
+    assert (
+        classify_builder_whatsapp_action("kodenya mana?", prior)
+        == "trial_link"
+    )
+    assert (
+        classify_builder_intent("kodenya mana?", prior_agent_message=prior)
+        == "demo"
+    )
+
+
 def test_demo_skill_exposes_trial_link_and_dedicated_qr_tools():
     tools = [
         SimpleNamespace(name="get_agent_detail"),
@@ -96,6 +119,46 @@ def test_demo_skill_exposes_trial_link_and_dedicated_qr_tools():
         "send_agent_wa_qr",
     ]
     assert removed == ["link_dashboard_account"]
+
+
+def test_selected_demo_path_hides_qr_tool():
+    tools = [
+        SimpleNamespace(name="get_agent_detail"),
+        SimpleNamespace(name="create_wa_dev_trial_link"),
+        SimpleNamespace(name="send_agent_wa_qr"),
+    ]
+    kept, removed = scope_arthur_builder_tools(
+        tools,
+        primary_skill="arthur-whatsapp-demo-channel",
+        mixin_skills=[],
+        whatsapp_action="trial_link",
+    )
+
+    assert [tool.name for tool in kept] == [
+        "get_agent_detail",
+        "create_wa_dev_trial_link",
+    ]
+    assert removed == ["send_agent_wa_qr"]
+
+
+def test_selected_dedicated_path_hides_trial_link_tool():
+    tools = [
+        SimpleNamespace(name="get_agent_detail"),
+        SimpleNamespace(name="create_wa_dev_trial_link"),
+        SimpleNamespace(name="send_agent_wa_qr"),
+    ]
+    kept, removed = scope_arthur_builder_tools(
+        tools,
+        primary_skill="arthur-whatsapp-demo-channel",
+        mixin_skills=[],
+        whatsapp_action="dedicated_qr",
+    )
+
+    assert [tool.name for tool in kept] == [
+        "get_agent_detail",
+        "send_agent_wa_qr",
+    ]
+    assert removed == ["create_wa_dev_trial_link"]
 
 
 def test_subscription_skill_does_not_expose_dashboard_linking():

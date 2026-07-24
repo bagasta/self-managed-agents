@@ -584,6 +584,114 @@ async def _deliver_shared_whatsapp_file_via_tool(
     return True, f"File {filename} sudah saya kirim ke WhatsApp."
 
 
+def _builder_channel_agent_id_from_steps(steps: list[dict[str, Any]]) -> str:
+    for step in reversed(steps or []):
+        if str(step.get("tool") or "") not in {
+            "create_agent",
+            "get_agent_detail",
+            "verify_agent",
+        }:
+            continue
+        data = _parse_step_result_json(step.get("result"))
+        if not isinstance(data, dict):
+            continue
+        agent_id = str(data.get("agent_id") or data.get("id") or "").strip()
+        if agent_id:
+            return agent_id
+    return ""
+
+
+async def _invoke_builder_whatsapp_action_tool(
+    *,
+    tools: list[Any],
+    action: str,
+    parsed: ParsedResult,
+    session_id: uuid.UUID,
+    run_id: uuid.UUID,
+    step_index: int,
+    log: Any,
+) -> bool:
+    """Deterministically finish an authorized demo/QR action missed by the LLM."""
+    tool_name = (
+        "create_wa_dev_trial_link"
+        if action == "trial_link"
+        else "send_agent_wa_qr"
+    )
+    selected_tool = next(
+        (tool for tool in tools if getattr(tool, "name", "") == tool_name),
+        None,
+    )
+    if selected_tool is None:
+        log.error(
+            "agent_run.builder_whatsapp_action_tool_missing",
+            action=action,
+            tool=tool_name,
+        )
+        return False
+
+    if action == "trial_link":
+        args: dict[str, Any] = {"send_contact": True}
+    else:
+        agent_id = _builder_channel_agent_id_from_steps(parsed.get("steps", []))
+        if not agent_id:
+            log.warning(
+                "agent_run.builder_whatsapp_action_target_missing",
+                action=action,
+                tool=tool_name,
+            )
+            return False
+        args = {
+            "agent_id": agent_id,
+            "caption": (
+                "Scan sekali dari WhatsApp untuk memasang agent ke nomor kamu. "
+                "Berlaku sekitar 20 detik."
+            ),
+        }
+
+    try:
+        raw_result = await selected_tool.ainvoke(args)
+    except Exception as exc:
+        raw_result = f"[error] {type(exc).__name__}: {exc}"
+        log.warning(
+            "agent_run.builder_whatsapp_action_direct_exception",
+            action=action,
+            tool=tool_name,
+            error=str(exc)[:300],
+        )
+
+    result_text = str(raw_result or "")
+    step_no = max(
+        [int(step.get("step") or 0) for step in parsed.get("steps", [])] + [0]
+    ) + 1
+    parsed["steps"].append(
+        {
+            "step": step_no,
+            "tool": tool_name,
+            "args": args,
+            "result": result_text[:4000],
+            "tool_call_id": "deterministic_builder_whatsapp_action",
+        }
+    )
+    parsed["db_messages"].append(
+        Message(
+            session_id=session_id,
+            role="tool",
+            tool_name=tool_name,
+            tool_args=args,
+            tool_result=result_text[:2000],
+            step_index=step_index,
+            run_id=run_id,
+        )
+    )
+    log.info(
+        "agent_run.builder_whatsapp_action_direct_done",
+        action=action,
+        tool=tool_name,
+        result_preview=result_text[:220],
+    )
+    return True
+
+
 def _shared_artifact_record(shared_path: str, *, sent: bool = False) -> dict[str, Any]:
     filename = (shared_path or "").rsplit("/", 1)[-1] or "file"
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
@@ -822,6 +930,7 @@ async def run_agent(
             "primary_skill": _arthur_skill_context.primary_skill,
             "mixin_skills": list(_arthur_skill_context.mixin_skills),
             "skill_versions": dict(_arthur_skill_context.skill_versions),
+            "whatsapp_action": _arthur_skill_context.whatsapp_action,
             "build_id": (
                 str(_arthur_skill_context.draft.id)
                 if _arthur_skill_context.draft is not None
@@ -833,6 +942,7 @@ async def run_agent(
             primary_skill=_arthur_skill_context.primary_skill,
             mixin_skills=_arthur_skill_context.mixin_skills,
             skill_versions=_arthur_skill_context.skill_versions,
+            whatsapp_action=_arthur_skill_context.whatsapp_action,
             engine_version=ARTHUR_ENGINE_VERSION,
             prompt_version=ARTHUR_PROMPT_VERSION,
         )
@@ -840,10 +950,12 @@ async def run_agent(
             tools,
             primary_skill=_arthur_skill_context.primary_skill or "arthur-discovery",
             mixin_skills=_arthur_skill_context.mixin_skills,
+            whatsapp_action=_arthur_skill_context.whatsapp_action,
         )
         log.info(
             "agent_run.arthur_tools_scoped",
             primary_skill=_arthur_skill_context.primary_skill,
+            whatsapp_action=_arthur_skill_context.whatsapp_action,
             removed_tools=_arthur_removed_tools,
             remaining_tools=len(tools),
         )
@@ -2350,6 +2462,22 @@ async def run_agent(
                     action=_builder_whatsapp_action,
                     error=str(_channel_completion_exc)[:300],
                 )
+        if _needs_builder_whatsapp_action_completion(
+            _builder_whatsapp_action,
+            steps,
+            is_builder=runtime_policy.is_builder,
+        ):
+            _direct_channel_done = await _invoke_builder_whatsapp_action_tool(
+                tools=tools,
+                action=str(_builder_whatsapp_action),
+                parsed=parsed,
+                session_id=session.id,
+                run_id=run_id,
+                step_index=step_counter + len(parsed["db_messages"]),
+                log=log,
+            )
+            if _direct_channel_done:
+                steps = parsed["steps"]
 
         if _needs_deploy_followup(execution_user_message, tools_config, steps, final_reply):
             log.warning(
@@ -2685,6 +2813,7 @@ async def run_agent(
         tools_config=tools_config,
         active_groups=active_groups,
         user_message=execution_user_message,
+        builder_whatsapp_action=_builder_whatsapp_action,
     )
     if final_reply != _reply_before_non_empty_guard:
         log.warning(

@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     arthur_document_model: str = "mistral-ocr-latest"
     arthur_image_model: str = "openai/gpt-4.1-mini"
     arthur_engine_version: str = "arthur-progressive-v1"
-    arthur_prompt_version: str = "arthur-kernel-v4"
+    arthur_prompt_version: str = "arthur-kernel-v5"
     llm_request_timeout_seconds: float = 120.0
     llm_max_retries: int = 1
 

@@ -777,8 +777,8 @@ def build_builder_create_tools(
                 "message": (
                     f"Agent '{agent.name}' berhasil dibuat dengan ID: {agent.id}. "
                     "Simpan agent_id ini sebagai target utama untuk aksi lanjutan pada percakapan ini. "
-                    "Jika channel_type adalah whatsapp, jawaban ke user WAJIB mengarahkan uji coba nomor demo Arthur terlebih dahulu. "
-                    "Jangan menawarkan pemasangan nomor WhatsApp user sebelum user mencoba demo dan menyatakan cocok, kecuali user memintanya sendiri. "
+                    "Jika channel_type adalah whatsapp, tawarkan dua pilihan: nomor demo Arthur atau nomor khusus milik user. "
+                    "Setelah user memilih, panggil tool channel yang sesuai pada turn yang sama. "
                     "Jangan berhenti hanya dengan menyebut agent sudah jadi atau ID agent. "
                     "Jika google_workspace_enabled=true, langkah berikutnya adalah generate_google_auth_link lalu kirim link login Google; "
                     "jangan menunggu user bertanya cara koneknya. "
