@@ -174,6 +174,31 @@ def test_code_followup_after_demo_reply_requires_trial_link():
     )
 
 
+def test_informal_dedicated_number_sequence_requires_qr():
+    offer = AIMessage(
+        content=(
+            "Untuk memasang ke nomor khusus milikmu, pilih nomor khusus "
+            "agar saya kirim scan sekali dari WhatsApp."
+        )
+    )
+
+    assert (
+        _requested_builder_whatsapp_action(
+            "kalo mau konekin ke nomer whatsapp khusus gimana?",
+            [],
+        )
+        == "dedicated_qr"
+    )
+    assert (
+        _requested_builder_whatsapp_action(
+            "saya udah ada nomernya",
+            [offer],
+        )
+        == "dedicated_qr"
+    )
+    assert _requested_builder_whatsapp_action("minta qr", []) == "dedicated_qr"
+
+
 def test_generic_whatsapp_setup_question_does_not_choose_for_user():
     assert (
         _requested_builder_whatsapp_action(
@@ -235,3 +260,65 @@ async def test_deterministic_demo_fallback_calls_trial_tool_not_qr():
     assert calls == [("create_wa_dev_trial_link", {"send_contact": True})]
     assert parsed["steps"][0]["tool"] == "create_wa_dev_trial_link"
     assert parsed["db_messages"][0].tool_name == "create_wa_dev_trial_link"
+
+
+@pytest.mark.asyncio
+async def test_deterministic_qr_fallback_resolves_single_owned_agent():
+    from app.core.engine.agent_runner import (
+        _invoke_builder_whatsapp_action_tool,
+    )
+
+    calls = []
+    agent_id = str(uuid.uuid4())
+
+    class FakeTool:
+        def __init__(self, name):
+            self.name = name
+
+        async def ainvoke(self, args):
+            calls.append((self.name, args))
+            if self.name == "list_my_agents":
+                return json.dumps(
+                    {
+                        "count": 1,
+                        "agents": [{"id": agent_id, "name": "Minsel"}],
+                    }
+                )
+            return "[QR_SENT] QR Minsel sudah dikirim"
+
+    parsed = {
+        "final_reply": "",
+        "steps": [],
+        "total_tokens_used": 0,
+        "has_output": True,
+        "db_messages": [],
+    }
+    done = await _invoke_builder_whatsapp_action_tool(
+        tools=[
+            FakeTool("list_my_agents"),
+            FakeTool("send_agent_wa_qr"),
+        ],
+        action="dedicated_qr",
+        parsed=parsed,
+        session_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        step_index=1,
+        log=type(
+            "Log",
+            (),
+            {
+                "info": lambda *_args, **_kwargs: None,
+                "warning": lambda *_args, **_kwargs: None,
+                "error": lambda *_args, **_kwargs: None,
+            },
+        )(),
+    )
+
+    assert done is True
+    assert calls[0] == ("list_my_agents", {})
+    assert calls[1][0] == "send_agent_wa_qr"
+    assert calls[1][1]["agent_id"] == agent_id
+    assert [step["tool"] for step in parsed["steps"]] == [
+        "list_my_agents",
+        "send_agent_wa_qr",
+    ]

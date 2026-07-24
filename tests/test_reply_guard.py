@@ -308,6 +308,19 @@ def test_builder_dashboard_install_hallucination_is_sanitized():
     assert "menu settings" not in out.lower()
 
 
+def test_builder_reversed_clevio_dashboard_phrase_is_sanitized():
+    out = ensure_non_empty_reply(
+        "Langsung Pasang ke Clevio Dashboard lalu scan QR di sana.",
+        [],
+        active_groups=["builder"],
+        user_message="minta qr",
+        builder_whatsapp_action="dedicated_qr",
+    )
+
+    assert "dashboard" not in out.lower()
+    assert "Semua pengaturan agent dilakukan lewat chat WhatsApp ini" in out
+
+
 def test_qr_tool_success_has_verified_whatsapp_only_reply():
     out = ensure_non_empty_reply(
         "QR akan saya kirim.",

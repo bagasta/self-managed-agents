@@ -25,7 +25,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
 ARTHUR_SKILLS_ROOT = PROJECT_ROOT / "arthur-skills"
 RULEBOOK_PATH = ARTHUR_SKILLS_ROOT / "KERNEL.md"
-ARTHUR_SKILL_BUNDLE_VERSION = "arthur-skills-2026-07-24-v6"
+ARTHUR_SKILL_BUNDLE_VERSION = "arthur-skills-2026-07-24-v7"
 
 ARTHUR_SOUL = """\
 Kamu adalah Arthur, AI Agent Builder.
@@ -87,7 +87,7 @@ ARTHUR_CONFIG = {
             "document_model": "mistral-ocr-latest",
             "image_model": "openai/gpt-4.1-mini",
             "engine_version": "arthur-progressive-v1",
-            "prompt_version": "arthur-kernel-v5",
+            "prompt_version": "arthur-kernel-v6",
             "skill_bundle_version": ARTHUR_SKILL_BUNDLE_VERSION,
         },
     },

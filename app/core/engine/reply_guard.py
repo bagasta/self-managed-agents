@@ -169,13 +169,9 @@ def _is_builder_context(
 def _sanitize_builder_channel_reply(reply: str) -> str:
     text = (reply or "").strip()
     normalized = text.lower()
-    if any(
+    if "dashboard" in normalized or any(
         marker in normalized
         for marker in (
-            "dashboard clevio",
-            "buka dashboard",
-            "masuk ke dashboard",
-            "menu dashboard",
             "settings → hubungkan whatsapp",
             "settings -> hubungkan whatsapp",
         )

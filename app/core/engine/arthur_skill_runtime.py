@@ -19,7 +19,7 @@ from app.models.agent_build_draft import AgentBuildDraft
 from app.models.message import Message
 
 ARTHUR_ENGINE_VERSION = "arthur-progressive-v1"
-ARTHUR_PROMPT_VERSION = "arthur-kernel-v5"
+ARTHUR_PROMPT_VERSION = "arthur-kernel-v6"
 
 _BUILDER_TOOL_NAMES = {
     "get_self_config", "get_platform_capabilities", "list_available_wa_devices", "get_presets",
@@ -149,7 +149,7 @@ def normalize_builder_language(text: str) -> str:
     """Normalize common informal WhatsApp spellings used in builder intents."""
     normalized = str(text or "").casefold()
     substitutions = (
-        (r"\bnomer\b", "nomor"),
+        (r"\bnomer(?=\b|nya\b)", "nomor"),
         (r"\bno wa\b", "nomor whatsapp"),
         (r"\btes\b", "coba"),
         (r"\btest\b", "coba"),
@@ -157,6 +157,8 @@ def normalize_builder_language(text: str) -> str:
         (r"\bpake\b", "pakai"),
         (r"\bpakek\b", "pakai"),
         (r"\bwhats app\b", "whatsapp"),
+        (r"\bkonekin\b", "hubungkan"),
+        (r"\bkonekkan\b", "hubungkan"),
     )
     for pattern, replacement in substitutions:
         normalized = re.sub(pattern, replacement, normalized)
@@ -180,7 +182,26 @@ def classify_builder_whatsapp_action(
         "qr baru",
         "scan qr",
     )
-    if _contains(current, dedicated_markers):
+    explicit_dedicated_number = bool(
+        re.search(
+            r"\bnomor\b.{0,24}\b(?:khusus|sendiri|pribadi)\b",
+            current,
+        )
+    )
+    explicit_qr_request = (
+        current == "qr"
+        or bool(
+            re.search(
+                r"\b(?:minta|kirim|mau|butuh|mana|kasih)\b.{0,16}\bqr\b",
+                current,
+            )
+        )
+    )
+    if (
+        _contains(current, dedicated_markers)
+        or explicit_dedicated_number
+        or explicit_qr_request
+    ):
         return "dedicated_qr"
 
     trial_markers = (
@@ -211,6 +232,17 @@ def classify_builder_whatsapp_action(
             "mau saya buatkan link",
         ),
     )
+    prior_offered_dedicated = _contains(
+        prior_agent,
+        (
+            "nomor khusus",
+            "nomor whatsapp khusus",
+            "nomor sendiri",
+            "scan sekali",
+            "pasang ke nomor",
+            "menghubungkan agent ke nomor",
+        ),
+    )
     short_affirmative = current in {
         "iya",
         "iya mau",
@@ -235,6 +267,18 @@ def classify_builder_whatsapp_action(
     )
     if prior_offered_demo and (short_affirmative or missing_demo_artifact):
         return "trial_link"
+    has_owned_number_followup = bool(
+        re.search(
+            r"\b(?:saya|aku)?\s*(?:sudah|udah|telah)?\s*(?:punya|ada)\b.{0,20}\bnomor(?:nya)?\b",
+            current,
+        )
+        or re.search(
+            r"\bnomor(?:nya)?\b.{0,20}\b(?:sudah|udah)?\s*ada\b",
+            current,
+        )
+    )
+    if prior_offered_dedicated and has_owned_number_followup:
+        return "dedicated_qr"
     return None
 
 

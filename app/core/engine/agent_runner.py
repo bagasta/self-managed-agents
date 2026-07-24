@@ -634,12 +634,63 @@ async def _invoke_builder_whatsapp_action_tool(
     else:
         agent_id = _builder_channel_agent_id_from_steps(parsed.get("steps", []))
         if not agent_id:
-            log.warning(
-                "agent_run.builder_whatsapp_action_target_missing",
-                action=action,
-                tool=tool_name,
+            list_tool = next(
+                (
+                    tool
+                    for tool in tools
+                    if getattr(tool, "name", "") == "list_my_agents"
+                ),
+                None,
             )
-            return False
+            if list_tool is not None:
+                try:
+                    list_result = str(await list_tool.ainvoke({}) or "")
+                except Exception as exc:
+                    list_result = f"[error] {type(exc).__name__}: {exc}"
+                list_data = _parse_step_result_json(list_result)
+                agents = (
+                    list_data.get("agents")
+                    if isinstance(list_data, dict)
+                    and isinstance(list_data.get("agents"), list)
+                    else []
+                )
+                if len(agents) == 1 and isinstance(agents[0], dict):
+                    agent_id = str(agents[0].get("id") or "").strip()
+                list_step_no = max(
+                    [
+                        int(step.get("step") or 0)
+                        for step in parsed.get("steps", [])
+                    ]
+                    + [0]
+                ) + 1
+                parsed["steps"].append(
+                    {
+                        "step": list_step_no,
+                        "tool": "list_my_agents",
+                        "args": {},
+                        "result": list_result[:4000],
+                        "tool_call_id": "deterministic_builder_whatsapp_target",
+                    }
+                )
+                parsed["db_messages"].append(
+                    Message(
+                        session_id=session_id,
+                        role="tool",
+                        tool_name="list_my_agents",
+                        tool_args={},
+                        tool_result=list_result[:2000],
+                        step_index=step_index,
+                        run_id=run_id,
+                    )
+                )
+                step_index += 1
+            if not agent_id:
+                log.warning(
+                    "agent_run.builder_whatsapp_action_target_missing",
+                    action=action,
+                    tool=tool_name,
+                )
+                return False
         args = {
             "agent_id": agent_id,
             "caption": (

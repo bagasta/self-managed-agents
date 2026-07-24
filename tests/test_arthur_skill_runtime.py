@@ -100,6 +100,35 @@ def test_missing_code_followup_stays_on_demo_path():
     )
 
 
+def test_informal_dedicated_number_requests_route_to_qr():
+    for message in (
+        "kalo mau konekin ke nomer whatsapp khusus gimana?",
+        "minta qr",
+        "kirim QR dong",
+    ):
+        assert classify_builder_whatsapp_action(message) == "dedicated_qr"
+        assert classify_builder_intent(message) == "demo"
+
+
+def test_owned_number_followup_stays_on_dedicated_path():
+    prior = (
+        "Untuk memasang ke nomor khusus milikmu, pilih nomor khusus "
+        "agar saya kirim scan sekali dari WhatsApp."
+    )
+
+    assert (
+        classify_builder_whatsapp_action("saya udah ada nomernya", prior)
+        == "dedicated_qr"
+    )
+    assert (
+        classify_builder_intent(
+            "saya udah ada nomernya",
+            prior_agent_message=prior,
+        )
+        == "demo"
+    )
+
+
 def test_demo_skill_exposes_trial_link_and_dedicated_qr_tools():
     tools = [
         SimpleNamespace(name="get_agent_detail"),
