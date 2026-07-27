@@ -820,8 +820,14 @@ _PLATFORM_CHANNELS = [
 ]
 
 _RECOMMENDED_MODELS = [
-    {"model": "openai/gpt-4.1-mini", "use_case": "Budget default — cukup kuat untuk mayoritas agent, lebih hemat"},
-    {"model": "openai/gpt-4.1", "use_case": "Balance cost & quality (generasi sebelumnya)"},
+    {
+        "model": "openai/gpt-4.1-mini",
+        "use_case": "Budget default multimodal — mendukung teks dan input gambar/vision, lebih hemat",
+    },
+    {
+        "model": "openai/gpt-4.1",
+        "use_case": "Kualitas lebih tinggi untuk teks dan input gambar/vision",
+    },
     {"model": "openai/gpt-4.1-nano", "use_case": "Ultra-fast response"},
     {"model": "anthropic/claude-sonnet-4-6", "use_case": "Reasoning kompleks, nuanced"},
     {"model": "openai/gpt-4o", "use_case": "Analisis gambar/dokumen (vision)"},

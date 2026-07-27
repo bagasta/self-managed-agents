@@ -96,9 +96,26 @@ def build_builder_read_tools(
             "input_types": [
                 "teks — pesan tulis biasa",
                 "voice_note — audio PTT, otomatis ditranskrip ke teks via Whisper",
-                "gambar — bisa dianalisis jika model mendukung vision",
+                (
+                    "gambar — diterima oleh runtime WhatsApp dan dianalisis langsung oleh model vision; "
+                    "openai/gpt-4.1-mini mendukung input gambar"
+                ),
                 "dokumen — PDF/DOCX/TXT, bisa diindeks ke RAG",
             ],
+            "media_semantics": {
+                "incoming_images": (
+                    "Penerimaan foto WhatsApp diproses oleh runtime dan tidak bergantung pada "
+                    "flag whatsapp_media."
+                ),
+                "whatsapp_media": (
+                    "Flag whatsapp_media mengaktifkan pengiriman gambar/dokumen keluar lewat WhatsApp; "
+                    "flag ini bukan penentu kemampuan membaca foto masuk."
+                ),
+                "image_processing": (
+                    "Untuk foto struk pada model vision, parent agent membaca gambar/hasil ekstraksi vision "
+                    "langsung. Jangan delegasikan OCR gambar masuk ke task/subagent atau Tesseract."
+                ),
+            },
             "critical_limitations": [
                 RUNTIME_LIMITATIONS["wa_device_scan_required_before_use"]["user_message"],
                 RUNTIME_LIMITATIONS["deploy_requires_docker_socket"]["user_message"],

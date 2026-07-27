@@ -19,7 +19,7 @@ from app.models.agent_build_draft import AgentBuildDraft
 from app.models.message import Message
 
 ARTHUR_ENGINE_VERSION = "arthur-progressive-v1"
-ARTHUR_PROMPT_VERSION = "arthur-kernel-v10"
+ARTHUR_PROMPT_VERSION = "arthur-kernel-v11"
 
 _BUILDER_TOOL_NAMES = {
     "get_self_config", "get_platform_capabilities", "list_available_wa_devices", "get_presets",
@@ -34,7 +34,7 @@ _BUILDER_TOOL_NAMES = {
 _SKILL_TOOL_ALLOWLISTS = {
     "arthur-discovery": {
         "get_self_config", "get_platform_capabilities", "get_presets", "plan_agent",
-        "get_user_subscription",
+        "get_user_subscription", "list_my_agents", "get_agent_detail",
     },
     "arthur-create-agent": {
         "get_self_config", "get_platform_capabilities", "get_presets", "plan_agent",
@@ -43,7 +43,7 @@ _SKILL_TOOL_ALLOWLISTS = {
         "get_agent_detail", "get_user_subscription", "set_agent_memory",
     },
     "arthur-edit-agent": {
-        "list_my_agents", "get_agent_detail", "update_agent", "verify_agent",
+        "get_platform_capabilities", "list_my_agents", "get_agent_detail", "update_agent", "verify_agent",
         "validate_agent_config", "compose_agent_blueprint", "compose_agent_operating_manual",
         "compose_agent_instructions", "compose_agent_soul", "set_agent_memory", "add_agent_knowledge",
     },
@@ -210,6 +210,9 @@ def normalize_builder_language(text: str) -> str:
         (r"\bwhats app\b", "whatsapp"),
         (r"\bkonekin\b", "hubungkan"),
         (r"\bkonekkan\b", "hubungkan"),
+        (r"\b(?:ga|gak|nggak|enggak)\s*bisa\b", "tidak bisa"),
+        (r"\b(?:gabisa|gakbisa|nggakbisa|enggakbisa)\b", "tidak bisa"),
+        (r"\bnerima\b", "menerima"),
     )
     for pattern, replacement in substitutions:
         normalized = re.sub(pattern, replacement, normalized)
@@ -364,6 +367,42 @@ def classify_builder_intent(
     )
     if explicit_subscription_intent:
         return "subscription"
+    # Complaints about an already-created agent are diagnosis/edit work, even
+    # when the user does not use the literal words "edit" or "update". This is
+    # especially important after launch, where Indonesian users naturally say
+    # "kok dia nggak bisa..." and attach a screenshot. Treating that as a new
+    # build hid get/update tools and incorrectly ran the subscription gate.
+    existing_agent_symptom = bool(
+        re.search(
+            r"\b(?:tidak bisa|belum bisa|gagal|error|bermasalah|masalah|ngaco|salah)\b",
+            current,
+        )
+    )
+    existing_agent_reference = bool(
+        re.search(r"\b(?:agent(?:nya)?|bot(?:nya)?|ai(?:nya)?|dia)\b", current)
+    )
+    operational_symptom = _contains(
+        current,
+        (
+            "menerima foto",
+            "baca foto",
+            "baca gambar",
+            "foto struk",
+            "gambar struk",
+            "catat",
+            "reminder",
+            "spreadsheet",
+            "google sheet",
+            "jawab",
+            "balas",
+            "kirim",
+            "tool",
+            "fitur",
+            "fungsi",
+        ),
+    )
+    if existing_agent_symptom and existing_agent_reference and operational_symptom:
+        return "edit"
     if classify_builder_whatsapp_action(
         current,
         prior_agent_message,
@@ -587,7 +626,10 @@ def resolve_policy_mixins(text: str, primary: str) -> list[str]:
         mixins.append("arthur-google-workspace")
     if primary != "arthur-files-knowledge" and _contains(
         low,
-        ("file", "dokumen", "document", "pdf", "docx", "pptx", "gambar", "image", "knowledge", "website"),
+        (
+            "file", "dokumen", "document", "pdf", "docx", "pptx", "gambar",
+            "foto", "struk", "image", "vision", "knowledge", "website",
+        ),
     ):
         mixins.append("arthur-files-knowledge")
     return mixins[:1]

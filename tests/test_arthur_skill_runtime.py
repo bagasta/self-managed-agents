@@ -34,6 +34,30 @@ def test_intent_and_primary_skill_routing_are_not_beechat_specific():
     assert resolve_primary_skill("create", "awaiting_confirmation") == "arthur-create-agent"
 
 
+def test_existing_agent_complaint_routes_to_edit_with_media_context():
+    message = "ini kok dia gabisa nerima foto struk??"
+
+    assert normalize_builder_language(message) == "ini kok dia tidak bisa menerima foto struk??"
+    assert classify_builder_intent(message) == "edit"
+    assert resolve_primary_skill(
+        classify_builder_intent(message),
+        "setup_pending",
+        user_message=message,
+    ) == "arthur-edit-agent"
+    assert resolve_policy_mixins(message, "arthur-edit-agent") == [
+        "arthur-files-knowledge"
+    ]
+
+
+def test_existing_agent_failure_does_not_run_new_agent_subscription_path():
+    for message in (
+        "agentnya gagal baca gambar",
+        "JuleAI agentnya bermasalah waktu catat struk",
+        "kok dia belum bisa kirim file?",
+    ):
+        assert classify_builder_intent(message) == "edit"
+
+
 def test_payment_plan_selection_keeps_subscription_skill_on_short_followup():
     prior = (
         "Mau ambil paket yang mana? Starter, Pro, atau Enterprise. "
@@ -299,8 +323,40 @@ def test_tool_scoping_removes_material_tools_during_discovery():
         primary_skill="arthur-discovery",
         mixin_skills=[],
     )
-    assert [tool.name for tool in kept] == ["plan_agent", "tavily_search"]
-    assert removed == ["create_agent", "delete_agent", "list_my_agents"]
+    assert [tool.name for tool in kept] == [
+        "plan_agent",
+        "list_my_agents",
+        "tavily_search",
+    ]
+    assert removed == ["create_agent", "delete_agent"]
+
+
+def test_edit_scope_exposes_diagnostics_and_update_but_not_create_or_delete():
+    tools = [
+        SimpleNamespace(name="get_platform_capabilities"),
+        SimpleNamespace(name="list_my_agents"),
+        SimpleNamespace(name="get_agent_detail"),
+        SimpleNamespace(name="verify_agent"),
+        SimpleNamespace(name="update_agent"),
+        SimpleNamespace(name="plan_agent"),
+        SimpleNamespace(name="create_agent"),
+        SimpleNamespace(name="delete_agent"),
+    ]
+
+    kept, removed = scope_arthur_builder_tools(
+        tools,
+        primary_skill="arthur-edit-agent",
+        mixin_skills=["arthur-files-knowledge"],
+    )
+
+    assert [tool.name for tool in kept] == [
+        "get_platform_capabilities",
+        "list_my_agents",
+        "get_agent_detail",
+        "verify_agent",
+        "update_agent",
+    ]
+    assert removed == ["create_agent", "delete_agent", "plan_agent"]
 
 
 def test_ready_plan_completion_scope_exposes_create_but_cannot_replan():

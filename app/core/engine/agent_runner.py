@@ -97,6 +97,7 @@ from app.core.engine.agent_policy import (
     should_block_external_service_fallback_tool,
     should_use_google_workspace_parent_only,
 )
+from app.core.engine.model_capabilities import model_supports_image_input
 from app.models.agent import Agent as AgentModel
 from app.models.message import Message
 from app.models.run import Run
@@ -246,30 +247,24 @@ class AgentRunResult(TypedDict):
 
 
 def _model_supports_image_input(model: str | None) -> bool:
-    """Best-effort guard for provider endpoints that reject multimodal messages."""
-    name = str(model or "").lower()
-    if not name:
-        return False
-    if any(marker in name for marker in ("deepseek/", "moonshotai/", "kimi-")):
-        return False
-    if "qwen3" in name and "vl" not in name:
-        return False
-    return any(
-        marker in name
-        for marker in (
-            "gpt-4o",
-            "gpt-4.1",
-            "o4-mini",
-            "gemini",
-            "claude-3",
-            "claude-sonnet-4",
-            "pixtral",
-            "llava",
-            "vision",
-            "-vl",
-            "qwen-vl",
-        )
-    )
+    """Backward-compatible alias for tests and older imports."""
+    return model_supports_image_input(model)
+
+
+def _scope_direct_image_parent_tools(
+    tools: list[Any],
+) -> tuple[list[Any], list[str]]:
+    """Remove routes that cannot see the inbound multimodal payload."""
+    blocked = {"task", "read_file", "execute"}
+    kept: list[Any] = []
+    removed: list[str] = []
+    for tool in tools:
+        name = str(getattr(tool, "name", "") or "")
+        if name in blocked:
+            removed.append(name)
+        else:
+            kept.append(tool)
+    return kept, removed
 
 
 def _build_human_content_for_model(
@@ -1210,6 +1205,50 @@ async def run_agent(
 
     is_op_msg = _is_operator_envelope(user_message)
 
+    # Extract every inbound image through a trusted vision route before the
+    # orchestration graph runs. Deep-agent subagents receive file paths but not
+    # the original multimodal message; delegating receipt OCR to them caused
+    # read_file/Tesseract failures even though the parent model supports vision.
+    _attachment_evidence = None
+    _direct_image_parent_only = bool(media_image_b64 and media_image_mime)
+    if _direct_image_parent_only:
+        _attachment_evidence = await extract_image_evidence(
+            image_b64=media_image_b64 or "",
+            mime_type=media_image_mime or "",
+            filename=current_attachment_name,
+            user_request=user_message,
+            settings=settings,
+            log=log,
+        )
+        _session_meta = dict(session.metadata_ or {})
+        _session_meta["arthur_attachment_evidence"] = _attachment_evidence.to_dict()
+        session.metadata_ = _session_meta
+        db.add(session)
+        run_record.runtime_metadata = {
+            **dict(run_record.runtime_metadata or {}),
+            "attachment_route": _attachment_evidence.route,
+            "attachment_model": _attachment_evidence.model,
+            "attachment_status": _attachment_evidence.status,
+            "attachment_id": _attachment_evidence.attachment_id,
+        }
+        if subagent_list:
+            log.info(
+                "agent_run.direct_image_subagents_removed",
+                subagents=len(subagent_list),
+                reason="inbound_image_must_be_understood_by_parent",
+            )
+            subagent_list = []
+            active_groups = [
+                group for group in active_groups
+                if not str(group).startswith("subagents(")
+            ]
+        tools, _removed_image_tools = _scope_direct_image_parent_tools(tools)
+        if _removed_image_tools:
+            log.info(
+                "agent_run.direct_image_invisible_tools_removed",
+                removed_tools=_removed_image_tools,
+            )
+
     # ------------------------------------------------------------------ #
     # 6. System prompt                                                    #
     # ------------------------------------------------------------------ #
@@ -1231,17 +1270,14 @@ async def run_agent(
     )
     if _arthur_skill_context is not None and _arthur_skill_context.prompt_block:
         system_prompt += "\n\n" + _arthur_skill_context.prompt_block
-    if (
-        media_image_b64
-        and media_image_mime
-        and _model_supports_image_input(getattr(agent_model, "model", None))
-    ):
+    if _direct_image_parent_only:
         system_prompt += (
             "\n\n## Direct Image Understanding\n"
-            "Gambar terbaru terlihat langsung oleh model pada pesan user. Jika user meminta membaca struk, "
-            "nota, atau dokumen gambar, ekstrak data visualnya sendiri pada parent. Jangan delegasikan OCR "
-            "ke task/subagent dan jangan meminta user mengetik ulang data yang terlihat. Setelah ekstraksi, "
-            "jalankan tool tujuan seperti Google Sheets secara langsung."
+            "Gambar terbaru diproses oleh vision route dan hasilnya tersedia pada pesan user; untuk model "
+            "multimodal, gambar aslinya juga terlihat langsung. Jika user meminta membaca struk, nota, atau "
+            "dokumen gambar, gunakan bukti visual itu pada parent. DILARANG mendelegasikan OCR ke task/subagent, "
+            "membaca image sebagai file teks, memasang/menjalankan Tesseract, atau meminta user mengetik ulang "
+            "data yang sudah terlihat. Setelah ekstraksi, jalankan tool tujuan seperti Google Sheets secara langsung."
         )
     if abandoned_before_current is not None:
         system_prompt += (
@@ -1582,15 +1618,24 @@ async def run_agent(
                 _interrupt_on = {name: True for name in _raw_interrupt_on}
             else:
                 _interrupt_on = {}
-            if runtime_policy.is_builder:
+            if runtime_policy.is_builder or _direct_image_parent_only:
                 # Arthur is a control-plane agent. DeepAgents adds a generic
-                # task tool even without explicit subagents, which lets Arthur
-                # invent "updates" instead of calling builder tools.
+                # task tool even without explicit subagents. Direct image turns
+                # also stay on the parent because delegated agents do not receive
+                # the original multimodal message.
                 from langgraph.prebuilt import create_react_agent
 
                 log.info(
-                    "agent_run.builder_react_agent_mode",
-                    reason="builder_must_not_receive_task_or_filesystem_tools",
+                    (
+                        "agent_run.builder_react_agent_mode"
+                        if runtime_policy.is_builder
+                        else "agent_run.direct_image_react_agent_mode"
+                    ),
+                    reason=(
+                        "builder_must_not_receive_task_or_filesystem_tools"
+                        if runtime_policy.is_builder
+                        else "inbound_image_must_remain_on_parent"
+                    ),
                 )
                 graph = create_react_agent(
                     llm,
@@ -1662,33 +1707,24 @@ async def run_agent(
                 checkpointer=_checkpointer,
             )
 
-        _attachment_evidence = None
-        if (
-            runtime_policy.is_builder
-            and arthur_runtime_enabled(tools_config, "image_routing")
-            and media_image_b64
-            and media_image_mime
-        ):
-            _attachment_evidence = await extract_image_evidence(
-                image_b64=media_image_b64,
-                mime_type=media_image_mime,
-                filename=current_attachment_name,
-                user_request=user_message,
-                settings=settings,
-                log=log,
+        if _attachment_evidence is not None:
+            _evidence_text = (
+                (user_message or "").strip()
+                + "\n\n"
+                + _attachment_evidence.to_prompt()
             )
-            human_content = (user_message or "").strip() + "\n\n" + _attachment_evidence.to_prompt()
-            _session_meta = dict(session.metadata_ or {})
-            _session_meta["arthur_attachment_evidence"] = _attachment_evidence.to_dict()
-            session.metadata_ = _session_meta
-            db.add(session)
-            run_record.runtime_metadata = {
-                **dict(run_record.runtime_metadata or {}),
-                "attachment_route": _attachment_evidence.route,
-                "attachment_model": _attachment_evidence.model,
-                "attachment_status": _attachment_evidence.status,
-                "attachment_id": _attachment_evidence.attachment_id,
-            }
+            if _model_supports_image_input(getattr(agent_model, "model", None)):
+                human_content = [
+                    {"type": "text", "text": _evidence_text},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{media_image_mime};base64,{media_image_b64}"
+                        },
+                    },
+                ]
+            else:
+                human_content = _evidence_text
         else:
             human_content = _build_human_content_for_model(
                 user_message=user_message,

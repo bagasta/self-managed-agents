@@ -261,6 +261,26 @@ def test_vision_model_keeps_wa_image_payload():
     assert content[1]["type"] == "image_url"
 
 
+def test_direct_image_scope_blocks_subagent_and_file_ocr_fallbacks():
+    from app.core.engine.agent_runner import _scope_direct_image_parent_tools
+
+    tools = [
+        SimpleNamespace(name="task"),
+        SimpleNamespace(name="read_file"),
+        SimpleNamespace(name="execute"),
+        SimpleNamespace(name="modify_sheet_values"),
+        SimpleNamespace(name="send_whatsapp_image"),
+    ]
+
+    kept, removed = _scope_direct_image_parent_tools(tools)
+
+    assert [tool.name for tool in kept] == [
+        "modify_sheet_values",
+        "send_whatsapp_image",
+    ]
+    assert removed == ["task", "read_file", "execute"]
+
+
 def test_wa_dev_disconnect_lookup_candidates_cover_phone_lid_and_group():
     assert _wa_dev_session_lookup_candidates(
         "+628123456789",

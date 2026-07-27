@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.domain.agent_sop_service import get_latest_agent_operating_manual, summarize_operating_manual
+from app.core.engine.model_capabilities import model_supports_image_input
 from app.core.tools.builder_google import has_google_workspace_tools as _has_google_workspace_tools
 from app.core.tools.builder_identity import (
     agent_belongs_to_owner as _agent_belongs_to_owner,
@@ -227,6 +228,23 @@ def build_builder_management_tools(
             "name": agent.name,
             "description": agent.description,
             "model": agent.model,
+            "runtime_capabilities": {
+                "image_input_supported": model_supports_image_input(agent.model),
+                "incoming_whatsapp_images_supported": agent.channel_type == "whatsapp",
+                "incoming_image_route": (
+                    "parent vision extraction/direct image understanding"
+                    if model_supports_image_input(agent.model)
+                    else "unsupported by configured model"
+                ),
+                "whatsapp_media_enabled": bool(
+                    (agent.tools_config or {}).get("whatsapp_media")
+                    if isinstance(agent.tools_config, dict)
+                    else False
+                ),
+                "whatsapp_media_scope": (
+                    "outbound image/document delivery; not required for receiving inbound photos"
+                ),
+            },
             "temperature": agent.temperature,
             "tools_config": agent.tools_config,
             "google_workspace_enabled": _has_google_workspace_tools(

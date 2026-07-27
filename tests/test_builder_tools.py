@@ -783,6 +783,23 @@ class TestGetPlatformCapabilities:
         for key in required_keys:
             assert key in data["tools_config_options"], f"Key '{key}' harus ada di tools_config_options"
 
+    def test_media_contract_identifies_gpt_41_mini_as_vision_and_inbound_separately(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "get_platform_capabilities")
+        data = json.loads(_run(tool.ainvoke({})))
+
+        default_model = next(
+            item for item in data["recommended_models"]
+            if item["model"] == "openai/gpt-4.1-mini"
+        )
+        assert "vision" in default_model["use_case"]
+        assert "tidak bergantung" in data["media_semantics"]["incoming_images"]
+        assert "pengiriman" in data["media_semantics"]["whatsapp_media"]
+        assert "Jangan delegasikan OCR" in data["media_semantics"]["image_processing"]
+
 
 class TestGetUserSubscription:
     def test_tier3_unlimited_agent_slot_does_not_crash(self):
@@ -3582,6 +3599,33 @@ class TestGetAgentDetail:
         assert data["created_by_type"] == "arthur_builder"
         assert data["created_by_agent_name"] == "Arthur"
         assert data["launch_metadata"]["created_by_arthur"] is True
+        assert data["runtime_capabilities"]["image_input_supported"] is True
+        assert data["runtime_capabilities"]["incoming_whatsapp_images_supported"] is False
+        assert data["runtime_capabilities"]["whatsapp_media_scope"].startswith("outbound")
+
+    def test_gpt_41_mini_whatsapp_agent_reports_inbound_image_ready(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        my_agent = _make_mock_agent(
+            operator_ids=["+62811xxx"],
+            channel_type="whatsapp",
+            tools_config={"whatsapp_media": True},
+        )
+        my_agent.model = "openai/gpt-4.1-mini"
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = my_agent
+        db.execute = AsyncMock(return_value=mock_result)
+
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "get_agent_detail")
+        data = json.loads(_run(tool.ainvoke({"agent_id": str(my_agent.id)})))
+
+        runtime = data["runtime_capabilities"]
+        assert runtime["image_input_supported"] is True
+        assert runtime["incoming_whatsapp_images_supported"] is True
+        assert runtime["whatsapp_media_enabled"] is True
+        assert "not required for receiving" in runtime["whatsapp_media_scope"]
 
     def test_rejects_access_to_others_agent(self):
         from app.core.tools.builder_tools import build_builder_tools
