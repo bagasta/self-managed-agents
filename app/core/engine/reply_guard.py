@@ -40,6 +40,9 @@ _INCOMPLETE_BUILDER_REPLY_MARKERS = (
     "langsung aku hidupkan",
     "langsung saya aktifkan",
     "saya proses",
+    "aku proses",
+    "sekarang aku proses",
+    "sekarang saya proses",
     "masih saya proses",
     "cek dulu konfigurasi",
     "placeholder",
@@ -612,6 +615,14 @@ def ensure_non_empty_reply(
     if text:
         if _is_builder_context(steps, active_groups):
             text = _sanitize_builder_channel_reply(text)
+            if _looks_like_incomplete_builder_reply(text) and not any(
+                name in _BUILDER_TOOLS for name in _step_tool_names(steps)
+            ):
+                return (
+                    "Kebutuhan terakhir sudah saya catat, tetapi belum ada eksekusi builder "
+                    "yang terverifikasi pada turn ini. Progres tersimpan aman; saya akan "
+                    "melanjutkan dari state tersebut tanpa meminta jawaban yang sama."
+                )
         builder_reply = _builder_fallback_reply(
             steps,
             whatsapp_action=builder_whatsapp_action,

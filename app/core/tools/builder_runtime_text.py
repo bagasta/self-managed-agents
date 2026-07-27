@@ -19,6 +19,7 @@ def _append_google_workspace_instruction(instructions: str | None) -> tuple[str,
             "KEMAMPUAN GOOGLE WORKSPACE\n"
             "Jika user meminta membuat atau mengedit Google Docs, Google Sheets, Google Drive, Gmail, Calendar, Slides, atau Forms, "
             "gunakan integrasi Google Workspace yang tersedia. Jangan mengatakan tidak punya akses jika integrasi Google aktif. "
+            "Gunakan hanya produk Google yang memang dikonfigurasi untuk workflow ini; jangan meminta aktivasi Google Tasks, Calendar, Gmail, atau API lain untuk menyelesaikan pekerjaan Google Sheets. "
             "Untuk laporan riset di Google Docs, lakukan riset terlebih dahulu, susun konten lengkap, lalu buat dokumen Google Docs dan kirim link dokumennya. "
             "Jika akun Google Owner belum terhubung atau perlu izin ulang, jelaskan secara natural bahwa Owner perlu menghubungkan Google lagi dan berikan link otentikasi jika tersedia. "
             "Jangan menyebut istilah teknis internal/protokol tool kepada user."

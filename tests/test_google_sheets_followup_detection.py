@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from app.core.engine.agent_runner import (
     _is_google_sheets_authoring_intent,
     _needs_google_sheets_followup,
@@ -6,6 +8,8 @@ from app.core.engine.google_mcp_support import (
     _fallback_unqualified_sheet_range,
     build_google_mcp_usage_notice,
     google_sheets_followup_directive,
+    google_spreadsheet_bootstrap_directive,
+    needs_google_spreadsheet_bootstrap,
 )
 
 
@@ -110,3 +114,37 @@ def test_sheet1_range_can_fallback_to_first_sheet_range() -> None:
     assert _fallback_unqualified_sheet_range("'Sheet 1'!A1:F6") == "A1:F6"
     assert _fallback_unqualified_sheet_range("Lembar1!A1:F6") == "A1:F6"
     assert _fallback_unqualified_sheet_range("Data!A1:F6") is None
+
+
+def test_owner_finance_write_bootstraps_missing_verified_spreadsheet() -> None:
+    needed = needs_google_spreadsheet_bootstrap(
+        tools_config={"google_workspace_resources": {}},
+        user_message="catat ya pengeluaran ini",
+        agent_instructions="Catat keuangan dan laporan ke Google Spreadsheet.",
+        mcp_tools=[
+            SimpleNamespace(name="create_spreadsheet"),
+            SimpleNamespace(name="modify_sheet_values"),
+        ],
+    )
+
+    assert needed is True
+    directive = google_spreadsheet_bootstrap_directive(
+        "catat ya pengeluaran ini"
+    ).lower()
+    assert "jangan meminta id" in directive
+    assert "google tasks" in directive
+    assert "buat spreadsheet" in directive
+
+
+def test_verified_default_spreadsheet_does_not_bootstrap_again() -> None:
+    assert needs_google_spreadsheet_bootstrap(
+        tools_config={
+            "google_workspace_resources": {
+                "default_spreadsheet_id": "sheet-verified",
+                "default_spreadsheet_verified": True,
+            }
+        },
+        user_message="catat transaksi baru",
+        agent_instructions="Catat ke Google Spreadsheet.",
+        mcp_tools=[SimpleNamespace(name="create_spreadsheet")],
+    ) is False

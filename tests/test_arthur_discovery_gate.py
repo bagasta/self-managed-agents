@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.core.tools.builder_create_tools import build_builder_create_tools
 from app.core.tools.builder_discovery import (
+    _is_explicit_confirmation_message,
     bind_owner_escalation_phone,
     discovery_escalation_policy,
     discovery_operator_phone,
@@ -228,6 +229,27 @@ def test_owner_escalation_phone_cannot_be_changed_by_model_typo():
     assert bound["escalation_target"]["whatsapp_number"] == "62895626765423"
 
 
+def test_owner_escalation_phone_resolves_nomer_ini_from_authenticated_session():
+    answers = {
+        "escalation_target": {
+            "conditions": "Saat agent tidak tahu jawabannya",
+            "recipient": "Bagas sebagai admin leader",
+            "whatsapp_number": "62800000000000",
+        }
+    }
+
+    bound = bind_owner_escalation_phone(
+        answers,
+        user_messages=[
+            "Saya pilih opsi nomor 2, eskalasi ke admin.",
+            "nomer ini",
+        ],
+        owner_phone="62895626765423",
+    )
+
+    assert bound["escalation_target"]["whatsapp_number"] == "62895626765423"
+
+
 def test_unverified_optional_sensitive_policy_is_dropped_not_reasked():
     answers, messages = _discovery_with_persisted_evidence(_work_discovery())
     answers["sensitive_data_policy"] = "Kebijakan buatan model yang tidak pernah diberikan user."
@@ -289,6 +311,26 @@ def test_confirmed_file_workflow_is_derived_from_discovery():
 
     assert result["complete"] is True
     assert result["file_capability"] == "receive_only"
+
+
+def test_receive_proof_but_explicitly_no_generated_file_stays_receive_only():
+    result = validate_agent_discovery(
+        _work_discovery(
+            capabilities=(
+                "Chat teks dan menerima file atau gambar bukti transfer; "
+                "dia tidak perlu membuat file untuk dikirim."
+            ),
+            expected_outputs="Cukup catat data pendaftaran di Google Spreadsheet.",
+            vision_requirement=(
+                "Menerima bukti transfer untuk diteruskan ke admin; "
+                "tidak perlu membaca isi gambar."
+            ),
+        )
+    )
+
+    assert result["complete"] is True
+    assert result["file_capability"] == "receive_only"
+    assert result["normalized_answers"]["file_capability"] == "receive_only"
 
 
 def test_julehai_receive_and_generate_wording_is_canonical_both():
@@ -748,6 +790,12 @@ def test_short_sudah_is_valid_only_as_latest_explicit_confirmation():
     )
     assert changed_result["complete"] is False
     assert changed_result["next_group"]["id"] == "confirmation"
+
+
+def test_conversational_yaa_sip_sesuai_is_valid_confirmation():
+    assert _is_explicit_confirmation_message("yaa sip sesuai") is True
+    assert _is_explicit_confirmation_message("Sip, sudah sesuai!") is True
+    assert _is_explicit_confirmation_message("belum sesuai") is False
 
 
 def test_runtime_confirmation_requires_an_immediately_confirmed_summary():

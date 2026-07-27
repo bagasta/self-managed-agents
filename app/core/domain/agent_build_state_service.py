@@ -1,6 +1,7 @@
 """Restart-safe shadow/runtime state for Arthur agent-building workflows."""
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import uuid
@@ -15,6 +16,7 @@ from app.models.agent_build_draft import AgentBuildDraft
 _QUESTION_RE = re.compile(r"(?:^|\n|(?<=[.!]))\s*([^\n?]{4,300}\?)", re.MULTILINE)
 _INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
 _SPACE_RE = re.compile(r"\s+")
+_MANIFEST_WRAPPER_FIELDS = {"_evidence", "user_confirmed"}
 
 _QUESTION_TOPIC_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("pain_point", ("pain point", "masalah", "kendala", "kewalahan", "sering nanya", "hambatan")),
@@ -41,6 +43,39 @@ _QUESTION_TOPIC_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
 def canonical_question(text: str) -> str:
     clean = _SPACE_RE.sub(" ", str(text or "").strip().casefold())
     return re.sub(r"[^a-z0-9\s]", "", clean)
+
+
+def _canonical_manifest_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _canonical_manifest_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            if str(key) not in _MANIFEST_WRAPPER_FIELDS
+            and item not in (None, "", [], {})
+        }
+    if isinstance(value, (list, tuple)):
+        return [_canonical_manifest_value(item) for item in value]
+    if isinstance(value, str):
+        return _SPACE_RE.sub(" ", value).strip()
+    return value
+
+
+def canonical_discovery_manifest(discovery_answers: Any) -> dict[str, Any]:
+    """Return the stable, confirmation-independent agent requirement manifest."""
+    if not isinstance(discovery_answers, dict):
+        return {}
+    canonical = _canonical_manifest_value(discovery_answers)
+    return canonical if isinstance(canonical, dict) else {}
+
+
+def _manifest_hash(manifest: dict[str, Any]) -> str:
+    payload = json.dumps(
+        manifest,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def question_topic(text: str) -> str | None:
@@ -75,6 +110,27 @@ def extract_questions(reply: str, *, max_questions: int = 3) -> list[str]:
             seen.add(canonical)
             found.append(question)
     return found[:max_questions]
+
+
+def _remove_question_with_wrappers(reply: str, question: str) -> str:
+    """Remove one question and its matching Markdown wrapper atomically."""
+    start = reply.find(question)
+    if start < 0:
+        return reply
+    end = start + len(question)
+    wrapped_prefix = next(
+        (marker for marker in ("**", "__") if question.startswith(marker)),
+        "",
+    )
+    if wrapped_prefix and reply[end : end + len(wrapped_prefix)] == wrapped_prefix:
+        end += len(wrapped_prefix)
+    elif start >= 2 and reply[start - 2 : start] in {"**", "__"}:
+        marker = reply[start - 2 : start]
+        if reply[end : end + 2] == marker:
+            start -= 2
+            end += 2
+    cleaned = reply[:start] + reply[end:]
+    return re.sub(r"(?m)^[ \t]+(?=\S)", "", cleaned)
 
 
 def answered_question_topics(evidence: list[dict[str, Any]] | None) -> set[str]:
@@ -156,7 +212,7 @@ def guard_repeated_questions(
             and (topic is None or topic not in answered_topics)
         ):
             continue
-        cleaned = cleaned.replace(question, "", 1)
+        cleaned = _remove_question_with_wrappers(cleaned, question)
         removed.append(question)
 
     if not removed:
@@ -181,7 +237,7 @@ def guard_single_discovery_question(reply: str) -> tuple[str, list[str]]:
     cleaned = str(reply or "")
     removed: list[str] = []
     for question in questions[1:]:
-        cleaned = cleaned.replace(question, "", 1)
+        cleaned = _remove_question_with_wrappers(cleaned, question)
         removed.append(question)
     cleaned = re.sub(r"(?m)^\s*[-*\d.)]*\s*$", "", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
@@ -252,6 +308,14 @@ def persisted_confirmation_applies(
         incoming = {}
     else:
         return False
+    candidate = dict(prior)
+    for field, value in incoming.items():
+        if field in {"_evidence", "user_confirmed"}:
+            continue
+        candidate[field] = value
+    confirmed_hash = str(snapshot.get("confirmed_manifest_hash") or "")
+    if confirmed_hash:
+        return _manifest_hash(canonical_discovery_manifest(candidate)) == confirmed_hash
     for field, value in incoming.items():
         if field in {"_evidence", "user_confirmed"}:
             continue
@@ -286,6 +350,8 @@ async def load_build_discovery_facts(
 def discovery_snapshot_from_steps(
     existing_facts: dict[str, Any] | None,
     steps: list[dict[str, Any]],
+    *,
+    confirmation_message_id: str | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Build the next canonical fact snapshot from the latest plan result."""
     facts = dict(existing_facts or {})
@@ -351,6 +417,16 @@ def discovery_snapshot_from_steps(
         else:
             canonical_evidence.pop("user_confirmed", None)
 
+        agent_manifest = canonical_discovery_manifest(canonical_answers)
+        manifest_hash = _manifest_hash(agent_manifest)
+        prior_manifest_hash = str(facts.get("manifest_hash") or "")
+        prior_manifest_version = int(facts.get("manifest_version") or 0)
+        manifest_version = (
+            prior_manifest_version
+            if prior_manifest_hash == manifest_hash and prior_manifest_version > 0
+            else prior_manifest_version + 1
+        )
+
         facts = {
             **facts,
             "discovery_answers": canonical_answers,
@@ -369,8 +445,19 @@ def discovery_snapshot_from_steps(
             ),
             "file_capability": str(discovery.get("file_capability") or ""),
             "confirmation_verified": complete,
+            "agent_manifest": agent_manifest,
+            "manifest_hash": manifest_hash,
+            "manifest_version": manifest_version,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
+        if complete:
+            facts["confirmed_manifest_hash"] = manifest_hash
+            facts["confirmed_manifest_version"] = manifest_version
+            facts["confirmation_message_id"] = confirmation_message_id
+        else:
+            facts.pop("confirmed_manifest_hash", None)
+            facts.pop("confirmed_manifest_version", None)
+            facts.pop("confirmation_message_id", None)
         break
     return facts, confirmation_status
 
@@ -498,15 +585,26 @@ def infer_workflow_state(
         if "create_wa_dev_trial_link" in tool_names and succeeded("create_wa_dev_trial_link"):
             return "demo_ready"
         return "agent_created"
+    if "create_wa_dev_trial_link" in tool_names and succeeded("create_wa_dev_trial_link"):
+        return "demo_ready"
+    if "send_agent_wa_qr" in tool_names and succeeded("send_agent_wa_qr"):
+        return "demo_ready"
+    if any("auth" in name or "oauth" in name for name in tool_names):
+        return "integration_auth_pending"
+    if "create_spreadsheet" in tool_names:
+        sheet_write_tools = {
+            "modify_sheet_values",
+            "append_table_rows",
+            "create_sheet",
+        }
+        if sheet_write_tools.intersection(tool_names) and "update_agent" in tool_names:
+            return "verifying"
+        return "integration_setup"
     if any(
         name in {"update_agent", "set_agent_memory"} and succeeded(name)
         for name in tool_names
     ):
         return "verifying"
-    if any("auth" in name or "oauth" in name for name in tool_names):
-        return "integration_auth_pending"
-    if "create_wa_dev_trial_link" in tool_names and succeeded("create_wa_dev_trial_link"):
-        return "demo_ready"
     # The latest planning result is the corrected source of truth when a model
     # calls plan_agent more than once in the same run.
     for step in reversed(steps or []):
@@ -522,6 +620,105 @@ def infer_workflow_state(
     if extract_questions(final_reply):
         return "discovery"
     return current_state
+
+
+def _first_result_value(value: Any, keys: set[str]) -> str:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if str(key) in keys and item not in (None, "", [], {}):
+                return str(item)
+        for item in value.values():
+            found = _first_result_value(item, keys)
+            if found:
+                return found
+    if isinstance(value, list):
+        for item in value:
+            found = _first_result_value(item, keys)
+            if found:
+                return found
+    return ""
+
+
+def _integration_artifact_status_from_steps(
+    draft: AgentBuildDraft,
+    steps: list[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    integrations = dict(draft.integration_status_json or {})
+    artifacts = dict(draft.artifact_status_json or {})
+    google = dict(integrations.get("google_workspace") or {})
+    sheet = dict(artifacts.get("google_sheet") or {})
+
+    for step in steps or []:
+        tool_name = str(step.get("tool") or "")
+        result = _step_result(step)
+        result_text = str(step.get("result") or "").casefold()
+        failed = (
+            result.get("success") is False
+            or bool(result.get("error"))
+            or "[error]" in result_text
+        )
+        if tool_name == "generate_google_auth_link" and not failed:
+            google.update(
+                {
+                    "status": "auth_pending",
+                    "auth_link_issued": True,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        elif tool_name == "create_spreadsheet" and not failed:
+            spreadsheet_id = _first_result_value(
+                result,
+                {"spreadsheet_id", "spreadsheetId", "file_id", "id"},
+            )
+            spreadsheet_url = _first_result_value(
+                result,
+                {"spreadsheet_url", "web_view_link", "url"},
+            )
+            if not spreadsheet_id:
+                id_match = re.search(
+                    r"(?:/spreadsheets/d/|\bID:\s*)([A-Za-z0-9_-]{10,})",
+                    str(step.get("result") or ""),
+                    flags=re.IGNORECASE,
+                )
+                spreadsheet_id = id_match.group(1) if id_match else ""
+            if not spreadsheet_url:
+                url_match = re.search(
+                    r"https://docs\.google\.com/spreadsheets/d/[A-Za-z0-9_-]+"
+                    r"(?:/[^\s\"']*)?",
+                    str(step.get("result") or ""),
+                    flags=re.IGNORECASE,
+                )
+                spreadsheet_url = url_match.group(0) if url_match else ""
+            sheet.update(
+                {
+                    "status": "resource_created",
+                    "spreadsheet_id": spreadsheet_id,
+                    "spreadsheet_url": spreadsheet_url,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            google["status"] = "resource_ready"
+        elif tool_name in {
+            "modify_sheet_values",
+            "append_table_rows",
+            "create_sheet",
+        } and not failed:
+            sheet.update(
+                {
+                    "status": "write_verified",
+                    "write_verified": True,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        elif tool_name == "update_agent" and not failed and sheet.get("spreadsheet_id"):
+            sheet["bound_to_agent"] = True
+            google["status"] = "configured"
+
+    if google:
+        integrations["google_workspace"] = google
+    if sheet:
+        artifacts["google_sheet"] = sheet
+    return integrations, artifacts
 
 
 async def record_build_outcome(
@@ -552,6 +749,11 @@ async def record_build_outcome(
     facts, confirmation_status = discovery_snapshot_from_steps(
         draft.facts_json,
         steps,
+        confirmation_message_id=draft.last_inbound_message_id,
+    )
+    integration_status, artifact_status = _integration_artifact_status_from_steps(
+        draft,
+        steps,
     )
 
     expected_version = int(draft.state_version or 1)
@@ -561,6 +763,8 @@ async def record_build_outcome(
         "confirmation_status": confirmation_status,
         "question_history_json": history,
         "skill_versions_json": dict(skill_versions),
+        "integration_status_json": integration_status,
+        "artifact_status_json": artifact_status,
         "state_version": expected_version + 1,
         "updated_at": datetime.now(timezone.utc),
     }
@@ -603,6 +807,16 @@ def build_state_prompt(draft: AgentBuildDraft) -> str:
     ]
     facts_text = json.dumps(discovery_answers, ensure_ascii=False, separators=(",", ":"))
     unresolved_text = ", ".join(unresolved_fields) or "tidak ada"
+    integration_text = json.dumps(
+        draft.integration_status_json or {},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    artifact_text = json.dumps(
+        draft.artifact_status_json or {},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     return (
         "## Arthur Persistent Build State\n"
         f"- build_id: {draft.id}\n"
@@ -613,6 +827,8 @@ def build_state_prompt(draft: AgentBuildDraft) -> str:
         "### Fakta discovery canonical (gunakan kembali; jangan ditanyakan ulang)\n"
         f"{facts_text or '{}'}\n"
         f"### Field yang benar-benar belum selesai\n- {unresolved_text}\n"
+        f"### Status integrasi terverifikasi\n{integration_text}\n"
+        f"### Status resource/artifact terverifikasi\n{artifact_text}\n"
         "### Evidence user terbaru\n"
         f"{evidence_lines}\n"
         "### Pertanyaan canonical yang sudah pernah diajukan\n"

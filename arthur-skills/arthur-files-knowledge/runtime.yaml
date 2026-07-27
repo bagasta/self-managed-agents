@@ -1,4 +1,4 @@
-version: "1.0.0"
+version: "1.1.0"
 triggers: ["file", "document", "pdf", "docx", "pptx", "image", "spreadsheet", "knowledge", "rag"]
 supported_states: ["discovery", "awaiting_confirmation", "setup_pending", "verifying"]
 allowed_tool_groups: ["files", "knowledge", "compose"]

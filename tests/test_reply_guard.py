@@ -876,3 +876,15 @@ def test_disabled_google_workspace_claim_is_rewritten():
 
     assert "belum bisa mengakses Google Workspace" in out
     assert "Owner perlu mengaktifkan dan menghubungkan Google" in out
+
+
+def test_builder_progress_claim_without_execution_is_rejected():
+    out = ensure_non_empty_reply(
+        "Oke, sekarang aku proses rancang agentnya. Langsung ya! 🚀",
+        [],
+        active_groups=["builder"],
+        user_message="a dan b, dia tidak perlu membuat file",
+    )
+
+    assert "sekarang aku proses" not in out.lower()
+    assert "belum ada eksekusi" in out.lower()

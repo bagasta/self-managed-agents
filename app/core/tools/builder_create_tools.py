@@ -30,7 +30,11 @@ from app.core.tools.builder_discovery import (
     owner_escalation_phone_selected,
     validate_agent_discovery,
 )
-from app.core.tools.builder_google import has_google_workspace_tools as _has_google_workspace_tools
+from app.core.tools.builder_google import (
+    configure_google_workspace_services as _configure_google_workspace_services,
+    has_google_workspace_tools as _has_google_workspace_tools,
+    infer_google_workspace_services as _infer_google_workspace_services,
+)
 from app.core.tools.builder_identity import (
     agent_created_by_metadata as _agent_created_by_metadata,
     blocked_agent_policy_reason as _blocked_agent_policy_reason,
@@ -381,6 +385,9 @@ def build_builder_create_tools(
             domain=domain,
             operating_manual=operating_manual_input,
         )
+        confirmed_integrations = str(confirmed_discovery.get("integrations") or "")
+        if _infer_google_workspace_services(confirmed_integrations):
+            tc = _configure_google_workspace_services(tc, confirmed_integrations)
         if _has_google_workspace_tools(tc):
             instructions, _ = _append_google_workspace_instruction(instructions)
         instructions, business_name_sanitized = _sanitize_unverified_business_name(

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -18,8 +19,8 @@ from app.core.domain.skill_service import list_active_system_skills
 from app.models.agent_build_draft import AgentBuildDraft
 from app.models.message import Message
 
-ARTHUR_ENGINE_VERSION = "arthur-progressive-v1"
-ARTHUR_PROMPT_VERSION = "arthur-kernel-v11"
+ARTHUR_ENGINE_VERSION = "arthur-progressive-v2"
+ARTHUR_PROMPT_VERSION = "arthur-kernel-v12"
 
 _BUILDER_TOOL_NAMES = {
     "get_self_config", "get_platform_capabilities", "list_available_wa_devices", "get_presets",
@@ -122,6 +123,13 @@ def scope_arthur_builder_tools(
 ) -> tuple[list[Any], list[str]]:
     allowed = set(_SKILL_TOOL_ALLOWLISTS.get(primary_skill, set()))
     allowed_supporting = set(_SKILL_SUPPORTING_TOOL_ALLOWLISTS.get(primary_skill, set()))
+    # A user may confirm OAuth and select a WhatsApp path in the same message.
+    # Keep the integration/setup workflow primary, but expose only the selected
+    # channel action so setup can finish transactionally in one turn.
+    if primary_skill == "arthur-create-agent" and whatsapp_action == "trial_link":
+        allowed.add("create_wa_dev_trial_link")
+    elif primary_skill == "arthur-create-agent" and whatsapp_action == "dedicated_qr":
+        allowed.update({"list_available_wa_devices", "send_agent_wa_qr"})
     # During discovery an integration mention is a requirement to record, not
     # authorization to mutate Google or an existing agent.
     if primary_skill != "arthur-discovery":
@@ -537,8 +545,8 @@ def _is_explicit_build_confirmation(user_message: str) -> bool:
         return False
     conversational_confirmation = bool(
         re.fullmatch(
-            r"(?:(?:sip|siap|ya|iya|ok|oke|okey|mantap|gas)[\s,!.]+)*"
-            r"(?:sudah sesuai|sudah benar|semuanya sesuai|saya setuju|setuju)"
+            r"(?:(?:sip|siap|ya+|iya|ok|oke|okey|mantap|gas)[\s,!.]+)*"
+            r"(?:(?:sudah|semuanya|saya)\s+)?(?:sesuai|benar|setuju)"
             r"(?:\s+(?:ya|nih|dong))?",
             normalized,
         )
@@ -584,6 +592,8 @@ def resolve_primary_skill(
         "ready_to_create",
         "creating",
         "verifying",
+        "integration_auth_pending",
+        "integration_setup",
     }
     if intent == "edit":
         return "arthur-edit-agent"
@@ -632,7 +642,10 @@ def resolve_policy_mixins(text: str, primary: str) -> list[str]:
         ),
     ):
         mixins.append("arthur-files-knowledge")
-    return mixins[:1]
+    # Capability skills compose. Limiting this list to one made the first
+    # lexical match (usually Google) silently erase an independently required
+    # file/vision policy, or vice versa.
+    return list(dict.fromkeys(mixins))
 
 
 def _recent_evidence_text(draft: AgentBuildDraft | None) -> str:
@@ -645,6 +658,20 @@ def _recent_evidence_text(draft: AgentBuildDraft | None) -> str:
     )
 
 
+def _draft_capability_text(draft: AgentBuildDraft | None) -> str:
+    """Return persisted capability facts used only for deterministic routing."""
+    if draft is None:
+        return ""
+    facts = draft.facts_json if isinstance(draft.facts_json, dict) else {}
+    routing_facts = {
+        "discovery_answers": facts.get("discovery_answers") or {},
+        "required_integrations": draft.required_integrations_json or {},
+        "integration_status": draft.integration_status_json or {},
+        "artifact_status": draft.artifact_status_json or {},
+    }
+    return json.dumps(routing_facts, ensure_ascii=False, sort_keys=True)
+
+
 async def prepare_arthur_skill_context_for_primary(
     *,
     agent_id: uuid.UUID,
@@ -654,8 +681,10 @@ async def prepare_arthur_skill_context_for_primary(
     db: AsyncSession,
 ) -> ArthurSkillContext:
     """Load a verified skill context for a deterministic runtime transition."""
-    requested_names = [primary_skill, *mixin_skills]
-    loaded = await list_active_system_skills(agent_id, db, names=requested_names)
+    requested_names = list(dict.fromkeys([primary_skill, *mixin_skills]))
+    # Level 1 disclosure: load the compact metadata catalog for every active
+    # system skill. Full instruction bodies remain undisclosed until selected.
+    loaded = await list_active_system_skills(agent_id, db)
     by_name = {skill.name: skill for skill in loaded}
     missing = [name for name in requested_names if name not in by_name]
     if missing:
@@ -663,17 +692,32 @@ async def prepare_arthur_skill_context_for_primary(
             "Arthur system skill bundle is incomplete: " + ", ".join(missing)
         )
 
-    parts: list[str] = []
+    metadata_lines: list[str] = []
+    for skill in loaded:
+        if not skill.immutable or skill.trust_level != "system":
+            raise RuntimeError(f"Untrusted Arthur skill rejected: {skill.name}")
+        actual_checksum = hashlib.sha256(skill.content_md.encode("utf-8")).hexdigest()
+        if skill.checksum != actual_checksum:
+            raise RuntimeError(
+                f"Arthur skill checksum mismatch: {skill.name}@{skill.version}"
+            )
+        triggers = ", ".join(str(item) for item in (skill.triggers or [])) or "-"
+        states = ", ".join(str(item) for item in (skill.supported_states or [])) or "-"
+        metadata_lines.append(
+            f"- {skill.name}@{skill.version}: {skill.description} "
+            f"| triggers=[{triggers}] | states=[{states}]"
+        )
+
+    parts: list[str] = [
+        "## Available Skill Metadata (Progressive Disclosure Level 1)\n"
+        + "\n".join(metadata_lines)
+        + "\nOnly the selected skills below are disclosed at instruction-body level."
+    ]
     if draft is not None:
         parts.append(build_state_prompt(draft))
     versions: dict[str, str] = {}
     for name in requested_names:
         skill = by_name[name]
-        actual_checksum = hashlib.sha256(skill.content_md.encode("utf-8")).hexdigest()
-        if not skill.immutable or skill.trust_level != "system":
-            raise RuntimeError(f"Untrusted Arthur skill rejected: {name}")
-        if skill.checksum != actual_checksum:
-            raise RuntimeError(f"Arthur skill checksum mismatch: {name}@{skill.version}")
         label = (
             "Primary Workflow Skill"
             if name == primary_skill
@@ -758,7 +802,7 @@ async def prepare_arthur_skill_context(
         user_message=user_message,
     )
     mixins = resolve_policy_mixins(
-        f"{_recent_evidence_text(draft)}\n{user_message}",
+        f"{_draft_capability_text(draft)}\n{_recent_evidence_text(draft)}\n{user_message}",
         primary,
     )
     context = await prepare_arthur_skill_context_for_primary(

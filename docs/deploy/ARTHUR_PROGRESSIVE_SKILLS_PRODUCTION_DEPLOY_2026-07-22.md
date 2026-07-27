@@ -62,8 +62,8 @@ MISTRAL_API_KEY=...
 ARTHUR_PRIMARY_MODEL=deepseek/deepseek-v4-flash
 ARTHUR_DOCUMENT_MODEL=mistral-ocr-latest
 ARTHUR_IMAGE_MODEL=openai/gpt-4.1-mini
-ARTHUR_ENGINE_VERSION=arthur-progressive-v1
-ARTHUR_PROMPT_VERSION=arthur-kernel-v1
+ARTHUR_ENGINE_VERSION=arthur-progressive-v2
+ARTHUR_PROMPT_VERSION=arthur-kernel-v12
 LLM_REQUEST_TIMEOUT_SECONDS=120
 LLM_MAX_RETRIES=1
 APP_COMMIT_SHA=<full DEPLOY_SHA>
@@ -147,8 +147,8 @@ Expected `/health`:
 - `arthur_runtime.primary_model=deepseek/deepseek-v4-flash`;
 - `document_model=mistral-ocr-latest`;
 - `image_model=openai/gpt-4.1-mini`;
-- `engine_version=arthur-progressive-v1`;
-- `prompt_version=arthur-kernel-v1`.
+- `engine_version=arthur-progressive-v2`;
+- `prompt_version=arthur-kernel-v12`.
 
 Expected `/health/detailed`:
 
@@ -157,7 +157,7 @@ Expected `/health/detailed`:
 - `checks.scheduler=external`;
 - `checks.wa_service=ok`;
 - `arthur_runtime.active_system_skills=8`;
-- `arthur_runtime.skill_bundle_version=arthur-skills-2026-07-22-v1`;
+- `arthur_runtime.skill_bundle_version=arthur-skills-2026-07-27-v14`;
 - database primary model dan version sama dengan source health.
 
 Jika `/health` 200 tetapi `/health/detailed` 503, release belum lulus. Periksa dependency yang disebut endpoint; jangan menutupinya dengan hanya memonitor endpoint sederhana.

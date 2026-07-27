@@ -14,6 +14,8 @@ Treat Google setup as a transaction, not a boolean capability.
 ## Workflow
 
 1. Confirm the exact Google product, operation, data schema, trigger, and write/read permission.
+   Expose only tools for those confirmed products. A Sheets-only workflow must
+   not use or request Google Tasks, Calendar, Gmail, or another unrelated API.
 2. Update or create the agent with only the required Google capability.
 3. Read the agent back and verify the connector configuration.
 4. Check authorization for the current owner identity.
@@ -40,4 +42,5 @@ For survey agents, confirm columns such as timestamp, customer identity, purchas
 - Never substitute sandbox code, local files, or non-Google tools for a required Google action.
 - Preserve the created agent and return `setup_pending` with one concrete next action.
 - If OAuth succeeds but resource creation fails, do not generate another auth link unless the error is actually auth-related.
+- Never infer that an unrelated Google API is required from a missing table, column, or Sheet resource. Repair the Sheet with Sheets/Drive tools only.
 - A successful OAuth callback is not proof that a Sheet exists. Do not hand off a survey agent to demo/production while its Sheet ID is missing or still a placeholder.

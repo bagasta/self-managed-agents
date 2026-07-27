@@ -261,6 +261,48 @@ _BUILD_PROGRESS_TOOLS = frozenset(
 )
 
 
+def _needs_builder_plan_completion(
+    steps: list[dict[str, Any]],
+    *,
+    is_builder: bool,
+    primary_skill: str | None,
+    workflow_state: str | None,
+) -> bool:
+    """Require the deterministic planning gate on every discovery/create turn."""
+    if not is_builder or primary_skill not in {
+        "arthur-discovery",
+        "arthur-create-agent",
+    }:
+        return False
+    if workflow_state not in {
+        "discovery",
+        "awaiting_confirmation",
+        "ready_to_create",
+        "creating",
+    }:
+        return False
+    tool_names = {
+        str(step.get("tool", "")).strip()
+        for step in (steps or [])
+        if str(step.get("tool", "")).strip()
+    }
+    return not (
+        "plan_agent" in tool_names
+        or "create_agent" in tool_names
+        or "update_agent" in tool_names
+    )
+
+
+def _builder_plan_completion_directive() -> str:
+    return (
+        "RUNTIME GATE: turn discovery/create ini belum memanggil plan_agent. "
+        "Panggil plan_agent SEKARANG tepat satu kali menggunakan seluruh fakta canonical "
+        "dan evidence tersimpan. Jangan mengarang field. Jika hasilnya needs_clarification, "
+        "tanyakan hanya next_question dari hasil tool. Jika ready, lanjutkan sesuai state "
+        "contract tanpa meminta konfirmasi ulang."
+    )
+
+
 def _needs_builder_create_completion(
     steps: list[dict[str, Any]],
     *,

@@ -527,6 +527,68 @@ def build_google_workspace_resource_notice(tools_config: dict[str, Any]) -> str:
     )
 
 
+def needs_google_spreadsheet_bootstrap(
+    *,
+    tools_config: dict[str, Any] | None,
+    user_message: str,
+    agent_instructions: str,
+    mcp_tools: list[Any],
+) -> bool:
+    """Detect an authorized owner write when no verified default Sheet exists."""
+    config = tools_config if isinstance(tools_config, dict) else {}
+    resources = config.get("google_workspace_resources")
+    resources = resources if isinstance(resources, dict) else {}
+    if (
+        resources.get("default_spreadsheet_verified") is True
+        and str(resources.get("default_spreadsheet_id") or "").strip()
+    ):
+        return False
+    if not any(
+        str(getattr(tool, "name", "") or "") == "create_spreadsheet"
+        for tool in mcp_tools
+    ):
+        return False
+    current = str(user_message or "").casefold()
+    write_requested = any(
+        marker in current
+        for marker in (
+            "catat",
+            "simpan",
+            "tambahkan",
+            "masukkan",
+            "input",
+            "rekam",
+            "tulis",
+            "buatkan tabel",
+        )
+    )
+    sheet_context = f"{current}\n{str(agent_instructions or '').casefold()}"
+    sheet_required = any(
+        marker in sheet_context
+        for marker in (
+            "google sheet",
+            "google spreadsheet",
+            "spreadsheet",
+            "catat keuangan",
+            "laporan keuangan",
+        )
+    )
+    return write_requested and sheet_required
+
+
+def google_spreadsheet_bootstrap_directive(user_message: str) -> str:
+    return (
+        "\n\n## Verified Spreadsheet Bootstrap\n"
+        "Owner meminta aksi tulis ke Google Sheets, OAuth sudah aktif, dan belum ada "
+        "spreadsheet default yang terverifikasi. Jangan meminta ID, jangan menyuruh Owner "
+        "membuat Sheet manual, dan jangan meminta aktivasi Google Tasks/Calendar/API lain. "
+        "Gunakan hanya Sheets/Drive: buat spreadsheet yang sesuai workflow, isi header yang "
+        "diperlukan, selesaikan aksi tulis user pada turn ini, lalu baca kembali hasilnya. "
+        "Jangan mengklaim selesai sebelum tool tulis berhasil.\n"
+        f"Permintaan asli: {str(user_message or '').strip()[:1000]}"
+    )
+
+
 def customer_survey_google_resource(
     session: Any,
     agent_model: Any,
@@ -2223,6 +2285,78 @@ def _build_google_reauth_tool(
         return auth_url
 
     return [get_google_workspace_auth_link]
+
+
+def filter_google_mcp_tools_by_services(
+    mcp_tools: list[Any],
+    *,
+    tools_config: dict[str, Any] | None,
+    requirement_text: str = "",
+    log: Any,
+) -> list[Any]:
+    """Enforce the agent's persisted Google product allowlist.
+
+    Legacy agents without ``allowed_services`` retain their existing behavior.
+    Newly built agents expose only tools for explicitly confirmed products, so
+    a Sheets workflow cannot hallucinate a dependency on Google Tasks.
+    """
+    config = tools_config if isinstance(tools_config, dict) else {}
+    mcp_cfg = config.get("mcp") if isinstance(config.get("mcp"), dict) else {}
+    servers = (
+        mcp_cfg.get("servers")
+        if isinstance(mcp_cfg.get("servers"), dict)
+        else mcp_cfg
+    )
+    google_cfg = (
+        servers.get("google_workspace")
+        if isinstance(servers, dict)
+        and isinstance(servers.get("google_workspace"), dict)
+        else {}
+    )
+    allowed = {
+        str(service).strip().casefold()
+        for service in google_cfg.get("allowed_services") or []
+        if str(service).strip()
+    }
+    if not allowed and requirement_text:
+        from app.core.tools.builder_google import infer_google_workspace_services
+
+        allowed = set(infer_google_workspace_services(requirement_text))
+    if not allowed:
+        return mcp_tools
+
+    service_markers: dict[str, tuple[str, ...]] = {
+        "sheets": ("sheet", "spreadsheet"),
+        "drive": ("drive",),
+        "docs": ("_doc", "document"),
+        "forms": ("form", "survey"),
+        "slides": ("slide", "presentation"),
+        "calendar": ("event", "calendar"),
+        "gmail": ("gmail", "email", "mail"),
+        "tasks": ("task",),
+        "contacts": ("contact",),
+        "chat": ("chat", "message"),
+    }
+    kept: list[Any] = []
+    removed: list[str] = []
+    for mcp_tool in mcp_tools:
+        name = str(getattr(mcp_tool, "name", "") or "").casefold()
+        matched_services = {
+            service
+            for service, markers in service_markers.items()
+            if any(marker in name for marker in markers)
+        }
+        if matched_services & allowed:
+            kept.append(mcp_tool)
+        else:
+            removed.append(name)
+    if removed:
+        log.info(
+            "agent_run.google_mcp_service_allowlist_applied",
+            allowed_services=sorted(allowed),
+            removed_tools=sorted(removed),
+        )
+    return kept
 
 
 def sanitize_google_forms_tools(mcp_tools: list, log: Any) -> list:

@@ -43,6 +43,51 @@ def enable_google_workspace_tools(tools_config: dict[str, Any] | None) -> dict[s
     return merged
 
 
+def infer_google_workspace_services(requirement_text: str) -> list[str]:
+    """Infer only explicitly named Google products for least-privilege tools."""
+    text = " ".join(str(requirement_text or "").casefold().split())
+    services: list[str] = []
+
+    def add(service: str, patterns: tuple[str, ...]) -> None:
+        if service not in services and any(pattern in text for pattern in patterns):
+            services.append(service)
+
+    add("sheets", ("google sheet", "google spreadsheet", "spreadsheet", "sheets"))
+    if "sheets" in services and "drive" not in services:
+        # Sheets are Drive resources; resource lookup/access may legitimately
+        # need Drive, but this must not unlock Calendar, Tasks, Gmail, etc.
+        services.append("drive")
+    add("calendar", ("google calendar", "google kalender", "calendar", "kalender google"))
+    add("gmail", ("gmail", "google mail"))
+    add("drive", ("google drive",))
+    add("docs", ("google docs", "google document"))
+    add("forms", ("google form", "google forms", "forms google"))
+    add("slides", ("google slides", "google presentation"))
+    add("tasks", ("google tasks", "tasks google"))
+    add("contacts", ("google contacts", "contacts google"))
+    add("chat", ("google chat",))
+    return services
+
+
+def configure_google_workspace_services(
+    tools_config: dict[str, Any] | None,
+    requirement_text: str,
+) -> dict[str, Any]:
+    """Persist an explicit Google service allowlist without broadening access."""
+    merged = enable_google_workspace_tools(tools_config)
+    services = infer_google_workspace_services(requirement_text)
+    if not services:
+        return merged
+    mcp_cfg = dict(merged.get("mcp") or {})
+    servers = dict(mcp_cfg.get("servers") or {})
+    google_cfg = dict(servers.get("google_workspace") or {})
+    google_cfg["allowed_services"] = services
+    servers["google_workspace"] = google_cfg
+    mcp_cfg["servers"] = servers
+    merged["mcp"] = mcp_cfg
+    return merged
+
+
 def has_google_workspace_tools(tools_config: dict[str, Any] | None) -> bool:
     if not isinstance(tools_config, dict):
         return False
@@ -120,4 +165,3 @@ def negates_google_workspace(text: str) -> bool:
         r"\b(google|workspace|gmail|calendar|drive|docs|sheets)\b.{0,32}\b(tanpa|jangan|tidak|ga|gak|nggak|enggak|belum|nanti)\b",
     )
     return any(re.search(pattern, lowered) for pattern in patterns)
-

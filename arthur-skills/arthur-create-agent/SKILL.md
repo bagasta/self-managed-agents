@@ -11,6 +11,7 @@ Create only from confirmed evidence and finish the whole required transaction.
 
 - Runtime build state belongs to the current owner and session.
 - Required discovery facts are confirmed.
+- The current canonical manifest hash/version matches the manifest explicitly confirmed by the user; wrappers such as evidence and confirmation markers are not part of that hash.
 - Agent name, target users, core jobs, behavior boundaries, knowledge source, escalation/fallback, and required integrations are known.
 - Subscription capacity and duplicate-name constraints have been checked.
 

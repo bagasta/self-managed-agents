@@ -228,9 +228,21 @@ def owner_escalation_phone_selected(user_messages: list[str] | None) -> bool:
         "wa saya sendiri",
         "nomor wa gua sendiri",
         "nomer wa gua sendiri",
+        "nomor ini",
+        "nomer ini",
+        "ke nomor ini",
+        "ke nomer ini",
+        "ke nomor saya",
+        "ke nomer saya",
     )
     for message in reversed(user_messages or []):
         text = _normalize_evidence_text(message)
+        if re.search(
+            r"\b(?:bukan|jangan|tidak|ga|gak|nggak)\b(?:\s+\w+){0,4}\s+"
+            r"\b(?:nomor|nomer|wa)\s+(?:ini|saya)\b",
+            text,
+        ):
+            return False
         if any(marker in text for marker in owner_markers):
             return True
         if re.search(r"(?:\+?62|0)\d[\d\s-]{7,16}", str(message or "")):
@@ -284,8 +296,23 @@ def bind_owner_escalation_phone(
 
 def _is_explicit_confirmation_message(value: Any) -> bool:
     normalized = _normalize_evidence_text(value)
+    if re.search(
+        r"\b(?:belum|tidak|nggak|gak|jangan|bukan)\b(?:\s+\w+){0,5}\s+"
+        r"\b(?:sesuai|setuju|benar|buat|buatkan)\b",
+        normalized,
+    ):
+        return False
+    conversational = bool(
+        re.fullmatch(
+            r"(?:(?:ya+|iya|sip|siap|ok|oke|mantap|gas)\s+)*"
+            r"(?:sudah\s+)?(?:sesuai|setuju|benar)"
+            r"(?:\s+(?:ya+|nih|dong))?",
+            normalized,
+        )
+    )
     return (
         normalized in _SHORT_EXPLICIT_CONFIRMATIONS
+        or conversational
         or any(
             _normalize_evidence_text(marker) in normalized
             for marker in _EXPLICIT_CONFIRMATION_MARKERS
@@ -666,6 +693,18 @@ def discovery_file_capability(answers: dict[str, Any] | None) -> str:
             for field in ("capabilities", "expected_outputs")
         )
     )
+    # A negated generation phrase is not positive capability evidence. The old
+    # substring check read "tidak perlu membuat file" as "membuat file".
+    positive_generate_text = re.sub(
+        r"\b(?:tidak|tak|ga|gak|nggak|enggak|tanpa)\b"
+        r"(?:\s+\w+){0,4}\s+"
+        r"\b(?:buat|bikin|membuat|menghasilkan|generate|susun|render|"
+        r"export|ekspor|mengirim)\b"
+        r"(?:\s+\w+){0,4}\s+"
+        r"\b(?:file|dokumen|laporan|pdf|excel|xlsx|csv)\b",
+        " ",
+        generate_text,
+    )
     all_text = f"{receive_text} {generate_text}".strip()
     text_only_markers = (
         "hanya chat teks",
@@ -725,16 +764,18 @@ def discovery_file_capability(answers: dict[str, Any] | None) -> str:
             receive_text,
         )
     )
-    generates_files = any(marker in generate_text for marker in generate_markers) or bool(
+    generates_files = any(
+        marker in positive_generate_text for marker in generate_markers
+    ) or bool(
         re.search(
             r"\b(?:buat|bikin|membuat|hasilkan|menghasilkan|generate|susun|render|"
             r"export|ekspor)\b(?:\s+\w+){0,4}\s+\b(?:file|dokumen|laporan|pdf|excel|csv)\b",
-            generate_text,
+            positive_generate_text,
         )
         or re.search(
             r"\b(?:laporan|report)\b(?:\s+\w+){0,5}\s+"
             r"\b(?:file|format|pdf|excel|xlsx|csv)\b",
-            generate_text,
+            positive_generate_text,
         )
     )
     if receives_files and generates_files:

@@ -28,7 +28,7 @@ from app.core.tools.builder_discovery import (
     validate_agent_discovery,
 )
 from app.core.tools.builder_google import (
-    enable_google_workspace_tools as _enable_google_workspace_tools,
+    configure_google_workspace_services as _configure_google_workspace_services,
     google_workspace_option as _google_workspace_option,
     negates_google_workspace as _negates_google_workspace,
 )
@@ -522,7 +522,10 @@ def build_builder_planning_tools(
         elif normalized_escalation_policy in {"owner", "operator"}:
             tools_config["escalation"] = True
         if wants_google:
-            tools_config = _enable_google_workspace_tools(tools_config)
+            tools_config = _configure_google_workspace_services(
+                tools_config,
+                discovery_integrations or google_context_text,
+            )
 
         # --- Capability discovery: JANGAN asumsi kebutuhan file/data/visualisasi ---
         # Agent percakapan/CS sering belakangan diminta MENERIMA file (PDF/Excel/CSV/gambar)

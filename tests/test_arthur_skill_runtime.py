@@ -2,7 +2,9 @@ import json
 from types import SimpleNamespace
 
 from app.core.domain.agent_build_state_service import (
+    _integration_artifact_status_from_steps,
     answered_question_topics,
+    canonical_discovery_manifest,
     canonical_question,
     discovery_snapshot_from_steps,
     extract_questions,
@@ -23,6 +25,7 @@ from app.core.engine.arthur_skill_runtime import (
     scope_arthur_builder_tools,
     scope_arthur_create_completion_tools,
 )
+from app.core.engine.agent_followups import _needs_builder_plan_completion
 
 
 def test_intent_and_primary_skill_routing_are_not_beechat_specific():
@@ -151,6 +154,10 @@ def test_setuju_and_direct_create_requests_expose_create_tooling_immediately():
 def test_demo_request_cannot_hide_create_tools_during_unfinished_build():
     assert resolve_primary_skill("demo", "discovery") == "arthur-discovery"
     assert resolve_primary_skill("demo", "ready_to_create") == "arthur-create-agent"
+    assert (
+        resolve_primary_skill("demo", "integration_auth_pending")
+        == "arthur-create-agent"
+    )
 
 
 def test_explicit_current_demo_request_still_wins_over_build_history():
@@ -302,12 +309,15 @@ def test_subscription_skill_does_not_expose_dashboard_linking():
     assert removed == ["link_dashboard_account"]
 
 
-def test_google_and_file_mixins_are_limited_to_one():
+def test_google_and_file_capability_skills_compose_together():
     mixins = resolve_policy_mixins(
         "Simpan hasil survey ke Google Sheets dan baca file PDF",
         "arthur-create-agent",
     )
-    assert mixins == ["arthur-google-workspace"]
+    assert mixins == [
+        "arthur-google-workspace",
+        "arthur-files-knowledge",
+    ]
 
 
 def test_tool_scoping_removes_material_tools_during_discovery():
@@ -329,6 +339,30 @@ def test_tool_scoping_removes_material_tools_during_discovery():
         "tavily_search",
     ]
     assert removed == ["create_agent", "delete_agent"]
+
+
+def test_discovery_turn_without_plan_is_forced_through_planning_gate():
+    assert _needs_builder_plan_completion(
+        [],
+        is_builder=True,
+        primary_skill="arthur-discovery",
+        workflow_state="discovery",
+    ) is True
+    assert _needs_builder_plan_completion(
+        [{"tool": "plan_agent", "result": "{}"}],
+        is_builder=True,
+        primary_skill="arthur-discovery",
+        workflow_state="discovery",
+    ) is False
+
+
+def test_post_create_integration_setup_does_not_restart_discovery_plan():
+    assert _needs_builder_plan_completion(
+        [],
+        is_builder=True,
+        primary_skill="arthur-create-agent",
+        workflow_state="integration_auth_pending",
+    ) is False
 
 
 def test_edit_scope_exposes_diagnostics_and_update_but_not_create_or_delete():
@@ -422,6 +456,33 @@ def test_google_mixin_keeps_resource_setup_and_verification_tools():
     assert removed == ["send_agent_wa_qr"]
 
 
+def test_oauth_completion_can_finish_google_setup_then_selected_demo_path():
+    tools = [
+        SimpleNamespace(name="create_spreadsheet"),
+        SimpleNamespace(name="modify_sheet_values"),
+        SimpleNamespace(name="update_agent"),
+        SimpleNamespace(name="verify_agent"),
+        SimpleNamespace(name="create_wa_dev_trial_link"),
+        SimpleNamespace(name="send_agent_wa_qr"),
+    ]
+
+    kept, removed = scope_arthur_builder_tools(
+        tools,
+        primary_skill="arthur-create-agent",
+        mixin_skills=["arthur-google-workspace"],
+        whatsapp_action="trial_link",
+    )
+
+    assert [tool.name for tool in kept] == [
+        "create_spreadsheet",
+        "modify_sheet_values",
+        "update_agent",
+        "verify_agent",
+        "create_wa_dev_trial_link",
+    ]
+    assert removed == ["send_agent_wa_qr"]
+
+
 def test_question_history_uses_canonical_deduplication():
     reply = "Apa tujuan utama agent?\nApa tujuan utama agent?\nSiapa pengguna agent ini?"
     assert extract_questions(reply) == ["Apa tujuan utama agent?", "Siapa pengguna agent ini?"]
@@ -435,6 +496,16 @@ def test_runtime_guard_keeps_only_one_discovery_question():
 
     assert reply == "Baik.\n\n1. Apa masalah utamanya?"
     assert removed == ["2. Siapa penggunanya?", "3. Apa nama agentnya?"]
+
+
+def test_runtime_guard_removes_balanced_bold_question_without_leaking_markdown():
+    reply, removed = guard_single_discovery_question(
+        "Baik.\n\n**Apa masalah utamanya?**\n**Siapa penggunanya?** Misalnya orang tua murid."
+    )
+
+    assert reply == "Baik.\n\n**Apa masalah utamanya?**\nMisalnya orang tua murid."
+    assert removed == ["**Siapa penggunanya?"]
+    assert reply.count("**") == 2
 
 
 def test_runtime_guard_removes_question_already_shown_to_user():
@@ -589,13 +660,21 @@ def test_plan_result_persists_facts_and_confirmation_status():
         }
     ]
 
-    facts, confirmation = discovery_snapshot_from_steps({}, steps)
+    facts, confirmation = discovery_snapshot_from_steps(
+        {},
+        steps,
+        confirmation_message_id="msg-confirm-1",
+    )
 
     assert facts["discovery_answers"]["agent_name"] == "Minsel"
     assert facts["discovery_answers"]["user_confirmed"] is True
     assert facts["discovery_evidence"]["daily_chat_volume"] == "Puluhan"
     assert facts["unresolved_fields"] == []
     assert facts["confirmation_verified"] is True
+    assert facts["agent_manifest"]["agent_name"] == "Minsel"
+    assert facts["manifest_version"] == 1
+    assert facts["confirmed_manifest_hash"] == facts["manifest_hash"]
+    assert facts["confirmation_message_id"] == "msg-confirm-1"
     assert confirmation == "confirmed"
 
 
@@ -617,6 +696,101 @@ def test_verified_confirmation_is_reused_only_when_confirmed_facts_are_unchanged
     assert merge_discovery_answers(unchanged, facts)["user_confirmed"] is True
     assert persisted_confirmation_applies(changed, facts) is False
     assert "user_confirmed" not in merge_discovery_answers(changed, facts)
+
+
+def test_canonical_manifest_ignores_confirmation_and_evidence_wrappers():
+    first = canonical_discovery_manifest(
+        {
+            "agent_name": "Minsel",
+            "capabilities": "Menerima file",
+            "file_capability": "receive_only",
+            "user_confirmed": True,
+            "_evidence": {"agent_name": "namanya Minsel"},
+        }
+    )
+    second = canonical_discovery_manifest(
+        {
+            "file_capability": "receive_only",
+            "capabilities": "Menerima file",
+            "agent_name": "Minsel",
+        }
+    )
+
+    assert first == second
+
+
+def test_manifest_version_only_changes_when_canonical_requirements_change():
+    ready_discovery = {
+        "complete": True,
+        "normalized_answers": {
+            "agent_name": "Minsel",
+            "capabilities": "Menerima file",
+            "file_capability": "receive_only",
+            "user_confirmed": True,
+        },
+        "completed_fields": ["agent_name", "capabilities"],
+        "required_fields": ["agent_name", "capabilities"],
+        "missing_fields": [],
+        "invalid_fields": [],
+        "file_capability": "receive_only",
+    }
+    first, _ = discovery_snapshot_from_steps(
+        {},
+        [{"tool": "plan_agent", "args": {}, "result": {"plan_status": "ready", "discovery": ready_discovery}}],
+        confirmation_message_id="msg-1",
+    )
+    unchanged, _ = discovery_snapshot_from_steps(
+        first,
+        [{"tool": "plan_agent", "args": {}, "result": {"plan_status": "ready", "discovery": ready_discovery}}],
+        confirmation_message_id="msg-2",
+    )
+    changed_discovery = json.loads(json.dumps(ready_discovery))
+    changed_discovery["normalized_answers"]["agent_name"] = "Minsel Baru"
+    changed, _ = discovery_snapshot_from_steps(
+        unchanged,
+        [{"tool": "plan_agent", "args": {}, "result": {"plan_status": "ready", "discovery": changed_discovery}}],
+        confirmation_message_id="msg-3",
+    )
+
+    assert first["manifest_version"] == 1
+    assert unchanged["manifest_version"] == 1
+    assert changed["manifest_version"] == 2
+    assert changed["manifest_hash"] != first["manifest_hash"]
+
+
+def test_google_resource_and_write_status_survive_restart_state():
+    draft = SimpleNamespace(
+        integration_status_json={},
+        artifact_status_json={},
+    )
+    steps = [
+        {
+            "tool": "create_spreadsheet",
+            "result": (
+                "Successfully created spreadsheet 'Keuangan'. "
+                "ID: sheet123456789 | URL: "
+                "https://docs.google.com/spreadsheets/d/sheet123456789/edit"
+            ),
+        },
+        {
+            "tool": "modify_sheet_values",
+            "result": '{"success":true,"updatedRows":2}',
+        },
+        {
+            "tool": "update_agent",
+            "result": '{"success":true}',
+        },
+    ]
+
+    integrations, artifacts = _integration_artifact_status_from_steps(
+        draft,
+        steps,
+    )
+
+    assert integrations["google_workspace"]["status"] == "configured"
+    assert artifacts["google_sheet"]["spreadsheet_id"] == "sheet123456789"
+    assert artifacts["google_sheet"]["write_verified"] is True
+    assert artifacts["google_sheet"]["bound_to_agent"] is True
 
 
 def test_workflow_state_comes_from_verified_steps():

@@ -150,9 +150,12 @@ from app.core.engine.google_mcp_support import (
     google_forms_followup_retry_directive,
     google_forms_request_kind_retry_directive,
     google_sheets_followup_directive,
+    google_spreadsheet_bootstrap_directive,
     find_last_google_workspace_user_request,
+    filter_google_mcp_tools_by_services,
     is_google_auth_recovery_followup,
     is_google_workspace_mcp_configured,
+    needs_google_spreadsheet_bootstrap,
     prepare_google_mcp_runtime,
     sanitize_google_forms_tools,
     google_slides_dimension_retry_directive,
@@ -172,6 +175,7 @@ from app.core.engine.agent_reply_guards import (
 )
 from app.core.engine.agent_followups import (
     _builder_create_completion_directive,
+    _builder_plan_completion_directive,
     _builder_retryable_plan_directive,
     _builder_verify_completion_directive,
     _builder_whatsapp_action_directive,
@@ -184,6 +188,7 @@ from app.core.engine.agent_followups import (
     _has_public_url_in_text,
     _is_website_or_app_request,
     _needs_builder_create_completion,
+    _needs_builder_plan_completion,
     _needs_builder_retryable_plan,
     _needs_builder_whatsapp_action_completion,
     _pending_builder_verify_agent_id,
@@ -1129,6 +1134,27 @@ async def run_agent(
             mixin_skills=_arthur_skill_context.mixin_skills,
             whatsapp_action=_arthur_skill_context.whatsapp_action,
         )
+        _arthur_eligible_tools = sorted(
+            {
+                str(getattr(tool, "name", "") or "")
+                for tool in tools
+                if str(getattr(tool, "name", "") or "")
+            }
+        )
+        _arthur_skill_context.prompt_block += (
+            "\n\n## Runtime Tool Eligibility (Authoritative)\n"
+            f"Eligible on this turn: {', '.join(_arthur_eligible_tools) or '(none)'}.\n"
+            f"Known but state-gated on this turn: {', '.join(_arthur_removed_tools) or '(none)'}.\n"
+            "A state-gated tool is a known platform capability, not a missing tool. "
+            "Never tell the user it is unavailable merely because it is gated. "
+            "Advance through the selected skill's state contract; the runtime will expose it "
+            "when its preconditions are met."
+        )
+        run_record.runtime_metadata = {
+            **dict(run_record.runtime_metadata or {}),
+            "eligible_tools": _arthur_eligible_tools,
+            "state_gated_tools": list(_arthur_removed_tools),
+        }
         log.info(
             "agent_run.arthur_tools_scoped",
             primary_skill=_arthur_skill_context.primary_skill,
@@ -1458,6 +1484,16 @@ async def run_agent(
         if google_mcp.preflight_error and "google_workspace" not in mcp_errors:
             mcp_errors["google_workspace"] = google_mcp.preflight_error
         if mcp_tools:
+            mcp_tools = filter_google_mcp_tools_by_services(
+                mcp_tools,
+                tools_config=tools_config,
+                requirement_text=(
+                    f"{execution_user_message}\n"
+                    f"{getattr(agent_model, 'description', '') or ''}\n"
+                    f"{str(getattr(agent_model, 'instructions', '') or '').split('KEMAMPUAN GOOGLE WORKSPACE', 1)[0]}"
+                ),
+                log=log,
+            )
             mcp_tools = sanitize_google_forms_tools(mcp_tools, log)
             if customer_survey_resource is not None:
                 mcp_tools = build_customer_survey_append_tools(
@@ -1477,6 +1513,24 @@ async def run_agent(
                     user_message=user_message,
                     log=log,
                 )
+            if (
+                customer_survey_resource is None
+                and needs_google_spreadsheet_bootstrap(
+                    tools_config=tools_config,
+                    user_message=execution_user_message,
+                    agent_instructions=str(
+                        getattr(agent_model, "instructions", "") or ""
+                    ),
+                    mcp_tools=mcp_tools,
+                )
+            ):
+                system_prompt = (
+                    (system_prompt if isinstance(system_prompt, str) else "")
+                    + google_spreadsheet_bootstrap_directive(
+                        execution_user_message
+                    )
+                )
+                log.info("agent_run.google_spreadsheet_bootstrap_required")
             mcp_tool_names = [getattr(tool, "name", "") for tool in mcp_tools]
         if mcp_tools:
             if google_mcp_parent_only and subagent_list:
@@ -2558,6 +2612,67 @@ async def run_agent(
                 log.warning(
                     "agent_run.google_mcp_retry_after_blocked_fallback_failed",
                     error=str(_mcp_retry_exc)[:300],
+                )
+
+        if _needs_builder_plan_completion(
+            steps,
+            is_builder=runtime_policy.is_builder,
+            primary_skill=(
+                _arthur_skill_context.primary_skill
+                if _arthur_skill_context is not None
+                else None
+            ),
+            workflow_state=(
+                _arthur_skill_context.draft.workflow_state
+                if _arthur_skill_context is not None
+                and _arthur_skill_context.draft is not None
+                else None
+            ),
+        ):
+            log.warning(
+                "agent_run.builder_plan_completion_required",
+                primary_skill=(
+                    _arthur_skill_context.primary_skill
+                    if _arthur_skill_context is not None
+                    else None
+                ),
+            )
+            _plan_completion_input = _sanitize_input_messages(input_messages)
+            _plan_completion_input.append(
+                HumanMessage(content=_builder_plan_completion_directive())
+            )
+            try:
+                async with asyncio.timeout(_timeout):
+                    _plan_completion_output = await graph.ainvoke(
+                        {"messages": _plan_completion_input},
+                        config=_graph_config,
+                        version="v2",
+                    )
+                    result = await _graph_result_from_output(
+                        graph=graph,
+                        graph_config=_graph_config,
+                        graph_output=_plan_completion_output,
+                        log=log,
+                    )
+                parsed = parse_agent_result(
+                    result=result,
+                    input_messages=input_messages,
+                    session_id=session.id,
+                    run_id=run_id,
+                    step_start=step_counter,
+                    log=log,
+                )
+                final_reply = parsed["final_reply"]
+                steps = parsed["steps"]
+                total_tokens_used = (
+                    _agent_logger.total_tokens_from_callbacks
+                    or parsed["total_tokens_used"]
+                )
+                log.info("agent_run.builder_plan_completion_ok")
+            except Exception as _plan_completion_exc:
+                log.warning(
+                    "agent_run.builder_plan_completion_failed",
+                    error=str(_plan_completion_exc)[:300],
                 )
 
         if _needs_builder_retryable_plan(steps, is_builder=runtime_policy.is_builder):
