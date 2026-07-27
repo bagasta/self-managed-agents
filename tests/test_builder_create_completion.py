@@ -16,9 +16,11 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from app.core.engine.agent_followups import (
+    _builder_verify_completion_directive,
     _builder_whatsapp_action_directive,
     _needs_builder_create_completion,
     _needs_builder_whatsapp_action_completion,
+    _pending_builder_verify_agent_id,
     _requested_builder_whatsapp_action,
 )
 
@@ -49,6 +51,28 @@ def test_continues_when_plan_succeeded_but_create_not_called():
         _plan_step(allowed=True),
     ]
     assert _needs_builder_create_completion(steps, is_builder=True) is True
+
+
+def test_latest_ready_plan_supersedes_older_clarification():
+    steps = [
+        {
+            "tool": "plan_agent",
+            "result": json.dumps({"plan_status": "needs_clarification"}),
+        },
+        _plan_step(allowed=True),
+    ]
+    assert _needs_builder_create_completion(steps, is_builder=True) is True
+
+
+def test_latest_clarification_plan_supersedes_older_ready_plan():
+    steps = [
+        _plan_step(allowed=True),
+        {
+            "tool": "plan_agent",
+            "result": json.dumps({"plan_status": "needs_clarification"}),
+        },
+    ]
+    assert _needs_builder_create_completion(steps, is_builder=True) is False
 
 
 def test_does_not_continue_on_real_entitlement_block():
@@ -86,6 +110,43 @@ def test_completion_directive_never_authorizes_invented_details():
 
     assert "dilarang menambah asumsi" in directive
     assert "pakai asumsi wajar" not in directive
+    assert "compose_agent_operating_manual" in directive
+    assert "create_agent satu kali" in directive
+    assert "jangan mengulang" in directive
+    assert "jangan menurunkan capability" in directive
+
+
+def test_successful_create_without_verify_requires_read_after_create():
+    steps = [
+        _plan_step(allowed=True),
+        {
+            "tool": "create_agent",
+            "result": json.dumps(
+                {"success": True, "agent_id": "agent-julehai", "name": "JULEHAI"}
+            ),
+        },
+    ]
+
+    assert _pending_builder_verify_agent_id(steps, is_builder=True) == "agent-julehai"
+    directive = _builder_verify_completion_directive("agent-julehai").lower()
+    assert "verify_agent" in directive
+    assert "agent_id=agent-julehai" in directive
+    assert "dilarang memanggil create_agent" in directive
+
+
+def test_verify_after_create_closes_verification_recovery():
+    steps = [
+        {
+            "tool": "create_agent",
+            "result": json.dumps({"success": True, "agent_id": "agent-julehai"}),
+        },
+        {
+            "tool": "verify_agent",
+            "result": json.dumps({"status": "launch_ready"}),
+        },
+    ]
+
+    assert _pending_builder_verify_agent_id(steps, is_builder=True) is None
 
 
 def test_retryable_plan_evidence_failure_gets_one_internal_retry():

@@ -261,6 +261,41 @@ def test_builder_create_whatsapp_agent_overrides_id_only_reply():
     )
 
 
+def test_builder_create_launch_blocked_reports_setup_pending_not_verified():
+    steps = [
+        {
+            "tool": "create_agent",
+            "result": json.dumps(
+                {
+                    "success": True,
+                    "name": "JULEHAI",
+                    "agent_id": "agent-123",
+                    "channel_type": "whatsapp",
+                }
+            ),
+        },
+        {
+            "tool": "verify_agent",
+            "result": json.dumps(
+                {
+                    "status": "launch_blocked",
+                    "setup_status_for_owner": {
+                        "summary_for_owner": (
+                            "Agent belum siap launch. Ada setup yang perlu dibereskan dulu."
+                        )
+                    },
+                }
+            ),
+        },
+    ]
+
+    out = ensure_non_empty_reply("JULEHAI sudah jadi dan terverifikasi!", steps)
+
+    assert "sudah dibuat, tetapi belum siap dipakai penuh" in out
+    assert "belum siap launch" in out
+    assert "terverifikasi" not in out
+
+
 def test_builder_create_whatsapp_agent_offers_demo_and_dedicated_number_options():
     steps = [
         {
@@ -599,6 +634,36 @@ def test_builder_create_discovery_blocker_returns_capability_questions():
     assert "belum berhasil" not in out.lower()
 
 
+def test_specific_file_mismatch_beats_later_generic_discovery_error():
+    steps = [
+        {
+            "tool": "create_agent",
+            "result": json.dumps(
+                {
+                    "error_code": "FILE_CAPABILITY_MISMATCH",
+                    "error": "Keputusan kemampuan file berbeda dari discovery.",
+                }
+            ),
+        },
+        {
+            "tool": "create_agent",
+            "result": json.dumps(
+                {
+                    "error_code": "DISCOVERY_INCOMPLETE",
+                    "error": "Discovery kebutuhan agent belum lengkap atau belum dikonfirmasi user.",
+                    "discovery_progress": {"next_questions": []},
+                }
+            ),
+        },
+    ]
+
+    out = ensure_non_empty_reply("Belum berhasil dibuat.", steps)
+
+    assert "konfigurasi internal kemampuan file tidak konsisten" in out
+    assert "tidak perlu menjawab ulang" in out
+    assert "Discovery kebutuhan agent belum lengkap" not in out
+
+
 def test_malformed_plan_result_does_not_override_real_confirmation_question():
     steps = [
         {
@@ -609,6 +674,25 @@ def test_malformed_plan_result_does_not_override_real_confirmation_question():
     reply = "Sebelum saya buat, boleh konfirmasi apakah rangkuman ini sudah sesuai?"
 
     assert ensure_non_empty_reply(reply, steps) == reply
+
+
+def test_latest_ready_plan_prevents_stale_clarification_reply():
+    steps = [
+        {
+            "tool": "plan_agent",
+            "result": json.dumps(
+                {
+                    "plan_status": "needs_clarification",
+                    "capability_clarifications": [
+                        {"topic": "whatsapp_scale", "question": "Berapa nomor WhatsApp?"}
+                    ],
+                }
+            ),
+        },
+        {"tool": "plan_agent", "result": json.dumps({"plan_status": "ready"})},
+    ]
+
+    assert ensure_non_empty_reply("Saya lanjut membuat agentnya.", steps) == "Saya lanjut membuat agentnya."
 
 
 def test_plan_clarification_overrides_non_empty_internal_evidence_progress_note():

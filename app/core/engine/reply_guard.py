@@ -212,21 +212,46 @@ def _sanitize_builder_channel_reply(reply: str) -> str:
     return f"{sanitized}\n\n{channel_note}"
 
 
-def _create_agent_success_reply(data: dict[str, Any]) -> str:
+def _latest_verify_result(
+    steps: list[dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    for step in reversed(steps or []):
+        if step.get("tool") != "verify_agent":
+            continue
+        return _parse_step_result(step.get("result"))
+    return None
+
+
+def _create_agent_success_reply(
+    data: dict[str, Any],
+    *,
+    steps: list[dict[str, Any]] | None = None,
+) -> str:
     name = str(data.get("name") or "agent").strip()
     agent_id = str(data.get("agent_id") or "").strip()
     channel = str(data.get("channel_type") or data.get("channel") or "").strip().lower()
+    verify = _latest_verify_result(steps)
+    launch_status = str((verify or {}).get("status") or "").strip().lower()
+    setup = (verify or {}).get("setup_status_for_owner")
+    setup = setup if isinstance(setup, dict) else {}
+    setup_summary = str(setup.get("summary_for_owner") or "").strip()
+    status_prefix = f"{name} sudah jadi."
+    if launch_status == "launch_blocked":
+        status_prefix = (
+            f"{name} sudah dibuat, tetapi belum siap dipakai penuh."
+            + (f" {setup_summary}" if setup_summary else "")
+        )
 
     if channel == "whatsapp":
         return (
-            f"{name} sudah jadi. Pilih cara menghubungkannya lewat WhatsApp:\n"
+            f"{status_prefix} Pilih cara menghubungkannya lewat WhatsApp:\n"
             "1. Nomor demo Arthur — saya kirim link wa.me dan kode untuk langsung mencoba.\n"
             "2. Nomor khusus milikmu — saya kirim scan sekali dari WhatsApp untuk menghubungkannya.\n"
             "Balas `nomor demo` atau `nomor khusus`."
         )
     if agent_id:
-        return f"{name} sudah jadi. ID agent: {agent_id}."
-    return f"{name} sudah jadi."
+        return f"{status_prefix} ID agent: {agent_id}."
+    return status_prefix
 
 
 def _render_builder_questions(questions: Any) -> str | None:
@@ -261,7 +286,10 @@ def _builder_clarification_reply(data: dict[str, Any]) -> str | None:
     if rendered:
         return rendered
 
+    code = str(data.get("error_code") or "").strip().upper()
     error = str(data.get("error") or "").strip().lower()
+    if code in {"FILE_CAPABILITY_CONTRADICTION", "FILE_CAPABILITY_MISMATCH"}:
+        return None
     if "kemampuan file belum diputuskan" in error or "keputusan kemampuan file" in error:
         return (
             "Sebelum saya buat, pilih kebutuhan file agent ini: hanya chat teks, menerima "
@@ -270,14 +298,56 @@ def _builder_clarification_reply(data: dict[str, Any]) -> str | None:
     return None
 
 
+_CREATE_ERROR_PRIORITY = {
+    "FILE_CAPABILITY_CONTRADICTION": 100,
+    "FILE_CAPABILITY_MISMATCH": 95,
+    "LAUNCH_CAPABILITY_UNAVAILABLE": 90,
+    "OPERATING_MANUAL_REQUIRED": 80,
+    "CONFIG_UNSAFE": 70,
+    "DISCOVERY_INCOMPLETE": 40,
+}
+
+
+def _best_create_failure(
+    steps: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    candidates: list[tuple[int, int, dict[str, Any]]] = []
+    for index, step in enumerate(steps or []):
+        if step.get("tool") != "create_agent":
+            continue
+        data = _parse_step_result(step.get("result"))
+        if not data or data.get("success") is True or not data.get("error"):
+            continue
+        code = str(data.get("error_code") or "").strip().upper()
+        error = str(data.get("error") or "").casefold()
+        priority = _CREATE_ERROR_PRIORITY.get(code, 50)
+        if not code:
+            if "keputusan kemampuan file" in error:
+                priority = _CREATE_ERROR_PRIORITY["FILE_CAPABILITY_MISMATCH"]
+            elif "operating manual" in error:
+                priority = _CREATE_ERROR_PRIORITY["OPERATING_MANUAL_REQUIRED"]
+            elif "discovery kebutuhan agent" in error:
+                priority = _CREATE_ERROR_PRIORITY["DISCOVERY_INCOMPLETE"]
+        candidates.append((priority, index, data))
+    if not candidates:
+        return None
+    # Prefer the most actionable root cause; for equal priorities the latest
+    # result is authoritative.
+    return max(candidates, key=lambda item: (item[0], item[1]))[2]
+
+
 def _plan_agent_clarification_reply(steps: list[dict[str, Any]]) -> str | None:
+    """Return a question only when the latest plan still needs clarification."""
     for step in reversed(steps or []):
         if step.get("tool") != "plan_agent":
             continue
         data = _parse_step_result(step.get("result"))
-        if not data or str(data.get("plan_status") or "").strip().lower() != "needs_clarification":
-            continue
-        return _builder_clarification_reply(data)
+        if not data:
+            return None
+        if str(data.get("plan_status") or "").strip().lower() == "needs_clarification":
+            return _builder_clarification_reply(data)
+        # A newer ready/blocked/temporary result supersedes every older plan.
+        return None
     return None
 
 
@@ -375,16 +445,33 @@ def _builder_fallback_reply(
         if step.get("tool") != "create_agent":
             continue
         data = _parse_step_result(step.get("result"))
-        if not data:
-            continue
-        if data.get("success") is True:
-            return _create_agent_success_reply(data)
-        clarification_reply = _builder_clarification_reply(data)
+        if data and data.get("success") is True:
+            return _create_agent_success_reply(data, steps=steps)
+
+    create_failure = _best_create_failure(steps)
+    if create_failure:
+        clarification_reply = _builder_clarification_reply(create_failure)
         if clarification_reply:
             return clarification_reply
-        error = str(data.get("error") or "").strip()
+        error = str(create_failure.get("error") or "").strip()
+        code = str(create_failure.get("error_code") or "").strip().upper()
+        if code == "OPERATING_MANUAL_REQUIRED":
+            return (
+                "Konfigurasi agent belum dibuat karena SOP kerjanya belum tersusun. "
+                "Saya pertahankan seluruh kebutuhan yang sudah dikonfirmasi dan akan menyusun SOP itu sebelum mencoba lagi."
+            )
+        if code in {"FILE_CAPABILITY_CONTRADICTION", "FILE_CAPABILITY_MISMATCH"}:
+            return (
+                "Agent belum dibuat karena konfigurasi internal kemampuan file tidak konsisten. "
+                "Kebutuhan file yang sudah kamu konfirmasi tetap saya pertahankan; kamu tidak perlu menjawab ulang."
+            )
+        if code == "LAUNCH_CAPABILITY_UNAVAILABLE":
+            return (
+                "Agent belum dibuat karena kemampuan membuat file sedang belum tersedia di runtime. "
+                "Kebutuhan yang sudah kamu konfirmasi tetap tersimpan dan tidak saya turunkan diam-diam."
+            )
         if error:
-            return f"Belum berhasil dibuat: {error}"
+            return f"Agent belum dibuat karena: {error}"
 
     for step in reversed(steps or []):
         if step.get("tool") != "update_agent":

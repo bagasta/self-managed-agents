@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 from app.core.domain.agent_build_state_service import (
@@ -6,6 +7,7 @@ from app.core.domain.agent_build_state_service import (
     discovery_snapshot_from_steps,
     extract_questions,
     guard_repeated_questions,
+    guard_single_discovery_question,
     infer_workflow_state,
     merge_discovery_answers,
     persisted_confirmation_applies,
@@ -92,6 +94,11 @@ def test_setuju_and_direct_create_requests_expose_create_tooling_immediately():
             resolve_primary_skill("discover", "discovery", user_message=message)
             == "arthur-create-agent"
         )
+
+
+def test_demo_request_cannot_hide_create_tools_during_unfinished_build():
+    assert resolve_primary_skill("demo", "discovery") == "arthur-discovery"
+    assert resolve_primary_skill("demo", "ready_to_create") == "arthur-create-agent"
 
 
 def test_explicit_current_demo_request_still_wins_over_build_history():
@@ -268,7 +275,7 @@ def test_tool_scoping_removes_material_tools_during_discovery():
     assert removed == ["create_agent", "delete_agent", "list_my_agents"]
 
 
-def test_google_mixin_adds_auth_tool_without_exposing_create():
+def test_google_mixin_does_not_expose_mutation_tools_during_discovery():
     tools = [
         SimpleNamespace(name="plan_agent"),
         SimpleNamespace(name="generate_google_auth_link"),
@@ -279,7 +286,7 @@ def test_google_mixin_adds_auth_tool_without_exposing_create():
         primary_skill="arthur-discovery",
         mixin_skills=["arthur-google-workspace"],
     )
-    assert [tool.name for tool in kept] == ["plan_agent", "generate_google_auth_link"]
+    assert [tool.name for tool in kept] == ["plan_agent"]
 
 
 def test_google_mixin_keeps_resource_setup_and_verification_tools():
@@ -311,6 +318,15 @@ def test_question_history_uses_canonical_deduplication():
     reply = "Apa tujuan utama agent?\nApa tujuan utama agent?\nSiapa pengguna agent ini?"
     assert extract_questions(reply) == ["Apa tujuan utama agent?", "Siapa pengguna agent ini?"]
     assert canonical_question("Apa tujuan utama Agent?!") == "apa tujuan utama agent"
+
+
+def test_runtime_guard_keeps_only_one_discovery_question():
+    reply, removed = guard_single_discovery_question(
+        "Baik.\n\n1. Apa masalah utamanya?\n2. Siapa penggunanya?\n3. Apa nama agentnya?"
+    )
+
+    assert reply == "Baik.\n\n1. Apa masalah utamanya?"
+    assert removed == ["2. Siapa penggunanya?", "3. Apa nama agentnya?"]
 
 
 def test_runtime_guard_removes_question_already_shown_to_user():
@@ -353,6 +369,25 @@ def test_guard_checks_questions_beyond_old_three_question_limit():
     )
     assert removed == ["Apa masalah utama yang ingin diselesaikan?"]
     assert "Satu?" in reply
+
+
+def test_question_guard_never_mutilates_inline_dialogue_example():
+    reply = (
+        "Berikan 2-3 contoh percakapan ideal. Contoh format: "
+        "`Customer: Apakah stok masih ada?` lalu "
+        "`Agent: Saya cek dari sumber yang tersedia; kalau belum pasti saya eskalasikan ke admin.`"
+    )
+
+    assert extract_questions(reply, max_questions=12) == []
+    cleaned, removed = guard_repeated_questions(
+        reply,
+        [],
+        [{"status": "answered", "value": "Contohnya kamu sesuaikan aja."}],
+    )
+
+    assert cleaned == reply
+    assert removed == []
+    assert "` lalu `Agent:" in cleaned
 
 
 def test_guard_does_not_reask_explicit_escalation_evidence():
@@ -493,7 +528,45 @@ def test_workflow_state_comes_from_verified_steps():
         "Silakan konfirmasi.",
     ) == "ready_to_create"
     assert infer_workflow_state(
+        "discovery",
+        [
+            {"tool": "plan_agent", "result": '{"plan_status":"needs_clarification"}'},
+            {"tool": "plan_agent", "result": '{"plan_status":"ready"}'},
+        ],
+        "",
+    ) == "ready_to_create"
+    assert infer_workflow_state(
         "agent_created",
         [{"tool": "create_wa_dev_trial_link", "result": '{"success":true}'}],
         "",
     ) == "demo_ready"
+
+
+def test_discovery_snapshot_persists_canonical_file_capability():
+    facts, confirmation = discovery_snapshot_from_steps(
+        {},
+        [
+            {
+                "tool": "plan_agent",
+                "args": {"discovery_answers": {"capabilities": "terima dan buat file"}},
+                "result": json.dumps(
+                    {
+                        "plan_status": "ready",
+                        "discovery": {
+                            "complete": True,
+                            "normalized_answers": {
+                                "capabilities": "terima dan buat file",
+                                "file_capability": "both",
+                            },
+                            "completed_fields": ["capabilities"],
+                            "file_capability": "both",
+                        },
+                    }
+                ),
+            }
+        ],
+    )
+
+    assert confirmation == "confirmed"
+    assert facts["file_capability"] == "both"
+    assert facts["discovery_answers"]["file_capability"] == "both"

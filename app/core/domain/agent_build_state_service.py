@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.agent_build_draft import AgentBuildDraft
 
 _QUESTION_RE = re.compile(r"(?:^|\n|(?<=[.!]))\s*([^\n?]{4,300}\?)", re.MULTILINE)
+_INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
 _SPACE_RE = re.compile(r"\s+")
 
 _QUESTION_TOPIC_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -51,10 +52,24 @@ def question_topic(text: str) -> str | None:
 
 
 def extract_questions(reply: str, *, max_questions: int = 3) -> list[str]:
+    source = str(reply or "")
+    # A discovery question may contain a sample dialogue such as
+    # ``Customer: Apakah stok ada?``. The question mark inside inline code is
+    # example content, not the end of the surrounding user-facing question.
+    # Mask only those question marks while preserving string offsets so guards
+    # never delete half a sentence and leak a suffix such as "` lalu Agent: ...".
+    masked_chars = list(source)
+    for code_match in _INLINE_CODE_RE.finditer(source):
+        for index in range(code_match.start(), code_match.end()):
+            if masked_chars[index] == "?":
+                masked_chars[index] = " "
+    masked = "".join(masked_chars)
+
     found: list[str] = []
     seen: set[str] = set()
-    for match in _QUESTION_RE.finditer(reply or ""):
-        question = _SPACE_RE.sub(" ", match.group(1)).strip()
+    for match in _QUESTION_RE.finditer(masked):
+        start, end = match.span(1)
+        question = _SPACE_RE.sub(" ", source[start:end]).strip()
         canonical = canonical_question(question)
         if canonical and canonical not in seen:
             seen.add(canonical)
@@ -154,6 +169,22 @@ def guard_repeated_questions(
             "Saya sudah mencatat jawaban sebelumnya dan tidak akan menanyakannya lagi. "
             "Saya lanjutkan dari informasi yang sudah tersimpan."
         )
+    return cleaned, removed
+
+
+def guard_single_discovery_question(reply: str) -> tuple[str, list[str]]:
+    """Keep at most one user-facing question in a discovery WhatsApp reply."""
+    questions = extract_questions(reply, max_questions=12)
+    if len(questions) <= 1:
+        return reply, []
+
+    cleaned = str(reply or "")
+    removed: list[str] = []
+    for question in questions[1:]:
+        cleaned = cleaned.replace(question, "", 1)
+        removed.append(question)
+    cleaned = re.sub(r"(?m)^\s*[-*\d.)]*\s*$", "", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     return cleaned, removed
 
 
@@ -294,6 +325,13 @@ def discovery_snapshot_from_steps(
         for field in completed:
             if field in normalized:
                 canonical_answers[field] = normalized[field]
+        canonical_file_capability = str(
+            discovery.get("file_capability")
+            or normalized.get("file_capability")
+            or ""
+        ).strip().lower()
+        if canonical_file_capability:
+            canonical_answers["file_capability"] = canonical_file_capability
 
         complete = bool(discovery.get("complete"))
         if complete:
@@ -469,7 +507,9 @@ def infer_workflow_state(
         return "integration_auth_pending"
     if "create_wa_dev_trial_link" in tool_names and succeeded("create_wa_dev_trial_link"):
         return "demo_ready"
-    for step in steps:
+    # The latest planning result is the corrected source of truth when a model
+    # calls plan_agent more than once in the same run.
+    for step in reversed(steps or []):
         if str(step.get("tool") or "") != "plan_agent":
             continue
         result = _step_result(step)
@@ -478,6 +518,7 @@ def infer_workflow_state(
             return "ready_to_create"
         if status in {"needs_clarification", "clarification"}:
             return "discovery"
+        break
     if extract_questions(final_reply):
         return "discovery"
     return current_state

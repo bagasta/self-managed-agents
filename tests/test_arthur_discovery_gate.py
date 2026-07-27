@@ -96,21 +96,16 @@ def _personal_discovery(**overrides):
     return answers
 
 
-def test_discovery_starts_with_all_group_one_questions():
+def test_discovery_starts_with_one_group_one_question():
     result = validate_agent_discovery({})
 
     assert result["complete"] is False
     assert result["next_group"]["id"] == "context_goal"
-    assert [item["topic"] for item in result["next_questions"]] == [
-        "problem",
-        "usage_context",
-        "agent_name",
-        "audience",
-    ]
+    assert [item["topic"] for item in result["next_questions"]] == ["problem"]
     assert result["operational_hours_requested"] is False
 
 
-def test_group_two_questions_include_examples_for_hard_to_answer_items():
+def test_group_two_exposes_only_the_next_highest_priority_question():
     result = validate_agent_discovery(
         {
             "problem": "Customer lama menunggu jawaban order.",
@@ -121,10 +116,8 @@ def test_group_two_questions_include_examples_for_hard_to_answer_items():
     )
 
     assert result["next_group"]["id"] == "agent_behavior"
-    questions = {item["topic"]: item["question"] for item in result["next_questions"]}
-    assert "Contoh:" in questions["tone_style"]
-    assert "2-3 contoh" in questions["ideal_conversations"]
-    assert "red line" in questions["avoided_conversations"]
+    assert len(result["next_questions"]) == 1
+    assert result["next_questions"][0]["topic"] == "main_tasks"
 
 
 def test_minsel_confirmed_discovery_accepts_real_user_answers_without_reasking():
@@ -298,6 +291,34 @@ def test_confirmed_file_workflow_is_derived_from_discovery():
     assert result["file_capability"] == "receive_only"
 
 
+def test_julehai_receive_and_generate_wording_is_canonical_both():
+    result = validate_agent_discovery(
+        _personal_discovery(
+            capabilities="chat teks, terima file/gambar, generate file/laporan, web search",
+            expected_outputs=(
+                "Jadwal harian, reminder, resep masakan, catatan keuangan, "
+                "laporan keuangan (file Excel/PDF), data tersimpan di Google Sheets"
+            ),
+            vision_requirement="Menerima foto struk untuk dicatat",
+        )
+    )
+
+    assert result["complete"] is True
+    assert result["file_capability"] == "both"
+    assert result["normalized_answers"]["file_capability"] == "both"
+
+
+def test_personal_agent_daily_volume_is_optional():
+    answers = _personal_discovery()
+    answers.pop("daily_chat_volume")
+
+    result = validate_agent_discovery(answers)
+
+    assert result["complete"] is True
+    assert "daily_chat_volume" not in result["missing_fields"]
+    assert result["next_questions"] == []
+
+
 def test_natural_volume_and_image_phrasing_are_valid():
     result = validate_agent_discovery(
         _work_discovery(
@@ -326,19 +347,15 @@ def test_problem_must_be_a_pain_point_not_only_an_agent_feature():
     assert result["next_group"]["id"] == "context_goal"
 
 
-def test_whatsapp_scale_question_requires_number_and_user_distribution_pattern():
+def test_optional_whatsapp_scale_never_blocks_personal_agent_creation():
     answers = _personal_discovery()
     answers["whatsapp_scale"] = "Satu nomor WhatsApp."
 
     result = validate_agent_discovery(answers)
 
-    assert "whatsapp_scale" in result["invalid_fields"]
-    assert result["next_group"]["id"] == "scale_integration"
-    question = next(
-        item["question"] for item in result["next_questions"] if item["topic"] == "whatsapp_scale"
-    )
-    assert "satu nomor melayani banyak user" in question
-    assert "setiap user memiliki nomor sendiri" in question
+    assert "whatsapp_scale" not in result["invalid_fields"]
+    assert result["complete"] is True
+    assert result["next_questions"] == []
 
 
 def test_work_discovery_requires_detailed_escalation_and_go_live_approver():
@@ -563,6 +580,83 @@ def test_arthur_work_agent_requires_manual_from_confirmed_discovery():
 
     assert "Operating manual terkonfirmasi wajib diisi" in payload["error"]
     assert payload["validation_errors"]
+
+
+def test_create_agent_rejects_generated_file_workflow_downgraded_to_receive_only():
+    create_agent = build_builder_create_tools(
+        None,
+        owner_phone="628111111111",
+        self_agent_id=None,
+        append_platform_staff_identity_instruction=lambda text: (text, False),
+        append_google_workspace_instruction=lambda text: (text, False),
+        platform_staff_identity_block=lambda **_kwargs: "",
+    )["create_agent"]
+
+    payload = json.loads(
+        _run(
+            create_agent.ainvoke(
+                {
+                    "name": "JULEHAI",
+                    "instructions": (
+                        "Terima foto struk dari Bun dan buat laporan keuangan final dalam "
+                        "format Excel atau PDF untuk dikirim lewat WhatsApp."
+                    ),
+                    "file_capability": "receive_only",
+                    "tools_config": {
+                        "whatsapp_media": True,
+                        "sandbox": True,
+                        "subagents": {"enabled": True},
+                    },
+                }
+            )
+        )
+    )
+
+    assert payload["error_code"] == "FILE_CAPABILITY_CONTRADICTION"
+    assert payload["retryable"] is False
+    assert "menurunkan kemampuan file" in payload["hint"]
+
+
+def test_confirmed_file_capability_overrides_stale_create_argument_without_reasking_user():
+    create_agent = build_builder_create_tools(
+        None,
+        owner_phone="628111111111",
+        self_agent_id=str(uuid.uuid4()),
+        append_platform_staff_identity_instruction=lambda text: (text, False),
+        append_google_workspace_instruction=lambda text: (text, False),
+        platform_staff_identity_block=lambda **_kwargs: "",
+    )["create_agent"]
+    discovery = _personal_discovery(
+        agent_name="JULEHAI",
+        capabilities="chat teks, terima file/gambar, generate file/laporan, web search",
+        expected_outputs="laporan keuangan dalam file Excel/PDF",
+        vision_requirement="Menerima foto struk untuk dicatat",
+    )
+
+    with patch(
+        "app.core.tools.builder_create_tools.sandbox_subagents_enabled",
+        return_value=False,
+    ):
+        payload = json.loads(
+            _run(
+                create_agent.ainvoke(
+                    {
+                        "name": "JULEHAI",
+                        "instructions": (
+                            "Terima foto struk dari Bun dan buat laporan keuangan final dalam "
+                            "format Excel atau PDF untuk dikirim lewat WhatsApp."
+                        ),
+                        "file_capability": "receive_only",
+                        "discovery_answers": discovery,
+                    }
+                )
+            )
+        )
+
+    assert payload["error_code"] == "LAUNCH_CAPABILITY_UNAVAILABLE"
+    assert payload["file_capability"] == "both"
+    assert payload["file_capability_canonicalized"] is True
+    assert "mengubah kebutuhan" in payload["hint"]
 
 
 def _discovery_with_persisted_evidence(answers):

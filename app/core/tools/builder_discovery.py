@@ -182,6 +182,12 @@ _OPTIONAL_DISCOVERY_FIELDS = {
     # and caused otherwise complete CS builds to loop.
     "whatsapp_scale",
 }
+_PERSONAL_OPTIONAL_DISCOVERY_FIELDS = {
+    # Volume is useful for capacity planning, but it does not change the
+    # permission or minimum configuration of a personal assistant.
+    "daily_chat_volume",
+}
+_FILE_CAPABILITY_VALUES = {"text_only", "receive_only", "generate", "both"}
 _EVIDENCE_STOPWORDS = {
     "agent",
     "agen",
@@ -625,6 +631,13 @@ def _confirmed(value: Any) -> bool:
     }
 
 
+def _field_is_optional(field: str, usage_context: str) -> bool:
+    return field in _OPTIONAL_DISCOVERY_FIELDS or (
+        usage_context == "personal"
+        and field in _PERSONAL_OPTIONAL_DISCOVERY_FIELDS
+    )
+
+
 def discovery_file_capability(answers: dict[str, Any] | None) -> str:
     """Derive only an explicit, user-confirmed file decision from discovery.
 
@@ -633,17 +646,27 @@ def discovery_file_capability(answers: dict[str, Any] | None) -> str:
     global text-only/no-file statement.
     """
     data = answers if isinstance(answers, dict) else {}
-    text = _normalize_evidence_text(
+    explicit = str(data.get("file_capability") or "").strip().lower()
+    if explicit == "enabled":
+        explicit = "both"
+    if explicit == "not_needed":
+        explicit = "text_only"
+    if explicit not in _FILE_CAPABILITY_VALUES:
+        explicit = ""
+
+    receive_text = _normalize_evidence_text(
         " ".join(
             str(data.get(field) or "")
-            for field in (
-                "capabilities",
-                "knowledge_sources",
-                "expected_outputs",
-                "vision_requirement",
-            )
+            for field in ("capabilities", "knowledge_sources", "vision_requirement")
         )
     )
+    generate_text = _normalize_evidence_text(
+        " ".join(
+            str(data.get(field) or "")
+            for field in ("capabilities", "expected_outputs")
+        )
+    )
+    all_text = f"{receive_text} {generate_text}".strip()
     text_only_markers = (
         "hanya chat teks",
         "hanya teks",
@@ -670,40 +693,67 @@ def discovery_file_capability(answers: dict[str, Any] | None) -> str:
         "mengolah dokumen",
         "mengolah data excel",
         "katalog pdf",
-        "file pdf",
-        "file excel",
-        "file csv",
         "bukti transfer",
         "foto produk",
     )
     generate_markers = (
+        "buat file",
+        "bikin file",
+        "buat laporan",
+        "bikin laporan",
         "membuat file",
         "membuat dokumen",
         "membuat laporan",
         "membuat pdf",
+        "generate file",
+        "generate dokumen",
+        "generate laporan",
+        "generate pdf",
+        "generate excel",
+        "export file",
+        "ekspor file",
         "mengirim file",
         "mengirim dokumen",
         "visualisasi data",
     )
     # Concrete positive workflows win over a local negative such as "tidak
     # perlu gambar" when another answer explicitly requires a PDF/Excel file.
-    receives_files = any(marker in text for marker in receive_markers) or bool(
+    receives_files = any(marker in receive_text for marker in receive_markers) or bool(
         re.search(
             r"\b(?:terima|menerima|baca|membaca|lihat|melihat|analisis|menganalisis|"
             r"olah|mengolah)\b(?:\s+\w+){0,3}\s+\b(?:file|dokumen|gambar|foto)\b",
-            text,
+            receive_text,
         )
     )
-    generates_files = any(marker in text for marker in generate_markers)
+    generates_files = any(marker in generate_text for marker in generate_markers) or bool(
+        re.search(
+            r"\b(?:buat|bikin|membuat|hasilkan|menghasilkan|generate|susun|render|"
+            r"export|ekspor)\b(?:\s+\w+){0,4}\s+\b(?:file|dokumen|laporan|pdf|excel|csv)\b",
+            generate_text,
+        )
+        or re.search(
+            r"\b(?:laporan|report)\b(?:\s+\w+){0,5}\s+"
+            r"\b(?:file|format|pdf|excel|xlsx|csv)\b",
+            generate_text,
+        )
+    )
     if receives_files and generates_files:
-        return "both"
-    if generates_files:
-        return "generate"
-    if receives_files:
-        return "receive_only"
-    if any(marker in text for marker in text_only_markers):
-        return "text_only"
-    return ""
+        derived = "both"
+    elif generates_files:
+        derived = "generate"
+    elif receives_files:
+        derived = "receive_only"
+    elif any(marker in all_text for marker in text_only_markers):
+        derived = "text_only"
+    else:
+        derived = ""
+
+    # The typed value is canonical only when it agrees with the evidence-backed
+    # capability prose. This lets subsequent tool calls reuse the normalized
+    # enum without allowing a model to override contradictory user evidence.
+    if explicit and (not derived or explicit == derived):
+        return explicit
+    return derived
 
 
 def _has_two_to_three_conversation_examples(value: Any) -> bool:
@@ -859,7 +909,14 @@ def validate_agent_discovery(
     # platform safety baseline instead of blocking or silently trusting it.
     if require_evidence:
         persisted_user_messages = list(user_messages or [])
-        for field in _OPTIONAL_DISCOVERY_FIELDS:
+        for field in {
+            *_OPTIONAL_DISCOVERY_FIELDS,
+            *(
+                _PERSONAL_OPTIONAL_DISCOVERY_FIELDS
+                if usage_context == "personal"
+                else set()
+            ),
+        }:
             if not _is_answered(answers.get(field)):
                 continue
             verified_quotes = _verified_evidence_quotes(
@@ -882,7 +939,7 @@ def validate_agent_discovery(
         for field in group["fields"]:
             if usage_context == "personal" and field in {"escalation_target", "go_live_approver"}:
                 continue
-            if field in _OPTIONAL_DISCOVERY_FIELDS:
+            if _field_is_optional(field, usage_context):
                 continue
             required_fields.append(field)
 
@@ -957,6 +1014,8 @@ def validate_agent_discovery(
         invalid_fields.append("problem")
         validation_errors.append("problem harus menjelaskan pain point/masalah, bukan hanya fitur atau jenis agent.")
     file_capability = discovery_file_capability(answers)
+    if file_capability:
+        answers["file_capability"] = file_capability
     if _is_answered(answers.get("capabilities")) and not file_capability:
         invalid_fields.append("capabilities")
         validation_errors.append(
@@ -970,15 +1029,19 @@ def validate_agent_discovery(
     ):
         invalid_fields.append("ideal_conversations")
         validation_errors.append("ideal_conversations harus berisi 2-3 contoh percakapan.")
-    if _is_answered(answers.get("whatsapp_scale")) and not _whatsapp_scale_is_detailed(
-        answers.get("whatsapp_scale")
+    if (
+        "whatsapp_scale" not in _OPTIONAL_DISCOVERY_FIELDS
+        and _is_answered(answers.get("whatsapp_scale"))
+        and not _whatsapp_scale_is_detailed(answers.get("whatsapp_scale"))
     ):
         invalid_fields.append("whatsapp_scale")
         validation_errors.append(
             "whatsapp_scale harus menjelaskan jumlah nomor dan pola satu nomor-banyak user atau tiap user-punya nomor."
         )
-    if _is_answered(answers.get("daily_chat_volume")) and not _daily_chat_volume_is_estimated(
-        answers.get("daily_chat_volume")
+    if (
+        not _field_is_optional("daily_chat_volume", usage_context)
+        and _is_answered(answers.get("daily_chat_volume"))
+        and not _daily_chat_volume_is_estimated(answers.get("daily_chat_volume"))
     ):
         invalid_fields.append("daily_chat_volume")
         validation_errors.append(
@@ -1054,7 +1117,7 @@ def validate_agent_discovery(
             for field in group["fields"]
             if not (usage_context == "personal" and field in {"escalation_target", "go_live_approver"})
             and not (
-                field in _OPTIONAL_DISCOVERY_FIELDS
+                _field_is_optional(field, usage_context)
                 and not _is_answered(answers.get(field))
             )
         ]
@@ -1073,9 +1136,11 @@ def validate_agent_discovery(
         not require_confirmation
         or (_confirmed(answers.get("user_confirmed")) and confirmation_evidence_valid)
     )
+    # WhatsApp discovery is progressive: expose exactly one unresolved field.
+    # The next plan call advances from the persisted answers.
     next_questions = [
         {"topic": field, "question": _QUESTIONS[field]}
-        for field in group_missing
+        for field in group_missing[:1]
     ]
     return {
         "complete": complete,

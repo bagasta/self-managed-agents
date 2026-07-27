@@ -180,8 +180,10 @@ def build_builder_create_tools(
             except DiscoveryEvidenceUnavailable as exc:
                 return json.dumps(
                     {
+                        "error_code": "DISCOVERY_STATE_UNAVAILABLE",
                         "error": str(exc),
                         "retryable": True,
+                        "max_internal_retries": 1,
                         "hint": (
                             "Ulangi create_agent secara internal satu kali dengan payload yang sama. "
                             "Jangan meminta user mengulang discovery."
@@ -193,8 +195,10 @@ def build_builder_create_tools(
             except Exception:
                 return json.dumps(
                     {
+                        "error_code": "DISCOVERY_STATE_UNAVAILABLE",
                         "error": "State discovery tersimpan belum dapat dibaca dengan aman.",
                         "retryable": True,
+                        "max_internal_retries": 1,
                         "hint": (
                             "Ulangi create_agent secara internal satu kali. Jangan meminta "
                             "user mengulang discovery."
@@ -231,12 +235,15 @@ def build_builder_create_tools(
             if not discovery.get("complete"):
                 return json.dumps(
                     {
+                        "error_code": "DISCOVERY_INCOMPLETE",
                         "error": "Discovery kebutuhan agent belum lengkap atau belum dikonfirmasi user.",
+                        "retryable": False,
                         "discovery_progress": discovery,
                         "validation_errors": discovery.get("validation_errors") or [],
                         "hint": (
-                            "Jangan create. Tanyakan seluruh pertanyaan pada next_group dalam satu pesan, "
-                            "panggil plan_agent lagi dengan jawaban lengkap, lalu minta konfirmasi akhir. "
+                            "Jangan create. Tanyakan hanya pertanyaan pertama pada next_questions, "
+                            "simpan jawabannya, lalu panggil plan_agent lagi dengan seluruh jawaban terkumpul. "
+                            "Minta konfirmasi akhir hanya setelah discovery lengkap. "
                             "Jangan menanyakan jam aktif/jam operasional agent."
                         ),
                     },
@@ -286,6 +293,7 @@ def build_builder_create_tools(
         )
         if operating_manual_input in (None, "", {}) and confirmed_context_requires_manual:
             return json.dumps({
+                "error_code": "OPERATING_MANUAL_REQUIRED",
                 "error": "Operating manual terkonfirmasi wajib diisi; runtime tidak boleh menyusunnya dari asumsi.",
                 "validation_errors": [
                     "Konteks bisnis/blueprint/domain sudah diberikan, tetapi operating_manual belum ada."
@@ -351,25 +359,18 @@ def build_builder_create_tools(
             blueprint,
         )
         requested_file_decision = str(file_capability or "").strip().lower()
-        if (
+        if requested_file_decision == "enabled":
+            requested_file_decision = "both"
+        elif requested_file_decision == "not_needed":
+            requested_file_decision = "text_only"
+        file_capability_canonicalized = bool(
             confirmed_file_capability
             and requested_file_decision
             and requested_file_decision != confirmed_file_capability
-        ):
-            return json.dumps(
-                {
-                    "error": "Keputusan kemampuan file berbeda dari discovery yang dikonfirmasi user.",
-                    "validation_errors": [
-                        f"Discovery={confirmed_file_capability}, create_agent={requested_file_decision}."
-                    ],
-                    "hint": (
-                        "Jangan menimpa jawaban user. Gunakan keputusan file dari discovery, "
-                        "atau tanyakan ulang jika kebutuhan memang berubah."
-                    ),
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
+        )
+        # Confirmed discovery is the server-side source of truth. If the model
+        # sends a stale or downgraded enum, normalize it here instead of asking
+        # the user to reconfirm a decision they already made.
         file_decision = confirmed_file_capability or requested_file_decision
         tc, generated_operating_manual = ensure_operating_manual_in_tools_config(
             tc,
@@ -396,6 +397,44 @@ def build_builder_create_tools(
         platform_identity_added = False
 
         critical_errors: list[str] = []
+        if generated_file_workflow and file_decision in {"receive_only", "text_only"}:
+            return json.dumps(
+                {
+                    "error_code": "FILE_CAPABILITY_CONTRADICTION",
+                    "error": "Workflow pembuatan file bertentangan dengan keputusan kemampuan file.",
+                    "validation_errors": [
+                        (
+                            f"file_capability={file_decision}, tetapi instructions/config meminta "
+                            "agent membuat laporan atau file final."
+                        )
+                    ],
+                    "hint": (
+                        "Jangan menurunkan kemampuan file untuk melewati validator. "
+                        "Gunakan keputusan canonical dari discovery; jika user meminta output file, "
+                        "nilainya harus generate atau both."
+                    ),
+                    "retryable": False,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        if file_delivery_workflow and file_decision == "text_only":
+            return json.dumps(
+                {
+                    "error_code": "FILE_CAPABILITY_CONTRADICTION",
+                    "error": "Workflow pengiriman file bertentangan dengan keputusan text_only.",
+                    "validation_errors": [
+                        "file_capability=text_only, tetapi instructions/config meminta pengiriman file."
+                    ],
+                    "hint": (
+                        "Gunakan keputusan canonical dari discovery. Jangan aktifkan atau kirim file "
+                        "jika user memilih text_only."
+                    ),
+                    "retryable": False,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
         # Fix #3: gerbang keras keputusan kemampuan file. Heuristik file_delivery/generated
         # bisa meleset untuk agent yang baru diminta file saat RUNTIME (mis. user kirim CSV
         # lalu minta visualisasi). Kalau sinyal file ambigu — tidak terdeteksi, tidak dinegasikan
@@ -429,14 +468,19 @@ def build_builder_create_tools(
             )
             if launch_blocked_workflow:
                 return json.dumps({
+                    "error_code": "LAUNCH_CAPABILITY_UNAVAILABLE",
                     "error": "Fitur sandbox/subagent sementara dinonaktifkan untuk launch.",
                     "validation_errors": [
                         "Agent yang membutuhkan coding, deploy, analisis/generate file, atau subagent belum boleh dibuat sementara."
                     ],
                     "hint": (
-                        "Tanyakan user apakah mau dibuat versi agent chat/CS/escalation dulu tanpa analisis/generate file, "
-                        "atau tunda fitur sandbox/subagent sampai stabilisasi selesai."
+                        "Pertahankan scope dan file_capability yang sudah dikonfirmasi. Jangan membuat versi parsial "
+                        "atau menurunkan kemampuan diam-diam; lanjutkan hanya setelah capability tersedia atau user "
+                        "secara eksplisit mengubah kebutuhan."
                     ),
+                    "retryable": False,
+                    "file_capability": file_decision,
+                    "file_capability_canonicalized": file_capability_canonicalized,
                     "launch_safety": {
                         "sandbox_subagents_enabled": False,
                         "disabled_features": disabled_launch_features,
@@ -456,6 +500,7 @@ def build_builder_create_tools(
                 critical_errors.append("Instructions wajib menyebut escalate_to_human untuk bukti transfer/admin approval.")
         if critical_errors:
             return json.dumps({
+                "error_code": "CONFIG_UNSAFE",
                 "error": "Konfigurasi agent belum aman untuk dibuat.",
                 "validation_errors": critical_errors,
                 "hint": "Panggil compose_agent_blueprint dan compose_agent_instructions ulang, lalu validate_agent_config sebelum create_agent.",
@@ -504,6 +549,7 @@ def build_builder_create_tools(
                 critical_errors.append("Workflow pembuatan file final wajib sandbox=true dan subagents.enabled=true.")
         if critical_errors:
             return json.dumps({
+                "error_code": "CONFIG_UNSAFE",
                 "error": "Konfigurasi agent belum aman untuk dibuat.",
                 "validation_errors": critical_errors,
                 "hint": "Panggil compose_agent_blueprint dan compose_agent_instructions ulang, lalu validate_agent_config sebelum create_agent.",
@@ -755,6 +801,8 @@ def build_builder_create_tools(
                 "name": agent.name,
                 "model": agent.model,
                 "channel_type": agent.channel_type,
+                "file_capability": file_decision,
+                "file_capability_canonicalized": file_capability_canonicalized,
                 "google_workspace_enabled": _has_google_workspace_tools(tc),
                 "needs_google_auth": _has_google_workspace_tools(tc),
                 **created_by_metadata,

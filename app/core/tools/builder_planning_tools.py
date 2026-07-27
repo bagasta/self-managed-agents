@@ -147,18 +147,15 @@ def _missing_agent_brief_clarifications(
     if any(marker in text for marker in ("google calendar", "gmail", "google docs", "google sheets", "google drive")):
         return []
     question = (
-        "Agar agentnya tidak generik, jawab singkat 3 hal ini: agent ini untuk bisnis/kebutuhan apa, "
-        "siapa yang akan chat dengan agent, dan alur kerja utamanya harus bagaimana?"
+        "Masalah utama apa yang ingin dibantu oleh agent ini?"
     )
     if detected_preset in {"cs_whatsapp_basic", "ecommerce_cs", "approval_gated_service_agent"}:
         question = (
-            "Agar agent CS-nya tepat, jawab singkat 3 hal ini: bisnisnya jual/layani apa, "
-            "data apa yang harus ditanyakan ke customer, dan kapan harus diteruskan ke admin/Owner?"
+            "Bisnis ini menjual produk atau memberikan layanan apa?"
         )
     elif detected_preset == "personal_assistant":
         question = (
-            "Agar assistant-nya tidak generik, jawab singkat 3 hal ini: tugas utama yang harus dibantu, "
-            "data/preferensi apa yang perlu diingat, dan output akhirnya berupa apa?"
+            "Tugas utama apa yang paling ingin kamu serahkan ke assistant ini?"
         )
     return [
         {
@@ -182,8 +179,8 @@ def _discovery_clarification_payload(discovery: dict[str, Any]) -> dict[str, Any
         "discovery_progress": discovery,
         "capability_clarifications": discovery.get("next_questions") or [],
         "next_action": (
-            "JANGAN create_agent atau compose artifact dulu. Tanyakan seluruh pertanyaan pada "
-            f"{next_group.get('label') or 'grup discovery berikutnya'} dalam satu pesan yang ringkas, "
+            "JANGAN create_agent atau compose artifact dulu. Tanyakan hanya satu pertanyaan pertama pada "
+            f"{next_group.get('label') or 'bagian discovery berikutnya'}, "
             "simpan jawaban faktualnya, lalu panggil plan_agent lagi dengan discovery_answers lengkap "
             "(jawaban grup sebelumnya tetap disertakan). Isi `_evidence` untuk setiap field dengan kutipan "
             "pesan user yang tersimpan. Jika user meminta Arthur menyesuaikan suatu detail, detail itu baru "

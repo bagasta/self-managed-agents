@@ -31,6 +31,7 @@ from app.core.engine.context_service import (
 )
 from app.core.domain.agent_build_state_service import (
     guard_repeated_questions,
+    guard_single_discovery_question,
     record_build_outcome,
 )
 from app.core.domain.agent_sop_service import get_latest_agent_operating_manual
@@ -166,6 +167,7 @@ from app.core.engine.agent_reply_guards import (
 from app.core.engine.agent_followups import (
     _builder_create_completion_directive,
     _builder_retryable_plan_directive,
+    _builder_verify_completion_directive,
     _builder_whatsapp_action_directive,
     _BUILD_PROGRESS_TOOLS,
     _deploy_followup_message,
@@ -178,6 +180,7 @@ from app.core.engine.agent_followups import (
     _needs_builder_create_completion,
     _needs_builder_retryable_plan,
     _needs_builder_whatsapp_action_completion,
+    _pending_builder_verify_agent_id,
     _needs_deploy_followup,
     _needs_whatsapp_file_delivery_followup,
     _requested_builder_whatsapp_action,
@@ -2588,6 +2591,69 @@ async def run_agent(
                 )
                 break
 
+        # Creation and readiness are separate states. If the model stopped
+        # immediately after a successful create, perform one read-after-create
+        # verification pass without authorizing another create call.
+        _pending_verify_agent_id = _pending_builder_verify_agent_id(
+            steps,
+            is_builder=runtime_policy.is_builder,
+        )
+        if _pending_verify_agent_id:
+            log.warning(
+                "agent_run.builder_verify_completion_continue",
+                agent_id=_pending_verify_agent_id,
+                steps=len(steps),
+            )
+            _verify_completion_input = _sanitize_input_messages(input_messages)
+            _verify_completion_input.append(
+                HumanMessage(
+                    content=_builder_verify_completion_directive(
+                        _pending_verify_agent_id
+                    )
+                )
+            )
+            try:
+                async with asyncio.timeout(_timeout):
+                    _verify_completion_output = await graph.ainvoke(
+                        {"messages": _verify_completion_input},
+                        config=_graph_config,
+                        version="v2",
+                    )
+                    result = await _graph_result_from_output(
+                        graph=graph,
+                        graph_config=_graph_config,
+                        graph_output=_verify_completion_output,
+                        log=log,
+                    )
+                parsed = parse_agent_result(
+                    result=result,
+                    input_messages=input_messages,
+                    session_id=session.id,
+                    run_id=run_id,
+                    step_start=step_counter,
+                    log=log,
+                )
+                final_reply = parsed["final_reply"]
+                steps = parsed["steps"]
+                total_tokens_used = (
+                    _agent_logger.total_tokens_from_callbacks
+                    or parsed["total_tokens_used"]
+                )
+                log.info(
+                    "agent_run.builder_verify_completion_continue_ok",
+                    agent_id=_pending_verify_agent_id,
+                    verified=any(
+                        str(step.get("tool") or "") == "verify_agent"
+                        for step in steps
+                    ),
+                )
+            except Exception as _verify_completion_exc:
+                log.warning(
+                    "agent_run.builder_verify_completion_continue_failed",
+                    agent_id=_pending_verify_agent_id,
+                    error=str(_verify_completion_exc)[:300],
+                )
+
         _builder_whatsapp_action = _requested_builder_whatsapp_action(
             execution_user_message,
             input_messages,
@@ -3080,6 +3146,15 @@ async def run_agent(
         )
 
     if _arthur_skill_context is not None and _arthur_skill_context.draft is not None:
+        if _arthur_skill_context.primary_skill == "arthur-discovery":
+            final_reply, _removed_extra_questions = guard_single_discovery_question(
+                final_reply
+            )
+            if _removed_extra_questions:
+                log.warning(
+                    "agent_run.arthur_extra_discovery_questions_removed",
+                    count=len(_removed_extra_questions),
+                )
         final_reply, _removed_repeated_questions = guard_repeated_questions(
             final_reply,
             _arthur_skill_context.draft.question_history_json,

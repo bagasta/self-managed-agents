@@ -19,7 +19,7 @@ from app.models.agent_build_draft import AgentBuildDraft
 from app.models.message import Message
 
 ARTHUR_ENGINE_VERSION = "arthur-progressive-v1"
-ARTHUR_PROMPT_VERSION = "arthur-kernel-v9"
+ARTHUR_PROMPT_VERSION = "arthur-kernel-v10"
 
 _BUILDER_TOOL_NAMES = {
     "get_self_config", "get_platform_capabilities", "list_available_wa_devices", "get_presets",
@@ -122,9 +122,12 @@ def scope_arthur_builder_tools(
 ) -> tuple[list[Any], list[str]]:
     allowed = set(_SKILL_TOOL_ALLOWLISTS.get(primary_skill, set()))
     allowed_supporting = set(_SKILL_SUPPORTING_TOOL_ALLOWLISTS.get(primary_skill, set()))
-    for mixin in mixin_skills:
-        allowed.update(_MIXIN_TOOL_ALLOWLISTS.get(mixin, set()))
-        allowed_supporting.update(_MIXIN_SUPPORTING_TOOL_ALLOWLISTS.get(mixin, set()))
+    # During discovery an integration mention is a requirement to record, not
+    # authorization to mutate Google or an existing agent.
+    if primary_skill != "arthur-discovery":
+        for mixin in mixin_skills:
+            allowed.update(_MIXIN_TOOL_ALLOWLISTS.get(mixin, set()))
+            allowed_supporting.update(_MIXIN_SUPPORTING_TOOL_ALLOWLISTS.get(mixin, set()))
     kept: list[Any] = []
     removed: list[str] = []
     for tool in tools:
@@ -494,9 +497,22 @@ def resolve_primary_skill(
     *,
     user_message: str = "",
 ) -> str:
+    unfinished_build_states = {
+        "discovery",
+        "awaiting_confirmation",
+        "ready_to_create",
+        "creating",
+        "verifying",
+    }
     if intent == "edit":
         return "arthur-edit-agent"
     if intent == "demo":
+        # Demo and QR tools require an existing verified agent. An unfinished
+        # active build takes precedence so channel words cannot hide create tools.
+        if workflow_state in unfinished_build_states:
+            if workflow_state == "discovery":
+                return "arthur-discovery"
+            return "arthur-create-agent"
         return "arthur-whatsapp-demo-channel"
     if intent == "subscription":
         return "arthur-subscription-payment"

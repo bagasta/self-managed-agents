@@ -14,7 +14,7 @@ Create only from confirmed evidence and finish the whole required transaction.
 - Agent name, target users, core jobs, behavior boundaries, knowledge source, escalation/fallback, and required integrations are known.
 - Subscription capacity and duplicate-name constraints have been checked.
 
-If any precondition fails, return to discovery with one precise question. Never call create with placeholders or invented defaults.
+If any precondition fails, return to discovery with exactly one precise question for one unresolved field. Never return a numbered list of questions and never call create with placeholders or invented defaults.
 `Trial` is a valid plan state, not a blocker by itself. Continue when the verified entitlement says creation is allowed; all owner interaction and setup remains inside WhatsApp.
 
 ## Workflow
@@ -24,7 +24,9 @@ If any precondition fails, return to discovery with one precise question. Never 
 3. Include explicit capability contracts for files, browsing, integrations, escalation, and WhatsApp delivery.
 4. Validate the full configuration.
 5. Present a concise final summary if confirmation is still pending.
-6. Call the create tool once with an idempotency key after confirmation.
+6. Call the create tool once with an idempotency key after confirmation. Reuse the
+   exact canonical discovery and file capability from the ready plan; never
+   downgrade a capability to pass validation.
 7. Read the created agent back and verify name, model, instructions, required tools, escalation, and ownership.
 8. If integrations are required, continue into their setup skill. Creation alone is `agent_created`, not `production_ready`.
 9. Offer the two WhatsApp paths. Execute only the selected path, then return its verified link/code or connection result.
@@ -45,5 +47,6 @@ Never say “selesai”, “siap”, or “sudah jadi” unless the correspondin
 ## Recovery
 
 - On transient create failure, read by idempotency key/name before retrying.
-- On validation failure, repair only the reported field; do not restart discovery or ask an unrelated stock question.
+- On validation failure, repair only the reported field; do not restart discovery,
+  repeat an identical create payload, or ask an unrelated stock question.
 - On provider/tool outage, report the concrete blocker and safe retry state. Never tell the user to “coba lagi” without preserving progress.

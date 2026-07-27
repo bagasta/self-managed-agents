@@ -659,7 +659,8 @@ def test_builder_prompt_blocks_repeated_continue_questions():
     assert "inisiatif hanya boleh mengikuti kebutuhan yang sudah dikonfirmasi" in prompt
     assert "discovery enam grup secara lengkap" in prompt
     assert "Mulai dari Grup 1" in prompt
-    assert "Discovery dilakukan satu grup per pesan" in prompt
+    assert "Discovery dilakukan satu pertanyaan per pesan WhatsApp" in prompt
+    assert "DILARANG mengirim daftar pertanyaan" in prompt
     assert "minta pembayaran, bukti apa yang diminta" in prompt
     assert "Rangkuman dan konfirmasi kebutuhan adalah gerbang wajib" in prompt
     assert "Jangan mengunci preset hanya dari satu kata kunci" in prompt

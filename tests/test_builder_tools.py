@@ -363,7 +363,7 @@ class TestBuilderToolsReturnsList:
         assert payload["plan_status"] == "needs_clarification"
         assert any(item["topic"] == "problem" for item in payload["capability_clarifications"])
         assert payload["discovery_progress"]["next_group"]["id"] == "context_goal"
-        assert "seluruh pertanyaan" in payload["next_action"]
+        assert "hanya satu pertanyaan pertama" in payload["next_action"]
 
     def test_plan_agent_defaults_unspecified_channel_to_whatsapp(self):
         from app.core.tools.builder_tools import build_builder_tools
