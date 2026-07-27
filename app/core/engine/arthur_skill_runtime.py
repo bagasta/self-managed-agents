@@ -156,6 +156,32 @@ def scope_arthur_builder_tools(
     return kept, sorted(set(removed))
 
 
+def scope_arthur_create_completion_tools(
+    tools: list[Any],
+    *,
+    mixin_skills: list[str],
+) -> tuple[list[Any], list[str]]:
+    """Expose material build tools after a ready plan, without re-planning.
+
+    This scope is only used by the deterministic ready-plan continuation in the
+    runner.  Removing ``plan_agent`` prevents a recovery pass from cycling back
+    into discovery instead of completing the already-authorized build.
+    """
+    kept, removed = scope_arthur_builder_tools(
+        tools,
+        primary_skill="arthur-create-agent",
+        mixin_skills=mixin_skills,
+    )
+    completion_tools: list[Any] = []
+    for tool in kept:
+        name = str(getattr(tool, "name", "") or "")
+        if name == "plan_agent":
+            removed.append(name)
+            continue
+        completion_tools.append(tool)
+    return completion_tools, sorted(set(removed))
+
+
 def arthur_runtime_config(tools_config: dict[str, Any] | None) -> dict[str, Any]:
     raw = (tools_config or {}).get("arthur_runtime")
     return raw if isinstance(raw, dict) else {}
@@ -461,7 +487,23 @@ async def _latest_agent_message(session_id: uuid.UUID, db: AsyncSession) -> str:
 
 
 def _is_explicit_build_confirmation(user_message: str) -> bool:
-    normalized = " ".join((user_message or "").casefold().split())
+    normalized = " ".join((user_message or "").casefold().split()).strip(
+        " \t\r\n.,!🙏👍✅"
+    )
+    if re.search(
+        r"\b(?:belum|tidak|nggak|gak|jangan)\b.{0,32}"
+        r"\b(?:sesuai|setuju|benar|buat|buatkan)\b",
+        normalized,
+    ):
+        return False
+    conversational_confirmation = bool(
+        re.fullmatch(
+            r"(?:(?:sip|siap|ya|iya|ok|oke|okey|mantap|gas)[\s,!.]+)*"
+            r"(?:sudah sesuai|sudah benar|semuanya sesuai|saya setuju|setuju)"
+            r"(?:\s+(?:ya|nih|dong))?",
+            normalized,
+        )
+    )
     return normalized in {
         "ok",
         "oke",
@@ -473,7 +515,7 @@ def _is_explicit_build_confirmation(user_message: str) -> bool:
         "buat agentnya",
         "sudah sesuai",
         "sudah benar",
-    } or any(
+    } or conversational_confirmation or any(
         marker in normalized
         for marker in (
             "semuanya sesuai",
@@ -561,6 +603,58 @@ def _recent_evidence_text(draft: AgentBuildDraft | None) -> str:
     )
 
 
+async def prepare_arthur_skill_context_for_primary(
+    *,
+    agent_id: uuid.UUID,
+    primary_skill: str,
+    mixin_skills: list[str],
+    draft: AgentBuildDraft | None,
+    db: AsyncSession,
+) -> ArthurSkillContext:
+    """Load a verified skill context for a deterministic runtime transition."""
+    requested_names = [primary_skill, *mixin_skills]
+    loaded = await list_active_system_skills(agent_id, db, names=requested_names)
+    by_name = {skill.name: skill for skill in loaded}
+    missing = [name for name in requested_names if name not in by_name]
+    if missing:
+        raise RuntimeError(
+            "Arthur system skill bundle is incomplete: " + ", ".join(missing)
+        )
+
+    parts: list[str] = []
+    if draft is not None:
+        parts.append(build_state_prompt(draft))
+    versions: dict[str, str] = {}
+    for name in requested_names:
+        skill = by_name[name]
+        actual_checksum = hashlib.sha256(skill.content_md.encode("utf-8")).hexdigest()
+        if not skill.immutable or skill.trust_level != "system":
+            raise RuntimeError(f"Untrusted Arthur skill rejected: {name}")
+        if skill.checksum != actual_checksum:
+            raise RuntimeError(f"Arthur skill checksum mismatch: {name}@{skill.version}")
+        label = (
+            "Primary Workflow Skill"
+            if name == primary_skill
+            else "Policy Mixin Skill"
+        )
+        parts.append(f"## {label}: {name}@{skill.version}\n{skill.content_md}")
+        versions[name] = skill.version
+
+    parts.append(
+        "## Runtime Skill Contract\n"
+        f"Gunakan `{primary_skill}` sebagai satu-satunya primary workflow skill pada turn ini. "
+        "Policy mixin hanya menambah kewajiban connector/file dan tidak boleh mengganti state contract."
+    )
+    return ArthurSkillContext(
+        enabled=True,
+        primary_skill=primary_skill,
+        mixin_skills=list(mixin_skills),
+        skill_versions=versions,
+        prompt_block="\n\n".join(parts),
+        draft=draft,
+    )
+
+
 async def prepare_arthur_skill_context(
     *,
     agent_id: uuid.UUID,
@@ -625,42 +719,13 @@ async def prepare_arthur_skill_context(
         f"{_recent_evidence_text(draft)}\n{user_message}",
         primary,
     )
-    requested_names = [primary, *mixins]
-    loaded = await list_active_system_skills(agent_id, db, names=requested_names)
-    by_name = {skill.name: skill for skill in loaded}
-    missing = [name for name in requested_names if name not in by_name]
-    if missing:
-        raise RuntimeError(
-            "Arthur system skill bundle is incomplete: " + ", ".join(missing)
-        )
-
-    parts: list[str] = []
-    if draft is not None:
-        parts.append(build_state_prompt(draft))
-    versions: dict[str, str] = {}
-    for name in requested_names:
-        skill = by_name[name]
-        actual_checksum = hashlib.sha256(skill.content_md.encode("utf-8")).hexdigest()
-        if not skill.immutable or skill.trust_level != "system":
-            raise RuntimeError(f"Untrusted Arthur skill rejected: {name}")
-        if skill.checksum != actual_checksum:
-            raise RuntimeError(f"Arthur skill checksum mismatch: {name}@{skill.version}")
-        label = "Primary Workflow Skill" if name == primary else "Policy Mixin Skill"
-        parts.append(f"## {label}: {name}@{skill.version}\n{skill.content_md}")
-        versions[name] = skill.version
-
-    parts.append(
-        "## Runtime Skill Contract\n"
-        f"Gunakan `{primary}` sebagai satu-satunya primary workflow skill pada turn ini. "
-        "Policy mixin hanya menambah kewajiban connector/file dan tidak boleh mengganti state contract."
-    )
-    return ArthurSkillContext(
-        enabled=True,
+    context = await prepare_arthur_skill_context_for_primary(
+        agent_id=agent_id,
         primary_skill=primary,
         mixin_skills=mixins,
-        skill_versions=versions,
-        whatsapp_action=whatsapp_action,
-        payment_plan=payment_plan,
-        prompt_block="\n\n".join(parts),
         draft=draft,
+        db=db,
     )
+    context.whatsapp_action = whatsapp_action
+    context.payment_plan = payment_plan
+    return context

@@ -57,7 +57,9 @@ from app.core.engine.arthur_skill_runtime import (
     ARTHUR_PROMPT_VERSION,
     arthur_runtime_enabled,
     prepare_arthur_skill_context,
+    prepare_arthur_skill_context_for_primary,
     scope_arthur_builder_tools,
+    scope_arthur_create_completion_tools,
 )
 from app.core.engine.attachment_evidence import extract_image_evidence
 from app.core.engine.agent_recovery import send_agent_recovery_message
@@ -1043,6 +1045,10 @@ async def run_agent(
         operating_manual=_early_operating_manual,
     )
     tools = tool_setup.tools
+    # Keep the complete builder tool inventory. Progressive discovery scoping is
+    # intentionally restrictive, but a ready plan may transition to create
+    # within this same run and must build a new graph from the original tools.
+    _arthur_unscoped_tools = list(tools)
     active_groups = tool_setup.active_groups
     saved_custom_tools = tool_setup.saved_custom_tools
     sandbox = tool_setup.sandbox
@@ -2539,12 +2545,61 @@ async def run_agent(
                 )
 
         # A ready plan should finish without asking the user to type "coba lagi".
-        # Give the model one additional internal recovery attempt when the first
-        # continuation still stops before create_agent. Clarification plans never
-        # enter this loop; _needs_builder_create_completion enforces plan_status=ready.
+        # Discovery graphs intentionally cannot see create tools, so a ready-plan
+        # state transition must rebuild both prompt and tool scope. Reusing the
+        # discovery graph here caused Arthur to claim create_agent was unavailable.
+        _create_completion_graph = None
         for _create_completion_attempt in range(1, 3):
             if not _needs_builder_create_completion(steps, is_builder=runtime_policy.is_builder):
                 break
+            if _create_completion_graph is None:
+                if _arthur_skill_context is None:
+                    # Preserve legacy behavior for builder agents that do not
+                    # use Arthur's progressive-skill runtime.
+                    _create_completion_graph = graph
+                else:
+                    _completion_mixins = list(_arthur_skill_context.mixin_skills)
+                    _completion_tools, _completion_removed = (
+                        scope_arthur_create_completion_tools(
+                            _arthur_unscoped_tools,
+                            mixin_skills=_completion_mixins,
+                        )
+                    )
+                    _completion_context = (
+                        await prepare_arthur_skill_context_for_primary(
+                            agent_id=agent_id,
+                            primary_skill="arthur-create-agent",
+                            mixin_skills=_completion_mixins,
+                            draft=_arthur_skill_context.draft,
+                            db=db,
+                        )
+                    )
+                    _completion_prompt = (
+                        (system_prompt if isinstance(system_prompt, str) else "")
+                        + "\n\n"
+                        + _completion_context.prompt_block
+                        + "\n\n## Deterministic Ready-Plan Transition\n"
+                        "Hasil plan_agent terbaru pada run ini sudah `ready`. "
+                        "Scope discovery sebelumnya berakhir sekarang; selesaikan build "
+                        "dengan skill dan tool create yang aktif. Jangan kembali ke discovery."
+                    )
+                    from langgraph.prebuilt import create_react_agent as _cra
+
+                    _create_completion_graph = _cra(
+                        llm,
+                        tools=_completion_tools,
+                        prompt=_completion_prompt,
+                        checkpointer=_checkpointer,
+                    )
+                    log.info(
+                        "agent_run.builder_create_completion_graph_ready",
+                        tools=[
+                            str(getattr(tool, "name", "") or "")
+                            for tool in _completion_tools
+                        ],
+                        removed_tools=_completion_removed,
+                        mixin_skills=_completion_mixins,
+                    )
             log.warning(
                 "agent_run.builder_create_completion_continue",
                 steps=len(steps),
@@ -2556,13 +2611,13 @@ async def run_agent(
             )
             try:
                 async with asyncio.timeout(_timeout):
-                    _create_completion_output = await graph.ainvoke(
+                    _create_completion_output = await _create_completion_graph.ainvoke(
                         {"messages": _create_completion_input},
                         config=_graph_config,
                         version="v2",
                     )
                     result = await _graph_result_from_output(
-                        graph=graph,
+                        graph=_create_completion_graph,
                         graph_config=_graph_config,
                         graph_output=_create_completion_output,
                         log=log,

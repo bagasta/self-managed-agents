@@ -21,6 +21,7 @@ from app.core.engine.arthur_skill_runtime import (
     resolve_policy_mixins,
     resolve_primary_skill,
     scope_arthur_builder_tools,
+    scope_arthur_create_completion_tools,
 )
 
 
@@ -80,6 +81,33 @@ def test_explicit_confirmation_exposes_create_skill_even_if_shadow_state_lags():
     assert (
         resolve_primary_skill("create", "discovery", user_message="sudah sesuai")
         == "arthur-create-agent"
+    )
+
+
+def test_conversational_confirmation_exposes_create_skill_without_false_negative():
+    for message in (
+        "sip sudah sesuai",
+        "Sip, sudah sesuai!",
+        "iya semuanya sesuai 🙏",
+        "mantap saya setuju",
+        "sip sudah sesuai ya",
+    ):
+        assert (
+            resolve_primary_skill("create", "discovery", user_message=message)
+            == "arthur-create-agent"
+        )
+
+    assert (
+        resolve_primary_skill("create", "discovery", user_message="belum sesuai")
+        == "arthur-discovery"
+    )
+    assert (
+        resolve_primary_skill(
+            "create",
+            "discovery",
+            user_message="belum semuanya sesuai",
+        )
+        == "arthur-discovery"
     )
 
 
@@ -273,6 +301,30 @@ def test_tool_scoping_removes_material_tools_during_discovery():
     )
     assert [tool.name for tool in kept] == ["plan_agent", "tavily_search"]
     assert removed == ["create_agent", "delete_agent", "list_my_agents"]
+
+
+def test_ready_plan_completion_scope_exposes_create_but_cannot_replan():
+    tools = [
+        SimpleNamespace(name="plan_agent"),
+        SimpleNamespace(name="compose_agent_blueprint"),
+        SimpleNamespace(name="validate_agent_config"),
+        SimpleNamespace(name="create_agent"),
+        SimpleNamespace(name="verify_agent"),
+        SimpleNamespace(name="delete_agent"),
+    ]
+
+    kept, removed = scope_arthur_create_completion_tools(
+        tools,
+        mixin_skills=[],
+    )
+
+    assert [tool.name for tool in kept] == [
+        "compose_agent_blueprint",
+        "validate_agent_config",
+        "create_agent",
+        "verify_agent",
+    ]
+    assert removed == ["delete_agent", "plan_agent"]
 
 
 def test_google_mixin_does_not_expose_mutation_tools_during_discovery():
