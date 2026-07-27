@@ -21,6 +21,11 @@ from app.core.engine.google_mcp_support import (
     _extract_google_mcp_resource_error,
     _is_google_resource_not_found_error,
     _is_google_mcp_intent,
+    build_google_workspace_resource_notice,
+    extract_created_spreadsheet_resource,
+    google_missing_spreadsheet_recovery_directive,
+    remember_created_google_spreadsheet,
+    should_retry_missing_spreadsheet_resource,
     _sanitize_user_facing_google_terms,
     _looks_like_google_auth_recovery_reply,
     apply_google_mcp_reply_overrides,
@@ -328,7 +333,7 @@ async def test_owner_google_resource_blocker_routes_to_arthur_without_oauth(monk
     )
 
     assert "Koneksi Google untuk Minsel aktif" in reply
-    assert "siapkan Google Sheet survey untuk Minsel" in reply
+    assert "siapkan Google Sheet utama untuk Minsel sesuai tugasnya" in reply
     assert "login" not in reply.casefold()
 
 
@@ -378,10 +383,78 @@ async def test_customer_google_resource_blocker_notifies_owner_without_oauth_lin
 
     assert sent
     assert "Koneksi Google aktif" in sent[0]
-    assert "siapkan Google Sheet survey untuk Minsel" in sent[0]
+    assert "siapkan Google Sheet utama untuk Minsel sesuai tugasnya" in sent[0]
     assert "reconnect" not in sent[0].casefold()
     assert "Owner" in reply
     assert "konfigurasi teknis" in reply
+
+
+def test_owner_sheet_write_with_404_gets_automatic_resource_recovery() -> None:
+    steps = [
+        {
+            "tool": "read_sheet_values",
+            "result": 'HTTP 404: Requested entity was not found.',
+        }
+    ]
+
+    assert should_retry_missing_spreadsheet_resource(
+        steps,
+        user_message="catat ya",
+    )
+    assert not should_retry_missing_spreadsheet_resource(
+        steps,
+        user_message="tolong baca isi sheet ini",
+    )
+    directive = google_missing_spreadsheet_recovery_directive("catat ya")
+    assert "JANGAN gunakan lagi" in directive
+    assert "Buat spreadsheet pengganti" in directive
+    assert "jangan delegasikan OCR" in directive
+
+
+def test_successful_created_spreadsheet_is_persisted_as_verified_default() -> None:
+    steps = [
+        {
+            "tool": "create_spreadsheet",
+            "args": {"title": "Catatan Keuangan JuleAI"},
+            "result": (
+                "Successfully created spreadsheet 'Catatan Keuangan JuleAI'. "
+                "ID: valid-sheet-12345 | URL: "
+                "https://docs.google.com/spreadsheets/d/valid-sheet-12345/edit"
+            ),
+        }
+    ]
+    log = type("Log", (), {"info": lambda *args, **kwargs: None})()
+    agent = type(
+        "Agent",
+        (),
+        {
+            "id": "agent-1",
+            "version": 1,
+            "instructions": "Catat keuangan dan laporan keuangan.",
+            "tools_config": {"mcp": {"enabled": True}},
+        },
+    )()
+
+    extracted = extract_created_spreadsheet_resource(steps)
+    assert extracted == {
+        "spreadsheet_id": "valid-sheet-12345",
+        "url": "https://docs.google.com/spreadsheets/d/valid-sheet-12345/edit",
+        "title": "Catatan Keuangan JuleAI",
+    }
+    assert remember_created_google_spreadsheet(
+        agent,
+        steps,
+        user_message="catat pengeluaran",
+        log=log,
+    )
+
+    resources = agent.tools_config["google_workspace_resources"]
+    assert resources["default_spreadsheet_id"] == "valid-sheet-12345"
+    assert resources["default_spreadsheet_verified"] is True
+    assert agent.version == 2
+    notice = build_google_workspace_resource_notice(agent.tools_config)
+    assert "valid-sheet-12345" in notice
+    assert "Jangan pernah mengarang" in notice
 
 
 def test_google_auth_error_markers_include_preflight_not_connected_message() -> None:

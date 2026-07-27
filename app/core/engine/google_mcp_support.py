@@ -326,6 +326,207 @@ def _extract_google_mcp_resource_error(steps: list[dict[str, Any]]) -> str | Non
     return None
 
 
+def should_retry_missing_spreadsheet_resource(
+    steps: list[dict[str, Any]],
+    *,
+    user_message: str,
+) -> bool:
+    """Retry an owner write request that used a missing/hallucinated Sheet ID."""
+    write_markers = (
+        "catat",
+        "simpan",
+        "tambahkan",
+        "tambah ",
+        "masukkan",
+        "input ",
+        "rekam",
+        "append",
+        "tulis",
+        "update",
+        "buat ",
+    )
+    message = str(user_message or "").casefold()
+    if not any(marker in message for marker in write_markers):
+        return False
+    sheet_tools = {
+        "read_sheet_values",
+        "modify_sheet_values",
+        "append_table_rows",
+        "list_sheet_tables",
+        "create_sheet",
+    }
+    return any(
+        str((step or {}).get("tool") or "") in sheet_tools
+        and _is_google_resource_not_found_error(str((step or {}).get("result") or ""))
+        for step in steps or []
+    )
+
+
+def google_missing_spreadsheet_recovery_directive(user_message: str) -> str:
+    """Give a Google-only retry graph a deterministic missing-Sheet workflow."""
+    return (
+        "## Missing Google Sheet Recovery\n"
+        "OAuth Google sudah aktif, tetapi spreadsheet_id yang dipakai sebelumnya menghasilkan 404. "
+        "Anggap ID itu tidak valid dan JANGAN gunakan lagi. Pengirim adalah Owner/operator dan meminta "
+        "aksi tulis, jadi jangan meminta ID atau setup manual kepada user.\n"
+        "Lakukan sekarang dengan tool Google yang tersedia:\n"
+        "1. Buat spreadsheet pengganti dengan judul yang sesuai tugas agent.\n"
+        "2. Buat header/tabel yang sesuai bila belum ada.\n"
+        "3. Selesaikan aksi tulis asli user ke spreadsheet baru.\n"
+        "4. Verifikasi hasil bila tool baca tersedia, lalu kirim link yang benar.\n"
+        "Jika input terbaru memuat gambar, gambar itu terlihat langsung oleh model: baca datanya sendiri "
+        "dan jangan delegasikan OCR ke task/subagent.\n"
+        f"Request asli yang harus diselesaikan: {str(user_message or '').strip()[:1000]}"
+    )
+
+
+_CREATED_SPREADSHEET_URL_RE = re.compile(
+    r"https://docs\.google\.com/spreadsheets/d/([A-Za-z0-9_-]+)(?:/[^\s\"']*)?",
+    re.IGNORECASE,
+)
+
+
+def extract_created_spreadsheet_resource(
+    steps: list[dict[str, Any]],
+) -> dict[str, str] | None:
+    """Extract a verified spreadsheet artifact from a successful tool result."""
+    for step in reversed(steps or []):
+        if str((step or {}).get("tool") or "") != "create_spreadsheet":
+            continue
+        result = str((step or {}).get("result") or "")
+        lowered = result.casefold()
+        if "error" in lowered or "successfully created spreadsheet" not in lowered:
+            continue
+        url_match = _CREATED_SPREADSHEET_URL_RE.search(result)
+        id_match = re.search(r"\bID:\s*([A-Za-z0-9_-]{10,})", result)
+        spreadsheet_id = (
+            url_match.group(1)
+            if url_match
+            else (id_match.group(1) if id_match else "")
+        )
+        if not spreadsheet_id:
+            continue
+        args = (step or {}).get("args") or (step or {}).get("input") or {}
+        title = ""
+        if isinstance(args, dict):
+            title = str(
+                args.get("title")
+                or args.get("spreadsheet_title")
+                or args.get("name")
+                or ""
+            ).strip()
+        return {
+            "spreadsheet_id": spreadsheet_id,
+            "url": (
+                url_match.group(0)
+                if url_match
+                else f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
+            ),
+            "title": title,
+        }
+    return None
+
+
+def remember_created_google_spreadsheet(
+    agent_model: Any,
+    steps: list[dict[str, Any]],
+    *,
+    user_message: str,
+    log: Any,
+) -> bool:
+    """Persist successful Sheet artifacts so later sessions never invent an ID."""
+    resource = extract_created_spreadsheet_resource(steps)
+    if resource is None:
+        return False
+
+    tools_config = copy.deepcopy(
+        getattr(agent_model, "tools_config", None)
+        if isinstance(getattr(agent_model, "tools_config", None), dict)
+        else {}
+    )
+    resources = tools_config.get("google_workspace_resources")
+    resources = copy.deepcopy(resources) if isinstance(resources, dict) else {}
+    spreadsheets = resources.get("spreadsheets")
+    spreadsheets = list(spreadsheets) if isinstance(spreadsheets, list) else []
+    spreadsheets = [
+        item
+        for item in spreadsheets
+        if not (
+            isinstance(item, dict)
+            and str(item.get("spreadsheet_id") or "") == resource["spreadsheet_id"]
+        )
+    ]
+    spreadsheets.append(
+        {
+            **resource,
+            "purpose": str(user_message or "").strip()[:500],
+            "verified": True,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    resources["spreadsheets"] = spreadsheets[-10:]
+
+    recurring_context = (
+        str(getattr(agent_model, "instructions", "") or "")
+        + "\n"
+        + str(user_message or "")
+    ).casefold()
+    if any(
+        marker in recurring_context
+        for marker in (
+            "catat keuangan",
+            "catatan keuangan",
+            "laporan keuangan",
+            "pemasukan",
+            "pengeluaran",
+            "transaksi",
+        )
+    ):
+        resources.update(
+            {
+                "default_spreadsheet_id": resource["spreadsheet_id"],
+                "default_spreadsheet_url": resource["url"],
+                "default_spreadsheet_title": resource["title"],
+                "default_spreadsheet_verified": True,
+            }
+        )
+
+    tools_config["google_workspace_resources"] = resources
+    agent_model.tools_config = tools_config
+    if hasattr(agent_model, "version"):
+        agent_model.version = int(getattr(agent_model, "version", 0) or 0) + 1
+    log.info(
+        "agent_run.google_spreadsheet_resource_remembered",
+        agent_id=str(getattr(agent_model, "id", "") or ""),
+        spreadsheet_id=resource["spreadsheet_id"],
+        default=bool(resources.get("default_spreadsheet_id") == resource["spreadsheet_id"]),
+    )
+    return True
+
+
+def build_google_workspace_resource_notice(tools_config: dict[str, Any]) -> str:
+    """Inject a verified default Sheet into the runtime prompt."""
+    resources = (tools_config or {}).get("google_workspace_resources")
+    if not isinstance(resources, dict):
+        return ""
+    spreadsheet_id = str(resources.get("default_spreadsheet_id") or "").strip()
+    if (
+        resources.get("default_spreadsheet_verified") is not True
+        or not spreadsheet_id
+    ):
+        return ""
+    title = str(resources.get("default_spreadsheet_title") or "").strip()
+    return (
+        "\n\n[SYSTEM NOTICE - VERIFIED GOOGLE RESOURCE]\n"
+        f"Spreadsheet utama agent yang sudah dibuat dan diverifikasi: {spreadsheet_id}"
+        + (f" ({title})" if title else "")
+        + ". Untuk pencatatan rutin, gunakan ID ini dan baca header lebih dulu. "
+        "Jangan pernah mengarang atau mengganti spreadsheet_id. Jika ID ini menghasilkan 404, "
+        "buat resource pengganti hanya untuk request tulis dari Owner/operator.\n"
+        "[/SYSTEM NOTICE]\n"
+    )
+
+
 def customer_survey_google_resource(
     session: Any,
     agent_model: Any,
@@ -2769,6 +2970,7 @@ async def prepare_google_mcp_runtime(
         runtime.system_prompt = (
             system_prompt
             + build_google_mcp_usage_notice(user_message)
+            + build_google_workspace_resource_notice(tools_config)
             + build_google_mcp_runtime_state_notice(runtime)
         )
     return runtime

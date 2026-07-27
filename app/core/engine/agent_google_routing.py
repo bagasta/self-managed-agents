@@ -223,8 +223,8 @@ async def _route_google_workspace_blocker_to_owner_if_customer(
             agent_name = str(getattr(agent_model, "name", "") or "agent ini").strip()
             return (
                 f"Koneksi Google untuk {agent_name} aktif, tetapi Sheet/resource yang dibutuhkan "
-                "belum dikonfigurasi atau tidak ditemukan. Jangan gunakan ID placeholder. "
-                f"Buka chat Arthur dan kirim: “siapkan Google Sheet survey untuk {agent_name}”. "
+                "belum ditemukan. Percobaan membuat resource pengganti otomatis juga belum berhasil. "
+                f"Buka chat Arthur dan kirim: “siapkan Google Sheet utama untuk {agent_name} sesuai tugasnya”. "
                 "Arthur akan membuat atau memilih Sheet, menyimpan ID yang valid ke agent, lalu menguji penulisannya."
             )
         return reply
@@ -245,7 +245,7 @@ async def _route_google_workspace_blocker_to_owner_if_customer(
                 f"Customer: {sender or '-'}\n"
                 f"Pesan terakhir: {user_message.strip()[:500] or '-'}\n"
                 f"Error ringkas: {str(error_text or '').strip()[:500] or '-'}\n\n"
-                f"Buka chat Arthur dan kirim: “siapkan Google Sheet survey untuk {agent_name}”. "
+                f"Buka chat Arthur dan kirim: “siapkan Google Sheet utama untuk {agent_name} sesuai tugasnya”. "
                 "Arthur harus membuat/memilih Sheet, menyimpan ID valid ke agent, dan menjalankan tes tulis."
             )
         else:

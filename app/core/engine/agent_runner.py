@@ -122,6 +122,9 @@ from app.core.engine.google_mcp_support import (
     _candidate_external_user_ids,
     _contains_google_workspace_artifact,
     build_customer_survey_append_tools,
+    google_missing_spreadsheet_recovery_directive,
+    remember_created_google_spreadsheet,
+    should_retry_missing_spreadsheet_resource,
     customer_survey_google_resource,
     _extract_google_mcp_step_error,
     _extract_google_mcp_resource_error,
@@ -1228,6 +1231,18 @@ async def run_agent(
     )
     if _arthur_skill_context is not None and _arthur_skill_context.prompt_block:
         system_prompt += "\n\n" + _arthur_skill_context.prompt_block
+    if (
+        media_image_b64
+        and media_image_mime
+        and _model_supports_image_input(getattr(agent_model, "model", None))
+    ):
+        system_prompt += (
+            "\n\n## Direct Image Understanding\n"
+            "Gambar terbaru terlihat langsung oleh model pada pesan user. Jika user meminta membaca struk, "
+            "nota, atau dokumen gambar, ekstrak data visualnya sendiri pada parent. Jangan delegasikan OCR "
+            "ke task/subagent dan jangan meminta user mengetik ulang data yang terlihat. Setelah ekstraksi, "
+            "jalankan tool tujuan seperti Google Sheets secara langsung."
+        )
     if abandoned_before_current is not None:
         system_prompt += (
             "\n\n## Restart Recovery\n"
@@ -3042,6 +3057,80 @@ async def run_agent(
                     error=str(_sheets_followup_exc)[:300],
                     spreadsheet_id=_followup_spreadsheet_id,
                 )
+
+        _missing_sheet_error = _extract_google_mcp_resource_error(steps)
+        _can_recover_missing_sheet = (
+            bool(_missing_sheet_error)
+            and bool(mcp_tools)
+            and any(
+                str(getattr(tool, "name", "") or "") == "create_spreadsheet"
+                for tool in mcp_tools
+            )
+            and _is_google_workspace_mcp_authorized_for_session(session, agent_model)
+            and should_retry_missing_spreadsheet_resource(
+                steps,
+                user_message=execution_user_message,
+            )
+        )
+        if _can_recover_missing_sheet:
+            log.warning(
+                "agent_run.google_missing_spreadsheet_recovery",
+                error=str(_missing_sheet_error)[:300],
+            )
+            try:
+                from langgraph.prebuilt import create_react_agent as _cra
+
+                _resource_recovery_prompt = (
+                    (system_prompt if isinstance(system_prompt, str) else "")
+                    + "\n\n"
+                    + google_missing_spreadsheet_recovery_directive(
+                        execution_user_message
+                    )
+                )
+                _resource_recovery_graph = _cra(
+                    llm,
+                    tools=mcp_tools,
+                    prompt=_resource_recovery_prompt,
+                )
+                _resource_recovery_input = _sanitize_input_messages(input_messages)
+                async with asyncio.timeout(settings.agent_timeout_seconds):
+                    result = await _resource_recovery_graph.ainvoke(
+                        {"messages": _resource_recovery_input},
+                        config=_graph_config,
+                    )
+                parsed = parse_agent_result(
+                    result=result,
+                    input_messages=input_messages,
+                    session_id=session.id,
+                    run_id=run_id,
+                    step_start=step_counter,
+                    log=log,
+                )
+                final_reply = parsed["final_reply"]
+                steps = parsed["steps"]
+                total_tokens_used = (
+                    _agent_logger.total_tokens_from_callbacks
+                    or parsed["total_tokens_used"]
+                )
+                for _msg_record in parsed["db_messages"]:
+                    db.add(_msg_record)
+                log.info(
+                    "agent_run.google_missing_spreadsheet_recovery_ok",
+                    artifact=_has_google_workspace_artifact_step(steps),
+                )
+            except Exception as _resource_recovery_exc:
+                log.warning(
+                    "agent_run.google_missing_spreadsheet_recovery_failed",
+                    error=str(_resource_recovery_exc)[:300],
+                )
+
+        if remember_created_google_spreadsheet(
+            agent_model,
+            steps,
+            user_message=execution_user_message,
+            log=log,
+        ):
+            db.add(agent_model)
 
     await db.flush()
 
