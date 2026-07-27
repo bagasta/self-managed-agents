@@ -92,11 +92,11 @@ PROD_COMPOSE=(docker compose -f deploy/docker-compose.prod.yml)
 
 Dry-run harus menunjukkan:
 
-- kernel 4.235 karakter;
+- kernel dimuat tanpa error dan mencakup metadata-first progressive disclosure;
 - model `deepseek/deepseek-v4-flash`;
 - document model `mistral-ocr-latest`;
 - image model `openai/gpt-4.1-mini`;
-- bundle `arthur-skills-2026-07-22-v1` berisi 8 skill.
+- bundle `arthur-skills-2026-07-27-v14` berisi 8 skill.
 
 Stop deploy bila import gagal, database tidak dapat diakses, model berbeda, skill kurang dari delapan, atau dry-run menampilkan secret.
 
