@@ -2235,6 +2235,32 @@ class TestCreateAgent:
             "owner_review_follow_up",
         ]
 
+    def test_personal_finance_assistant_does_not_get_ecommerce_sop(self):
+        from app.core.domain.agent_sop_service import build_agent_operating_manual
+
+        manual = build_agent_operating_manual(
+            name="JuleAI",
+            description=(
+                "Personal assistant untuk reminder, catat keuangan dari foto struk, "
+                "dan laporan keuangan ke Google Spreadsheet."
+            ),
+            instructions=(
+                "Panggil user Bun. Catat pemasukan dan pengeluaran, buat reminder, "
+                "dan baca foto struk."
+            ),
+            business_context="Asisten pribadi untuk Julia, bukan toko atau customer service.",
+        )
+
+        assert manual["domain"] == "personal_assistant"
+        workflow_ids = {
+            workflow["workflow_id"]
+            for workflow in manual["workflows"]
+        }
+        assert workflow_ids == {
+            "personal_reminder",
+            "personal_finance_record",
+        }
+
     def test_owner_phone_added_to_operator_ids(self):
         from app.core.tools.builder_tools import build_builder_tools
         db = _make_mock_db()
