@@ -292,6 +292,82 @@ async def test_owner_google_auth_blocker_keeps_auth_reply(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_owner_google_auth_blocker_notifies_again_via_arthur(monkeypatch) -> None:
+    sent = []
+
+    async def fake_arthur_config(agent_model, owner_target):
+        assert owner_target == "62895619356936"
+        return {
+            "device_id": "arthur-device",
+            "user_phone": "owner-lid@lid",
+            "phone_number": "62895619356936",
+        }
+
+    async def fake_send_message(*, channel_type, channel_config, text, to_override=None):
+        sent.append((channel_type, channel_config, text))
+        return {"message_id": "reauth-1"}
+
+    monkeypatch.setattr(
+        "app.core.engine.agent_google_routing._arthur_owner_notification_channel_config",
+        fake_arthur_config,
+    )
+    monkeypatch.setattr(
+        "app.core.infra.channel_service.send_message",
+        fake_send_message,
+    )
+    agent = type(
+        "Agent",
+        (),
+        {
+            "name": "JuleAI",
+            "owner_external_id": "62895619356936",
+            "operator_ids": ["62895619356936"],
+            "escalation_config": {"operator_phone": "62895619356936"},
+            "wa_device_id": "demo-device",
+        },
+    )()
+    session = type(
+        "Session",
+        (),
+        {
+            "channel_type": "whatsapp",
+            "external_user_id": "62895619356936",
+            "channel_config": {
+                "device_id": "demo-device",
+                "phone_number": "62895619356936",
+            },
+        },
+    )()
+    log = type(
+        "Log",
+        (),
+        {
+            "info": lambda *args, **kwargs: None,
+            "warning": lambda *args, **kwargs: None,
+        },
+    )()
+    auth_url = "https://auth.example/start?t=new"
+
+    reply = await _route_google_workspace_blocker_to_owner_if_customer(
+        reply=f"Klik link reconnect Google: {auth_url}",
+        session=session,
+        agent_model=agent,
+        user_message="catat ya",
+        error_text="Google Workspace belum terhubung atau token sudah expired",
+        auth_url=auth_url,
+        log=log,
+    )
+
+    assert reply == f"Klik link reconnect Google: {auth_url}"
+    assert len(sent) == 1
+    assert sent[0][0] == "whatsapp"
+    assert sent[0][1]["device_id"] == "arthur-device"
+    assert sent[0][1]["user_phone"] == "owner-lid@lid"
+    assert auth_url in sent[0][2]
+    assert "JuleAI" in sent[0][2]
+
+
+@pytest.mark.asyncio
 async def test_owner_google_resource_blocker_routes_to_arthur_without_oauth(monkeypatch) -> None:
     async def fail_send_message(*args, **kwargs):
         raise AssertionError("owner chat should receive direct setup guidance")

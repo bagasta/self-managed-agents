@@ -27,6 +27,7 @@ from app.core.engine.agent_step_utils import (
 from app.core.engine.google_mcp_support import (
     _candidate_external_user_ids,
     _fetch_google_auth_link,
+    _is_google_auth_or_scope_error,
     _is_google_resource_not_found_error,
 )
 from app.core.utils.phone_utils import normalize_phone
@@ -194,6 +195,62 @@ def _google_workspace_mcp_unauthorized_reply() -> str:
     )
 
 
+async def _arthur_owner_notification_channel_config(
+    agent_model: Any,
+    owner_target: str,
+) -> dict[str, Any] | None:
+    """Find the Owner's latest WhatsApp session with the Arthur that built an agent."""
+    creator_id = str(getattr(agent_model, "created_by_agent_id", "") or "").strip()
+    try:
+        creator_uuid = uuid.UUID(creator_id)
+    except (TypeError, ValueError):
+        return None
+    normalized_owner = normalize_phone(owner_target)
+    if not normalized_owner:
+        return None
+
+    from sqlalchemy import select
+
+    from app.database import AsyncSessionLocal
+
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(Session)
+                .where(
+                    Session.agent_id == creator_uuid,
+                    Session.channel_type == "whatsapp",
+                )
+                .order_by(Session.updated_at.desc())
+                .limit(20)
+            )
+            for candidate in result.scalars():
+                cfg = (
+                    candidate.channel_config
+                    if isinstance(candidate.channel_config, dict)
+                    else {}
+                )
+                candidate_owner_ids = {
+                    normalize_phone(str(candidate.external_user_id or "")),
+                    normalize_phone(str(cfg.get("phone_number") or "")),
+                    normalize_phone(str(cfg.get("user_phone") or "")),
+                }
+                if normalized_owner not in candidate_owner_ids:
+                    continue
+                if not str(cfg.get("device_id") or "").strip():
+                    continue
+                if not str(cfg.get("user_phone") or "").strip():
+                    continue
+                return dict(cfg)
+    except Exception as exc:
+        logger.warning(
+            "google_workspace.arthur_owner_channel_lookup_failed",
+            creator_id=creator_id,
+            error=str(exc)[:200],
+        )
+    return None
+
+
 async def _route_google_workspace_blocker_to_owner_if_customer(
     *,
     reply: str,
@@ -227,14 +284,67 @@ async def _route_google_workspace_blocker_to_owner_if_customer(
                 f"Buka chat Arthur dan kirim: “siapkan Google Sheet utama untuk {agent_name} sesuai tugasnya”. "
                 "Arthur akan membuat atau memilih Sheet, menyimpan ID yang valid ke agent, lalu menguji penulisannya."
             )
+        if (
+            sender in _normalized_agent_operator_ids(agent_model)
+            and auth_url
+            and _is_google_auth_or_scope_error(error_text)
+        ):
+            owner_target = _owner_notification_target(agent_model)
+            arthur_cfg = await _arthur_owner_notification_channel_config(
+                agent_model,
+                owner_target,
+            )
+            if arthur_cfg:
+                agent_name = str(
+                    getattr(agent_model, "name", "") or "agent"
+                ).strip()
+                try:
+                    from app.core.infra.channel_service import send_message
+
+                    await send_message(
+                        channel_type="whatsapp",
+                        channel_config=arthur_cfg,
+                        text=(
+                            f"Google untuk {agent_name} perlu dihubungkan ulang.\n\n"
+                            f"Buka link autentikasi ini:\n{auth_url}\n\n"
+                            "Setelah berhasil, balas “sudah” agar proses bisa dilanjutkan."
+                        ),
+                    )
+                    log.info(
+                        "agent_run.google_auth_reconnect_notified_via_arthur",
+                        owner=normalize_phone(owner_target),
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "agent_run.google_auth_reconnect_arthur_notify_failed",
+                        owner=normalize_phone(owner_target),
+                        error=str(exc)[:200],
+                    )
         return reply
 
     cfg = session.channel_config if isinstance(session.channel_config, dict) else {}
-    device_id = str(cfg.get("device_id") or getattr(agent_model, "wa_device_id", "") or "").strip()
     owner_target = _owner_notification_target(agent_model)
+    arthur_cfg = await _arthur_owner_notification_channel_config(
+        agent_model,
+        owner_target,
+    )
+    notification_cfg = arthur_cfg or cfg
+    device_id = str(
+        notification_cfg.get("device_id")
+        or getattr(agent_model, "wa_device_id", "")
+        or ""
+    ).strip()
+    notification_target = str(
+        (
+            notification_cfg.get("user_phone")
+            if arthur_cfg
+            else owner_target
+        )
+        or ""
+    ).strip()
     notified_owner = False
 
-    if device_id and owner_target:
+    if device_id and notification_target:
         agent_name = str(getattr(agent_model, "name", "") or "agent").strip()
         sender = _session_sender_phone(session)
         if resource_missing:
@@ -272,7 +382,11 @@ async def _route_google_workspace_blocker_to_owner_if_customer(
 
             await send_message(
                 channel_type="whatsapp",
-                channel_config={**cfg, "user_phone": owner_target, "device_id": device_id},
+                channel_config={
+                    **notification_cfg,
+                    "user_phone": notification_target,
+                    "device_id": device_id,
+                },
                 text=owner_text,
             )
             notified_owner = True
@@ -280,6 +394,7 @@ async def _route_google_workspace_blocker_to_owner_if_customer(
                 "agent_run.google_workspace_blocker_notified_owner",
                 owner=normalize_phone(owner_target),
                 auth_url_present=bool(auth_url),
+                via_arthur=bool(arthur_cfg),
             )
         except Exception as exc:
             log.warning(
@@ -291,7 +406,7 @@ async def _route_google_workspace_blocker_to_owner_if_customer(
         log.warning(
             "agent_run.google_workspace_blocker_owner_notify_missing_target",
             device_id_present=bool(device_id),
-            owner_target_present=bool(owner_target),
+            owner_target_present=bool(notification_target),
         )
 
     return _google_workspace_customer_blocker_reply(notified_owner=notified_owner)
