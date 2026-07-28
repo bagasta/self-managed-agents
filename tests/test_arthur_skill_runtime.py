@@ -369,6 +369,17 @@ def test_discovery_turn_without_plan_is_forced_through_planning_gate():
     ) is False
 
 
+def test_planning_gate_directive_keeps_tool_call_mandatory_but_reply_natural():
+    from app.core.engine.agent_followups import _builder_plan_completion_directive
+
+    directive = _builder_plan_completion_directive()
+
+    assert "Panggil plan_agent SEKARANG tepat satu kali" in directive
+    assert "target semantik internal" in directive
+    assert "bukan teks yang harus disalin" in directive
+    assert "Jangan menyebut plan_agent" in directive
+
+
 def test_post_create_integration_setup_does_not_restart_discovery_plan():
     assert _needs_builder_plan_completion(
         [],

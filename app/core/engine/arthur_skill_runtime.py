@@ -20,7 +20,7 @@ from app.models.agent_build_draft import AgentBuildDraft
 from app.models.message import Message
 
 ARTHUR_ENGINE_VERSION = "arthur-progressive-v3"
-ARTHUR_PROMPT_VERSION = "arthur-kernel-v13"
+ARTHUR_PROMPT_VERSION = "arthur-kernel-v14"
 
 _BUILDER_TOOL_NAMES = {
     "get_self_config", "get_platform_capabilities", "list_available_wa_devices", "get_presets",

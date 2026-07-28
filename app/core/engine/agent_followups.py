@@ -317,8 +317,11 @@ def _builder_plan_completion_directive() -> str:
         "RUNTIME GATE: turn discovery/create ini belum memanggil plan_agent. "
         "Panggil plan_agent SEKARANG tepat satu kali menggunakan seluruh fakta canonical "
         "dan evidence tersimpan. Jangan mengarang field. Jika hasilnya needs_clarification, "
-        "tanyakan hanya next_question dari hasil tool. Jika ready, lanjutkan sesuai state "
-        "contract tanpa meminta konfirmasi ulang."
+        "perlakukan next_question sebagai target semantik internal, bukan teks yang harus "
+        "disalin. Balas natural dalam bahasa user: maksimal satu acknowledgment singkat lalu "
+        "tepat satu pertanyaan lengkap untuk topik tersebut. Jangan menyebut plan_agent, tool, "
+        "state, evidence, atau proses internal. Jika ready, lanjutkan sesuai state contract "
+        "tanpa meminta konfirmasi ulang."
     )
 
 

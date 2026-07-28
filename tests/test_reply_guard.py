@@ -814,6 +814,46 @@ def test_plan_clarification_keeps_exact_production_llm_reply_with_rhetorical_ack
     assert ensure_non_empty_reply(reply, steps) == reply
 
 
+def test_plan_clarification_rejects_an_unrelated_second_question():
+    question = "Mau kasih nama apa untuk agent-nya?"
+    steps = [
+        {
+            "tool": "plan_agent",
+            "result": json.dumps(
+                {
+                    "plan_status": "needs_clarification",
+                    "capability_clarifications": [
+                        {"topic": "agent_name", "question": question}
+                    ],
+                }
+            ),
+        }
+    ]
+    reply = "Sudah jelas ya? Mau kasih nama apa? Agent ini untuk customer atau tim?"
+
+    assert ensure_non_empty_reply(reply, steps) == question
+
+
+def test_plan_clarification_rejects_duplicate_questions_for_same_topic():
+    question = "Agent ini akan dipakai untuk kebutuhan pribadi atau bisnis?"
+    steps = [
+        {
+            "tool": "plan_agent",
+            "result": json.dumps(
+                {
+                    "plan_status": "needs_clarification",
+                    "capability_clarifications": [
+                        {"topic": "usage_context", "question": question}
+                    ],
+                }
+            ),
+        }
+    ]
+    reply = "Ini untuk personal atau bisnis? Dipakai buat usaha atau pekerjaan?"
+
+    assert ensure_non_empty_reply(reply, steps) == question
+
+
 def test_plan_clarification_still_rejects_premature_success_with_question():
     question = "Mau kasih nama apa untuk agent-nya?"
     steps = [

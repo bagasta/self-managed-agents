@@ -1,5 +1,7 @@
 """Regression coverage for Arthur's concise WhatsApp intake."""
 
+import json
+
 from app.core.engine.agent_followups import _needs_builder_plan_completion
 from app.core.engine.arthur_skill_runtime import classify_builder_whatsapp_action
 from app.core.engine.reply_guard import ensure_non_empty_reply
@@ -75,3 +77,36 @@ def test_builder_reasoning_text_is_never_sent_for_a_greeting() -> None:
 
     assert "panggil perencanaan" not in reply.casefold()
     assert reply.startswith("Halo! Aku Arthur")
+
+
+def test_required_planner_call_and_natural_whatsapp_reply_work_together() -> None:
+    steps = [
+        {
+            "tool": "plan_agent",
+            "result": json.dumps(
+                {
+                    "plan_status": "needs_clarification",
+                    "capability_clarifications": [
+                        {
+                            "topic": "agent_name",
+                            "question": "Mau kasih nama apa untuk agent-nya?",
+                        }
+                    ],
+                }
+            ),
+        }
+    ]
+
+    assert not _needs_builder_plan_completion(
+        steps,
+        is_builder=True,
+        primary_skill="arthur-discovery",
+        workflow_state="discovery",
+        user_message="Saya kewalahan balas customer dan mencatat order.",
+    )
+
+    reply = (
+        "Sip, berarti agent ini akan membantu CS sekaligus pencatatan order. "
+        "Kamu mau kasih nama apa untuk agent-nya?"
+    )
+    assert ensure_non_empty_reply(reply, steps) == reply

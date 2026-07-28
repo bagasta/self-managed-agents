@@ -389,10 +389,48 @@ def _is_natural_builder_clarification(text: str, *, topic: str = "") -> bool:
         for clause in re.findall(r"[^?]+\?", candidate)
         if clause.strip()
     ]
-    return any(
-        all(
+    matching_clauses = [
+        clause
+        for clause in question_clauses
+        if all(
             any(signal in clause for signal in group)
             for group in signal_groups
+        )
+    ]
+    # Exactly one clause may ask for the unresolved field. A preceding
+    # conversational check such as "kayaknya ini untuk bisnis ya?" is fine,
+    # but a second real question would restart questionnaire-like discovery.
+    if len(matching_clauses) != 1:
+        return False
+    contextual_check_endings = (
+        " ya?",
+        " kan?",
+        " benar?",
+        " betul?",
+        " right?",
+        " correct?",
+    )
+    question_word_markers = (
+        "apa ",
+        "siapa ",
+        "bagaimana",
+        "gimana",
+        "kapan",
+        "di mana",
+        "dimana",
+        "what ",
+        "who ",
+        "how ",
+        "when ",
+        "where ",
+        "which ",
+    )
+    return all(
+        clause in matching_clauses
+        or (
+            len(clause) <= 240
+            and clause.endswith(contextual_check_endings)
+            and not any(marker in clause for marker in question_word_markers)
         )
         for clause in question_clauses
     )
