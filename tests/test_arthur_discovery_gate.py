@@ -10,6 +10,7 @@ from app.core.tools.builder_discovery import (
     bind_owner_escalation_phone,
     discovery_escalation_policy,
     discovery_operator_phone,
+    infer_low_risk_discovery_facts,
     load_discovery_user_messages,
     validate_agent_discovery,
 )
@@ -248,6 +249,58 @@ def test_owner_escalation_phone_resolves_nomer_ini_from_authenticated_session():
     )
 
     assert bound["escalation_target"]["whatsapp_number"] == "62895626765423"
+
+
+def test_cs_workflow_infers_business_context_from_user_words():
+    answers = {
+        "problem": "Kewalahan membalas banyak chat sekaligus.",
+        "_evidence": {"problem": "Kewalahan membalas banyak chat sekaligus."},
+    }
+
+    enriched = infer_low_risk_discovery_facts(
+        answers,
+        user_messages=[
+            "Mau bikin agent CS deh",
+            "Kewalahan balas chat customer dan input datanya ke spreadsheet",
+        ],
+    )
+
+    assert enriched["usage_context"] == "work"
+    assert enriched["_evidence"]["usage_context"] == (
+        "Kewalahan balas chat customer dan input datanya ke spreadsheet"
+    )
+
+
+def test_escalate_to_me_binds_authenticated_owner_without_reasking_details():
+    answers = {
+        "unknown_handling": "Berhenti menjawab dan eskalasi jika jawabannya tidak tersedia.",
+        "_evidence": {
+            "unknown_handling": "harus eskalasi ke saya",
+        },
+    }
+
+    bound = bind_owner_escalation_phone(
+        answers,
+        user_messages=["harus eskalasi ke saya"],
+        owner_phone="62895626765423",
+    )
+
+    assert bound["escalation_target"] == {
+        "conditions": "Berhenti menjawab dan eskalasi jika jawabannya tidak tersedia.",
+        "recipient": "Owner",
+        "whatsapp_number": "62895626765423",
+    }
+    assert bound["_evidence"]["escalation_target"] == "harus eskalasi ke saya"
+
+
+def test_do_not_escalate_to_me_does_not_bind_authenticated_owner():
+    bound = bind_owner_escalation_phone(
+        {"unknown_handling": "Minta customer menunggu."},
+        user_messages=["Jangan eskalasi ke saya"],
+        owner_phone="62895626765423",
+    )
+
+    assert "escalation_target" not in bound
 
 
 def test_unverified_optional_sensitive_policy_is_dropped_not_reasked():

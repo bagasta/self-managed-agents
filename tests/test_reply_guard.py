@@ -721,6 +721,54 @@ def test_plan_clarification_overrides_non_empty_internal_evidence_progress_note(
     assert "plan_agent" not in out
 
 
+def test_plan_clarification_keeps_natural_english_question_after_language_switch():
+    steps = [
+        {
+            "tool": "plan_agent",
+            "result": json.dumps(
+                {
+                    "plan_status": "needs_clarification",
+                    "capability_clarifications": [
+                        {
+                            "topic": "agent_name",
+                            "question": "Mau kasih nama apa untuk agent-nya?",
+                        }
+                    ],
+                }
+            ),
+        }
+    ]
+    reply = "Sure — what would you like to name the agent?"
+
+    out = ensure_non_empty_reply(reply, steps, user_message="English please")
+
+    assert out == reply
+
+
+def test_plan_clarification_still_rejects_premature_success_with_question():
+    question = "Mau kasih nama apa untuk agent-nya?"
+    steps = [
+        {
+            "tool": "plan_agent",
+            "result": json.dumps(
+                {
+                    "plan_status": "needs_clarification",
+                    "capability_clarifications": [
+                        {"topic": "agent_name", "question": question}
+                    ],
+                }
+            ),
+        }
+    ]
+
+    out = ensure_non_empty_reply(
+        "Agent sudah jadi. Mau kasih nama apa?",
+        steps,
+    )
+
+    assert out == question
+
+
 def test_confirmation_clarification_never_leaks_internal_instruction_over_summary():
     summary = (
         "Rangkuman Minsel: survey pelanggan, hasil ke Google Sheets. "

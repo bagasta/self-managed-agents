@@ -294,6 +294,41 @@ def _render_builder_questions(questions: Any) -> str | None:
     return question_texts[0]
 
 
+def _is_natural_builder_clarification(text: str) -> bool:
+    """Keep a concise model-written question instead of forcing form copy.
+
+    ``plan_agent`` remains authoritative about *what* is unresolved, while the
+    model is allowed to phrase that question using the conversation's language
+    and context. Deterministic copy is only a fallback for empty, internal, or
+    misleading progress replies.
+    """
+    candidate = str(text or "").strip()
+    if not candidate or "?" not in candidate or len(candidate) > 700:
+        return False
+    normalized = candidate.casefold()
+    internal_markers = (
+        "plan_agent",
+        "discovery_progress",
+        "next_questions",
+        "capability_clarifications",
+        "_evidence",
+        "evidence format",
+        "format evidence",
+        "tool call",
+        "panggil tool",
+    )
+    premature_success_markers = (
+        "agent sudah jadi",
+        "agent berhasil dibuat",
+        "agent telah dibuat",
+        "agent is ready",
+        "agent has been created",
+        "siap digunakan",
+        "siap dipakai",
+    )
+    return not any(marker in normalized for marker in (*internal_markers, *premature_success_markers))
+
+
 def _builder_clarification_reply(data: dict[str, Any]) -> str | None:
     """Turn deterministic builder blockers into questions, never failure text."""
     questions = data.get("capability_clarifications") or []
@@ -637,12 +672,15 @@ def ensure_non_empty_reply(
         if not text or not any(marker in normalized for marker in retry_markers):
             return entitlement_retry
 
-    # plan_agent is the deterministic source of the next unresolved field.
-    # Do not let a non-empty model progress note or internal "evidence format"
-    # explanation replace it and send the user into another discovery loop.
+    # plan_agent is the deterministic source of the next unresolved field, but
+    # it must not turn Arthur into a form renderer. Keep a natural model-written
+    # question so Arthur can acknowledge context and honor the user's language.
+    # Fall back to canonical copy only for empty/internal/misleading replies.
     plan_clarification = _plan_agent_clarification_reply(steps)
     if plan_clarification:
         if plan_clarification.casefold() in text.casefold():
+            return text
+        if _is_natural_builder_clarification(text):
             return text
         return plan_clarification
 

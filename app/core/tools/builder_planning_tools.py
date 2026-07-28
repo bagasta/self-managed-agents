@@ -21,6 +21,7 @@ from app.core.tools.builder_catalog import AGENT_PRESETS, RUNTIME_LIMITATIONS, _
 from app.core.tools.builder_discovery import (
     DiscoveryEvidenceUnavailable,
     bind_owner_escalation_phone,
+    infer_low_risk_discovery_facts,
     discovery_escalation_policy,
     discovery_operator_phone,
     load_discovery_user_messages,
@@ -309,6 +310,10 @@ def build_builder_planning_tools(
         discovery_answers = merge_discovery_answers(
             discovery_answers,
             persisted_facts,
+        )
+        discovery_answers = infer_low_risk_discovery_facts(
+            discovery_answers,
+            user_messages=user_messages,
         )
         discovery_answers = bind_owner_escalation_phone(
             discovery_answers,

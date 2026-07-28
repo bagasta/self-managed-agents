@@ -59,17 +59,16 @@ _GROUPS: tuple[dict[str, Any], ...] = (
 )
 
 _QUESTIONS: dict[str, str] = {
-    "problem": "Problem/pain point apa yang mau diselesaikan? Ceritakan masalahnya, bukan sekadar fitur agent yang diinginkan.",
-    "usage_context": "Agent ini untuk kebutuhan personal atau pekerjaan/bisnis?",
-    "agent_name": "Nama agent yang kamu inginkan apa? Saya tidak akan memilih nama tanpa persetujuanmu.",
-    "audience": "Siapa yang akan chat dengan agent ini: kamu sendiri, internal tim, atau customer eksternal?",
-    "main_tasks": "Apa saja tugas utama agent? Tulis sebagai daftar pekerjaan konkret dari awal sampai selesai.",
+    "problem": "Bagian mana yang paling bikin kamu kewalahan dan ingin dibantu agent ini?",
+    "usage_context": "Agent ini akan dipakai untuk kebutuhan pribadi atau bisnis?",
+    "agent_name": "Mau kasih nama apa untuk agent-nya?",
+    "audience": "Nanti yang chat dengan agent ini siapa: kamu, tim internal, atau customer?",
+    "main_tasks": "Kalau ada chat masuk, apa saja yang perlu agent kerjakan sampai urusannya selesai?",
     "capabilities": (
-        "Kemampuan apa saja yang dibutuhkan agent dari awal sampai selesai? Sebutkan pekerjaan konkretnya, "
-        "lalu pilih kemampuan file secara eksplisit: (a) hanya chat teks/tidak perlu file, "
-        "(b) menerima file atau gambar dari user, (c) membuat file/laporan untuk dikirim, atau (d) keduanya."
+        "Agent ini hanya chat teks, perlu menerima file/gambar, perlu membuat file/laporan, "
+        "atau perlu menerima sekaligus membuat file?"
     ),
-    "prohibited_actions": "Apa yang sama sekali TIDAK BOLEH agent lakukan? Contoh: memberi diskon, menyetujui refund, atau mengarang informasi.",
+    "prohibited_actions": "Keputusan atau tindakan apa yang harus selalu ditangani manusia, bukan agent?",
     "allowed_actions": "Apa yang BOLEH agent lakukan dan sampai batas wewenang mana? Contoh: mencatat pesanan boleh, mengonfirmasi pembayaran tidak boleh.",
     "tone_style": "Tone dan gaya bahasanya bagaimana? Contoh: santai, bahasa Indonesia, boleh emoji secukupnya, tetapi tetap sopan.",
     "ideal_conversations": (
@@ -80,10 +79,9 @@ _QUESTIONS: dict[str, str] = {
         "Berikan contoh percakapan yang harus dihindari/red line. Contoh: customer meminta diskon, lalu agent "
         "langsung menjanjikan diskon tanpa izin Owner."
     ),
-    "unknown_handling": "Kalau agent tidak tahu, informasinya di luar instruksi, atau sumbernya tidak cukup, agent harus berhenti dan melakukan apa?",
+    "unknown_handling": "Kalau jawabannya tidak tersedia atau tidak pasti, agent harus melakukan apa?",
     "escalation_target": (
-        "Karena ini untuk pekerjaan/bisnis, jelaskan eskalasinya secara detail: kondisi pemicu, nama/role penerima, "
-        "dan nomor WhatsApp yang menerima ringkasan percakapan serta lampiran terakhir."
+        "Kalau perlu bantuan manusia, siapa yang harus menerima eskalasinya di WhatsApp?"
     ),
     "knowledge_sources": "Perlu pengetahuan/RAG tambahan? Jawab ya atau tidak; jika ya, sebutkan sumbernya seperti file, link, Google Sheet, atau database.",
     "sensitive_data_policy": "Apakah ada data sensitif seperti nama, kontak, atau transaksi? Jelaskan aturan kerahasiaan dan retensinya, atau nyatakan tidak ada.",
@@ -247,9 +245,25 @@ def owner_escalation_phone_selected(user_messages: list[str] | None) -> bool:
         "ke nomer ini",
         "ke nomor saya",
         "ke nomer saya",
+        "eskalasi ke saya",
+        "eskalasi ke gua",
+        "eskalasi ke aku",
+        "teruskan ke saya",
+        "teruskan ke gua",
+        "teruskan ke aku",
+        "info ke saya",
+        "info ke gua",
+        "info ke aku",
     )
     for message in reversed(user_messages or []):
         text = _normalize_evidence_text(message)
+        if re.search(
+            r"\b(?:bukan|jangan|tidak|ga|gak|nggak)\b(?:\s+\w+){0,4}\s+"
+            r"\b(?:eskalasi|teruskan|info)\b(?:\s+\w+){0,4}\s+"
+            r"\b(?:saya|gua|aku)\b",
+            text,
+        ):
+            return False
         if re.search(
             r"\b(?:bukan|jangan|tidak|ga|gak|nggak)\b(?:\s+\w+){0,4}\s+"
             r"\b(?:nomor|nomer|wa)\s+(?:ini|saya)\b",
@@ -304,6 +318,59 @@ def bind_owner_escalation_phone(
             "recipient": "Owner",
             "whatsapp_number": trusted_phone,
         }
+    elif _is_answered(answers.get("unknown_handling")):
+        answers["escalation_target"] = {
+            "conditions": str(answers["unknown_handling"]),
+            "recipient": "Owner",
+            "whatsapp_number": trusted_phone,
+        }
+        evidence = answers.get(_EVIDENCE_KEY)
+        evidence = dict(evidence) if isinstance(evidence, dict) else {}
+        if not _is_answered(evidence.get("escalation_target")):
+            owner_message = next(
+                (
+                    str(message).strip()
+                    for message in reversed(user_messages or [])
+                    if owner_escalation_phone_selected([str(message)])
+                ),
+                "",
+            )
+            if owner_message:
+                evidence["escalation_target"] = owner_message
+        if evidence:
+            answers[_EVIDENCE_KEY] = evidence
+    return answers
+
+
+def infer_low_risk_discovery_facts(
+    discovery_answers: Any,
+    *,
+    user_messages: list[str] | None,
+) -> Any:
+    """Derive only context directly entailed by the user's own workflow words."""
+    answers, parse_error = _parse_answers(discovery_answers)
+    if parse_error or _is_answered(answers.get("usage_context")):
+        return discovery_answers
+
+    work_pattern = re.compile(
+        r"\b(?:bisnis|business|usaha|toko|customer|pelanggan|pembeli|"
+        r"customer service|cs|admin|order|pesanan|spreadsheet|google sheets?)\b"
+    )
+    personal_pattern = re.compile(r"\b(?:personal|pribadi)\b")
+    supporting_message = ""
+    for message in reversed(user_messages or []):
+        normalized = _normalize_evidence_text(message)
+        if work_pattern.search(normalized) and not personal_pattern.search(normalized):
+            supporting_message = str(message).strip()
+            break
+    if not supporting_message:
+        return discovery_answers
+
+    answers["usage_context"] = "work"
+    evidence = answers.get(_EVIDENCE_KEY)
+    evidence = dict(evidence) if isinstance(evidence, dict) else {}
+    evidence.setdefault("usage_context", supporting_message)
+    answers[_EVIDENCE_KEY] = evidence
     return answers
 
 
@@ -567,7 +634,14 @@ def _evidence_supports_answer(field: str, answer: Any, quotes: list[str]) -> boo
     if field == "usage_context":
         if str(answer or "") == "personal":
             return bool(re.search(r"\b(personal|pribadi|sendiri)\b", quote_text))
-        return bool(re.search(r"\b(pekerjaan|kerja|bisnis|business|work|profesional)\b", quote_text))
+        return bool(
+            re.search(
+                r"\b(pekerjaan|kerja|bisnis|business|work|profesional|usaha|toko|"
+                r"customer|pelanggan|pembeli|customer service|cs|admin|order|pesanan|"
+                r"spreadsheet|google sheets?)\b",
+                quote_text,
+            )
+        )
     if field == "daily_chat_volume":
         answer_numbers = re.findall(r"\d+", _normalize_evidence_text(answer))
         quote_numbers = re.findall(r"\d+", quote_text)
@@ -586,9 +660,12 @@ def _evidence_supports_answer(field: str, answer: Any, quotes: list[str]) -> boo
             quote_text,
         ):
             return True
-    if field == "escalation_target" and re.search(
-        r"\b(nomor|nomer|wa)\b.*\b(saya|sendiri)\b",
-        quote_text,
+    if field == "escalation_target" and (
+        re.search(r"\b(nomor|nomer|wa)\b.*\b(saya|sendiri)\b", quote_text)
+        or re.search(
+            r"\b(?:eskalasi|teruskan|info)\b(?:\s+\w+){0,4}\s+\b(?:saya|gua|aku)\b",
+            quote_text,
+        )
     ):
         return True
     if field in _DELEGATABLE_FIELDS and any(
