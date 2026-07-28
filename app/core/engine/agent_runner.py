@@ -2628,6 +2628,7 @@ async def run_agent(
                 and _arthur_skill_context.draft is not None
                 else None
             ),
+            user_message=execution_user_message,
         ):
             log.warning(
                 "agent_run.builder_plan_completion_required",

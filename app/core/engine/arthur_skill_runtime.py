@@ -19,8 +19,8 @@ from app.core.domain.skill_service import list_active_system_skills
 from app.models.agent_build_draft import AgentBuildDraft
 from app.models.message import Message
 
-ARTHUR_ENGINE_VERSION = "arthur-progressive-v2"
-ARTHUR_PROMPT_VERSION = "arthur-kernel-v12"
+ARTHUR_ENGINE_VERSION = "arthur-progressive-v3"
+ARTHUR_PROMPT_VERSION = "arthur-kernel-v13"
 
 _BUILDER_TOOL_NAMES = {
     "get_self_config", "get_platform_capabilities", "list_available_wa_devices", "get_presets",
@@ -329,6 +329,12 @@ def classify_builder_whatsapp_action(
     )
     if prior_offered_demo and (short_affirmative or missing_demo_artifact):
         return "trial_link"
+    # The onboarding message presents two numbered choices.  Treat a bare
+    # selection as an explicit choice too; otherwise a perfectly normal "1"
+    # is routed back into a generic conversation and the promised demo link is
+    # never created.
+    if prior_offered_demo and current in {"1", "1.", "satu"}:
+        return "trial_link"
     has_owned_number_followup = bool(
         re.search(
             r"\b(?:saya|aku)?\s*(?:sudah|udah|telah)?\s*(?:punya|ada)\b.{0,20}\bnomor(?:nya)?\b",
@@ -340,6 +346,8 @@ def classify_builder_whatsapp_action(
         )
     )
     if prior_offered_dedicated and has_owned_number_followup:
+        return "dedicated_qr"
+    if prior_offered_dedicated and current in {"2", "2.", "dua"}:
         return "dedicated_qr"
     return None
 

@@ -185,7 +185,7 @@ def _discovery_clarification_payload(discovery: dict[str, Any]) -> dict[str, Any
             "(jawaban grup sebelumnya tetap disertakan). Isi `_evidence` untuk setiap field dengan kutipan "
             "pesan user yang tersimpan. Jika user meminta Arthur menyesuaikan suatu detail, detail itu baru "
             "boleh dipakai setelah ditampilkan pada rangkuman akhir dan dikonfirmasi user. Jangan menanyakan jam "
-            "aktif/jam operasional agent. Setelah semua grup lengkap, rangkum dan minta user membalas "
+            "aktif/jam operasional agent. Setelah brief inti lengkap, rangkum dan minta user membalas "
             "secara eksplisit `sudah`, `sesuai`, atau `sudah sesuai` sebagai konfirmasi akhir."
         ),
     }
@@ -219,10 +219,12 @@ def build_builder_planning_tools(
         validation warnings, dan langkah selanjutnya.
 
         Gunakan ini SEBELUM create_agent untuk memastikan config sudah tepat.
-        Plan adalah gerbang kelengkapan brief enam grup. Semua grup discovery (kecuali
-        jam aktif/jam operasional agent) harus lengkap, lalu dirangkum dan dikonfirmasi
-        user satu kali sebelum compose/create. Setelah itu tidak perlu meminta approval
-        mikro untuk tiap artifact internal.
+        Plan adalah gerbang brief inti. Tujuan, pengguna, tugas, batas penting,
+        eskalasi, dan integrasi material harus jelas, lalu dirangkum dan dikonfirmasi
+        user satu kali sebelum compose/create. Contoh dialog, volume, approver, dan
+        preferensi presentasi adalah opsional; jangan gunakan sebagai alasan untuk
+        menahan pembuatan agent. Setelah konfirmasi tidak perlu meminta approval mikro
+        untuk tiap artifact internal.
 
         PENGECUALIAN WAJIB: kalau plan_status == "needs_clarification" atau ada isi di
         capability_clarifications, JANGAN create dulu. Tanyakan dulu kebutuhan itu ke user
@@ -238,19 +240,15 @@ def build_builder_planning_tools(
             business_context: Konteks bisnis untuk agent CS/FAQ (opsional)
             operator_phone: Nomor operator/admin untuk eskalasi (opsional)
             escalation_policy: Pilihan eksplisit user: 'owner', 'operator', atau 'none'. Kosong berarti belum dikonfirmasi.
-            discovery_answers: JSON/object berisi seluruh jawaban discovery yang sudah user berikan:
+            discovery_answers: JSON/object berisi jawaban inti yang sudah user berikan:
                 problem, usage_context (personal/work), agent_name, audience, main_tasks,
-                capabilities, prohibited_actions, allowed_actions, tone_style,
-                ideal_conversations (2-3 contoh), avoided_conversations, unknown_handling,
+                capabilities bila media/file belum jelas, prohibited_actions, unknown_handling,
                 escalation_target (untuk work: conditions, recipient, whatsapp_number),
-                knowledge_sources, sensitive_data_policy, whatsapp_scale, daily_chat_volume,
-                integrations, expected_outputs, vision_requirement, go_live_approver (work),
-                dan user_confirmed=true setelah rangkuman akhir disetujui. Selalu kirim ulang
-                jawaban lengkap yang sudah terkumpul. Sertakan `_evidence` berupa mapping setiap
-                field ke kutipan pesan user yang mendukung jawaban tersebut. Jika user meminta Arthur
-                menyesuaikan suatu detail, kutip bagian rangkuman akhir yang memuat detail itu setelah
-                user mengonfirmasinya. Untuk user_confirmed, kutip pesan konfirmasi terakhir seperti
-                `sudah`, `sesuai`, atau `sudah sesuai`. Jangan
+                integrations, dan user_confirmed=true setelah rangkuman akhir disetujui.
+                Sertakan juga detail opsional bila user memberikannya. Selalu kirim ulang jawaban
+                yang sudah terkumpul. Sertakan `_evidence` berupa mapping setiap field ke kutipan
+                pesan user yang mendukung jawaban tersebut. Untuk user_confirmed, kutip pesan
+                konfirmasi terakhir seperti `sudah`, `sesuai`, atau `sudah sesuai`. Jangan
                 menyertakan operational_hours/jam aktif dan jangan membuat kutipan sendiri.
         """
         policy_reason = _blocked_agent_policy_reason(

@@ -181,6 +181,19 @@ _OPTIONAL_DISCOVERY_FIELDS = {
     # restate the one-number/many-customers topology adds no build permission
     # and caused otherwise complete CS builds to loop.
     "whatsapp_scale",
+    # These details improve an agent, but none grants an integration,
+    # external action, or permission. Requiring every owner to design sample
+    # dialogues, quantify volume, and nominate a reviewer turned a short
+    # WhatsApp intake into a questionnaire and repeatedly stalled creation.
+    "allowed_actions",
+    "tone_style",
+    "ideal_conversations",
+    "avoided_conversations",
+    "knowledge_sources",
+    "daily_chat_volume",
+    "expected_outputs",
+    "vision_requirement",
+    "go_live_approver",
 }
 _PERSONAL_OPTIONAL_DISCOVERY_FIELDS = {
     # Volume is useful for capacity planning, but it does not change the
@@ -684,7 +697,7 @@ def discovery_file_capability(answers: dict[str, Any] | None) -> str:
     receive_text = _normalize_evidence_text(
         " ".join(
             str(data.get(field) or "")
-            for field in ("capabilities", "knowledge_sources", "vision_requirement")
+            for field in ("main_tasks", "capabilities", "knowledge_sources", "vision_requirement")
         )
     )
     generate_text = _normalize_evidence_text(
@@ -937,6 +950,19 @@ def validate_agent_discovery(
     usage_context = _normalize_usage_context(answers.get("usage_context"))
     if usage_context:
         answers["usage_context"] = usage_context
+
+    # A concrete receipt/photo/document workflow is an explicit capability
+    # decision in the owner's own words. Preserve it as the capability answer
+    # so the validator does not make Arthur ask the same fact again using the
+    # artificial label "vision" or "file capability".
+    if not _is_answered(answers.get("capabilities")) and _is_answered(
+        answers.get("main_tasks")
+    ):
+        inferred_file_capability = discovery_file_capability(
+            {"main_tasks": answers.get("main_tasks")}
+        )
+        if inferred_file_capability:
+            answers["capabilities"] = str(answers["main_tasks"])
 
     missing_fields: list[str] = []
     invalid_fields: list[str] = []

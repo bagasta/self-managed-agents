@@ -48,6 +48,11 @@ _INCOMPLETE_BUILDER_REPLY_MARKERS = (
     "placeholder",
     "lanjut buat",
     "lanjutkan buat",
+    "panggil perencanaan",
+    "panggil dulu perencanaan",
+    "panggil plan",
+    "sedang merencanakan",
+    "semua data yang sudah terkumpul",
 )
 
 _UPDATE_INTENT_TOOLS = {
@@ -143,6 +148,17 @@ def _has_whatsapp_onboarding(reply: str) -> bool:
 def _looks_like_incomplete_builder_reply(reply: str) -> bool:
     normalized = reply.lower()
     return any(marker in normalized for marker in _INCOMPLETE_BUILDER_REPLY_MARKERS)
+
+
+def _is_simple_greeting(user_message: str) -> bool:
+    text = " ".join(str(user_message or "").casefold().split()).strip(".,!🙏👋🙂😊")
+    return bool(
+        re.fullmatch(
+            r"(?:halo|hai|hi|hello|p|pagi|siang|sore|malam)"
+            r"(?:\s+(?:arthur|bro|sis|min|admin))?",
+            text,
+        )
+    )
 
 
 def _looks_like_technical_builder_reply(reply: str) -> bool:
@@ -615,6 +631,15 @@ def ensure_non_empty_reply(
     if text:
         if _is_builder_context(steps, active_groups):
             text = _sanitize_builder_channel_reply(text)
+            if (
+                _looks_like_incomplete_builder_reply(text)
+                and not any(name in _BUILDER_TOOLS for name in _step_tool_names(steps))
+                and _is_simple_greeting(user_message)
+            ):
+                return (
+                    "Halo! Aku Arthur 👋 Aku bisa bantu bikin, mengubah, atau mengecek "
+                    "AI agent WhatsApp. Ceritakan kebutuhanmu, ya."
+                )
             if _looks_like_incomplete_builder_reply(text) and not any(
                 name in _BUILDER_TOOLS for name in _step_tool_names(steps)
             ):

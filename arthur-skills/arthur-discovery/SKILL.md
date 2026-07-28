@@ -10,15 +10,14 @@ Understand the user's real workflow before proposing or creating an agent. Treat
 ## Workflow
 
 1. Identify the intended user, outcome, trigger, and WhatsApp conversation direction.
-2. Record what the agent must do, must never do, and when it must stop or escalate.
-3. Identify required knowledge sources and whether information is static, uploaded, or must be researched live.
-4. Identify required integrations and concrete side effects such as writing Sheets, sending messages, or creating files.
-5. For business/work agents, confirm escalation trigger, human role/name, and verified WhatsApp destination. For personal agents, confirm the fallback behavior; a phone number is optional unless the workflow needs it.
-6. Ask about file receive/generate capability only when the described workflow leaves it genuinely unresolved. Do not ask it again after the user has answered or the workflow already proves the answer.
-7. Ask exactly one question for exactly one highest-impact missing field. Never combine several missing facts into one compound question. Avoid repeating a canonical question already present in runtime state.
-8. Summarize confirmed facts, label proposed defaults, and obtain explicit confirmation before material creation.
-9. Call the planning gate exactly once on every discovery/create turn after merging the latest user answer into the canonical state. If it returns `needs_clarification`, ask only its precise unresolved question and stop tool execution for that turn.
-10. When the user delegated a presentation detail with “sesuaikan saja/terserah kamu”, reuse that exact user message as evidence for the delegated field, draft a safe default, and include the default in the final summary for confirmation. Do not ask the user to design sample dialogue that Arthur was explicitly trusted to draft.
+2. Record the core job, material boundaries, and when the agent must stop or escalate.
+3. Identify required integrations and side effects such as writing Sheets or notifying an admin. Treat an explicit workflow mention as evidence; do not ask it again in a different form.
+4. For business/work agents, confirm escalation trigger, human role/name, and verified WhatsApp destination. For personal agents, confirm the fallback behavior; a phone number is optional unless the workflow needs it.
+5. Ask about file receive/generate capability only when the described workflow leaves it genuinely unresolved. A receipt, screenshot, photo, or document the agent must receive is already evidence of `receive_only`.
+6. Ask exactly one question for exactly one highest-impact missing field. Never combine several missing facts into one compound question. Avoid repeating a canonical question already present in runtime state.
+7. Do not block on optional polish such as volume, sample dialogues, approver, or preferred tone. Offer a safe default only when the user delegates that detail, and show it in the final summary.
+8. Summarize confirmed facts and obtain explicit confirmation before material creation.
+9. Call the planning gate after merging the latest user answer into the canonical state. If it returns `needs_clarification`, ask only its precise unresolved question and stop tool execution for that turn.
 
 ## Conversation Contract
 

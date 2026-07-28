@@ -261,12 +261,25 @@ _BUILD_PROGRESS_TOOLS = frozenset(
 )
 
 
+def _is_non_actionable_builder_greeting(user_message: str) -> bool:
+    """Return true only for a greeting that must not trigger builder work."""
+    text = " ".join(str(user_message or "").casefold().split()).strip(".,!🙏👋🙂😊")
+    return bool(
+        re.fullmatch(
+            r"(?:halo|hai|hi|hello|p|pagi|siang|sore|malam)"
+            r"(?:\s+(?:arthur|bro|sis|min|admin))?",
+            text,
+        )
+    )
+
+
 def _needs_builder_plan_completion(
     steps: list[dict[str, Any]],
     *,
     is_builder: bool,
     primary_skill: str | None,
     workflow_state: str | None,
+    user_message: str = "",
 ) -> bool:
     """Require the deterministic planning gate on every discovery/create turn."""
     if not is_builder or primary_skill not in {
@@ -275,11 +288,17 @@ def _needs_builder_plan_completion(
     }:
         return False
     if workflow_state not in {
+        "idle",
         "discovery",
         "awaiting_confirmation",
         "ready_to_create",
         "creating",
     }:
+        return False
+    # A greeting is not discovery evidence or a request to make/edit an agent.
+    # Running the recovery LLM pass here replaced a perfectly natural greeting
+    # with leaked internal text such as "saya panggil perencanaan".
+    if _is_non_actionable_builder_greeting(user_message):
         return False
     tool_names = {
         str(step.get("tool", "")).strip()
