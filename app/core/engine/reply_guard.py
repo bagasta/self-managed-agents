@@ -294,7 +294,55 @@ def _render_builder_questions(questions: Any) -> str | None:
     return question_texts[0]
 
 
-def _is_natural_builder_clarification(text: str) -> bool:
+_CLARIFICATION_TOPIC_SIGNAL_GROUPS: dict[str, tuple[tuple[str, ...], ...]] = {
+    "problem": (
+        ("masalah", "kendala", "kewalahan", "sulit", "problem", "challenge", "struggle", "pain"),
+    ),
+    "usage_context": (
+        ("pribadi", "personal"),
+        ("bisnis", "usaha", "pekerjaan", "kerja", "business", "work"),
+    ),
+    "agent_name": (("nama", "name", "call the agent", "call it"),),
+    "audience": (
+        ("siapa", "who"),
+        ("chat", "pakai", "menggunakan", "customer", "pelanggan", "tim", "use"),
+    ),
+    "main_tasks": (
+        ("tugas", "kerjakan", "alur", "proses", "workflow", "task", "job", "do"),
+    ),
+    "capabilities": (
+        ("teks", "chat", "file", "gambar", "foto", "laporan", "text", "image", "report"),
+    ),
+    "prohibited_actions": (
+        ("tidak boleh", "dilarang", "batas", "keputusan", "must not", "not allowed", "boundary"),
+    ),
+    "allowed_actions": (
+        ("boleh", "wewenang", "izin", "allowed", "authority", "permission"),
+    ),
+    "tone_style": (("tone", "gaya", "bahasa", "style", "language"),),
+    "ideal_conversations": (("contoh", "percakapan", "example", "conversation"),),
+    "avoided_conversations": (
+        ("hindari", "jangan", "red line", "avoid", "must not"),
+    ),
+    "unknown_handling": (
+        ("tidak tahu", "tidak tersedia", "tidak pasti", "don't know", "not available", "uncertain"),
+    ),
+    "escalation_target": (
+        ("eskalasi", "manusia", "admin", "owner", "escalat", "human"),
+        ("siapa", "mana", "who", "which", "recipient", "penerima"),
+    ),
+    "knowledge_sources": (
+        ("sumber", "knowledge", "dokumen", "website", "database", "source"),
+    ),
+    "integrations": (
+        ("integrasi", "google", "crm", "payment", "database", "integration", "system"),
+    ),
+    "expected_outputs": (("output", "hasil", "laporan", "spreadsheet", "report"),),
+    "vision_requirement": (("gambar", "foto", "image", "photo", "vision"),),
+}
+
+
+def _is_natural_builder_clarification(text: str, *, topic: str = "") -> bool:
     """Keep a concise model-written question instead of forcing form copy.
 
     ``plan_agent`` remains authoritative about *what* is unresolved, while the
@@ -303,7 +351,11 @@ def _is_natural_builder_clarification(text: str) -> bool:
     misleading progress replies.
     """
     candidate = str(text or "").strip()
-    if not candidate or "?" not in candidate or len(candidate) > 700:
+    if (
+        not candidate
+        or candidate.count("?") != 1
+        or len(candidate) > 700
+    ):
         return False
     normalized = candidate.casefold()
     internal_markers = (
@@ -326,19 +378,41 @@ def _is_natural_builder_clarification(text: str) -> bool:
         "siap digunakan",
         "siap dipakai",
     )
-    return not any(marker in normalized for marker in (*internal_markers, *premature_success_markers))
+    if any(marker in normalized for marker in (*internal_markers, *premature_success_markers)):
+        return False
+
+    signal_groups = _CLARIFICATION_TOPIC_SIGNAL_GROUPS.get(str(topic or "").strip())
+    if not signal_groups:
+        return False
+    return all(
+        any(signal in normalized for signal in group)
+        for group in signal_groups
+    )
 
 
-def _builder_clarification_reply(data: dict[str, Any]) -> str | None:
-    """Turn deterministic builder blockers into questions, never failure text."""
+def _builder_clarification_entry(data: dict[str, Any]) -> tuple[str, str] | None:
     questions = data.get("capability_clarifications") or []
     if not questions:
         progress = data.get("discovery_progress")
         if isinstance(progress, dict):
             questions = progress.get("next_questions") or []
-    rendered = _render_builder_questions(questions)
-    if rendered:
-        return rendered
+    if not isinstance(questions, list):
+        return None
+    for item in questions:
+        if not isinstance(item, dict):
+            continue
+        topic = str(item.get("topic") or "").strip()
+        question = str(item.get("question") or "").strip()
+        if topic != "user_confirmed" and question:
+            return topic, question
+    return None
+
+
+def _builder_clarification_reply(data: dict[str, Any]) -> str | None:
+    """Turn deterministic builder blockers into questions, never failure text."""
+    entry = _builder_clarification_entry(data)
+    if entry:
+        return entry[1]
 
     code = str(data.get("error_code") or "").strip().upper()
     error = str(data.get("error") or "").strip().lower()
@@ -403,6 +477,21 @@ def _plan_agent_clarification_reply(steps: list[dict[str, Any]]) -> str | None:
         # A newer ready/blocked/temporary result supersedes every older plan.
         return None
     return None
+
+
+def _plan_agent_clarification_topic(steps: list[dict[str, Any]]) -> str:
+    """Return the authoritative unresolved discovery topic from the latest plan."""
+    for step in reversed(steps or []):
+        if step.get("tool") != "plan_agent":
+            continue
+        data = _parse_step_result(step.get("result"))
+        if not data:
+            return ""
+        if str(data.get("plan_status") or "").strip().lower() != "needs_clarification":
+            return ""
+        entry = _builder_clarification_entry(data)
+        return entry[0] if entry else ""
+    return ""
 
 
 def _builder_fallback_reply(
@@ -678,9 +767,10 @@ def ensure_non_empty_reply(
     # Fall back to canonical copy only for empty/internal/misleading replies.
     plan_clarification = _plan_agent_clarification_reply(steps)
     if plan_clarification:
+        plan_topic = _plan_agent_clarification_topic(steps)
         if plan_clarification.casefold() in text.casefold():
             return text
-        if _is_natural_builder_clarification(text):
+        if _is_natural_builder_clarification(text, topic=plan_topic):
             return text
         return plan_clarification
 

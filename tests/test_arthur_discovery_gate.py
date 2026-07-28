@@ -271,6 +271,23 @@ def test_cs_workflow_infers_business_context_from_user_words():
     )
 
 
+def test_cs_request_alone_is_enough_to_skip_personal_versus_business_question():
+    message = "mau bikin agent AI untuk CS bisa?"
+
+    enriched = infer_low_risk_discovery_facts(
+        {},
+        user_messages=[message],
+    )
+    result = validate_agent_discovery(
+        enriched,
+        user_messages=[message],
+        require_evidence=True,
+    )
+
+    assert result["normalized_answers"]["usage_context"] == "work"
+    assert result["next_questions"][0]["topic"] == "problem"
+
+
 def test_escalate_to_me_binds_authenticated_owner_without_reasking_details():
     answers = {
         "unknown_handling": "Berhenti menjawab dan eskalasi jika jawabannya tidak tersedia.",

@@ -37,6 +37,19 @@ def test_intent_and_primary_skill_routing_are_not_beechat_specific():
     assert resolve_primary_skill("create", "awaiting_confirmation") == "arthur-create-agent"
 
 
+def test_builder_management_state_machine_routes_each_goal_to_its_primary_skill():
+    cases = (
+        ("create", "discovery", "arthur-discovery"),
+        ("create", "awaiting_confirmation", "arthur-create-agent"),
+        ("demo", "agent_created", "arthur-whatsapp-demo-channel"),
+        ("edit", "agent_created", "arthur-edit-agent"),
+        ("lifecycle", "agent_created", "arthur-lifecycle-safety"),
+    )
+
+    for intent, state, expected_skill in cases:
+        assert resolve_primary_skill(intent, state) == expected_skill
+
+
 def test_existing_agent_complaint_routes_to_edit_with_media_context():
     message = "ini kok dia gabisa nerima foto struk??"
 

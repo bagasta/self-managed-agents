@@ -745,6 +745,49 @@ def test_plan_clarification_keeps_natural_english_question_after_language_switch
     assert out == reply
 
 
+def test_plan_clarification_rejects_incomplete_usage_context_fragment():
+    question = "Agent ini akan dipakai untuk kebutuhan pribadi atau bisnis?"
+    steps = [
+        {
+            "tool": "plan_agent",
+            "result": json.dumps(
+                {
+                    "plan_status": "needs_clarification",
+                    "capability_clarifications": [
+                        {"topic": "usage_context", "question": question}
+                    ],
+                }
+            ),
+        }
+    ]
+
+    out = ensure_non_empty_reply("Atau ada keperluan pribadi?", steps)
+
+    assert out == question
+
+
+def test_plan_clarification_keeps_complete_contextual_usage_question():
+    steps = [
+        {
+            "tool": "plan_agent",
+            "result": json.dumps(
+                {
+                    "plan_status": "needs_clarification",
+                    "capability_clarifications": [
+                        {
+                            "topic": "usage_context",
+                            "question": "Agent ini untuk kebutuhan pribadi atau bisnis?",
+                        }
+                    ],
+                }
+            ),
+        }
+    ]
+    reply = "Bisa. Is this agent for personal use or for your business?"
+
+    assert ensure_non_empty_reply(reply, steps) == reply
+
+
 def test_plan_clarification_still_rejects_premature_success_with_question():
     question = "Mau kasih nama apa untuk agent-nya?"
     steps = [
