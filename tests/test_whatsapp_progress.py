@@ -208,6 +208,42 @@ def test_ascii_text_request_does_not_trigger_file_delivery_followup():
     assert path is None
 
 
+def test_escaped_newline_after_shared_path_is_not_part_of_filename():
+    from app.core.engine.agent_followups import _extract_shared_workspace_file_path
+
+    assert (
+        _extract_shared_workspace_file_path(
+            "/workspace/shared/url.txt\\n\\nPastikan lewat WhatsApp"
+        )
+        == "/workspace/shared/url.txt"
+    )
+
+
+def test_deployment_url_txt_is_not_sent_as_customer_document():
+    from app.core.engine.agent_followups import _needs_whatsapp_file_delivery_followup
+
+    public_url = "https://example-deploy.trycloudflare.com"
+    steps = [
+        {
+            "tool": "task",
+            "result": (
+                f"Website selesai: {public_url}\\n"
+                "/workspace/shared/url.txt\\n\\nSIAP_DIKIRIM_PARENT"
+            ),
+        }
+    ]
+
+    needs_delivery, path = _needs_whatsapp_file_delivery_followup(
+        "buatkan website pemesanan dimsum dan kasih linknya",
+        {"whatsapp_media": True},
+        steps,
+        f"Website sudah online: {public_url}",
+    )
+
+    assert needs_delivery is False
+    assert path is None
+
+
 @pytest.mark.asyncio
 async def test_shared_pdf_followup_invokes_document_tool_directly():
     from app.core.engine.agent_runner import _deliver_shared_whatsapp_file_via_tool

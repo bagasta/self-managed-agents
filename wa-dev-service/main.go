@@ -76,6 +76,8 @@ func main() {
 	mux.HandleFunc("POST /send/document", api.SendDocument)
 	mux.HandleFunc("POST /send/document/url", api.SendDocumentURL)
 	mux.HandleFunc("POST /resolve-phones", api.ResolvePhones)
+	mux.HandleFunc("POST /typing/start", api.StartTyping)
+	mux.HandleFunc("POST /typing/stop", api.StopTyping)
 
 	// Dashboard
 	mux.Handle("/", http.FileServer(http.Dir("./dashboard")))

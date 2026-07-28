@@ -96,6 +96,40 @@ func (a *API) SendText(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "sent", "message_id": string(messageID)})
 }
 
+// POST /typing/start
+// Body: {"to": "+62xxx or chat_id@s.whatsapp.net"}
+func (a *API) StartTyping(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		To string `json:"to"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.To == "" {
+		http.Error(w, `{"error":"to is required"}`, http.StatusBadRequest)
+		return
+	}
+	if err := a.wa.StartTyping(body.To); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "typing"})
+}
+
+// POST /typing/stop
+// Body: {"to": "+62xxx or chat_id@s.whatsapp.net"}
+func (a *API) StopTyping(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		To string `json:"to"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.To == "" {
+		http.Error(w, `{"error":"to is required"}`, http.StatusBadRequest)
+		return
+	}
+	if err := a.wa.StopTyping(body.To); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "paused"})
+}
+
 // POST /send/contact
 // Body: {"to": "...", "display_name": "Arthur Trial", "phone": "+628xxx"}
 func (a *API) SendContact(w http.ResponseWriter, r *http.Request) {

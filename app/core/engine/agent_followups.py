@@ -14,7 +14,7 @@ from app.core.engine.agent_step_utils import (
 )
 from app.core.engine.tool_builder import _is_enabled
 
-_SHARED_WORKSPACE_FILE_RE = re.compile(r"(/workspace/shared/[^\s`'\"),]+)")
+_SHARED_WORKSPACE_FILE_RE = re.compile(r"(/workspace/shared/[^\s\\`'\"),]+)")
 
 
 def _has_external_service_fallback_blocked_step(steps: list[dict[str, Any]]) -> bool:
@@ -132,6 +132,18 @@ def _needs_whatsapp_file_delivery_followup(
         return False, None
     path = _extract_shared_workspace_file_from_steps(steps, final_reply)
     if not path:
+        return False, None
+    # Subagents use url.txt as a control-plane handoff for deployed websites.
+    # It is not a customer deliverable: the public URL belongs in the text reply.
+    filename = path.rsplit("/", 1)[-1].lower()
+    if (
+        filename in {"url.txt", "deploy_url.txt", "deployment_url.txt"}
+        and _is_website_or_app_request(user_message)
+        and (
+            _has_public_url_in_text(final_reply)
+            or _has_public_url_in_steps(steps)
+        )
+    ):
         return False, None
     if not _is_whatsapp_file_delivery_request(user_message, steps, final_reply):
         return False, None
