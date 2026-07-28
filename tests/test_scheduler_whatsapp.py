@@ -1,13 +1,90 @@
+import uuid
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.engine.agent_tool_setup import _should_self_heal_whatsapp_scheduler
+from app.core.tools.scheduler_tool import build_scheduler_tools
 from app.core.workers.scheduler_service import (
+    _SCHEDULER_HEARTBEAT_KEY,
     _scheduled_channel_config,
     _send_scheduled_channel_message,
     _tick_with_lock,
+    get_external_scheduler_health,
+    publish_scheduler_heartbeat,
 )
+from app.models.scheduled_job import ScheduledJob
+
+
+@pytest.mark.asyncio
+async def test_scheduler_heartbeat_proves_external_worker_liveness(monkeypatch) -> None:
+    class FakeRedis:
+        def __init__(self) -> None:
+            self.values = {}
+
+        async def set(self, key, value, ex):
+            self.values[key] = value
+            assert ex >= 30
+
+        async def get(self, key):
+            return self.values.get(key)
+
+    redis = FakeRedis()
+
+    async def fake_get_redis():
+        return redis
+
+    monkeypatch.setattr(
+        "app.core.workers.scheduler_service.get_redis",
+        fake_get_redis,
+    )
+
+    assert await get_external_scheduler_health() == "stopped"
+    assert await publish_scheduler_heartbeat() is True
+    assert _SCHEDULER_HEARTBEAT_KEY in redis.values
+    assert await get_external_scheduler_health() == "ok"
+
+
+@pytest.mark.asyncio
+async def test_set_reminder_with_runtime_contract_persists_scheduled_job() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    agent_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(ScheduledJob.__table__.create)
+
+        tools = build_scheduler_tools(session_id, agent_id, session_factory)
+        set_reminder = next(tool for tool in tools if tool.name == "set_reminder")
+
+        result = await set_reminder.ainvoke({
+            "label": "followup_customer",
+            "message": "Saatnya follow-up customer.",
+            "schedule": "in 2m",
+        })
+
+        assert "berhasil di-set" in result
+        async with session_factory() as db:
+            job = (
+                await db.execute(
+                    select(ScheduledJob).where(
+                        ScheduledJob.session_id == session_id,
+                        ScheduledJob.label == "followup_customer",
+                    )
+                )
+            ).scalar_one()
+
+        assert job.agent_id == agent_id
+        assert job.payload == "Saatnya follow-up customer."
+        assert job.status == "active"
+        assert job.run_once_at is not None
+        assert job.next_run_at == job.run_once_at
+    finally:
+        await engine.dispose()
 
 
 def test_whatsapp_reminder_request_self_heals_scheduler_when_disabled() -> None:
@@ -16,6 +93,16 @@ def test_whatsapp_reminder_request_self_heals_scheduler_when_disabled() -> None:
     assert _should_self_heal_whatsapp_scheduler(
         session,
         "ingetin saya follow-up customer besok jam 9",
+        {"scheduler": False},
+    )
+
+
+def test_natural_whatsapp_reminder_request_self_heals_scheduler_when_disabled() -> None:
+    session = SimpleNamespace(channel_type="whatsapp")
+
+    assert _should_self_heal_whatsapp_scheduler(
+        session,
+        "nanti jam 5 kabarin saya buat follow-up customer",
         {"scheduler": False},
     )
 

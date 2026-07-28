@@ -565,6 +565,61 @@ def _disabled_capability_guard_reply(
     )
 
 
+def _scheduler_success_guard_reply(
+    reply: str,
+    steps: list[dict[str, Any]],
+) -> str | None:
+    """Block reminder success claims that have no successful scheduler tool result."""
+    text = (reply or "").strip()
+    normalized = text.casefold()
+    if not text or re.search(
+        r"\b(?:belum|tidak|gagal)\b.{0,32}\b(?:reminder|pengingat|jadwal|dibuat|disetel|diatur|dibatalkan)\b",
+        normalized,
+    ):
+        return None
+
+    success_claim = any(
+        re.search(pattern, normalized)
+        for pattern in (
+            r"\b(?:reminder|pengingat|jadwal)\b.{0,24}\b(?:sudah|telah|berhasil)\b.{0,24}\b(?:dibuat|disetel|diatur|aktif|dibatalkan)\b",
+            r"\b(?:sudah|telah|berhasil)\b.{0,24}\b(?:set|buat|atur|batalkan|membuat|mengatur|membatalkan)\b.{0,24}\b(?:reminder|pengingat|jadwal)\b",
+        )
+    )
+    if not success_claim:
+        return None
+
+    scheduler_steps = [
+        step for step in (steps or [])
+        if step.get("tool") in {
+            "set_reminder",
+            "set_multiple_reminders",
+            "cancel_reminder",
+        }
+    ]
+    for step in reversed(scheduler_steps):
+        result = str(step.get("result") or "").strip()
+        result_lower = result.casefold()
+        if (
+            result
+            and not result_lower.startswith("[error]")
+            and (
+                "berhasil di-set" in result_lower
+                or "berhasil dibatalkan" in result_lower
+            )
+        ):
+            return None
+
+    if scheduler_steps:
+        return (
+            "Reminder belum berhasil diproses karena tool scheduler mengembalikan kegagalan. "
+            "Silakan periksa kembali waktu atau jadwalnya, lalu coba lagi."
+        )
+    return (
+        "Reminder belum berhasil dibuat karena tool scheduler belum dijalankan. "
+        "Kirim ulang waktu dan pesan pengingatnya agar saya bisa menjadwalkannya."
+    )
+
+
 def ensure_non_empty_reply(
     reply: str,
     steps: list[dict[str, Any]],
@@ -691,6 +746,9 @@ def ensure_non_empty_reply(
                 or _looks_like_technical_builder_reply(text)
             ):
                 return builder_reply
+        scheduler_guard_reply = _scheduler_success_guard_reply(text, steps)
+        if scheduler_guard_reply:
+            return scheduler_guard_reply
         disabled_guard_reply = _disabled_capability_guard_reply(
             text,
             tools_config=tools_config,

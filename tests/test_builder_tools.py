@@ -1286,6 +1286,93 @@ class TestComposeAgentBlueprint:
 
 
 class TestComposeAgentInstructions:
+    def test_scheduler_instructions_use_runtime_contract_and_require_tool_success(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "compose_agent_instructions")
+        stale_writer_output = (
+            "Kamu adalah asisten pengingat. "
+            "Gunakan set_reminder(message, run_at) untuk membuat reminder dan "
+            "cancel_reminder(id) untuk membatalkannya. "
+        ) * 8
+
+        with patch(
+            "app.core.tools.builder_tools._call_instruction_writer",
+            new=AsyncMock(return_value=stale_writer_output),
+        ):
+            result = _run(tool.ainvoke({
+                "preset_id": "scheduler_assistant",
+                "agent_name": "Pengingat",
+                "channel": "whatsapp",
+                "business_context": "Membantu user membuat dan membatalkan reminder WhatsApp.",
+            }))
+
+        instructions = json.loads(result)["instructions"]
+        assert "set_reminder(label, message, schedule)" in instructions
+        assert "set_multiple_reminders(reminders)" in instructions
+        assert "cancel_reminder(label)" in instructions
+        assert "set_reminder(message, run_at)" not in instructions
+        assert "cancel_reminder(id)" not in instructions
+        assert "Jangan pernah mengatakan reminder berhasil" in instructions
+        assert "reminder dianggap aktif hanya setelah" in instructions
+
+    def test_scheduler_writer_failure_keeps_runtime_contract(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "compose_agent_instructions")
+
+        with patch(
+            "app.core.tools.builder_tools._call_instruction_writer",
+            new=AsyncMock(side_effect=RuntimeError("writer down")),
+        ):
+            result = _run(tool.ainvoke({
+                "preset_id": "scheduler_assistant",
+                "agent_name": "Pengingat",
+                "channel": "whatsapp",
+                "business_context": "Membantu user membuat dan membatalkan reminder WhatsApp.",
+            }))
+
+        fallback = json.loads(result)["fallback_skeleton"]
+        assert "set_reminder(label, message, schedule)" in fallback
+        assert "cancel_reminder(label)" in fallback
+        assert "Jangan pernah mengatakan reminder berhasil" in fallback
+
+    def test_cs_instructions_inherit_reminder_contract_from_blueprint(self):
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        tool = next(t for t in tools if t.name == "compose_agent_instructions")
+        writer_output = (
+            "Kamu adalah agent CS yang menjawab pertanyaan customer dan melakukan follow-up. "
+        ) * 12
+
+        with patch(
+            "app.core.tools.builder_tools._call_instruction_writer",
+            new=AsyncMock(return_value=writer_output),
+        ):
+            result = _run(tool.ainvoke({
+                "preset_id": "cs_whatsapp_basic",
+                "agent_name": "OrderCare",
+                "channel": "whatsapp",
+                "business_context": "Melayani pertanyaan customer melalui WhatsApp.",
+                "agent_blueprint": json.dumps({
+                    "requested_features": ["text_only", "reminder"],
+                    "workflow_steps": [
+                        "Mengirim pengingat follow-up customer pada waktu yang diminta."
+                    ],
+                }),
+            }))
+
+        instructions = json.loads(result)["instructions"]
+        assert "set_reminder(label, message, schedule)" in instructions
+        assert "set_multiple_reminders(reminders)" in instructions
+        assert "Jangan pernah mengatakan reminder berhasil" in instructions
+
     def test_event_cs_fallback_does_not_invent_payment_or_file_delivery(self):
         from app.core.tools.builder_tools import build_builder_tools
 

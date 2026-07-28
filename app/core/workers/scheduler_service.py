@@ -19,6 +19,8 @@ import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import case, or_, select
 
+from app.core.infra.redis_client import get_redis
+
 logger = structlog.get_logger(__name__)
 _scheduler: AsyncIOScheduler | None = None
 
@@ -28,6 +30,39 @@ _job_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_JOBS)
 _TICK_INTERVAL_SECONDS = 10
 _RUNNING_JOB_STALE_AFTER = timedelta(minutes=15)
 _running_tasks: set[asyncio.Task] = set()
+_SCHEDULER_HEARTBEAT_KEY = "health:scheduler_worker"
+_SCHEDULER_HEARTBEAT_TTL_SECONDS = max(30, _TICK_INTERVAL_SECONDS * 4)
+
+
+async def publish_scheduler_heartbeat() -> bool:
+    """Publish a short-lived liveness marker for the standalone worker."""
+    redis = await get_redis()
+    if redis is None:
+        logger.error("scheduler_worker.heartbeat_redis_unavailable")
+        return False
+    try:
+        await redis.set(
+            _SCHEDULER_HEARTBEAT_KEY,
+            datetime.now(timezone.utc).isoformat(),
+            ex=_SCHEDULER_HEARTBEAT_TTL_SECONDS,
+        )
+        return True
+    except Exception as exc:
+        logger.error("scheduler_worker.heartbeat_failed", error=str(exc))
+        return False
+
+
+async def get_external_scheduler_health() -> str:
+    """Return ok only when the external worker refreshed its Redis heartbeat."""
+    redis = await get_redis()
+    if redis is None:
+        return "unreachable"
+    try:
+        heartbeat = await redis.get(_SCHEDULER_HEARTBEAT_KEY)
+    except Exception as exc:
+        logger.warning("scheduler_worker.health_read_failed", error=str(exc))
+        return "unreachable"
+    return "ok" if heartbeat else "stopped"
 
 
 def _track_task(task: asyncio.Task) -> None:
@@ -430,6 +465,7 @@ async def run_scheduler_loop() -> None:
 
     while not stop_event.is_set():
         try:
+            await publish_scheduler_heartbeat()
             await _tick_with_lock()
         except Exception as exc:
             logger.error("scheduler_worker.tick_error", error=str(exc))

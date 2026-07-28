@@ -296,11 +296,14 @@ async def health_detailed(db: AsyncSession = Depends(get_db)) -> dict:
     except Exception as exc:
         checks["database"] = f"error: {exc}"
 
-    from app.core.workers.scheduler_service import is_scheduler_running
+    from app.core.workers.scheduler_service import (
+        get_external_scheduler_health,
+        is_scheduler_running,
+    )
     if settings.embedded_scheduler_enabled:
         checks["scheduler"] = "ok" if is_scheduler_running() else "stopped"
     else:
-        checks["scheduler"] = "external"
+        checks["scheduler"] = await get_external_scheduler_health()
 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -309,7 +312,7 @@ async def health_detailed(db: AsyncSession = Depends(get_db)) -> dict:
     except Exception:
         checks["wa_service"] = "unreachable"
 
-    all_ok = all(v in {"ok", "external"} for v in checks.values())
+    all_ok = all(v == "ok" for v in checks.values())
     return JSONResponse(
         status_code=200 if all_ok else 503,
         content={

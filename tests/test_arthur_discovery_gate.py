@@ -515,6 +515,85 @@ def test_plan_agent_is_ready_with_confirmed_personal_discovery():
     assert payload["recommended_config"]["tools_config"]["whatsapp_media"] is False
 
 
+def test_plan_agent_enables_scheduler_for_confirmed_cs_reminder_workflow():
+    async def preview_agent_creation_entitlement(**_kwargs):
+        return {"checked": True, "allowed": True}
+
+    plan = build_builder_planning_tools(
+        preview_agent_creation_entitlement=preview_agent_creation_entitlement
+    )["plan_agent"]
+    discovery = _work_discovery(
+        main_tasks=[
+            "Menjawab pertanyaan customer dari sumber resmi.",
+            "Mengirim pengingat follow-up customer pada waktu yang diminta.",
+        ],
+        capabilities=[
+            "Menjawab pertanyaan",
+            "Membuat reminder follow-up",
+            "Hanya chat teks; tidak perlu file",
+        ],
+        vision_requirement="Tidak perlu gambar atau vision.",
+    )
+
+    payload = json.loads(
+        _run(
+            plan.ainvoke(
+                {
+                    "user_goal": "Buat agent CS WhatsApp untuk customer",
+                    "agent_name": "OrderCare",
+                    "requested_features": "text_only",
+                    "discovery_answers": discovery,
+                }
+            )
+        )
+    )
+
+    assert payload["plan_status"] == "ready"
+    assert payload["detected_preset"] in {"cs_whatsapp_basic", "ecommerce_cs"}
+    assert payload["recommended_config"]["tools_config"]["scheduler"] is True
+    assert "reminder" in payload["blueprint_seed"]["requested_features"]
+
+
+def test_plan_agent_does_not_enable_scheduler_for_cs_schedule_information_only():
+    async def preview_agent_creation_entitlement(**_kwargs):
+        return {"checked": True, "allowed": True}
+
+    plan = build_builder_planning_tools(
+        preview_agent_creation_entitlement=preview_agent_creation_entitlement
+    )["plan_agent"]
+    discovery = _work_discovery(
+        agent_name="ClassCare",
+        problem="Customer sering bertanya jadwal kelas yang tersedia.",
+        main_tasks=[
+            "Menjawab pertanyaan customer tentang jadwal kelas dari katalog resmi.",
+            "Meneruskan pertanyaan yang tidak tersedia ke admin.",
+        ],
+        capabilities=[
+            "Menjawab informasi jadwal kelas",
+            "Hanya chat teks; tidak perlu file",
+        ],
+        vision_requirement="Tidak perlu gambar atau vision.",
+    )
+
+    payload = json.loads(
+        _run(
+            plan.ainvoke(
+                {
+                    "user_goal": "Buat agent CS untuk menjawab jadwal kelas",
+                    "agent_name": "ClassCare",
+                    "requested_features": "text_only",
+                    "discovery_answers": discovery,
+                }
+            )
+        )
+    )
+
+    assert payload["plan_status"] == "ready"
+    assert payload["detected_preset"] in {"cs_whatsapp_basic", "ecommerce_cs"}
+    assert payload["recommended_config"]["tools_config"]["scheduler"] is False
+    assert "reminder" not in payload["blueprint_seed"]["requested_features"]
+
+
 def test_plan_agent_reuses_persisted_facts_when_confirmation_payload_is_partial():
     async def preview_agent_creation_entitlement(**_kwargs):
         return {"checked": True, "allowed": True}

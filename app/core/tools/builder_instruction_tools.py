@@ -13,6 +13,7 @@ from app.core.tools.builder_intent import (
     _has_approval_state_contract,
     _looks_like_file_delivery_workflow,
     _looks_like_payment_approval_workflow,
+    _looks_like_scheduler_workflow,
     _sanitize_unverified_business_name,
     file_delivery_contract_issues,
 )
@@ -22,6 +23,43 @@ logger = structlog.get_logger(__name__)
 
 InstructionWriter = Callable[..., Awaitable[str]]
 LoggerProvider = Callable[[], Any]
+
+
+_SCHEDULER_INSTRUCTION_CONTRACT = """
+
+ATURAN REMINDER:
+- Untuk satu reminder, panggil set_reminder(label, message, schedule).
+- Untuk beberapa reminder dalam satu permintaan, panggil set_multiple_reminders(reminders).
+- Untuk melihat reminder aktif, panggil list_reminders().
+- Untuk membatalkan reminder, panggil cancel_reminder(label).
+- Jangan pernah mengatakan reminder berhasil dibuat atau dibatalkan sebelum tool terkait selesai dan mengembalikan respons sukses.
+- Jika tool mengembalikan [error] atau gagal dipanggil, jangan mengklaim berhasil. Jelaskan kegagalannya secara jujur dan minta data jadwal yang masih kurang bila diperlukan.
+- Jangan mensimulasikan reminder hanya dengan balasan chat; reminder dianggap aktif hanya setelah set_reminder atau set_multiple_reminders sukses.
+""".strip()
+
+
+def _ensure_scheduler_instruction_contract(
+    instructions: str,
+    *,
+    scheduler_enabled: bool,
+) -> str:
+    """Keep generated/fallback instructions aligned with the runtime tool schema."""
+    if not scheduler_enabled:
+        return instructions
+
+    normalized = (instructions or "").strip()
+    normalized = normalized.replace(
+        "set_reminder(message, run_at)",
+        "set_reminder(label, message, schedule)",
+    )
+    normalized = normalized.replace(
+        "cancel_reminder(id)",
+        "cancel_reminder(label)",
+    )
+
+    if _SCHEDULER_INSTRUCTION_CONTRACT not in normalized:
+        normalized = f"{normalized}\n\n{_SCHEDULER_INSTRUCTION_CONTRACT}".strip()
+    return normalized
 
 
 def build_builder_instruction_tools(
@@ -105,6 +143,14 @@ def build_builder_instruction_tools(
 
         # Build tool hints so the instruction writer knows which tools are available
         tc_preset = preset.get("tools_config", {})
+        scheduler_enabled = bool(
+            tc_preset.get("scheduler")
+            or _looks_like_scheduler_workflow(
+                business_context,
+                extra_rules,
+                agent_blueprint,
+            )
+        )
         tool_hints: list[str] = []
         if tc_preset.get("memory"):
             tool_hints.append(
@@ -142,9 +188,13 @@ def build_builder_instruction_tools(
         tool_hints.append(
             "- set_agent_memory(agent_id, key, value) — simpan soul atau blueprint ke memory agent setelah create, tanpa HTTP/API."
         )
-        if tc_preset.get("scheduler"):
+        if scheduler_enabled:
             tool_hints.append(
-                "- set_reminder(message, run_at) / list_reminders() / cancel_reminder(id) — jadwalkan pengingat otomatis untuk user."
+                "- set_reminder(label, message, schedule) / "
+                "set_multiple_reminders(reminders) / list_reminders() / "
+                "cancel_reminder(label) — jadwalkan pengingat otomatis untuk user. "
+                "Agent hanya boleh mengonfirmasi keberhasilan setelah tool selesai dengan respons sukses; "
+                "jika tool mengembalikan [error] atau gagal, agent wajib jujur dan tidak boleh mengklaim reminder aktif."
             )
         if tc_preset.get("rag"):
             tool_hints.append(
@@ -300,6 +350,10 @@ def build_builder_instruction_tools(
                 instructions,
                 business_context=business_context,
             )
+            instructions = _ensure_scheduler_instruction_contract(
+                instructions,
+                scheduler_enabled=scheduler_enabled,
+            )
 
             # Sanity check: flag only real template placeholders.
             placeholders = _find_unfilled_placeholders(instructions)
@@ -338,6 +392,10 @@ def build_builder_instruction_tools(
                 escalation_info=escalation_info,
                 extra_rules=extra_rules,
                 agent_blueprint=agent_blueprint,
+            )
+            fallback = _ensure_scheduler_instruction_contract(
+                fallback,
+                scheduler_enabled=scheduler_enabled,
             )
             return json.dumps({
                 "error": f"Gagal generate dengan model reasoning: {exc}",

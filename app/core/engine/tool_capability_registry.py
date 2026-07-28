@@ -77,7 +77,12 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
     ToolCapability(
         key="scheduler",
         label="Scheduler",
-        enabled_description="bisa membuat reminder atau jadwal otomatis.",
+        enabled_description=(
+            "bisa membuat reminder atau jadwal otomatis. Untuk satu reminder gunakan "
+            "set_reminder(label, message, schedule), untuk beberapa gunakan "
+            "set_multiple_reminders(reminders), dan batalkan dengan cancel_reminder(label). "
+            "Jangan klaim berhasil sebelum hasil tool menyatakan sukses."
+        ),
         disabled_reason="scheduler tidak tersedia pada run ini.",
         fallback_sentence="Saya belum bisa membuat reminder otomatis di run ini. Owner perlu mengaktifkan scheduler dulu.",
         high_risk=True,

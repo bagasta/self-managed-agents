@@ -151,6 +151,27 @@ def _combined_context_text(*parts: Any) -> str:
     return " ".join(str(part or "") for part in parts).lower()
 
 
+def _looks_like_scheduler_workflow(*parts: Any) -> bool:
+    """Detect an actual reminder action without treating schedule information as a job."""
+    text = _combined_context_text(*parts)
+    text = re.sub(
+        r"\b(?:tidak|nggak|enggak|gak|ga|tanpa|jangan)\s+"
+        r"(?:perlu\s+|butuh\s+|pakai\s+|gunakan\s+|membuat\s+|buat\s+)?"
+        r"(?:reminder|pengingat|alarm|timer)\b",
+        " ",
+        text,
+    )
+    scheduler_patterns = (
+        r"\b(?:reminder|remind|pengingat|alarm|timer)\b",
+        r"\b(?:ingatkan|ingetin|mengingatkan|jadwalkan|jadwalin|menjadwalkan)\b",
+        r"\bfollow[-\s]?up\b.{0,48}\b(?:otomatis|terjadwal|nanti|jam|tanggal|waktu)\b",
+        r"\b(?:otomatis|terjadwal|nanti|jam|tanggal|waktu)\b.{0,48}\bfollow[-\s]?up\b",
+        r"\b(?:kabari|kabarin|kabarkan|beritahu|notifikasi)\b.{0,48}\b(?:nanti|jam|tanggal|waktu)\b",
+        r"\b(?:nanti|jam|tanggal|waktu)\b.{0,48}\b(?:kabari|kabarin|kabarkan|beritahu|notifikasi)\b",
+    )
+    return any(re.search(pattern, text) for pattern in scheduler_patterns)
+
+
 _GENERIC_PAYMENT_APPROVAL_FALLBACK_TEXTS = (
     "kasus membutuhkan keputusan, akses, pembayaran, atau persetujuan manusia",
     "kasus membutuhkan keputusan, akses, pembayaran, atau persetujuan manusia",

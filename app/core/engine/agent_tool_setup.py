@@ -1,7 +1,6 @@
 """Tool and sub-agent setup for agent runs."""
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -37,6 +36,7 @@ from app.core.engine.tool_builder import (
 )
 from app.core.engine.sop_runtime_gate import filter_tools_by_sop
 from app.core.infra.sandbox import DockerSandbox
+from app.core.tools.builder_intent import _looks_like_scheduler_workflow
 from app.core.utils.phone_utils import normalize_phone
 from app.models.agent import Agent as AgentModel
 from app.models.session import Session
@@ -57,18 +57,12 @@ def is_operator_turn(user_message: str) -> bool:
     return user_message.startswith("[OPERATOR] ") or user_message.startswith("<OPERATOR>")
 
 
-_WHATSAPP_REMINDER_INTENT_RE = re.compile(
-    r"\b(reminder|remind|pengingat|ingatkan|ingetin|alarm|follow[-\s]?up|jadwalkan|jadwalin)\b",
-    re.IGNORECASE,
-)
-
-
 def _should_self_heal_whatsapp_scheduler(session: Session, user_message: str, tools_config: dict[str, Any]) -> bool:
     if getattr(session, "channel_type", None) != "whatsapp":
         return False
     if _is_enabled(tools_config, "scheduler", default=False):
         return False
-    return bool(_WHATSAPP_REMINDER_INTENT_RE.search(user_message or ""))
+    return _looks_like_scheduler_workflow(user_message)
 
 
 def _is_probable_lid(value: str | None) -> bool:

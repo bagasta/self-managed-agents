@@ -888,3 +888,43 @@ def test_builder_progress_claim_without_execution_is_rejected():
 
     assert "sekarang aku proses" not in out.lower()
     assert "belum ada eksekusi" in out.lower()
+def test_scheduler_success_claim_requires_successful_tool_step():
+    reply = ensure_non_empty_reply(
+        "Reminder sudah berhasil dibuat.",
+        [],
+        tools_config={"scheduler": True},
+        active_groups=["scheduler"],
+    )
+
+    assert "belum berhasil dibuat" in reply
+    assert "tool scheduler belum dijalankan" in reply
+
+
+def test_scheduler_failure_result_cannot_be_reported_as_success():
+    reply = ensure_non_empty_reply(
+        "Reminder sudah berhasil dibuat.",
+        [{"tool": "set_reminder", "result": "[error] Format schedule tidak dikenali"}],
+        tools_config={"scheduler": True},
+        active_groups=["scheduler"],
+    )
+
+    assert "belum berhasil diproses" in reply
+    assert "mengembalikan kegagalan" in reply
+
+
+def test_scheduler_success_result_keeps_success_reply():
+    original = "Reminder follow-up sudah berhasil dibuat."
+    reply = ensure_non_empty_reply(
+        original,
+        [{
+            "tool": "set_reminder",
+            "result": (
+                "Reminder 'followup' berhasil di-set. "
+                "Jadwal: sekali pada 2026-07-28 17:00:00 WIB."
+            ),
+        }],
+        tools_config={"scheduler": True},
+        active_groups=["scheduler"],
+    )
+
+    assert reply == original

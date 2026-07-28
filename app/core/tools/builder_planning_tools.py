@@ -41,6 +41,7 @@ from app.core.tools.builder_intent import (
     _looks_like_file_delivery_workflow,
     _looks_like_generated_file_workflow,
     _looks_like_payment_approval_workflow,
+    _looks_like_scheduler_workflow,
 )
 
 
@@ -425,6 +426,12 @@ def build_builder_planning_tools(
             mapped = feature_map.get(feat)
             if mapped and mapped in tools_config:
                 tools_config[mapped] = True
+
+        scheduler_required = _looks_like_scheduler_workflow(feature_text)
+        if scheduler_required:
+            tools_config["scheduler"] = True
+            if "reminder" not in features:
+                features.append("reminder")
 
         approval_gated_service = _looks_like_approval_gated_service(feature_text)
         payment_approval_workflow = _looks_like_payment_approval_workflow(feature_text)
