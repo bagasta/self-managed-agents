@@ -956,7 +956,29 @@ def test_confirmation_clarification_never_leaks_internal_instruction_over_summar
         }
     ]
 
-    assert ensure_non_empty_reply(summary, steps) == summary
+    trace = {}
+    assert ensure_non_empty_reply(summary, steps, decision_trace=trace) == summary
+    assert trace == {"reason": "pass_through"}
+
+
+def test_builder_generic_fallback_records_override_reason():
+    steps = [
+        {
+            "tool": "plan_agent",
+            "result": json.dumps({"plan_status": "ready"}),
+        }
+    ]
+    trace = {}
+
+    reply = ensure_non_empty_reply(
+        "",
+        steps,
+        active_groups=["builder"],
+        decision_trace=trace,
+    )
+
+    assert "kendala sistem" in reply
+    assert trace == {"reason": "fallback_other"}
 
 
 def test_builder_entitlement_error_forces_retry_reply():

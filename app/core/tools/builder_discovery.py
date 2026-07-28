@@ -8,6 +8,10 @@ from typing import Any
 
 from sqlalchemy import select
 
+from app.core.domain.builder_confirmation import (
+    is_explicit_build_confirmation,
+    is_safe_build_confirmation_continuation,
+)
 from app.models.message import Message
 
 
@@ -168,30 +172,6 @@ _IGNORED_OPERATIONAL_HOUR_FIELDS = {
 
 _EVIDENCE_KEY = "_evidence"
 _CONFIRMED_SUMMARY_PREFIX = "Rangkuman Arthur yang dikonfirmasi user: "
-_EXPLICIT_CONFIRMATION_MARKERS = (
-    "sudah sesuai",
-    "sudah benar",
-    "semuanya sesuai",
-    "saya setuju",
-    "setuju dibuat",
-    "setuju, buat",
-    "lanjut buat",
-    "lanjutkan buat",
-    "langsung buat",
-    "langsung saja buat",
-    "oke buat",
-    "buat sekarang",
-)
-_SHORT_EXPLICIT_CONFIRMATIONS = {
-    "ok",
-    "oke",
-    "sudah",
-    "sesuai",
-    "setuju",
-    "buat",
-    "buatkan",
-    "buat agentnya",
-}
 _DELEGATION_MARKERS = (
     "atur aja",
     "sesuaikan aja",
@@ -431,29 +411,26 @@ def infer_low_risk_discovery_facts(
 
 
 def _is_explicit_confirmation_message(value: Any) -> bool:
-    normalized = _normalize_evidence_text(value)
-    if re.search(
-        r"\b(?:belum|tidak|nggak|gak|jangan|bukan)\b(?:\s+\w+){0,5}\s+"
-        r"\b(?:sesuai|setuju|benar|buat|buatkan)\b",
-        normalized,
-    ):
-        return False
-    conversational = bool(
-        re.fullmatch(
-            r"(?:(?:ya+|iya|sip|siap|ok|oke|mantap|gas)\s+)*"
-            r"(?:sudah\s+)?(?:sesuai|setuju|benar)"
-            r"(?:\s+(?:ya+|nih|dong))?",
-            normalized,
-        )
-    )
-    return (
-        normalized in _SHORT_EXPLICIT_CONFIRMATIONS
-        or conversational
-        or any(
-            _normalize_evidence_text(marker) in normalized
-            for marker in _EXPLICIT_CONFIRMATION_MARKERS
-        )
-    )
+    return is_explicit_build_confirmation(value)
+
+
+def bind_current_user_confirmation(
+    discovery_answers: Any,
+    *,
+    current_user_message: str,
+) -> Any:
+    """Bind approval to trusted inbound text instead of model-authored evidence."""
+    if not is_explicit_build_confirmation(current_user_message):
+        return discovery_answers
+    answers, parse_error = _parse_answers(discovery_answers)
+    if parse_error:
+        return discovery_answers
+    evidence = answers.get(_EVIDENCE_KEY)
+    evidence = dict(evidence) if isinstance(evidence, dict) else {}
+    answers["user_confirmed"] = True
+    evidence["user_confirmed"] = str(current_user_message).strip()
+    answers[_EVIDENCE_KEY] = evidence
+    return answers
 
 
 async def load_discovery_user_messages(
@@ -628,7 +605,13 @@ def _verified_evidence_quotes(
                 # Always return the persisted source text, never the model's
                 # paraphrase. Downstream validation still checks that this
                 # source actually supports the normalized answer.
-                verified.append(message)
+                source_message = message
+                if message.startswith("Pertanyaan Arthur: ") and "\nJawaban user:" in message:
+                    # The question identifies which field a terse reply belongs
+                    # to, but its examples and wording are not user evidence.
+                    source_message = message.split("\nJawaban user:", 1)[1].strip()
+                if source_message and source_message not in verified:
+                    verified.append(source_message)
     return verified
 
 
@@ -759,21 +742,7 @@ def _confirmation_evidence_is_valid(
 
 
 def _is_safe_confirmation_continuation(value: Any) -> bool:
-    normalized = _normalize_evidence_text(value)
-    return normalized in {
-        "ok",
-        "oke",
-        "setuju",
-        "lanjut",
-        "lanjutkan",
-        "buat",
-        "buatkan",
-        "langsung buat",
-        "buat agentnya",
-        "langsung buat agentnya",
-        "ok langsung buat agentnya",
-        "oke langsung buat agentnya",
-    }
+    return is_safe_build_confirmation_continuation(value)
 
 
 def _normalize_usage_context(value: Any) -> str:
@@ -1010,6 +979,44 @@ def _daily_chat_volume_is_estimated(value: Any) -> bool:
             text,
         )
     )
+
+
+def _integrations_are_specific(value: Any) -> bool:
+    """A positive answer must name a system; a negative answer is complete."""
+    text = _normalize_evidence_text(value)
+    if not text:
+        return False
+    if re.search(
+        r"\b(?:tidak|nggak|gak|tanpa|no|none)\b(?:\s+\w+){0,3}\s+"
+        r"\b(?:perlu|butuh|integrasi|integration|external|eksternal)\b",
+        text,
+    ):
+        return True
+    generic_tokens = {
+        "ya",
+        "iya",
+        "yes",
+        "perlu",
+        "butuh",
+        "mau",
+        "integrasi",
+        "integration",
+        "sistem",
+        "system",
+        "lain",
+        "external",
+        "eksternal",
+        "dong",
+        "aja",
+        "saja",
+        "lainnya",
+    }
+    meaningful = {
+        token
+        for token in text.split()
+        if len(token) >= 3 and token not in generic_tokens
+    }
+    return bool(meaningful)
 
 
 def _phone_from_escalation(value: Any) -> str:
@@ -1295,6 +1302,14 @@ def validate_agent_discovery(
         invalid_fields.append("whatsapp_scale")
         validation_errors.append(
             "whatsapp_scale harus menjelaskan jumlah nomor dan pola satu nomor-banyak user atau tiap user-punya nomor."
+        )
+    if _is_answered(answers.get("integrations")) and not _integrations_are_specific(
+        answers.get("integrations")
+    ):
+        invalid_fields.append("integrations")
+        validation_errors.append(
+            "integrations positif harus menyebut sistem yang ingin dihubungkan; "
+            "jawaban umum seperti 'ya perlu' belum mengizinkan integrasi tertentu."
         )
     if (
         not _field_is_optional("daily_chat_volume", usage_context)

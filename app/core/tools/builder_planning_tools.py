@@ -20,6 +20,7 @@ from app.core.launch_safety import (
 from app.core.tools.builder_catalog import AGENT_PRESETS, RUNTIME_LIMITATIONS, _DEFAULT_MODEL
 from app.core.tools.builder_discovery import (
     DiscoveryEvidenceUnavailable,
+    bind_current_user_confirmation,
     bind_owner_escalation_phone,
     infer_low_risk_discovery_facts,
     discovery_escalation_policy,
@@ -310,6 +311,10 @@ def build_builder_planning_tools(
         discovery_answers = merge_discovery_answers(
             discovery_answers,
             persisted_facts,
+        )
+        discovery_answers = bind_current_user_confirmation(
+            discovery_answers,
+            current_user_message=current_user_message,
         )
         discovery_answers = infer_low_risk_discovery_facts(
             discovery_answers,

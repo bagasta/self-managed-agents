@@ -26,8 +26,8 @@ class Settings(BaseSettings):
     arthur_primary_model: str = "deepseek/deepseek-v4-flash"
     arthur_document_model: str = "mistral-ocr-latest"
     arthur_image_model: str = "openai/gpt-4.1-mini"
-    arthur_engine_version: str = "arthur-progressive-v4"
-    arthur_prompt_version: str = "arthur-kernel-v15"
+    arthur_engine_version: str = "arthur-progressive-v5"
+    arthur_prompt_version: str = "arthur-kernel-v16"
     llm_request_timeout_seconds: float = 120.0
     llm_max_retries: int = 1
 

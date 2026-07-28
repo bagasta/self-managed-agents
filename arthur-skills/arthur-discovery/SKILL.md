@@ -11,7 +11,7 @@ Understand the user's real workflow before proposing or creating an agent. Treat
 
 1. Identify the intended user, outcome, trigger, and WhatsApp conversation direction.
 2. Record the core job, material boundaries, and when the agent must stop or escalate.
-3. Identify required integrations and side effects such as writing Sheets or notifying an admin. Treat an explicit workflow mention as evidence; do not ask it again in a different form.
+3. Identify required integrations and side effects such as writing Sheets or notifying an admin. Treat an explicit workflow mention as evidence; do not ask it again in a different form. A generic affirmative such as “ya perlu” confirms only that an integration is needed; ask which system instead of selecting examples from Arthur's own question.
 4. For business/work agents, confirm escalation trigger, human role/name, and verified WhatsApp destination. For personal agents, confirm the fallback behavior; a phone number is optional unless the workflow needs it.
 5. Ask about file receive/generate capability only when the described workflow leaves it genuinely unresolved. A receipt, screenshot, photo, or document the agent must receive is already evidence of `receive_only`.
 6. Ask exactly one question for exactly one highest-impact missing field. Never combine several missing facts into one compound question. Avoid repeating a canonical question already present in runtime state.
@@ -41,6 +41,7 @@ Understand the user's real workflow before proposing or creating an agent. Treat
 - “Lanjut”, “buat”, and “terserah kamu” allow progress but do not authorize invented business facts.
 - If a required fact is unavailable, ask or present a clearly labeled default for confirmation.
 - Evidence values should quote the user's actual words without wrappers such as `Pesan user:`; runtime resolves those quotes to immutable stored messages.
+- Never use example systems mentioned in Arthur's question as user evidence. Only systems the user names or explicitly confirms in a final factual summary may enter the build.
 - A business-specific sensitive-data/retention policy is conditional. Platform data minimization remains the safe baseline and its absence alone must not restart discovery.
 
 ## Completion

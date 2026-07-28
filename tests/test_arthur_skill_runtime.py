@@ -127,10 +127,12 @@ def test_explicit_confirmation_exposes_create_skill_even_if_shadow_state_lags():
 def test_conversational_confirmation_exposes_create_skill_without_false_negative():
     for message in (
         "sip sudah sesuai",
+        "sip udah sesuai",
         "Sip, sudah sesuai!",
         "iya semuanya sesuai 🙏",
         "mantap saya setuju",
         "sip sudah sesuai ya",
+        "Everything looks good",
     ):
         assert (
             resolve_primary_skill("create", "discovery", user_message=message)

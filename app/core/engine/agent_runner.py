@@ -2704,7 +2704,33 @@ async def run_agent(
                     _agent_logger.total_tokens_from_callbacks
                     or parsed["total_tokens_used"]
                 )
-                log.info("agent_run.builder_plan_completion_ok")
+                if _needs_builder_plan_completion(
+                    steps,
+                    is_builder=runtime_policy.is_builder,
+                    primary_skill=(
+                        _arthur_skill_context.primary_skill
+                        if _arthur_skill_context is not None
+                        else None
+                    ),
+                    workflow_state=(
+                        _arthur_skill_context.draft.workflow_state
+                        if _arthur_skill_context is not None
+                        and _arthur_skill_context.draft is not None
+                        else None
+                    ),
+                    user_message=execution_user_message,
+                ):
+                    log.error(
+                        "agent_run.builder_plan_completion_contract_failed",
+                        steps=len(steps),
+                    )
+                    final_reply = (
+                        "Kebutuhanmu tetap tersimpan, tetapi gerbang perencanaan belum "
+                        "berhasil dijalankan pada proses ini. Saya belum memulai pembuatan "
+                        "agent dan tidak akan mengklaim sebaliknya."
+                    )
+                else:
+                    log.info("agent_run.builder_plan_completion_ok")
             except Exception as _plan_completion_exc:
                 log.warning(
                     "agent_run.builder_plan_completion_failed",

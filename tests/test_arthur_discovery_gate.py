@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from app.core.tools.builder_create_tools import build_builder_create_tools
 from app.core.tools.builder_discovery import (
     _is_explicit_confirmation_message,
+    _verified_evidence_quotes,
+    bind_current_user_confirmation,
     bind_owner_escalation_phone,
     discovery_escalation_policy,
     discovery_operator_phone,
@@ -1012,7 +1014,52 @@ def test_short_sudah_is_valid_only_as_latest_explicit_confirmation():
 def test_conversational_yaa_sip_sesuai_is_valid_confirmation():
     assert _is_explicit_confirmation_message("yaa sip sesuai") is True
     assert _is_explicit_confirmation_message("Sip, sudah sesuai!") is True
+    assert _is_explicit_confirmation_message("sip udah sesuai") is True
+    assert _is_explicit_confirmation_message("Everything looks good") is True
     assert _is_explicit_confirmation_message("belum sesuai") is False
+
+
+def test_current_confirmation_is_bound_to_exact_trusted_inbound_message():
+    answers = {
+        "problem": "Saya sering lupa jadwal.",
+        "_evidence": {"problem": "Saya sering lupa jadwal."},
+    }
+
+    bound = bind_current_user_confirmation(
+        answers,
+        current_user_message="sip udah sesuai",
+    )
+
+    assert bound["user_confirmed"] is True
+    assert bound["_evidence"]["user_confirmed"] == "sip udah sesuai"
+
+
+def test_question_examples_are_not_returned_as_user_evidence():
+    wrapper = (
+        "Pertanyaan Arthur: Perlu Google Calendar, Drive, atau Docs?\n"
+        "Jawaban user: Ya perlu"
+    )
+
+    verified = _verified_evidence_quotes(
+        "integrations",
+        {"integrations": "Ya perlu"},
+        [wrapper, "Ya perlu"],
+    )
+
+    assert verified == ["Ya perlu"]
+    assert all("Google Calendar" not in quote for quote in verified)
+
+
+def test_generic_positive_integration_answer_requires_specific_system():
+    result = validate_agent_discovery(
+        _personal_discovery(
+            integrations="Ya perlu",
+            user_confirmed=False,
+        )
+    )
+
+    assert "integrations" in result["invalid_fields"]
+    assert result["semantic_discovery"]["learning_field"] == "integrations"
 
 
 def test_runtime_confirmation_requires_an_immediately_confirmed_summary():

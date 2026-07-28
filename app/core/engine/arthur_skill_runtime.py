@@ -11,6 +11,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.domain.builder_confirmation import is_explicit_build_confirmation
 from app.core.domain.agent_build_state_service import (
     build_state_prompt,
     ensure_build_draft,
@@ -19,8 +20,8 @@ from app.core.domain.skill_service import list_active_system_skills
 from app.models.agent_build_draft import AgentBuildDraft
 from app.models.message import Message
 
-ARTHUR_ENGINE_VERSION = "arthur-progressive-v4"
-ARTHUR_PROMPT_VERSION = "arthur-kernel-v15"
+ARTHUR_ENGINE_VERSION = "arthur-progressive-v5"
+ARTHUR_PROMPT_VERSION = "arthur-kernel-v16"
 
 _BUILDER_TOOL_NAMES = {
     "get_self_config", "get_platform_capabilities", "list_available_wa_devices", "get_presets",
@@ -542,50 +543,7 @@ async def _latest_agent_message(session_id: uuid.UUID, db: AsyncSession) -> str:
 
 
 def _is_explicit_build_confirmation(user_message: str) -> bool:
-    normalized = " ".join((user_message or "").casefold().split()).strip(
-        " \t\r\n.,!🙏👍✅"
-    )
-    if re.search(
-        r"\b(?:belum|tidak|nggak|gak|jangan)\b.{0,32}"
-        r"\b(?:sesuai|setuju|benar|buat|buatkan)\b",
-        normalized,
-    ):
-        return False
-    conversational_confirmation = bool(
-        re.fullmatch(
-            r"(?:(?:sip|siap|ya+|iya|ok|oke|okey|mantap|gas)[\s,!.]+)*"
-            r"(?:(?:sudah|semuanya|saya)\s+)?(?:sesuai|benar|setuju)"
-            r"(?:\s+(?:ya|nih|dong))?",
-            normalized,
-        )
-    )
-    return normalized in {
-        "ok",
-        "oke",
-        "sudah",
-        "sesuai",
-        "setuju",
-        "buat",
-        "buatkan",
-        "buat agentnya",
-        "sudah sesuai",
-        "sudah benar",
-    } or conversational_confirmation or any(
-        marker in normalized
-        for marker in (
-            "semuanya sesuai",
-            "saya setuju",
-            "setuju dibuat",
-            "lanjut buat",
-            "lanjutkan buat",
-            "buat sekarang",
-        )
-    ) or bool(
-        re.search(
-            r"\b(?:langsung|lanjut|lanjutkan|bisa|boleh)\b.{0,40}\b(?:di)?buat(?:kan)?\b.{0,30}\bagent",
-            normalized,
-        )
-    )
+    return is_explicit_build_confirmation(user_message)
 
 
 def resolve_primary_skill(

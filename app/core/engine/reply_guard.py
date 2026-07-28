@@ -444,6 +444,26 @@ def _plan_agent_clarification_reply(steps: list[dict[str, Any]]) -> str | None:
     return None
 
 
+def _latest_plan_clarification_topic(steps: list[dict[str, Any]]) -> str:
+    for step in reversed(steps or []):
+        if step.get("tool") != "plan_agent":
+            continue
+        data = _parse_step_result(step.get("result"))
+        if not data or str(data.get("plan_status") or "").strip().lower() != "needs_clarification":
+            return ""
+        questions = data.get("capability_clarifications") or []
+        if not questions:
+            progress = data.get("discovery_progress")
+            if isinstance(progress, dict):
+                questions = progress.get("next_questions") or []
+        if isinstance(questions, list):
+            for item in questions:
+                if isinstance(item, dict) and str(item.get("topic") or "").strip():
+                    return str(item["topic"]).strip()
+        return ""
+    return ""
+
+
 def _builder_fallback_reply(
     steps: list[dict[str, Any]],
     *,
@@ -727,6 +747,15 @@ def ensure_non_empty_reply(
             safety_reason or ReplyGuardReason.FALLBACK_EMPTY_REPLY,
         )
         return plan_clarification
+    if (
+        text
+        and _latest_plan_clarification_topic(steps) == "user_confirmed"
+        and _builder_clarification_safety_reason(text) is None
+    ):
+        # Confirmation copy must include the model's natural summary. The
+        # planner's user_confirmed question is an internal semantic instruction,
+        # so the generic "system hiccup" fallback must not replace that summary.
+        return text
 
     normalized_request = " ".join(str(user_message or "").casefold().split())
     generic_whatsapp_setup = (
@@ -795,12 +824,14 @@ def ensure_non_empty_reply(
             and "create_wa_dev_trial_link" in tool_names
             and not _trial_link_reply_is_complete(text, steps)
         ):
+            _record_guard_reason(decision_trace, ReplyGuardReason.FALLBACK_OTHER)
             return builder_reply
         if (
             builder_reply
             and "send_agent_wa_qr" in tool_names
             and builder_whatsapp_action != "trial_link"
         ):
+            _record_guard_reason(decision_trace, ReplyGuardReason.FALLBACK_OTHER)
             return builder_reply
         if (
             builder_reply
@@ -810,6 +841,7 @@ def ensure_non_empty_reply(
                 and "nomor khusus" in text.casefold()
             )
         ):
+            _record_guard_reason(decision_trace, ReplyGuardReason.FALLBACK_OTHER)
             return builder_reply
         missing_whatsapp_onboarding = (
             builder_reply
@@ -827,6 +859,7 @@ def ensure_non_empty_reply(
                 or _looks_like_incomplete_builder_reply(text)
                 or _looks_like_technical_builder_reply(text)
             ):
+                _record_guard_reason(decision_trace, ReplyGuardReason.FALLBACK_OTHER)
                 return builder_reply
         scheduler_guard_reply = _scheduler_success_guard_reply(text, steps)
         if scheduler_guard_reply:
@@ -843,6 +876,7 @@ def ensure_non_empty_reply(
         whatsapp_action=builder_whatsapp_action,
     )
     if builder_reply:
+        _record_guard_reason(decision_trace, ReplyGuardReason.FALLBACK_OTHER)
         return builder_reply
 
     url_pat = re.compile(r"https://[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}(?:/[^\s\"']*)?")
