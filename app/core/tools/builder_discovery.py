@@ -349,7 +349,10 @@ def infer_low_risk_discovery_facts(
 ) -> Any:
     """Derive only context directly entailed by the user's own workflow words."""
     answers, parse_error = _parse_answers(discovery_answers)
-    if parse_error or _is_answered(answers.get("usage_context")):
+    if parse_error:
+        return discovery_answers
+    supplied_usage_context = _normalize_usage_context(answers.get("usage_context"))
+    if supplied_usage_context == "personal":
         return discovery_answers
 
     work_pattern = re.compile(
@@ -360,16 +363,25 @@ def infer_low_risk_discovery_facts(
     supporting_message = ""
     for message in reversed(user_messages or []):
         normalized = _normalize_evidence_text(message)
-        if work_pattern.search(normalized) and not personal_pattern.search(normalized):
+        # The latest explicit personal statement wins over an older work-like
+        # keyword. Do not repair model evidence across a real user correction.
+        if personal_pattern.search(normalized):
+            return discovery_answers
+        if work_pattern.search(normalized):
             supporting_message = str(message).strip()
             break
     if not supporting_message:
+        return discovery_answers
+    if supplied_usage_context not in {"", "work"}:
         return discovery_answers
 
     answers["usage_context"] = "work"
     evidence = answers.get(_EVIDENCE_KEY)
     evidence = dict(evidence) if isinstance(evidence, dict) else {}
-    evidence.setdefault("usage_context", supporting_message)
+    # Replace model-authored or missing evidence with immutable user wording.
+    # A small model often infers the correct value but cites its own paraphrase,
+    # which made the validator re-ask a fact it had already normalized.
+    evidence["usage_context"] = supporting_message
     answers[_EVIDENCE_KEY] = evidence
     return answers
 

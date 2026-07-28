@@ -788,6 +788,32 @@ def test_plan_clarification_keeps_complete_contextual_usage_question():
     assert ensure_non_empty_reply(reply, steps) == reply
 
 
+def test_plan_clarification_keeps_exact_production_llm_reply_with_rhetorical_ack():
+    steps = [
+        {
+            "tool": "plan_agent",
+            "result": json.dumps(
+                {
+                    "plan_status": "needs_clarification",
+                    "capability_clarifications": [
+                        {
+                            "topic": "usage_context",
+                            "question": "Agent ini akan dipakai untuk kebutuhan pribadi atau bisnis?",
+                        }
+                    ],
+                }
+            ),
+        }
+    ]
+    reply = (
+        "Maaf Bagas, sedikit klarifikasi — dari ceritamu soal balas chat customer "
+        "dan catat ke Google Sheet, kayaknya ini untuk bisnis ya? "
+        "**Agent ini akan dipakai untuk kebutuhan bisnis atau pribadi?**"
+    )
+
+    assert ensure_non_empty_reply(reply, steps) == reply
+
+
 def test_plan_clarification_still_rejects_premature_success_with_question():
     question = "Mau kasih nama apa untuk agent-nya?"
     steps = [

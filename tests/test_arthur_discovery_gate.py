@@ -288,6 +288,35 @@ def test_cs_request_alone_is_enough_to_skip_personal_versus_business_question():
     assert result["next_questions"][0]["topic"] == "problem"
 
 
+def test_work_context_repairs_model_authored_evidence_instead_of_reasking():
+    message = (
+        "Balasin chat customer yang mau beli di WA di waktu yang bersamaan "
+        "belum lagi harus input datanya ke google sheet"
+    )
+    answers = {
+        "problem": message,
+        "usage_context": "work",
+        "_evidence": {
+            "problem": message,
+            "usage_context": "Kayaknya ini untuk bisnis.",
+        },
+    }
+
+    enriched = infer_low_risk_discovery_facts(
+        answers,
+        user_messages=[message],
+    )
+    result = validate_agent_discovery(
+        enriched,
+        user_messages=[message],
+        require_evidence=True,
+    )
+
+    assert enriched["_evidence"]["usage_context"] == message
+    assert "usage_context" not in result["invalid_fields"]
+    assert result["next_questions"][0]["topic"] == "agent_name"
+
+
 def test_escalate_to_me_binds_authenticated_owner_without_reasking_details():
     answers = {
         "unknown_handling": "Berhenti menjawab dan eskalasi jika jawabannya tidak tersedia.",

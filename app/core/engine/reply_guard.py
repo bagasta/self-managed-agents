@@ -353,7 +353,7 @@ def _is_natural_builder_clarification(text: str, *, topic: str = "") -> bool:
     candidate = str(text or "").strip()
     if (
         not candidate
-        or candidate.count("?") != 1
+        or "?" not in candidate
         or len(candidate) > 700
     ):
         return False
@@ -384,9 +384,17 @@ def _is_natural_builder_clarification(text: str, *, topic: str = "") -> bool:
     signal_groups = _CLARIFICATION_TOPIC_SIGNAL_GROUPS.get(str(topic or "").strip())
     if not signal_groups:
         return False
-    return all(
-        any(signal in normalized for signal in group)
-        for group in signal_groups
+    question_clauses = [
+        clause.casefold().strip()
+        for clause in re.findall(r"[^?]+\?", candidate)
+        if clause.strip()
+    ]
+    return any(
+        all(
+            any(signal in clause for signal in group)
+            for group in signal_groups
+        )
+        for clause in question_clauses
     )
 
 
