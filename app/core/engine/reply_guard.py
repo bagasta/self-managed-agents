@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from enum import Enum
 from typing import Any
 
 from app.core.engine.tool_capability_registry import disabled_capability_claims
@@ -61,6 +62,24 @@ _UPDATE_INTENT_TOOLS = {
     "list_my_agents",
     "set_agent_memory",
 }
+
+
+class ReplyGuardReason(str, Enum):
+    """Machine-readable reason for the final reply guard decision."""
+
+    PASS_THROUGH = "pass_through"
+    FALLBACK_EMPTY_REPLY = "fallback_empty_reply"
+    FALLBACK_INTERNAL_LEAK = "fallback_internal_leak"
+    FALLBACK_PREMATURE_SUCCESS = "fallback_premature_success"
+    FALLBACK_OTHER = "fallback_other"
+
+
+def _record_guard_reason(
+    decision_trace: dict[str, str] | None,
+    reason: ReplyGuardReason,
+) -> None:
+    if decision_trace is not None:
+        decision_trace["reason"] = reason.value
 
 
 def _step_tool_names(steps: list[dict[str, Any]]) -> list[str]:
@@ -294,70 +313,16 @@ def _render_builder_questions(questions: Any) -> str | None:
     return question_texts[0]
 
 
-_CLARIFICATION_TOPIC_SIGNAL_GROUPS: dict[str, tuple[tuple[str, ...], ...]] = {
-    "problem": (
-        ("masalah", "kendala", "kewalahan", "sulit", "problem", "challenge", "struggle", "pain"),
-    ),
-    "usage_context": (
-        ("pribadi", "personal"),
-        ("bisnis", "usaha", "pekerjaan", "kerja", "business", "work"),
-    ),
-    "agent_name": (("nama", "name", "call the agent", "call it"),),
-    "audience": (
-        ("siapa", "who"),
-        ("chat", "pakai", "menggunakan", "customer", "pelanggan", "tim", "use"),
-    ),
-    "main_tasks": (
-        ("tugas", "kerjakan", "alur", "proses", "workflow", "task", "job", "do"),
-    ),
-    "capabilities": (
-        ("teks", "chat", "file", "gambar", "foto", "laporan", "text", "image", "report"),
-    ),
-    "prohibited_actions": (
-        ("tidak boleh", "dilarang", "batas", "keputusan", "must not", "not allowed", "boundary"),
-    ),
-    "allowed_actions": (
-        ("boleh", "wewenang", "izin", "allowed", "authority", "permission"),
-    ),
-    "tone_style": (("tone", "gaya", "bahasa", "style", "language"),),
-    "ideal_conversations": (("contoh", "percakapan", "example", "conversation"),),
-    "avoided_conversations": (
-        ("hindari", "jangan", "red line", "avoid", "must not"),
-    ),
-    "unknown_handling": (
-        ("tidak tahu", "tidak tersedia", "tidak pasti", "don't know", "not available", "uncertain"),
-    ),
-    "escalation_target": (
-        ("eskalasi", "manusia", "admin", "owner", "escalat", "human"),
-        ("siapa", "mana", "who", "which", "recipient", "penerima"),
-    ),
-    "knowledge_sources": (
-        ("sumber", "knowledge", "dokumen", "website", "database", "source"),
-    ),
-    "integrations": (
-        ("integrasi", "google", "crm", "payment", "database", "integration", "system"),
-    ),
-    "expected_outputs": (("output", "hasil", "laporan", "spreadsheet", "report"),),
-    "vision_requirement": (("gambar", "foto", "image", "photo", "vision"),),
-}
+def _builder_clarification_safety_reason(
+    text: str,
+) -> ReplyGuardReason | None:
+    """Classify the few clarification replies that must never reach a user.
 
-
-def _is_natural_builder_clarification(text: str, *, topic: str = "") -> bool:
-    """Keep a concise model-written question instead of forcing form copy.
-
-    ``plan_agent`` remains authoritative about *what* is unresolved, while the
-    model is allowed to phrase that question using the conversation's language
-    and context. Deterministic copy is only a fallback for empty, internal, or
-    misleading progress replies.
+    The planner owns the structured workflow state, but it is not a copywriter.
+    Do not infer a response's intent from language-specific keywords here: that
+    makes the guard brittle for multilingual and conversational replies.
     """
-    candidate = str(text or "").strip()
-    if (
-        not candidate
-        or "?" not in candidate
-        or len(candidate) > 700
-    ):
-        return False
-    normalized = candidate.casefold()
+    normalized = str(text or "").casefold()
     internal_markers = (
         "plan_agent",
         "discovery_progress",
@@ -378,62 +343,16 @@ def _is_natural_builder_clarification(text: str, *, topic: str = "") -> bool:
         "siap digunakan",
         "siap dipakai",
     )
-    if any(marker in normalized for marker in (*internal_markers, *premature_success_markers)):
-        return False
+    if any(marker in normalized for marker in internal_markers):
+        return ReplyGuardReason.FALLBACK_INTERNAL_LEAK
+    if any(marker in normalized for marker in premature_success_markers):
+        return ReplyGuardReason.FALLBACK_PREMATURE_SUCCESS
+    return None
 
-    signal_groups = _CLARIFICATION_TOPIC_SIGNAL_GROUPS.get(str(topic or "").strip())
-    if not signal_groups:
-        return False
-    question_clauses = [
-        clause.casefold().strip()
-        for clause in re.findall(r"[^?]+\?", candidate)
-        if clause.strip()
-    ]
-    matching_clauses = [
-        clause
-        for clause in question_clauses
-        if all(
-            any(signal in clause for signal in group)
-            for group in signal_groups
-        )
-    ]
-    # Exactly one clause may ask for the unresolved field. A preceding
-    # conversational check such as "kayaknya ini untuk bisnis ya?" is fine,
-    # but a second real question would restart questionnaire-like discovery.
-    if len(matching_clauses) != 1:
-        return False
-    contextual_check_endings = (
-        " ya?",
-        " kan?",
-        " benar?",
-        " betul?",
-        " right?",
-        " correct?",
-    )
-    question_word_markers = (
-        "apa ",
-        "siapa ",
-        "bagaimana",
-        "gimana",
-        "kapan",
-        "di mana",
-        "dimana",
-        "what ",
-        "who ",
-        "how ",
-        "when ",
-        "where ",
-        "which ",
-    )
-    return all(
-        clause in matching_clauses
-        or (
-            len(clause) <= 240
-            and clause.endswith(contextual_check_endings)
-            and not any(marker in clause for marker in question_word_markers)
-        )
-        for clause in question_clauses
-    )
+
+def _is_unsafe_builder_clarification(text: str) -> bool:
+    """Backward-compatible boolean wrapper for clarification safety."""
+    return _builder_clarification_safety_reason(text) is not None
 
 
 def _builder_clarification_entry(data: dict[str, Any]) -> tuple[str, str] | None:
@@ -523,21 +442,6 @@ def _plan_agent_clarification_reply(steps: list[dict[str, Any]]) -> str | None:
         # A newer ready/blocked/temporary result supersedes every older plan.
         return None
     return None
-
-
-def _plan_agent_clarification_topic(steps: list[dict[str, Any]]) -> str:
-    """Return the authoritative unresolved discovery topic from the latest plan."""
-    for step in reversed(steps or []):
-        if step.get("tool") != "plan_agent":
-            continue
-        data = _parse_step_result(step.get("result"))
-        if not data:
-            return ""
-        if str(data.get("plan_status") or "").strip().lower() != "needs_clarification":
-            return ""
-        entry = _builder_clarification_entry(data)
-        return entry[0] if entry else ""
-    return ""
 
 
 def _builder_fallback_reply(
@@ -798,26 +702,30 @@ def ensure_non_empty_reply(
     active_groups: list[str] | tuple[str, ...] | set[str] | None = None,
     user_message: str = "",
     builder_whatsapp_action: str | None = None,
+    decision_trace: dict[str, str] | None = None,
 ) -> str:
     text = (reply or "").strip()
+    _record_guard_reason(decision_trace, ReplyGuardReason.PASS_THROUGH)
     entitlement_retry = _builder_entitlement_retry_reply(steps)
     if entitlement_retry:
         normalized = text.lower()
         retry_markers = ("coba ulang", "coba lagi", "retry", "sesuaikan konfigurasi")
         if not text or not any(marker in normalized for marker in retry_markers):
+            _record_guard_reason(decision_trace, ReplyGuardReason.FALLBACK_OTHER)
             return entitlement_retry
 
-    # plan_agent is the deterministic source of the next unresolved field, but
-    # it must not turn Arthur into a form renderer. Keep a natural model-written
-    # question so Arthur can acknowledge context and honor the user's language.
-    # Fall back to canonical copy only for empty/internal/misleading replies.
+    # The planner is authoritative about workflow state, not wording. Keep every
+    # usable model reply so Arthur can be natural in the user's language; use the
+    # planner's copy only when no safe user-facing reply exists.
     plan_clarification = _plan_agent_clarification_reply(steps)
     if plan_clarification:
-        plan_topic = _plan_agent_clarification_topic(steps)
-        if plan_clarification.casefold() in text.casefold():
+        safety_reason = _builder_clarification_safety_reason(text) if text else None
+        if text and safety_reason is None:
             return text
-        if _is_natural_builder_clarification(text, topic=plan_topic):
-            return text
+        _record_guard_reason(
+            decision_trace,
+            safety_reason or ReplyGuardReason.FALLBACK_EMPTY_REPLY,
+        )
         return plan_clarification
 
     normalized_request = " ".join(str(user_message or "").casefold().split())

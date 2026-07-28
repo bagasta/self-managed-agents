@@ -105,6 +105,8 @@ def test_discovery_starts_with_one_group_one_question():
     assert result["next_group"]["id"] == "context_goal"
     assert [item["topic"] for item in result["next_questions"]] == ["problem"]
     assert result["operational_hours_requested"] is False
+    assert result["semantic_discovery"]["learning_goal"] == "understand_user_pain_point"
+    assert result["semantic_discovery"]["selection_mode"] == "shadow_risk_priority_v1"
 
 
 def test_group_two_exposes_only_the_next_highest_priority_question():
@@ -120,6 +122,43 @@ def test_group_two_exposes_only_the_next_highest_priority_question():
     assert result["next_group"]["id"] == "agent_behavior"
     assert len(result["next_questions"]) == 1
     assert result["next_questions"][0]["topic"] == "main_tasks"
+    assert result["semantic_discovery"]["learning_field"] == "main_tasks"
+
+
+def test_semantic_selector_is_risk_driven_without_changing_legacy_question_order():
+    answers = {
+        "problem": "Customer menunggu terlalu lama karena semua chat dijawab manual.",
+        "usage_context": "work",
+        "audience": "Customer eksternal.",
+        "main_tasks": "Menjawab pertanyaan order sampai tuntas.",
+    }
+
+    result = validate_agent_discovery(answers)
+
+    # Legacy compatibility still asks for the name from group one.
+    assert result["next_questions"][0]["topic"] == "agent_name"
+    # The shadow selector identifies the safety-critical human-only boundary.
+    assert result["semantic_discovery"]["learning_field"] == "prohibited_actions"
+    assert "human-controlled" in result["semantic_discovery"]["risk_if_unresolved"]
+
+
+def test_semantic_discovery_moves_to_confirmation_only_after_material_fields():
+    answers = _personal_discovery(user_confirmed=False)
+
+    result = validate_agent_discovery(answers)
+
+    assert result["semantic_discovery"]["state"] == "awaiting_confirmation"
+    assert result["semantic_discovery"]["learning_field"] == "user_confirmed"
+    assert result["semantic_discovery"]["must_confirm_before_create"] is True
+
+
+def test_semantic_known_facts_excludes_invalid_answers():
+    result = validate_agent_discovery(
+        _work_discovery(escalation_target="ke admin")
+    )
+
+    assert "escalation_target" in result["invalid_fields"]
+    assert "escalation_target" not in result["semantic_discovery"]["known_facts"]
 
 
 def test_minsel_confirmed_discovery_accepts_real_user_answers_without_reasking():
@@ -499,7 +538,7 @@ def test_optional_whatsapp_scale_never_blocks_personal_agent_creation():
     assert result["next_questions"] == []
 
 
-def test_work_discovery_requires_detailed_escalation_and_go_live_approver():
+def test_work_discovery_requires_detailed_escalation_but_not_go_live_approver():
     answers = _work_discovery()
     answers["escalation_target"] = "ke admin"
     answers.pop("go_live_approver")
@@ -508,7 +547,7 @@ def test_work_discovery_requires_detailed_escalation_and_go_live_approver():
 
     assert result["complete"] is False
     assert "escalation_target" in result["invalid_fields"]
-    assert "go_live_approver" in result["missing_fields"]
+    assert "go_live_approver" not in result["missing_fields"]
 
 
 def test_personal_discovery_skips_phone_and_go_live_approver():
@@ -1010,7 +1049,7 @@ def test_confirmed_final_summary_can_evidence_a_user_delegated_detail():
     )
 
     assert result["complete"] is True
-    assert "ideal_conversations" in result["verified_evidence_fields"]
+    assert result["normalized_answers"]["ideal_conversations"] == answers["ideal_conversations"]
 
 
 def test_runtime_evidence_includes_only_the_summary_immediately_confirmed_by_user():
@@ -1130,7 +1169,7 @@ def test_confirmed_summary_remains_evidence_after_later_discovery_turns():
     assert evidence[-1] == "Di Google Sheets"
 
 
-def test_minsel_replay_advances_from_delegated_examples_to_one_confirmation():
+def test_minsel_replay_does_not_block_confirmation_on_optional_examples():
     answers, messages = _discovery_with_persisted_evidence(
         _work_discovery(
             capabilities="Jawab survey, terima gambar dan text ajaaaa.",
@@ -1151,7 +1190,7 @@ def test_minsel_replay_advances_from_delegated_examples_to_one_confirmation():
         require_evidence=True,
         require_confirmed_summary=True,
     )
-    assert first["next_questions"][0]["topic"] == "ideal_conversations"
+    assert first["next_questions"][0]["topic"] == "user_confirmed"
 
     old_example_quote = answers["_evidence"]["ideal_conversations"]
     messages.remove(old_example_quote)

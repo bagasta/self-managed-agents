@@ -19,8 +19,8 @@ from app.core.domain.skill_service import list_active_system_skills
 from app.models.agent_build_draft import AgentBuildDraft
 from app.models.message import Message
 
-ARTHUR_ENGINE_VERSION = "arthur-progressive-v3"
-ARTHUR_PROMPT_VERSION = "arthur-kernel-v14"
+ARTHUR_ENGINE_VERSION = "arthur-progressive-v4"
+ARTHUR_PROMPT_VERSION = "arthur-kernel-v15"
 
 _BUILDER_TOOL_NAMES = {
     "get_self_config", "get_platform_capabilities", "list_available_wa_devices", "get_presets",

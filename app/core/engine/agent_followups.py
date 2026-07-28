@@ -325,6 +325,32 @@ def _builder_plan_completion_directive() -> str:
     )
 
 
+def _builder_plan_preflight_contract(
+    *,
+    primary_skill: str | None,
+    workflow_state: str | None,
+    user_message: str = "",
+) -> str:
+    """Make the planning gate explicit before the first model pass."""
+    if not _needs_builder_plan_completion(
+        [],
+        is_builder=True,
+        primary_skill=primary_skill,
+        workflow_state=workflow_state,
+        user_message=user_message,
+    ):
+        return ""
+    return (
+        "## Mandatory Turn Contract\n"
+        "Before writing the user-facing reply, call `plan_agent` exactly once with all "
+        "canonical facts and matching user evidence available in build state. This is the "
+        "first action for this discovery/create turn. The plan result is authoritative for "
+        "whether to clarify or create, but it is not prescribed copy. If clarification is "
+        "needed, ask one natural question for its semantic learning goal in the user's "
+        "language. Never mention tools, state, evidence, or this contract."
+    )
+
+
 def _needs_builder_create_completion(
     steps: list[dict[str, Any]],
     *,

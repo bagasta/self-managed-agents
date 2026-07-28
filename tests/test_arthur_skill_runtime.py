@@ -380,6 +380,32 @@ def test_planning_gate_directive_keeps_tool_call_mandatory_but_reply_natural():
     assert "Jangan menyebut plan_agent" in directive
 
 
+def test_builder_plan_preflight_contract_is_added_for_active_discovery():
+    from app.core.engine.agent_followups import _builder_plan_preflight_contract
+
+    contract = _builder_plan_preflight_contract(
+        primary_skill="arthur-discovery",
+        workflow_state="discovery",
+        user_message="I need an agent for customer support",
+    )
+
+    assert "call `plan_agent` exactly once" in contract
+    assert "user's language" in contract
+
+
+def test_builder_plan_preflight_contract_skips_simple_greeting():
+    from app.core.engine.agent_followups import _builder_plan_preflight_contract
+
+    assert (
+        _builder_plan_preflight_contract(
+            primary_skill="arthur-discovery",
+            workflow_state="idle",
+            user_message="hello Arthur",
+        )
+        == ""
+    )
+
+
 def test_post_create_integration_setup_does_not_restart_discovery_plan():
     assert _needs_builder_plan_completion(
         [],

@@ -15,6 +15,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
+from time import perf_counter
 from typing import Any, TypedDict
 
 import structlog
@@ -176,6 +177,7 @@ from app.core.engine.agent_reply_guards import (
 from app.core.engine.agent_followups import (
     _builder_create_completion_directive,
     _builder_plan_completion_directive,
+    _builder_plan_preflight_contract,
     _builder_retryable_plan_directive,
     _builder_verify_completion_directive,
     _builder_whatsapp_action_directive,
@@ -968,6 +970,26 @@ async def run_agent(
         model=agent_model.model,
     )
     log.info("agent_run.start")
+    _phase_timings_ms: dict[str, int] = {}
+    _phase_invocation_counts: dict[str, int] = {}
+
+    async def _timed_graph_invoke(
+        graph_obj: Any,
+        phase: str,
+        messages: list[BaseMessage],
+        graph_config: dict[str, Any],
+    ) -> Any:
+        started = perf_counter()
+        try:
+            return await graph_obj.ainvoke(
+                {"messages": messages},
+                config=graph_config,
+                version="v2",
+            )
+        finally:
+            elapsed_ms = max(0, int((perf_counter() - started) * 1000))
+            _phase_timings_ms[phase] = _phase_timings_ms.get(phase, 0) + elapsed_ms
+            _phase_invocation_counts[phase] = _phase_invocation_counts.get(phase, 0) + 1
 
     abandoned_before_current = (
         await db.execute(
@@ -1296,6 +1318,17 @@ async def run_agent(
     )
     if _arthur_skill_context is not None and _arthur_skill_context.prompt_block:
         system_prompt += "\n\n" + _arthur_skill_context.prompt_block
+        _builder_preflight_contract = _builder_plan_preflight_contract(
+            primary_skill=_arthur_skill_context.primary_skill,
+            workflow_state=(
+                _arthur_skill_context.draft.workflow_state
+                if _arthur_skill_context.draft is not None
+                else None
+            ),
+            user_message=execution_user_message,
+        )
+        if _builder_preflight_contract:
+            system_prompt += "\n\n" + _builder_preflight_contract
     if _direct_image_parent_only:
         system_prompt += (
             "\n\n## Direct Image Understanding\n"
@@ -2078,10 +2111,11 @@ async def run_agent(
             _timeout = settings.agent_timeout_seconds
         try:
             async with asyncio.timeout(_timeout):
-                _graph_output = await graph.ainvoke(
-                    {"messages": input_messages},
-                    config=_graph_config,
-                    version="v2",
+                _graph_output = await _timed_graph_invoke(
+                    graph,
+                    "initial_graph",
+                    input_messages,
+                    _graph_config,
                 )
                 # GraphOutput (version="v2") may only carry .interrupts; when
                 # a checkpointer exists, get messages from graph state.
@@ -2644,10 +2678,11 @@ async def run_agent(
             )
             try:
                 async with asyncio.timeout(_timeout):
-                    _plan_completion_output = await graph.ainvoke(
-                        {"messages": _plan_completion_input},
-                        config=_graph_config,
-                        version="v2",
+                    _plan_completion_output = await _timed_graph_invoke(
+                        graph,
+                        "builder_plan_recovery",
+                        _plan_completion_input,
+                        _graph_config,
                     )
                     result = await _graph_result_from_output(
                         graph=graph,
@@ -2682,10 +2717,11 @@ async def run_agent(
             _plan_retry_input.append(HumanMessage(content=_builder_retryable_plan_directive()))
             try:
                 async with asyncio.timeout(_timeout):
-                    _plan_retry_output = await graph.ainvoke(
-                        {"messages": _plan_retry_input},
-                        config=_graph_config,
-                        version="v2",
+                    _plan_retry_output = await _timed_graph_invoke(
+                        graph,
+                        "builder_plan_evidence_retry",
+                        _plan_retry_input,
+                        _graph_config,
                     )
                     result = await _graph_result_from_output(
                         graph=graph,
@@ -2778,10 +2814,11 @@ async def run_agent(
             )
             try:
                 async with asyncio.timeout(_timeout):
-                    _create_completion_output = await _create_completion_graph.ainvoke(
-                        {"messages": _create_completion_input},
-                        config=_graph_config,
-                        version="v2",
+                    _create_completion_output = await _timed_graph_invoke(
+                        _create_completion_graph,
+                        "builder_create_completion",
+                        _create_completion_input,
+                        _graph_config,
                     )
                     result = await _graph_result_from_output(
                         graph=_create_completion_graph,
@@ -2836,10 +2873,11 @@ async def run_agent(
             )
             try:
                 async with asyncio.timeout(_timeout):
-                    _verify_completion_output = await graph.ainvoke(
-                        {"messages": _verify_completion_input},
-                        config=_graph_config,
-                        version="v2",
+                    _verify_completion_output = await _timed_graph_invoke(
+                        graph,
+                        "builder_verify_completion",
+                        _verify_completion_input,
+                        _graph_config,
                     )
                     result = await _graph_result_from_output(
                         graph=graph,
@@ -2900,10 +2938,11 @@ async def run_agent(
             )
             try:
                 async with asyncio.timeout(_timeout):
-                    _channel_completion_output = await graph.ainvoke(
-                        {"messages": _channel_completion_input},
-                        config=_graph_config,
-                        version="v2",
+                    _channel_completion_output = await _timed_graph_invoke(
+                        graph,
+                        "builder_whatsapp_completion",
+                        _channel_completion_input,
+                        _graph_config,
                     )
                     result = await _graph_result_from_output(
                         graph=graph,
@@ -3407,6 +3446,7 @@ async def run_agent(
             final_reply = guarded_reply
 
     _reply_before_non_empty_guard = final_reply
+    _reply_guard_trace: dict[str, str] = {}
     final_reply = ensure_non_empty_reply(
         final_reply,
         steps,
@@ -3414,15 +3454,27 @@ async def run_agent(
         active_groups=active_groups,
         user_message=execution_user_message,
         builder_whatsapp_action=_builder_whatsapp_action,
+        decision_trace=_reply_guard_trace,
     )
     if final_reply != _reply_before_non_empty_guard:
+        _reply_guard_reason = _reply_guard_trace.get("reason", "fallback_other")
         log.warning(
             "agent_run.final_reply_overridden_by_non_empty_guard",
+            guard_reason=_reply_guard_reason,
             before_len=len(_reply_before_non_empty_guard or ""),
             after_len=len(final_reply or ""),
             before_preview=(_reply_before_non_empty_guard or "")[:220],
             after_preview=(final_reply or "")[:220],
         )
+        run_record.runtime_metadata = {
+            **dict(run_record.runtime_metadata or {}),
+            "reply_guard_reason": _reply_guard_reason,
+        }
+    else:
+        run_record.runtime_metadata = {
+            **dict(run_record.runtime_metadata or {}),
+            "reply_guard_reason": "pass_through",
+        }
 
     _reply_before_google_auth_guard = final_reply
     final_reply = await _append_builder_google_auth_link_if_needed(
@@ -3538,6 +3590,12 @@ async def run_agent(
 
     _completed_at = datetime.now(timezone.utc)
     _duration_ms = max(0, int((_completed_at - _now).total_seconds() * 1000))
+    run_record.runtime_metadata = {
+        **dict(run_record.runtime_metadata or {}),
+        "phase_timings_ms": dict(_phase_timings_ms),
+        "phase_invocation_counts": dict(_phase_invocation_counts),
+        "builder_plan_recovery_used": "builder_plan_recovery" in _phase_timings_ms,
+    }
     log.info(
         "agent_run.complete",
         steps=len(steps),

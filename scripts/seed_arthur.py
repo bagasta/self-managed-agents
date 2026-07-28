@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import os
 import pathlib
+import re
 import sys
 
 import yaml
@@ -25,7 +27,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
 ARTHUR_SKILLS_ROOT = PROJECT_ROOT / "arthur-skills"
 RULEBOOK_PATH = ARTHUR_SKILLS_ROOT / "KERNEL.md"
-ARTHUR_SKILL_BUNDLE_VERSION = "arthur-skills-2026-07-28-v16"
+ARTHUR_SKILL_BUNDLE_VERSION = "arthur-skills-2026-07-28-v17"
 
 ARTHUR_SOUL = """\
 Kamu adalah Arthur, AI Agent Builder.
@@ -86,8 +88,8 @@ ARTHUR_CONFIG = {
             "primary_model": "deepseek/deepseek-v4-flash",
             "document_model": "mistral-ocr-latest",
             "image_model": "openai/gpt-4.1-mini",
-            "engine_version": "arthur-progressive-v3",
-            "prompt_version": "arthur-kernel-v13",
+            "engine_version": "arthur-progressive-v4",
+            "prompt_version": "arthur-kernel-v15",
             "skill_bundle_version": ARTHUR_SKILL_BUNDLE_VERSION,
         },
     },
@@ -101,45 +103,64 @@ ARTHUR_CONFIG = {
 }
 
 
-async def seed(dry_run: bool = False) -> None:
+def load_arthur_source_bundle() -> tuple[str, list[dict]]:
+    """Validate every local Arthur source before any database write."""
     if not RULEBOOK_PATH.exists():
-        print(f"[ERROR] system-message-builder.md tidak ditemukan di: {RULEBOOK_PATH}")
-        sys.exit(1)
+        raise ValueError(f"Arthur kernel tidak ditemukan di: {RULEBOOK_PATH}")
 
     instructions = RULEBOOK_PATH.read_text(encoding="utf-8")
-    print(f"[OK] Compact kernel dimuat: {len(instructions)} karakter")
     if len(instructions) > 10_000:
-        print("[ERROR] Arthur kernel melebihi batas 10.000 karakter")
-        sys.exit(1)
+        raise ValueError("Arthur kernel melebihi batas 10.000 karakter")
 
     skill_sources: list[dict] = []
+    seen_names: set[str] = set()
     for skill_path in sorted(ARTHUR_SKILLS_ROOT.glob("*/SKILL.md")):
         runtime_path = skill_path.parent / "runtime.yaml"
         if not runtime_path.exists():
-            print(f"[ERROR] runtime.yaml tidak ditemukan untuk {skill_path.parent.name}")
-            sys.exit(1)
+            raise ValueError(f"runtime.yaml tidak ditemukan untuk {skill_path.parent.name}")
         content = skill_path.read_text(encoding="utf-8")
         if "[TODO" in content:
-            print(f"[ERROR] Skill masih berisi TODO: {skill_path}")
-            sys.exit(1)
+            raise ValueError(f"Skill masih berisi TODO: {skill_path}")
         if not content.startswith("---\n") or "\n---\n" not in content[4:]:
-            print(f"[ERROR] Frontmatter skill invalid: {skill_path}")
-            sys.exit(1)
+            raise ValueError(f"Frontmatter skill invalid: {skill_path}")
         _frontmatter, body = content[4:].split("\n---\n", 1)
         metadata = yaml.safe_load(_frontmatter) or {}
         runtime = yaml.safe_load(runtime_path.read_text(encoding="utf-8")) or {}
+        name = str(metadata.get("name") or "").strip()
+        description = str(metadata.get("description") or "").strip()
+        version = str(runtime.get("version") or "").strip()
+        if not name or not description:
+            raise ValueError(f"Metadata name/description tidak lengkap: {skill_path}")
+        if name in seen_names:
+            raise ValueError(f"Nama skill duplikat dalam bundle: {name}")
+        if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+            raise ValueError(f"Versi skill harus semver x.y.z: {name}@{version or '(empty)'}")
+        if not body.strip():
+            raise ValueError(f"Body skill kosong: {skill_path}")
+        seen_names.add(name)
         skill_sources.append({
-            "name": metadata.get("name"),
-            "description": metadata.get("description"),
+            "name": name,
+            "description": description,
             "content_md": body.strip(),
-            "version": str(runtime.get("version") or "1.0.0"),
+            "version": version,
             "triggers": list(runtime.get("triggers") or []),
             "supported_states": list(runtime.get("supported_states") or []),
             "allowed_tool_groups": list(runtime.get("allowed_tool_groups") or []),
         })
-    if len(skill_sources) != 8 or any(not item["name"] or not item["description"] for item in skill_sources):
-        print(f"[ERROR] Bundle skill Arthur tidak lengkap/invalid: {len(skill_sources)} skill")
-        sys.exit(1)
+    if len(skill_sources) != 8:
+        raise ValueError(f"Bundle skill Arthur tidak lengkap/invalid: {len(skill_sources)} skill")
+    return instructions, skill_sources
+
+
+async def seed(dry_run: bool = False) -> None:
+    try:
+        instructions, skill_sources = load_arthur_source_bundle()
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        print(f"[ERROR] Preflight source Arthur gagal: {exc}")
+        raise SystemExit(1) from exc
+
+    print(f"[OK] Compact kernel dimuat: {len(instructions)} karakter")
+    print(f"[OK] Preflight source lulus: {len(skill_sources)} skill valid")
 
     if dry_run:
         print("\n=== DRY RUN — config yang akan di-seed ===")
@@ -150,96 +171,121 @@ async def seed(dry_run: bool = False) -> None:
         print(f"  operator_ids  : {ARTHUR_CONFIG['operator_ids']}")
         print(f"  instructions  : {instructions[:200]}...")
         print(f"  skill_bundle  : {ARTHUR_SKILL_BUNDLE_VERSION} ({len(skill_sources)} skills)")
+        for source in skill_sources:
+            checksum = hashlib.sha256(source["content_md"].encode("utf-8")).hexdigest()
+            print(f"    - {source['name']}@{source['version']} sha256:{checksum[:12]}")
         print("\n[DRY RUN] Tidak ada perubahan ke database.")
         return
 
     from sqlalchemy import select
     from app.database import AsyncSessionLocal
-    from app.models.agent import Agent
-
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(
-            select(Agent).where(
-                Agent.name == "Arthur",
-                Agent.capabilities.contains(["system"]),
-                Agent.is_deleted.is_(False),
-            )
-        )
-        existing = result.scalar_one_or_none()
-
-        if existing:
-            print(f"[FOUND] Arthur sudah ada: id={existing.id}")
-            existing.instructions = instructions
-            existing.model = ARTHUR_CONFIG["model"]
-            existing.max_tokens = ARTHUR_CONFIG["max_tokens"]
-            existing.capabilities = ARTHUR_CONFIG["capabilities"]
-            existing.tools_config = ARTHUR_CONFIG["tools_config"]
-            existing.token_quota = ARTHUR_CONFIG["token_quota"]
-            existing.tokens_used = 0
-            if not existing.created_by_type:
-                existing.created_by_type = "system"
-                existing.created_by_agent_name = "System"
-            # Merge operator_ids — tambahkan yang baru dari env, jangan hapus yang sudah ada
-            new_ops = ARTHUR_CONFIG["operator_ids"]
-            if new_ops:
-                existing_ops = list(existing.operator_ids or [])
-                for op in new_ops:
-                    if op not in existing_ops:
-                        existing_ops.append(op)
-                existing.operator_ids = existing_ops
-                print(f"  operator_ids: {existing.operator_ids}")
-            existing.version = (existing.version or 1) + 1
-            await db.commit()
-            print(f"[UPDATED] Arthur diupdate ke versi {existing.version}")
-            print(f"  id     : {existing.id}")
-            print("  api_key: [REDACTED — existing key preserved]")
-            arthur_id = existing.id
-        else:
-            arthur = Agent(
-                name=ARTHUR_CONFIG["name"],
-                description=ARTHUR_CONFIG["description"],
-                instructions=instructions,
-                model=ARTHUR_CONFIG["model"],
-                temperature=ARTHUR_CONFIG["temperature"],
-                max_tokens=ARTHUR_CONFIG["max_tokens"],
-                capabilities=ARTHUR_CONFIG["capabilities"],
-                allowed_senders=ARTHUR_CONFIG["allowed_senders"],
-                token_quota=ARTHUR_CONFIG["token_quota"],
-                quota_period_days=ARTHUR_CONFIG["quota_period_days"],
-                tools_config=ARTHUR_CONFIG["tools_config"],
-                escalation_config=ARTHUR_CONFIG["escalation_config"],
-                operator_ids=ARTHUR_CONFIG["operator_ids"],
-                sandbox_config=ARTHUR_CONFIG["sandbox_config"],
-                safety_policy=ARTHUR_CONFIG["safety_policy"],
-                created_by_type="system",
-                created_by_agent_name="System",
-            )
-            db.add(arthur)
-            await db.commit()
-            await db.refresh(arthur)
-            print(f"[CREATED] Arthur berhasil dibuat!")
-            print(f"  id     : {arthur.id}")
-            print("  api_key: [REDACTED — stored in database]")
-            arthur_id = arthur.id
-
-    # Seed Arthur's soul ke agent_memories (scope=None → global per agent)
     from app.core.domain.memory_service import upsert_memory
-    async with AsyncSessionLocal() as db:
-        await upsert_memory(arthur_id, "soul", ARTHUR_SOUL, db, scope=None)
-        await db.commit()
-    print(f"[OK] Arthur's soul di-seed ke agent_memories")
-
     from app.core.domain.skill_service import publish_system_skill
+    from app.models.agent import Agent
+    from app.models.skill import Skill
+
+    created = False
+    arthur_version = 1
+    arthur_id = None
     async with AsyncSessionLocal() as db:
-        for source in skill_sources:
-            await publish_system_skill(
-                agent_id=arthur_id,
-                bundle_version=ARTHUR_SKILL_BUNDLE_VERSION,
-                publisher="scripts/seed_arthur.py",
-                db=db,
-                **source,
+        async with db.begin():
+            result = await db.execute(
+                select(Agent).where(
+                    Agent.name == "Arthur",
+                    Agent.capabilities.contains(["system"]),
+                    Agent.is_deleted.is_(False),
+                )
             )
-        await db.commit()
+            existing = result.scalar_one_or_none()
+
+            # Immutable checksum validation happens before config, soul, or
+            # activation state is mutated. The surrounding transaction is the
+            # second line of defense and rolls every write back on any failure.
+            if existing is not None:
+                for source in skill_sources:
+                    existing_skill = (
+                        await db.execute(
+                            select(Skill).where(
+                                Skill.agent_id == existing.id,
+                                Skill.name == source["name"],
+                                Skill.version == source["version"],
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    expected_checksum = hashlib.sha256(
+                        source["content_md"].encode("utf-8")
+                    ).hexdigest()
+                    if (
+                        existing_skill is not None
+                        and existing_skill.checksum
+                        and existing_skill.checksum != expected_checksum
+                    ):
+                        raise ValueError(
+                            "Immutable system skill "
+                            f"{source['name']}@{source['version']} has a different checksum"
+                        )
+
+            if existing:
+                existing.instructions = instructions
+                existing.model = ARTHUR_CONFIG["model"]
+                existing.max_tokens = ARTHUR_CONFIG["max_tokens"]
+                existing.capabilities = ARTHUR_CONFIG["capabilities"]
+                existing.tools_config = ARTHUR_CONFIG["tools_config"]
+                existing.token_quota = ARTHUR_CONFIG["token_quota"]
+                existing.tokens_used = 0
+                if not existing.created_by_type:
+                    existing.created_by_type = "system"
+                    existing.created_by_agent_name = "System"
+                new_ops = ARTHUR_CONFIG["operator_ids"]
+                if new_ops:
+                    existing_ops = list(existing.operator_ids or [])
+                    for op in new_ops:
+                        if op not in existing_ops:
+                            existing_ops.append(op)
+                    existing.operator_ids = existing_ops
+                existing.version = (existing.version or 1) + 1
+                arthur = existing
+            else:
+                created = True
+                arthur = Agent(
+                    name=ARTHUR_CONFIG["name"],
+                    description=ARTHUR_CONFIG["description"],
+                    instructions=instructions,
+                    model=ARTHUR_CONFIG["model"],
+                    temperature=ARTHUR_CONFIG["temperature"],
+                    max_tokens=ARTHUR_CONFIG["max_tokens"],
+                    capabilities=ARTHUR_CONFIG["capabilities"],
+                    allowed_senders=ARTHUR_CONFIG["allowed_senders"],
+                    token_quota=ARTHUR_CONFIG["token_quota"],
+                    quota_period_days=ARTHUR_CONFIG["quota_period_days"],
+                    tools_config=ARTHUR_CONFIG["tools_config"],
+                    escalation_config=ARTHUR_CONFIG["escalation_config"],
+                    operator_ids=ARTHUR_CONFIG["operator_ids"],
+                    sandbox_config=ARTHUR_CONFIG["sandbox_config"],
+                    safety_policy=ARTHUR_CONFIG["safety_policy"],
+                    created_by_type="system",
+                    created_by_agent_name="System",
+                )
+                db.add(arthur)
+
+            await db.flush()
+            arthur_id = arthur.id
+            arthur_version = arthur.version or 1
+            await upsert_memory(arthur_id, "soul", ARTHUR_SOUL, db, scope=None)
+            for source in skill_sources:
+                await publish_system_skill(
+                    agent_id=arthur_id,
+                    bundle_version=ARTHUR_SKILL_BUNDLE_VERSION,
+                    publisher="scripts/seed_arthur.py",
+                    db=db,
+                    **source,
+                )
+
+    action = "CREATED" if created else "UPDATED"
+    print(f"[{action}] Arthur tersimpan atomically ke versi {arthur_version}")
+    print(f"  id     : {arthur_id}")
+    print("  api_key: [REDACTED — existing key preserved]" if not created else "  api_key: [REDACTED — stored in database]")
+    print("[OK] Arthur's soul di-seed ke agent_memories")
     print(f"[OK] {len(skill_sources)} system skills Arthur dipublish: {ARTHUR_SKILL_BUNDLE_VERSION}")
 
     print("\n=== Langkah selanjutnya ===")

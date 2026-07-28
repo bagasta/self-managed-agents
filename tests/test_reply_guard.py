@@ -711,12 +711,15 @@ def test_plan_clarification_overrides_non_empty_internal_evidence_progress_note(
         }
     ]
 
+    trace = {}
     out = ensure_non_empty_reply(
         "Sistem butuh format evidence yang lebih detail. Aku ajukan lagi ke plan_agent.",
         steps,
+        decision_trace=trace,
     )
 
     assert out == question
+    assert trace == {"reason": "fallback_internal_leak"}
     assert "evidence" not in out.lower()
     assert "plan_agent" not in out
 
@@ -740,12 +743,19 @@ def test_plan_clarification_keeps_natural_english_question_after_language_switch
     ]
     reply = "Sure — what would you like to name the agent?"
 
-    out = ensure_non_empty_reply(reply, steps, user_message="English please")
+    trace = {}
+    out = ensure_non_empty_reply(
+        reply,
+        steps,
+        user_message="English please",
+        decision_trace=trace,
+    )
 
     assert out == reply
+    assert trace == {"reason": "pass_through"}
 
 
-def test_plan_clarification_rejects_incomplete_usage_context_fragment():
+def test_plan_clarification_keeps_conversational_fragment_without_keyword_matching():
     question = "Agent ini akan dipakai untuk kebutuhan pribadi atau bisnis?"
     steps = [
         {
@@ -761,9 +771,9 @@ def test_plan_clarification_rejects_incomplete_usage_context_fragment():
         }
     ]
 
-    out = ensure_non_empty_reply("Atau ada keperluan pribadi?", steps)
+    reply = "Atau ada keperluan pribadi?"
 
-    assert out == question
+    assert ensure_non_empty_reply(reply, steps) == reply
 
 
 def test_plan_clarification_keeps_complete_contextual_usage_question():
@@ -814,7 +824,7 @@ def test_plan_clarification_keeps_exact_production_llm_reply_with_rhetorical_ack
     assert ensure_non_empty_reply(reply, steps) == reply
 
 
-def test_plan_clarification_rejects_an_unrelated_second_question():
+def test_plan_clarification_does_not_rewrite_multiple_questions_by_heuristic():
     question = "Mau kasih nama apa untuk agent-nya?"
     steps = [
         {
@@ -831,10 +841,10 @@ def test_plan_clarification_rejects_an_unrelated_second_question():
     ]
     reply = "Sudah jelas ya? Mau kasih nama apa? Agent ini untuk customer atau tim?"
 
-    assert ensure_non_empty_reply(reply, steps) == question
+    assert ensure_non_empty_reply(reply, steps) == reply
 
 
-def test_plan_clarification_rejects_duplicate_questions_for_same_topic():
+def test_plan_clarification_does_not_rewrite_duplicate_questions_by_heuristic():
     question = "Agent ini akan dipakai untuk kebutuhan pribadi atau bisnis?"
     steps = [
         {
@@ -851,7 +861,26 @@ def test_plan_clarification_rejects_duplicate_questions_for_same_topic():
     ]
     reply = "Ini untuk personal atau bisnis? Dipakai buat usaha atau pekerjaan?"
 
-    assert ensure_non_empty_reply(reply, steps) == question
+    assert ensure_non_empty_reply(reply, steps) == reply
+
+
+def test_plan_clarification_keeps_multilingual_natural_reply():
+    steps = [
+        {
+            "tool": "plan_agent",
+            "result": json.dumps(
+                {
+                    "plan_status": "needs_clarification",
+                    "capability_clarifications": [
+                        {"topic": "problem", "question": "What problem should this agent solve?"}
+                    ],
+                }
+            ),
+        }
+    ]
+    reply = "Entiendo. ¿Qué parte de este proceso te está costando más ahora mismo?"
+
+    assert ensure_non_empty_reply(reply, steps) == reply
 
 
 def test_plan_clarification_still_rejects_premature_success_with_question():
@@ -870,12 +899,36 @@ def test_plan_clarification_still_rejects_premature_success_with_question():
         }
     ]
 
+    trace = {}
     out = ensure_non_empty_reply(
         "Agent sudah jadi. Mau kasih nama apa?",
         steps,
+        decision_trace=trace,
     )
 
     assert out == question
+    assert trace == {"reason": "fallback_premature_success"}
+
+
+def test_plan_clarification_empty_reply_records_fallback_reason():
+    question = "What problem should this agent solve?"
+    steps = [
+        {
+            "tool": "plan_agent",
+            "result": json.dumps(
+                {
+                    "plan_status": "needs_clarification",
+                    "capability_clarifications": [
+                        {"topic": "problem", "question": question}
+                    ],
+                }
+            ),
+        }
+    ]
+    trace = {}
+
+    assert ensure_non_empty_reply("", steps, decision_trace=trace) == question
+    assert trace == {"reason": "fallback_empty_reply"}
 
 
 def test_confirmation_clarification_never_leaks_internal_instruction_over_summary():

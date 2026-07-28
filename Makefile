@@ -1,4 +1,4 @@
-.PHONY: help install dev db-up migrate upgrade downgrade lint format wa wa-build dev-all wa-dev-build wa-dev sandbox-build sandbox-check seed-agents deploy-api-fast deploy-app deploy-all mcp-smoke-live mcp-smoke-live-strict mcp-smoke-live-reauth mcp-smoke-live-onboard
+.PHONY: help install install-dev test-arthur dev db-up migrate upgrade downgrade lint format wa wa-build dev-all wa-dev-build wa-dev sandbox-build sandbox-check seed-agents deploy-api-fast deploy-app deploy-all mcp-smoke-live mcp-smoke-live-strict mcp-smoke-live-reauth mcp-smoke-live-onboard
 
 PROD_COMPOSE := docker compose -f deploy/docker-compose.prod.yml
 
@@ -6,6 +6,8 @@ help:
 	@echo "Managed Agent Platform"
 	@echo ""
 	@echo "  make install                Install Python dependencies"
+	@echo "  make install-dev            Install runtime + reproducible test dependencies"
+	@echo "  make test-arthur            Run Arthur guard, discovery, and orchestration regressions"
 	@echo "  make dev                    Run API in dev mode (uvicorn --reload)"
 	@echo "  make wa                     Run WhatsApp Go microservice (port 8080)"
 	@echo "  make wa-build               Build wa-service binary"
@@ -31,6 +33,18 @@ help:
 
 install:
 	pip install -r requirements.txt
+
+install-dev:
+	pip install -r requirements-dev.txt
+
+test-arthur:
+	python -m pytest -q \
+		tests/test_reply_guard.py \
+		tests/test_arthur_discovery_gate.py \
+		tests/test_arthur_skill_runtime.py \
+		tests/test_arthur_fast_intake.py \
+		tests/test_builder_create_completion.py \
+		tests/test_agent_builder_phase4.py
 
 dev:
 	uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload

@@ -100,6 +100,50 @@ _QUESTIONS: dict[str, str] = {
     "user_confirmed": "Saya akan merangkum seluruh jawaban discovery. Setelah rangkumannya benar, minta user menyatakan setuju sebelum agent dibuat.",
 }
 
+# This priority is deliberately independent from the legacy six-group display
+# order. It is emitted in shadow mode first so production conversations can be
+# evaluated before it becomes the authoritative question selector.
+_MATERIAL_LEARNING_PRIORITY: tuple[str, ...] = (
+    "problem",
+    "usage_context",
+    "main_tasks",
+    "audience",
+    "prohibited_actions",
+    "unknown_handling",
+    "escalation_target",
+    "integrations",
+    "capabilities",
+    "agent_name",
+)
+
+_LEARNING_GOALS: dict[str, str] = {
+    "problem": "understand_user_pain_point",
+    "usage_context": "understand_personal_or_work_context",
+    "agent_name": "identify_agent_name",
+    "audience": "identify_conversation_audience",
+    "main_tasks": "understand_end_to_end_workflow",
+    "capabilities": "decide_text_and_file_capabilities",
+    "prohibited_actions": "define_human_only_decisions",
+    "unknown_handling": "define_unknown_answer_behavior",
+    "escalation_target": "define_escalation_conditions_and_recipient",
+    "integrations": "identify_required_external_integrations",
+    "user_confirmed": "confirm_final_requirements_summary",
+}
+
+_UNRESOLVED_RISKS: dict[str, str] = {
+    "problem": "the agent may optimize the wrong problem",
+    "usage_context": "personal and business safety requirements may be applied incorrectly",
+    "agent_name": "the created agent cannot be identified clearly",
+    "audience": "tone, access, and workflow may target the wrong users",
+    "main_tasks": "the agent may stop before completing the user's real workflow",
+    "capabilities": "the runtime may lack required text or file behavior",
+    "prohibited_actions": "the agent may take a decision that must remain human-controlled",
+    "unknown_handling": "the agent may invent an answer when evidence is unavailable",
+    "escalation_target": "a blocked business conversation may not reach the right human",
+    "integrations": "the agent may promise or miss an external system action",
+    "user_confirmed": "the agent could be created from an unapproved interpretation",
+}
+
 _USAGE_CONTEXT_ALIASES = {
     "personal": "personal",
     "pribadi": "personal",
@@ -1012,6 +1056,63 @@ def _group_for_field(field: str) -> dict[str, Any]:
     return {"id": "confirmation", "label": "Konfirmasi", "fields": ("user_confirmed",)}
 
 
+def _semantic_discovery_shadow(
+    *,
+    answers: dict[str, Any],
+    unresolved_fields: list[str],
+    require_confirmation: bool,
+    confirmation_evidence_valid: bool,
+) -> dict[str, Any]:
+    """Return the next semantic learning goal without changing the legacy gate."""
+    unresolved = set(unresolved_fields)
+    selected_field = next(
+        (field for field in _MATERIAL_LEARNING_PRIORITY if field in unresolved),
+        next(iter(unresolved_fields), None),
+    )
+    confirmation_pending = bool(
+        require_confirmation
+        and (
+            not _confirmed(answers.get("user_confirmed"))
+            or not confirmation_evidence_valid
+        )
+    )
+    if selected_field is None and confirmation_pending:
+        selected_field = "user_confirmed"
+
+    if unresolved_fields:
+        state = "needs_clarification"
+    elif confirmation_pending:
+        state = "awaiting_confirmation"
+    else:
+        state = "complete"
+
+    known_facts = {
+        key: value
+        for key, value in answers.items()
+        if key != "user_confirmed"
+        and key not in unresolved
+        and _is_answered(value)
+    }
+    return {
+        "state": state,
+        "known_facts": known_facts,
+        "unresolved_material_fields": list(unresolved_fields),
+        "learning_field": selected_field,
+        "learning_goal": _LEARNING_GOALS.get(
+            str(selected_field or ""),
+            f"clarify_{selected_field}" if selected_field else None,
+        ),
+        "risk_if_unresolved": _UNRESOLVED_RISKS.get(
+            str(selected_field or ""),
+            "the resulting agent configuration may not match the user's intent"
+            if selected_field
+            else None,
+        ),
+        "must_confirm_before_create": confirmation_pending,
+        "selection_mode": "shadow_risk_priority_v1",
+    }
+
+
 def validate_agent_discovery(
     discovery_answers: Any,
     *,
@@ -1179,7 +1280,8 @@ def validate_agent_discovery(
             "hanya chat teks, menerima file/gambar, membuat file/laporan, atau keduanya."
         )
     if (
-        _is_answered(answers.get("ideal_conversations"))
+        not _field_is_optional("ideal_conversations", usage_context)
+        and _is_answered(answers.get("ideal_conversations"))
         and "ideal_conversations" not in delegated_fields
         and not _has_two_to_three_conversation_examples(answers.get("ideal_conversations"))
     ):
@@ -1298,6 +1400,12 @@ def validate_agent_discovery(
         {"topic": field, "question": _QUESTIONS[field]}
         for field in group_missing[:1]
     ]
+    semantic_discovery = _semantic_discovery_shadow(
+        answers=answers,
+        unresolved_fields=unresolved_fields,
+        require_confirmation=require_confirmation,
+        confirmation_evidence_valid=confirmation_evidence_valid,
+    )
     return {
         "complete": complete,
         "usage_context": usage_context,
@@ -1324,6 +1432,7 @@ def validate_agent_discovery(
         "operational_hours_requested": False,
         "file_capability": file_capability,
         "confirmation_evidence_valid": confirmation_evidence_valid,
+        "semantic_discovery": semantic_discovery,
     }
 
 
