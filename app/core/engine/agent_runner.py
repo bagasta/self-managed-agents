@@ -74,6 +74,7 @@ from app.core.engine.agent_google_routing import (
     _google_workspace_server_has_auth,
     _is_google_chat_intent,
     _is_google_workspace_mcp_authorized_for_session,
+    _repair_partial_builder_google_auth_link,
     _remove_google_workspace_mcp_server,
     _route_google_workspace_blocker_to_owner_if_customer,
 )
@@ -3540,6 +3541,10 @@ async def run_agent(
                 "agent_run.arthur_repeated_questions_removed",
                 count=len(_removed_repeated_questions),
             )
+        _reply_before_google_link_repair = final_reply
+        final_reply = _repair_partial_builder_google_auth_link(final_reply, steps)
+        if final_reply != _reply_before_google_link_repair:
+            log.warning("agent_run.builder_google_auth_link_repaired")
 
         # The model may emit progress text before a tool call and the runtime
         # may later replace it with the deterministic discovery question or

@@ -33,6 +33,8 @@ def test_intent_and_primary_skill_routing_are_not_beechat_specific():
     assert classify_builder_intent("Tolong edit agent admin klinik") == "edit"
     assert classify_builder_intent("Mau coba nomor demo dulu") == "demo"
     assert classify_builder_intent("Berapa kuota paket saya?") == "subscription"
+    assert classify_builder_intent("maksudnya token tuh gimana?") == "subscription"
+    assert classify_builder_intent("gua bisa bikin berapa agent?") == "subscription"
     assert resolve_primary_skill("create", "discovery") == "arthur-discovery"
     assert resolve_primary_skill("create", "awaiting_confirmation") == "arthur-create-agent"
 
@@ -371,6 +373,33 @@ def test_discovery_turn_without_plan_is_forced_through_planning_gate():
     ) is False
 
 
+def test_subscription_explanation_never_runs_builder_planning_gate():
+    assert _needs_builder_plan_completion(
+        [],
+        is_builder=True,
+        primary_skill="arthur-discovery",
+        workflow_state="discovery",
+        user_message="maksudnya token tuh gimana?",
+    ) is False
+
+
+def test_google_auth_link_recovery_routes_to_edit_even_with_old_build_evidence():
+    prior = (
+        "Basingseng AI sudah saya edit.\n\n"
+        "t=abcdefghijklmnopqrstuvwxyz123456\n"
+        "Buka link ini dulu supaya agent bisa akses Google Workspace."
+    )
+
+    assert (
+        classify_builder_intent(
+            "linknya gabisa, kasih link lengkap",
+            prior_evidence="Saya mau bikin personal assistant",
+            prior_agent_message=prior,
+        )
+        == "edit"
+    )
+
+
 def test_planning_gate_directive_keeps_tool_call_mandatory_but_reply_natural():
     from app.core.engine.agent_followups import _builder_plan_completion_directive
 
@@ -619,6 +648,28 @@ def test_question_guard_never_mutilates_inline_dialogue_example():
     assert cleaned == reply
     assert removed == []
     assert "` lalu `Agent:" in cleaned
+
+
+def test_question_guard_never_treats_google_oauth_query_as_a_question():
+    auth_url = (
+        "https://google-workspace-mcp.chiefaiofficer.id/"
+        "v1/integrations/google/start?t=LcyFEjixW51nGuaPByvf8k8edefIjolxSVbb7F2SUNQ"
+    )
+    reply = (
+        "Basingseng AI sudah saya edit.\n\n"
+        f"Link login Google: {auth_url}\n"
+        "Buka link ini dulu supaya agent bisa akses Google Workspace."
+    )
+
+    cleaned, removed = guard_repeated_questions(
+        reply,
+        [],
+        [{"status": "answered", "value": "Integrasi Google Workspace diperlukan."}],
+    )
+
+    assert cleaned == reply
+    assert removed == []
+    assert auth_url in cleaned
 
 
 def test_guard_does_not_reask_explicit_escalation_evidence():

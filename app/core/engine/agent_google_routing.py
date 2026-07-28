@@ -10,6 +10,7 @@ import copy
 import re
 import uuid
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import structlog
 
@@ -54,6 +55,21 @@ def _extract_auth_url_from_builder_steps(steps: list[dict[str, Any]]) -> str | N
         if match:
             return match.group(0).rstrip(".,)")
     return None
+
+
+def _repair_partial_builder_google_auth_link(
+    final_reply: str,
+    steps: list[dict[str, Any]],
+) -> str:
+    """Restore an OAuth URL if a downstream formatter left only ``t=...``."""
+    auth_url = _extract_auth_url_from_builder_steps(steps)
+    if not auth_url:
+        return final_reply
+    token = (parse_qs(urlsplit(auth_url).query).get("t") or [""])[0].strip()
+    if not token:
+        return final_reply
+    partial = re.compile(rf"(?<![?&])\bt={re.escape(token)}\b")
+    return partial.sub(auth_url, str(final_reply or ""))
 
 
 def _builder_google_auth_agent_id(steps: list[dict[str, Any]]) -> str | None:

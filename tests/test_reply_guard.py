@@ -95,6 +95,31 @@ def test_builder_google_auth_link_is_appended_after_create_even_if_model_skips_t
     assert "Buka link ini dulu" in out
 
 
+def test_partial_builder_google_auth_token_is_repaired_from_tool_result():
+    from app.core.engine.agent_google_routing import (
+        _repair_partial_builder_google_auth_link,
+    )
+
+    auth_url = (
+        "https://google-workspace-mcp.chiefaiofficer.id/"
+        "v1/integrations/google/start?t=LcyFEjixW51nGuaPByvf8k8edefIjolxSVbb7F2SUNQ"
+    )
+    steps = [
+        {
+            "tool": "generate_google_auth_link",
+            "result": json.dumps({"auth_url": auth_url}),
+        }
+    ]
+
+    repaired = _repair_partial_builder_google_auth_link(
+        "Basingseng AI sudah diedit.\n\nt=LcyFEjixW51nGuaPByvf8k8edefIjolxSVbb7F2SUNQ",
+        steps,
+    )
+
+    assert auth_url in repaired
+    assert "\nt=LcyFE" not in repaired
+
+
 def test_needs_builder_create_completion_when_planned_but_not_created():
     from app.core.engine.agent_runner import _needs_builder_create_completion
 

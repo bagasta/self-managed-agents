@@ -285,6 +285,21 @@ def _is_non_actionable_builder_greeting(user_message: str) -> bool:
     )
 
 
+def _is_builder_informational_question(user_message: str) -> bool:
+    """Keep product/subscription explanations out of the create-agent gate."""
+    text = " ".join(str(user_message or "").casefold().split())
+    return bool(
+        re.search(
+            r"\b(?:token|kuota|subscription|langganan|paket|plan|slot)\b",
+            text,
+        )
+        or re.search(
+            r"\b(?:berapa|batas|maksimal|maximum|sisa)\b.{0,24}\bagent\b",
+            text,
+        )
+    )
+
+
 def _needs_builder_plan_completion(
     steps: list[dict[str, Any]],
     *,
@@ -311,6 +326,8 @@ def _needs_builder_plan_completion(
     # Running the recovery LLM pass here replaced a perfectly natural greeting
     # with leaked internal text such as "saya panggil perencanaan".
     if _is_non_actionable_builder_greeting(user_message):
+        return False
+    if _is_builder_informational_question(user_message):
         return False
     tool_names = {
         str(step.get("tool", "")).strip()

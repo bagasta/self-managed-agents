@@ -20,7 +20,7 @@ from app.core.domain.skill_service import list_active_system_skills
 from app.models.agent_build_draft import AgentBuildDraft
 from app.models.message import Message
 
-ARTHUR_ENGINE_VERSION = "arthur-progressive-v8"
+ARTHUR_ENGINE_VERSION = "arthur-progressive-v9"
 ARTHUR_PROMPT_VERSION = "arthur-kernel-v18"
 
 _BUILDER_TOOL_NAMES = {
@@ -370,7 +370,11 @@ def classify_builder_intent(
     # switched Arthur to the payment skill and removed every create tool.
     explicit_subscription_intent = bool(
         re.search(
-            r"\b(?:upgrade|langganan|subscription|kuota|slot)\b",
+            r"\b(?:upgrade|langganan|subscription|kuota|slot|token)\b",
+            current,
+        )
+        or re.search(
+            r"\b(?:berapa|batas|maksimal|maximum|sisa)\b.{0,24}\bagent\b",
             current,
         )
         or re.search(
@@ -384,6 +388,31 @@ def classify_builder_intent(
     )
     if explicit_subscription_intent:
         return "subscription"
+    google_auth_link_recovery = (
+        _contains(
+            current,
+            (
+                "linknya tidak bisa",
+                "link tidak bisa",
+                "linknya mana",
+                "mana linknya",
+                "token doang",
+                "token saja",
+                "link lengkap",
+            ),
+        )
+        and _contains(
+            prior_agent_message.casefold(),
+            (
+                "google workspace",
+                "integrations/google/start",
+                "\nt=",
+                "link login google",
+            ),
+        )
+    )
+    if google_auth_link_recovery:
+        return "edit"
     # Complaints about an already-created agent are diagnosis/edit work, even
     # when the user does not use the literal words "edit" or "update". This is
     # especially important after launch, where Indonesian users naturally say

@@ -15,6 +15,7 @@ from app.models.agent_build_draft import AgentBuildDraft
 
 _QUESTION_RE = re.compile(r"(?:^|\n|(?<=[.!]))\s*([^\n?]{4,300}\?)", re.MULTILINE)
 _INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+_URL_RE = re.compile(r"https?://[^\s<>'\"]+")
 _SPACE_RE = re.compile(r"\s+")
 _MANIFEST_WRAPPER_FIELDS = {"_evidence", "user_confirmed"}
 
@@ -96,6 +97,13 @@ def extract_questions(reply: str, *, max_questions: int = 3) -> list[str]:
     masked_chars = list(source)
     for code_match in _INLINE_CODE_RE.finditer(source):
         for index in range(code_match.start(), code_match.end()):
+            if masked_chars[index] == "?":
+                masked_chars[index] = " "
+    # Query strings are data, not user-facing questions. Without masking this
+    # separator, the repeated-question guard deletes the URL prefix through
+    # ``?`` and leaks only ``t=<oauth-token>`` to WhatsApp.
+    for url_match in _URL_RE.finditer(source):
+        for index in range(url_match.start(), url_match.end()):
             if masked_chars[index] == "?":
                 masked_chars[index] = " "
     masked = "".join(masked_chars)

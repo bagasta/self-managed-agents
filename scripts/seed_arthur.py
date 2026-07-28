@@ -88,7 +88,7 @@ ARTHUR_CONFIG = {
             "primary_model": "deepseek/deepseek-v4-flash",
             "document_model": "mistral-ocr-latest",
             "image_model": "openai/gpt-4.1-mini",
-            "engine_version": "arthur-progressive-v8",
+            "engine_version": "arthur-progressive-v9",
             "prompt_version": "arthur-kernel-v18",
             "skill_bundle_version": ARTHUR_SKILL_BUNDLE_VERSION,
         },
