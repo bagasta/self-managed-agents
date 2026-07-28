@@ -12,7 +12,7 @@ AGENT_PRESETS: dict[str, dict] = {
     "coding_deploy_agent": {
         "label": "Coding & Deploy Agent",
         "description": "Agent yang bisa menulis kode, menjalankannya di sandbox Docker, dan men-deploy ke public URL via Cloudflare tunnel.",
-        "default_model": "openai/gpt-4.1-mini",
+        "default_model": "deepseek/deepseek-v4-flash",
         "default_temperature": 0.5,
         "default_max_tokens": 2048,
         "default_channel": "whatsapp",
@@ -78,7 +78,7 @@ AGENT_PRESETS: dict[str, dict] = {
     "cs_whatsapp_basic": {
         "label": "CS WhatsApp Basic",
         "description": "Agent customer service untuk WhatsApp — jawab pertanyaan pelanggan, eskalasi ke operator jika perlu.",
-        "default_model": "openai/gpt-4.1-mini",
+        "default_model": "deepseek/deepseek-v4-flash",
         "default_temperature": 0.7,
         "default_max_tokens": 800,
         "default_channel": "whatsapp",
@@ -146,7 +146,7 @@ AGENT_PRESETS: dict[str, dict] = {
             "Agent WhatsApp untuk layanan/order berbayar yang mengumpulkan kebutuhan, meminta pembayaran, "
             "meneruskan bukti ke admin/operator, menunggu approval, lalu mengirim hasil layanan."
         ),
-        "default_model": "openai/gpt-4.1-mini",
+        "default_model": "deepseek/deepseek-v4-flash",
         "default_temperature": 0.4,
         "default_max_tokens": 2048,
         "default_channel": "whatsapp",
@@ -217,7 +217,7 @@ AGENT_PRESETS: dict[str, dict] = {
     "faq_webchat_rag": {
         "label": "FAQ & RAG WhatsApp Agent",
         "description": "Agent yang menjawab pertanyaan berdasarkan dokumen yang diupload (PDF, DOCX). Cocok untuk FAQ produk, kebijakan, manual.",
-        "default_model": "openai/gpt-4.1-mini",
+        "default_model": "deepseek/deepseek-v4-flash",
         "default_temperature": 0.3,
         "default_max_tokens": 1024,
         "default_channel": "whatsapp",
@@ -278,7 +278,7 @@ AGENT_PRESETS: dict[str, dict] = {
     "scheduler_assistant": {
         "label": "Scheduler & Reminder Assistant",
         "description": "Asisten pribadi yang bisa set reminder, jadwal, dan pengingat otomatis.",
-        "default_model": "openai/gpt-4.1-mini",
+        "default_model": "deepseek/deepseek-v4-flash",
         "default_temperature": 0.7,
         "default_max_tokens": 512,
         "default_channel": "whatsapp",
@@ -334,7 +334,7 @@ AGENT_PRESETS: dict[str, dict] = {
     "social_media_agent": {
         "label": "Social Media Specialist Agent",
         "description": "Agent spesialis konten media sosial — riset tren, buat content planner, generate file PDF/Excel, dan kirim langsung ke WhatsApp.",
-        "default_model": "openai/gpt-4.1-mini",
+        "default_model": "deepseek/deepseek-v4-flash",
         "default_temperature": 0.7,
         "default_max_tokens": 2048,
         "default_channel": "whatsapp",
@@ -395,7 +395,7 @@ AGENT_PRESETS: dict[str, dict] = {
     "data_analyst_agent": {
         "label": "Data Analyst Agent",
         "description": "Agent analisis data — upload file Excel/CSV, dapatkan insight, grafik, dan laporan langsung di WhatsApp.",
-        "default_model": "openai/gpt-4.1-mini",
+        "default_model": "deepseek/deepseek-v4-flash",
         "default_temperature": 0.3,
         "default_max_tokens": 2048,
         "default_channel": "whatsapp",
@@ -456,7 +456,7 @@ AGENT_PRESETS: dict[str, dict] = {
     "research_agent": {
         "label": "Research & Intelligence Agent",
         "description": "Agent riset mendalam — browsing internet, kumpulkan data, susun laporan terstruktur.",
-        "default_model": "openai/gpt-4.1-mini",
+        "default_model": "deepseek/deepseek-v4-flash",
         "default_temperature": 0.4,
         "default_max_tokens": 2048,
         "default_channel": "whatsapp",
@@ -517,7 +517,7 @@ AGENT_PRESETS: dict[str, dict] = {
     "ecommerce_cs": {
         "label": "E-Commerce Customer Service",
         "description": "CS agent khusus e-commerce — handle pertanyaan produk, status pesanan, komplain, dan retur via WhatsApp.",
-        "default_model": "openai/gpt-4.1-mini",
+        "default_model": "deepseek/deepseek-v4-flash",
         "default_temperature": 0.7,
         "default_max_tokens": 800,
         "default_channel": "whatsapp",
@@ -578,7 +578,7 @@ AGENT_PRESETS: dict[str, dict] = {
     "personal_assistant": {
         "label": "Personal Assistant Agent",
         "description": "Asisten pribadi all-in-one — jadwal, reminder, riset cepat, dan pengingat via WhatsApp.",
-        "default_model": "openai/gpt-4.1-mini",
+        "default_model": "deepseek/deepseek-v4-flash",
         "default_temperature": 0.7,
         "default_max_tokens": 1024,
         "default_channel": "whatsapp",
@@ -634,7 +634,7 @@ AGENT_PRESETS: dict[str, dict] = {
     "hr_assistant": {
         "label": "HR & Internal Knowledge Assistant",
         "description": "Asisten HR internal — jawab pertanyaan kebijakan perusahaan, cuti, benefit, dan onboarding dari dokumen.",
-        "default_model": "openai/gpt-4.1-mini",
+        "default_model": "deepseek/deepseek-v4-flash",
         "default_temperature": 0.3,
         "default_max_tokens": 1024,
         "default_channel": "whatsapp",
@@ -821,8 +821,12 @@ _PLATFORM_CHANNELS = [
 
 _RECOMMENDED_MODELS = [
     {
+        "model": "deepseek/deepseek-v4-flash",
+        "use_case": "Default semua agent baru buatan Arthur — cepat untuk percakapan dan orkestrasi tool",
+    },
+    {
         "model": "openai/gpt-4.1-mini",
-        "use_case": "Budget default multimodal — mendukung teks dan input gambar/vision, lebih hemat",
+        "use_case": "Pilihan multimodal — mendukung teks dan input gambar/vision",
     },
     {
         "model": "openai/gpt-4.1",
@@ -833,4 +837,4 @@ _RECOMMENDED_MODELS = [
     {"model": "openai/gpt-4o", "use_case": "Analisis gambar/dokumen (vision)"},
 ]
 
-_DEFAULT_MODEL = "openai/gpt-4.1-mini"
+_DEFAULT_MODEL = "deepseek/deepseek-v4-flash"

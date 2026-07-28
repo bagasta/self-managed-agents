@@ -655,7 +655,10 @@ class TestBuilderToolsReturnsList:
         plan_obj = SimpleNamespace(
             code="trial",
             label="Trial",
-            allowed_models=["openai/gpt-4.1-mini"],
+            allowed_models=[
+                "deepseek/deepseek-v4-flash",
+                "openai/gpt-4.1-mini",
+            ],
             subagents_allowed=False,
             wa_connect=True,
         )
@@ -782,6 +785,24 @@ class TestGetPlatformCapabilities:
                          "wa_agent_manager", "subagents"]
         for key in required_keys:
             assert key in data["tools_config_options"], f"Key '{key}' harus ada di tools_config_options"
+
+    def test_deepseek_v4_flash_is_the_canonical_default_for_all_presets(self):
+        from app.core.tools.builder_catalog import AGENT_PRESETS
+        from app.core.tools.builder_tools import build_builder_tools
+
+        db = _make_mock_db()
+        tools = build_builder_tools(db_factory=db, owner_phone="+62811xxx")
+        capabilities = next(t for t in tools if t.name == "get_platform_capabilities")
+        create_agent = next(t for t in tools if t.name == "create_agent")
+        data = json.loads(_run(capabilities.ainvoke({})))
+
+        expected_model = "deepseek/deepseek-v4-flash"
+        assert data["default_model"] == expected_model
+        assert data["recommended_models"][0]["model"] == expected_model
+        assert {preset["default_model"] for preset in AGENT_PRESETS.values()} == {
+            expected_model
+        }
+        assert create_agent.args_schema.model_fields["model"].default == expected_model
 
     def test_media_contract_identifies_gpt_41_mini_as_vision_and_inbound_separately(self):
         from app.core.tools.builder_tools import build_builder_tools
@@ -2046,7 +2067,10 @@ class TestCreateAgent:
         sub = SimpleNamespace(token_quota=10_000_000, expires_at=None, grace_until=None)
         plan_obj = SimpleNamespace(
             label="Starter",
-            allowed_models=["openai/gpt-4.1-mini"],
+            allowed_models=[
+                "deepseek/deepseek-v4-flash",
+                "openai/gpt-4.1-mini",
+            ],
             subagents_allowed=True,
             wa_connect=True,
         )

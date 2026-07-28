@@ -141,6 +141,14 @@ def test_default_tier3_plan_has_unlimited_agents_and_100m_tokens():
     assert tier3["token_quota"] == 100_000_000
 
 
+def test_default_trial_and_starter_plans_allow_deepseek_v4_flash():
+    from app.core.domain.subscription_service import DEFAULT_SUBSCRIPTION_PLANS
+
+    for code in ("trial", "tier_1"):
+        plan = next(plan for plan in DEFAULT_SUBSCRIPTION_PLANS if plan["code"] == code)
+        assert plan["allowed_models"][0] == "deepseek/deepseek-v4-flash"
+
+
 class TestGetOrCreateWaUser:
     @pytest.mark.asyncio
     async def test_creates_new_user_and_trial_sub(self):

@@ -57,7 +57,10 @@ DEFAULT_SUBSCRIPTION_PLANS: list[dict[str, Any]] = [
         "token_quota": 5_000_000,
         "period_days": 14,
         "grace_period_days": 3,
-        "allowed_models": ["openai/gpt-4.1-mini"],
+        "allowed_models": [
+            "deepseek/deepseek-v4-flash",
+            "openai/gpt-4.1-mini",
+        ],
         "subagents_allowed": True,
         "wa_connect": True,
         "is_trial": True,
@@ -71,7 +74,10 @@ DEFAULT_SUBSCRIPTION_PLANS: list[dict[str, Any]] = [
         "token_quota": 10_000_000,
         "period_days": 30,
         "grace_period_days": 3,
-        "allowed_models": ["openai/gpt-4.1-mini"],
+        "allowed_models": [
+            "deepseek/deepseek-v4-flash",
+            "openai/gpt-4.1-mini",
+        ],
         "subagents_allowed": True,
         "wa_connect": True,
         "is_trial": False,
@@ -132,8 +138,16 @@ async def ensure_default_subscription_plans(db: AsyncSession) -> None:
             existing.max_agents = 1
             existing.token_quota = 5_000_000
             existing.period_days = 14
-            existing.allowed_models = ["openai/gpt-4.1-mini"]
+            existing.allowed_models = [
+                "deepseek/deepseek-v4-flash",
+                "openai/gpt-4.1-mini",
+            ]
             existing.subagents_allowed = True
+        if existing.id == SubscriptionPlan.TIER_1_ID:
+            existing.allowed_models = [
+                "deepseek/deepseek-v4-flash",
+                "openai/gpt-4.1-mini",
+            ]
     await db.flush()
 
 

@@ -42,7 +42,7 @@ def build_builder_validation_tools() -> dict[str, Any]:
             name: Nama agent yang akan dibuat
             instructions: System prompt yang akan divalidasi
             tools_config: JSON string dari tools_config yang direncanakan
-            model: Model LLM yang akan digunakan (kosong = pakai default gpt-4.1-mini)
+            model: Model LLM yang akan digunakan (kosong = pakai default deepseek-v4-flash)
             channel_type: Channel agent: 'whatsapp' atau kosong
             preset_id: ID preset yang digunakan (opsional — untuk validasi preset-specific rules)
         """

@@ -96,7 +96,7 @@ def build_builder_create_tools(
         name: str,
         instructions: str,
         description: str = "",
-        model: str = "openai/gpt-4.1-mini",
+        model: str = "deepseek/deepseek-v4-flash",
         temperature: float = 0.7,
         tools_config: Any = '{"memory": true, "skills": true, "escalation": true}',
         allowed_senders: Any = "",
@@ -122,7 +122,7 @@ def build_builder_create_tools(
             name: Nama agent (wajib, maks 255 karakter)
             instructions: System prompt / instructions lengkap agent
             description: Deskripsi singkat fungsi agent
-            model: Model LLM (default: openai/gpt-4.1-mini)
+            model: Model LLM (default: deepseek/deepseek-v4-flash)
             temperature: Kreativitas respons, 0.0-2.0 (default: 0.7)
             tools_config: JSON string atau object konfigurasi tools, contoh: '{"memory": true, "scheduler": true}'
             allowed_senders: JSON array/string nomor WA yang diizinkan, contoh: '["+62811xxx"]'. Kosong = semua.
