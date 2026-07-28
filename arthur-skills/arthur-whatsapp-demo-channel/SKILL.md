@@ -14,7 +14,8 @@ When the user asks generally how to use or install the agent, present exactly tw
 1. Verify the target agent exists and is at least `agent_created`.
 2. Check required integrations; state demo limitations if setup is pending.
 3. Call `create_wa_dev_trial_link` for the explicitly selected agent.
-4. Send the shared-number vCard from Arthur's dedicated session when configured.
+4. Return one concise final reply containing the link and code. Do not send a
+   vCard unless the user explicitly asks for the contact card.
 5. Return the exact verified link/code and short test instructions.
 
 ## Own-number Workflow

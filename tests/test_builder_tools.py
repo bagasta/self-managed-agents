@@ -2518,7 +2518,7 @@ class TestCreateAgent:
 # ────────────────────────────────────────────────────────────────────────────
 
 class TestCreateWADevTrialLink:
-    def test_uses_whatsapp_context_when_phone_omitted(self):
+    def test_default_returns_link_without_direct_message_or_vcard(self):
         from app.core.tools.builder_tools import build_builder_tools
         db = _make_mock_db()
 
@@ -2552,17 +2552,10 @@ class TestCreateWADevTrialLink:
         data = json.loads(result)
         assert data["success"] is True
         assert data["code"] == "AB234C"
-        assert data["link_message_sent"] is True
-        assert data["contact_sent"] is True
-        send_message.assert_awaited_once()
-        assert data["wa_me_url"] in send_message.await_args.args[2]
-        assert "AB234C" in send_message.await_args.args[2]
-        send_contact.assert_awaited_once_with(
-            "arthur-device",
-            "+62811xxx",
-            "Demo Agent Baru",
-            "628123456789",
-        )
+        assert data["link_message_sent"] is False
+        assert data["contact_sent"] is False
+        send_message.assert_not_awaited()
+        send_contact.assert_not_awaited()
         assert data["shared_whatsapp_name"] == "Demo Agent Baru"
         assert "AB234C" in data["wa_me_url"]
         assert "Buka link wa.me" in data["instruction_for_user"]
@@ -2597,7 +2590,13 @@ class TestCreateWADevTrialLink:
                 default_target="+62811xxx",
             )
             tool = next(t for t in tools if t.name == "create_wa_dev_trial_link")
-            data = json.loads(_run(tool.ainvoke({"agent_id": str(my_agent.id)})))
+            data = json.loads(
+                _run(
+                    tool.ainvoke(
+                        {"agent_id": str(my_agent.id), "send_contact": True}
+                    )
+                )
+            )
 
         send_message.assert_awaited_once()
         send_contact.assert_not_awaited()
@@ -2680,7 +2679,9 @@ class TestCreateWADevTrialLink:
                 default_target="+62811xxx",
             )
             tool = next(t for t in tools if t.name == "create_wa_dev_trial_link")
-            result = _run(tool.ainvoke({"agent_name": "masbrew"}))
+            result = _run(
+                tool.ainvoke({"agent_name": "masbrew", "send_contact": True})
+            )
 
         data = json.loads(result)
         assert data["success"] is True
@@ -2767,7 +2768,11 @@ class TestCreateWADevTrialLink:
                 session_id=str(uuid.uuid4()),
             )
             tool = next(t for t in tools if t.name == "create_wa_dev_trial_link")
-            result = _run(tool.ainvoke({"agent_id": str(baas_agent.id)}))
+            result = _run(
+                tool.ainvoke(
+                    {"agent_id": str(baas_agent.id), "send_contact": True}
+                )
+            )
 
         data = json.loads(result)
         assert data["success"] is True
@@ -2870,8 +2875,20 @@ class TestCreateWADevTrialLink:
                 session_id=str(session_id),
             )
             tool = next(t for t in tools if t.name == "create_wa_dev_trial_link")
-            first = json.loads(_run(tool.ainvoke({"agent_id": str(agent.id)})))
-            second = json.loads(_run(tool.ainvoke({"agent_id": str(agent.id)})))
+            first = json.loads(
+                _run(
+                    tool.ainvoke(
+                        {"agent_id": str(agent.id), "send_contact": True}
+                    )
+                )
+            )
+            second = json.loads(
+                _run(
+                    tool.ainvoke(
+                        {"agent_id": str(agent.id), "send_contact": True}
+                    )
+                )
+            )
 
         assert first["contact_sent"] is True
         assert first["contact_already_sent"] is False

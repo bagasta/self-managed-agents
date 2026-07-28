@@ -649,7 +649,7 @@ async def _invoke_builder_whatsapp_action_tool(
         return False
 
     if action == "trial_link":
-        args: dict[str, Any] = {"send_contact": True}
+        args: dict[str, Any] = {"send_contact": False}
     else:
         agent_id = _builder_channel_agent_id_from_steps(parsed.get("steps", []))
         if not agent_id:

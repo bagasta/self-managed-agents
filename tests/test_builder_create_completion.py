@@ -318,7 +318,7 @@ async def test_deterministic_demo_fallback_calls_trial_tool_not_qr():
     )
 
     assert done is True
-    assert calls == [("create_wa_dev_trial_link", {"send_contact": True})]
+    assert calls == [("create_wa_dev_trial_link", {"send_contact": False})]
     assert parsed["steps"][0]["tool"] == "create_wa_dev_trial_link"
     assert parsed["db_messages"][0].tool_name == "create_wa_dev_trial_link"
 

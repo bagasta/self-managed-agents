@@ -150,7 +150,7 @@ def build_builder_channel_tools(
         agent_name: str = "",
         phone: str = "",
         force_new_code: bool = False,
-        send_contact: bool = True,
+        send_contact: bool = False,
     ) -> str:
         """
         Generate kode 6 karakter untuk mencoba agent lewat nomor demo Arthur.
@@ -164,9 +164,11 @@ def build_builder_channel_tools(
                       isi agent_name saat user menyebut nama agent.
             agent_name: Nama agent target, misalnya "Mas Brew". Wajib dipakai jika
                         user menyebut agent tertentu tapi agent_id belum diketahui.
-            phone: Nomor/JID tujuan untuk dikirimi vCard. Kosong = user saat ini.
+            phone: Nomor/JID tujuan untuk dikirimi vCard jika user memintanya eksplisit.
             force_new_code: True untuk rotate kode lama
-            send_contact: True untuk kirim contact card nomor shared Arthur ke user
+            send_contact: True hanya jika user eksplisit meminta contact card. Untuk
+                          alur demo normal wajib False agar link/kode dikirim tepat sekali
+                          lewat final reply.
         """
         agent_uuid: uuid.UUID | None = None
         if agent_id and self_agent_id and str(agent_id) == str(self_agent_id):

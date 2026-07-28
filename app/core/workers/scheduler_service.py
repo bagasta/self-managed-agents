@@ -274,6 +274,30 @@ async def _run_heartbeat_job(job, agent_model, db) -> None:
             log.warning("heartbeat.sse_failed", error=str(bus_exc))
 
 
+def _update_job_after_delivery(job: Any, *, now: datetime, delivery_failed: bool) -> None:
+    """Apply retry/cron/one-shot state without shadowing datetime imports."""
+    if delivery_failed:
+        job.next_run_at = now + timedelta(minutes=1)
+        job.status = "active"
+        return
+    if job.cron_expr:
+        try:
+            from croniter import croniter
+
+            # Cron dievaluasi dalam WIB (UTC+7), lalu dikonversi ke UTC.
+            local_tz = timezone(timedelta(hours=7))
+            now_local = now.astimezone(local_tz)
+            next_local = croniter(job.cron_expr, now_local).get_next(datetime)
+            job.next_run_at = next_local.astimezone(timezone.utc)
+            job.status = "active"
+        except ImportError:
+            job.next_run_at = now + timedelta(hours=1)
+            job.status = "active"
+        return
+    job.status = "done"
+    job.next_run_at = None
+
+
 async def _run_job(job_id) -> None:
     """Jalankan satu scheduled job: inject payload ke agent, kirim reply ke channel."""
     from app.core.engine.agent_runner import run_agent
@@ -305,7 +329,6 @@ async def _run_job(job_id) -> None:
                 logger.error("heartbeat.error", job_id=str(job_id), error=str(exc), exc_info=True)
             finally:
                 # Update next_run
-                from datetime import timedelta
                 from croniter import croniter
                 now = datetime.now(timezone.utc)
                 job.last_run_at = now
@@ -375,26 +398,13 @@ async def _run_job(job_id) -> None:
             now = datetime.now(timezone.utc)
             job.last_run_at = now
 
+            _update_job_after_delivery(
+                job,
+                now=now,
+                delivery_failed=delivery_failed,
+            )
             if delivery_failed:
-                job.next_run_at = now + timedelta(minutes=1)
-                job.status = "active"
                 log.warning("scheduler_service.job_retry_scheduled", next_run=str(job.next_run_at))
-            elif job.cron_expr:
-                try:
-                    from croniter import croniter
-                    # Cron dievaluasi dalam WIB (UTC+7), lalu konversi ke UTC untuk disimpan
-                    local_tz = timezone(timedelta(hours=7))
-                    now_local = now.astimezone(local_tz)
-                    next_local = croniter(job.cron_expr, now_local).get_next(datetime)
-                    job.next_run_at = next_local.astimezone(timezone.utc)
-                    job.status = "active"
-                except ImportError:
-                    job.next_run_at = now + timedelta(hours=1)
-                    job.status = "active"
-            else:
-                # One-time job selesai
-                job.status = "done"
-                job.next_run_at = None
 
             await db.commit()
             log.info("scheduler_service.job_done", next_run=str(job.next_run_at))

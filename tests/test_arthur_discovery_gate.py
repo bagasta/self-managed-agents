@@ -6,8 +6,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.core.tools.builder_create_tools import build_builder_create_tools
 from app.core.tools.builder_discovery import (
+    _evidence_supports_answer,
     _is_explicit_confirmation_message,
     _verified_evidence_quotes,
+    bind_current_file_capability,
     bind_current_user_confirmation,
     bind_owner_escalation_phone,
     discovery_escalation_policy,
@@ -1032,6 +1034,64 @@ def test_current_confirmation_is_bound_to_exact_trusted_inbound_message():
 
     assert bound["user_confirmed"] is True
     assert bound["_evidence"]["user_confirmed"] == "sip udah sesuai"
+
+
+def test_personal_assistant_wording_deterministically_binds_personal_context():
+    message = "Mau bikin agent untuk personal assistant"
+    enriched = infer_low_risk_discovery_facts(
+        {
+            "problem": message,
+            "_evidence": {"problem": message},
+        },
+        user_messages=[message],
+    )
+
+    assert enriched["usage_context"] == "personal"
+    assert enriched["_evidence"]["usage_context"] == message
+
+
+def test_two_duanya_binds_both_file_capabilities_with_raw_evidence():
+    bound = bind_current_file_capability(
+        {"capabilities": "receive_and_generate", "_evidence": {}},
+        current_user_message="2 duanya",
+    )
+
+    assert bound["file_capability"] == "both"
+    assert "menerima file" in bound["capabilities"]
+    assert "membuat file" in bound["capabilities"]
+    assert bound["_evidence"]["capabilities"] == "2 duanya"
+    assert _evidence_supports_answer(
+        "capabilities",
+        bound["capabilities"],
+        ["2 duanya"],
+    )
+
+
+def test_contextual_yes_supports_personal_without_trusting_question_examples():
+    contextual_evidence = (
+        "Pertanyaan Arthur: Basaoy AI ini untuk personal assistant — "
+        "jadi untuk kebutuhan pribadi ya? Bukan bisnis?\n"
+        "Jawaban user: yes betul"
+    )
+
+    assert _evidence_supports_answer(
+        "usage_context",
+        "personal",
+        [contextual_evidence],
+    )
+
+
+def test_ambiguous_file_yes_does_not_authorize_options_from_arthur_question():
+    contextual_evidence = (
+        "Pertanyaan Arthur: Perlu menerima file, membuat file, atau dua-duanya?\n"
+        "Jawaban user: Perlu"
+    )
+
+    assert not _evidence_supports_answer(
+        "capabilities",
+        "menerima file/gambar dan membuat file/laporan",
+        [contextual_evidence],
+    )
 
 
 def test_question_examples_are_not_returned_as_user_evidence():

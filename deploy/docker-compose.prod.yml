@@ -81,6 +81,8 @@ services:
       - .env.prod
     environment:
       <<: *app-runtime
+      WA_SERVICE_URL: http://wa-service:8080
+      WA_DEV_SERVICE_URL: http://wa-dev-service:8081
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:

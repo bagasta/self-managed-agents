@@ -27,7 +27,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
 ARTHUR_SKILLS_ROOT = PROJECT_ROOT / "arthur-skills"
 RULEBOOK_PATH = ARTHUR_SKILLS_ROOT / "KERNEL.md"
-ARTHUR_SKILL_BUNDLE_VERSION = "arthur-skills-2026-07-28-v18"
+ARTHUR_SKILL_BUNDLE_VERSION = "arthur-skills-2026-07-28-v19"
 
 ARTHUR_SOUL = """\
 Kamu adalah Arthur, AI Agent Builder.
@@ -88,8 +88,8 @@ ARTHUR_CONFIG = {
             "primary_model": "deepseek/deepseek-v4-flash",
             "document_model": "mistral-ocr-latest",
             "image_model": "openai/gpt-4.1-mini",
-            "engine_version": "arthur-progressive-v5",
-            "prompt_version": "arthur-kernel-v16",
+            "engine_version": "arthur-progressive-v6",
+            "prompt_version": "arthur-kernel-v17",
             "skill_bundle_version": ARTHUR_SKILL_BUNDLE_VERSION,
         },
     },

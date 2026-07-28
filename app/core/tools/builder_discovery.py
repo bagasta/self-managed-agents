@@ -376,36 +376,128 @@ def infer_low_risk_discovery_facts(
     if parse_error:
         return discovery_answers
     supplied_usage_context = _normalize_usage_context(answers.get("usage_context"))
-    if supplied_usage_context == "personal":
-        return discovery_answers
 
     work_pattern = re.compile(
         r"\b(?:bisnis|business|usaha|toko|customer|pelanggan|pembeli|"
         r"customer service|cs|admin|order|pesanan|spreadsheet|google sheets?)\b"
     )
-    personal_pattern = re.compile(r"\b(?:personal|pribadi)\b")
+    personal_pattern = re.compile(
+        r"\b(?:personal(?:\s+assistant)?|asisten\s+pribadi|assistant\s+pribadi|pribadi)\b"
+    )
     supporting_message = ""
+    inferred_usage_context = ""
     for message in reversed(user_messages or []):
-        normalized = _normalize_evidence_text(message)
+        source_message = _user_authored_evidence_text(message)
+        normalized = _normalize_evidence_text(source_message)
+        if not normalized:
+            continue
         # The latest explicit personal statement wins over an older work-like
         # keyword. Do not repair model evidence across a real user correction.
-        if personal_pattern.search(normalized):
-            return discovery_answers
-        if work_pattern.search(normalized):
-            supporting_message = str(message).strip()
+        personal_match = bool(personal_pattern.search(normalized))
+        work_match = bool(work_pattern.search(normalized))
+        negates_work = bool(
+            re.search(
+                r"\b(?:tidak|nggak|gak|bukan|tanpa)\b(?:\s+\w+){0,5}\s+"
+                r"\b(?:bisnis|business|usaha|kerja|pekerjaan)\b",
+                normalized,
+            )
+        )
+        if personal_match and (not work_match or negates_work):
+            supporting_message = source_message
+            inferred_usage_context = "personal"
+            break
+        if work_match and not personal_match:
+            supporting_message = source_message
+            inferred_usage_context = "work"
             break
     if not supporting_message:
         return discovery_answers
-    if supplied_usage_context not in {"", "work"}:
+    if supplied_usage_context and supplied_usage_context != inferred_usage_context:
         return discovery_answers
 
-    answers["usage_context"] = "work"
+    answers["usage_context"] = inferred_usage_context
     evidence = answers.get(_EVIDENCE_KEY)
     evidence = dict(evidence) if isinstance(evidence, dict) else {}
     # Replace model-authored or missing evidence with immutable user wording.
     # A small model often infers the correct value but cites its own paraphrase,
     # which made the validator re-ask a fact it had already normalized.
     evidence["usage_context"] = supporting_message
+    answers[_EVIDENCE_KEY] = evidence
+    return answers
+
+
+def _user_authored_evidence_text(value: Any) -> str:
+    text = str(value or "").strip()
+    if text.startswith("Pertanyaan Arthur: ") and "\nJawaban user:" in text:
+        return text.split("\nJawaban user:", 1)[1].strip()
+    return text
+
+
+def _file_capability_choice(value: Any) -> str:
+    text = _normalize_evidence_text(value)
+    if not text:
+        return ""
+    if re.search(
+        r"\b(?:dua duanya|dua2nya|2 duanya|keduanya|both)\b",
+        text,
+    ) or (
+        re.search(r"\bsemua\b", text)
+        and re.search(r"\b(?:file|dokumen|gambar|laporan)\b", text)
+    ) or (
+        re.search(r"\b(?:terima|menerima|baca|membaca)\b", text)
+        and re.search(r"\b(?:buat|bikin|membuat|hasilkan|generate)\b", text)
+        and re.search(r"\b(?:file|dokumen|gambar|laporan)\b", text)
+    ):
+        return "both"
+    if re.search(
+        r"\b(?:hanya|cuma)\b(?:\s+\w+){0,3}\s+\b(?:chat|teks|text)\b",
+        text,
+    ) or re.search(r"\b(?:tanpa|tidak perlu|nggak perlu|gak perlu)\s+file\b", text):
+        return "text_only"
+    receives = bool(
+        re.search(
+            r"\b(?:terima|menerima|baca|membaca)\b(?:\s+\w+){0,3}\s+"
+            r"\b(?:file|dokumen|gambar|foto)\b",
+            text,
+        )
+    )
+    generates = bool(
+        re.search(
+            r"\b(?:buat|bikin|membuat|hasilkan|generate)\b(?:\s+\w+){0,3}\s+"
+            r"\b(?:file|dokumen|laporan|pdf)\b",
+            text,
+        )
+    )
+    if receives and not generates:
+        return "receive_only"
+    if generates and not receives:
+        return "generate"
+    return ""
+
+
+def bind_current_file_capability(
+    discovery_answers: Any,
+    *,
+    current_user_message: str,
+) -> Any:
+    """Canonicalize a direct file-capability choice using trusted inbound text."""
+    choice = _file_capability_choice(current_user_message)
+    if not choice:
+        return discovery_answers
+    answers, parse_error = _parse_answers(discovery_answers)
+    if parse_error:
+        return discovery_answers
+    canonical_text = {
+        "text_only": "hanya chat teks tanpa menerima atau membuat file",
+        "receive_only": "menerima file/gambar tanpa membuat file",
+        "generate": "membuat file/laporan tanpa menerima file",
+        "both": "menerima file/gambar dan membuat file/laporan",
+    }[choice]
+    evidence = answers.get(_EVIDENCE_KEY)
+    evidence = dict(evidence) if isinstance(evidence, dict) else {}
+    answers["capabilities"] = canonical_text
+    answers["file_capability"] = choice
+    evidence["capabilities"] = str(current_user_message).strip()
     answers[_EVIDENCE_KEY] = evidence
     return answers
 
@@ -606,7 +698,11 @@ def _verified_evidence_quotes(
                 # paraphrase. Downstream validation still checks that this
                 # source actually supports the normalized answer.
                 source_message = message
-                if message.startswith("Pertanyaan Arthur: ") and "\nJawaban user:" in message:
+                if (
+                    field not in {"usage_context", "capabilities"}
+                    and message.startswith("Pertanyaan Arthur: ")
+                    and "\nJawaban user:" in message
+                ):
                     # The question identifies which field a terse reply belongs
                     # to, but its examples and wording are not user evidence.
                     source_message = message.split("\nJawaban user:", 1)[1].strip()
@@ -671,16 +767,53 @@ def _evidence_supports_answer(field: str, answer: Any, quotes: list[str]) -> boo
     if field == "agent_name":
         return _normalize_evidence_text(answer) in quote_text
     if field == "usage_context":
+        user_quote_text = _normalize_evidence_text(
+            " ".join(_user_authored_evidence_text(quote) for quote in quotes)
+        )
         if str(answer or "") == "personal":
-            return bool(re.search(r"\b(personal|pribadi|sendiri)\b", quote_text))
+            if re.search(r"\b(personal|pribadi|sendiri)\b", user_quote_text):
+                return True
+            for quote in quotes:
+                if "\nJawaban user:" not in quote:
+                    continue
+                question, user_answer = quote.split("\nJawaban user:", 1)
+                affirmative = bool(
+                    re.fullmatch(
+                        r"(?:ya+|iya|yes|betul|benar|yup|yep)(?:\s+(?:ya+|iya|yes|betul|benar))?",
+                        _normalize_evidence_text(user_answer),
+                    )
+                )
+                personal_proposition = bool(
+                    re.search(
+                        r"\b(?:jadi|untuk|murni)\b(?:\s+\w+){0,8}\s+"
+                        r"\b(?:personal|pribadi)\b",
+                        _normalize_evidence_text(question),
+                    )
+                )
+                if affirmative and personal_proposition:
+                    return True
+            return False
         return bool(
             re.search(
                 r"\b(pekerjaan|kerja|bisnis|business|work|profesional|usaha|toko|"
                 r"customer|pelanggan|pembeli|customer service|cs|admin|order|pesanan|"
                 r"spreadsheet|google sheets?)\b",
-                quote_text,
+                user_quote_text,
             )
         )
+    if field == "capabilities":
+        answer_choice = discovery_file_capability({"capabilities": answer})
+        if answer_choice and any(
+            _file_capability_choice(_user_authored_evidence_text(quote))
+            == answer_choice
+            for quote in quotes
+        ):
+            return True
+        answer_tokens = _answer_evidence_tokens(answer)
+        user_quote_tokens = _answer_evidence_tokens(
+            " ".join(_user_authored_evidence_text(quote) for quote in quotes)
+        )
+        return bool(answer_tokens & user_quote_tokens)
     if field == "daily_chat_volume":
         answer_numbers = re.findall(r"\d+", _normalize_evidence_text(answer))
         quote_numbers = re.findall(r"\d+", quote_text)
@@ -790,6 +923,8 @@ def discovery_file_capability(answers: dict[str, Any] | None) -> str:
     data = answers if isinstance(answers, dict) else {}
     explicit = str(data.get("file_capability") or "").strip().lower()
     if explicit == "enabled":
+        explicit = "both"
+    if explicit in {"receive_and_generate", "receive_generate", "both_files"}:
         explicit = "both"
     if explicit == "not_needed":
         explicit = "text_only"

@@ -556,8 +556,9 @@ def _builder_whatsapp_action_directive(action: str) -> str:
     return (
         "USER SUDAH MEMILIH NOMOR DEMO ARTHUR. Selesaikan sekarang di turn ini: "
         "temukan agent target yang benar dari konteks, lalu panggil create_wa_dev_trial_link "
-        "dengan send_contact=true. Jawaban final wajib memuat link wa.me dan kode persis dari "
-        "hasil tool. Jangan hanya menjelaskan cara mencoba dan jangan arahkan user ke dashboard."
+        "dengan send_contact=false. Jawaban final wajib memuat link wa.me dan kode persis dari "
+        "hasil tool tepat satu kali. Jangan kirim vCard kecuali user memintanya eksplisit, "
+        "jangan hanya menjelaskan cara mencoba, dan jangan arahkan user ke dashboard."
     )
 
 

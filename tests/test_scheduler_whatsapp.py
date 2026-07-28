@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,7 @@ from app.core.workers.scheduler_service import (
     _scheduled_channel_config,
     _send_scheduled_channel_message,
     _tick_with_lock,
+    _update_job_after_delivery,
     get_external_scheduler_health,
     publish_scheduler_heartbeat,
 )
@@ -145,6 +147,16 @@ def test_scheduled_whatsapp_config_falls_back_to_wadev_device() -> None:
 
     assert cfg["device_id"] == "wadev_agent-1"
     assert cfg["user_phone"] == "628111"
+
+
+def test_failed_reminder_delivery_is_rescheduled_without_datetime_shadowing() -> None:
+    now = datetime(2026, 7, 28, 13, 6, 52, tzinfo=timezone.utc)
+    job = SimpleNamespace(status="running", next_run_at=None, cron_expr=None)
+
+    _update_job_after_delivery(job, now=now, delivery_failed=True)
+
+    assert job.status == "active"
+    assert job.next_run_at == now + timedelta(minutes=1)
 
 
 @pytest.mark.asyncio
