@@ -30,6 +30,8 @@
   frontmatter, bodies, duplicate names, and checksums before writes.
 - Config, soul, and all skill activations are reseeded in one database
   transaction. Any immutable checksum conflict rolls back the entire release.
+- Reactivated immutable skill rows refresh their live bundle metadata, so every
+  active skill can be traced to the currently deployed bundle.
 - A read-only release preflight reports Git SHA, dirty paths, image identity,
   bundle checksums, API replica count, and health.
 

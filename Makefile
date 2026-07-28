@@ -44,7 +44,8 @@ test-arthur:
 		tests/test_arthur_skill_runtime.py \
 		tests/test_arthur_fast_intake.py \
 		tests/test_builder_create_completion.py \
-		tests/test_agent_builder_phase4.py
+		tests/test_agent_builder_phase4.py \
+		tests/test_skill_service.py
 
 dev:
 	uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload

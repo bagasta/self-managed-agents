@@ -115,7 +115,15 @@ async def publish_system_skill(
             raise ValueError(
                 f"Immutable system skill {name}@{version} has a different checksum"
             )
+        # The immutable content/version identity is reused across releases, but
+        # activation metadata must identify the bundle that is currently live.
+        # Without this refresh, a successful atomic reseed leaves active rows
+        # reporting historical bundle versions and makes release auditing
+        # ambiguous.
         existing.enabled = True
+        existing.bundle_version = bundle_version
+        existing.publisher = publisher
+        existing.published_at = datetime.now(timezone.utc)
         await db.execute(
             update(Skill)
             .where(
