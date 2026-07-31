@@ -1041,6 +1041,42 @@ async def test_google_mcp_success_claim_without_google_tool_is_overridden() -> N
 
 
 @pytest.mark.asyncio
+async def test_google_mcp_control_plane_configuration_is_not_treated_as_target_execution() -> None:
+    """Arthur V2 may configure another agent without running that agent's MCP."""
+    runtime = GoogleMcpRuntime(
+        enabled=True,
+        workspace_server={},
+        connected_user_id="user@example.com",
+        auth_url=None,
+        preflight_error=None,
+        integration_url="http://localhost:8002",
+        candidate_user_ids=["user@example.com"],
+        system_prompt="",
+    )
+    final_reply = (
+        "Minsel sudah terhubung ke Google Workspace. Google Sheet akan dibuat "
+        "saat Minsel menerima workflow order pertamanya."
+    )
+
+    reply, steps, _ = await apply_google_mcp_reply_overrides(
+        final_reply=final_reply,
+        steps=[{"tool": "update_assistant", "result": "done"}],
+        mcp_errors={},
+        runtime=runtime,
+        auth_url=None,
+        llm_raw=None,
+        user_message="sudah login Google untuk Minsel",
+        agent_id="00000000-0000-0000-0000-000000000000",
+        api_key="test",
+        log=type("Log", (), {"warning": lambda *args, **kwargs: None})(),
+        control_plane_run=True,
+    )
+
+    assert reply == final_reply
+    assert steps == [{"tool": "update_assistant", "result": "done"}]
+
+
+@pytest.mark.asyncio
 async def test_google_form_order_link_reply_is_not_overridden_without_google_step() -> None:
     runtime = GoogleMcpRuntime(
         enabled=True,

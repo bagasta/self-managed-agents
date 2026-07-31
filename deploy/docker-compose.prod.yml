@@ -45,6 +45,9 @@ services:
       API_KEEP_ALIVE_SECONDS: "${API_KEEP_ALIVE_SECONDS:-5}"
       API_GRACEFUL_SHUTDOWN_SECONDS: "${API_GRACEFUL_SHUTDOWN_SECONDS:-45}"
       EMBEDDED_SCHEDULER_ENABLED: "false"
+      # Arthur V1 is retired. Only the separately seeded `arthur_v2` system
+      # agent is allowed to execute builder actions in production.
+      ARTHUR_LEGACY_ENABLED: "${ARTHUR_LEGACY_ENABLED:-false}"
     volumes:
       - /tmp/agent-sandboxes:/tmp/agent-sandboxes
       - /var/run/docker.sock:/var/run/docker.sock

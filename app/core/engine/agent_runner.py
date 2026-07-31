@@ -53,7 +53,7 @@ from app.core.engine.agent_callbacks import AgentStepLogger
 from app.core.engine.agent_hitl import handle_graph_interrupt, handle_pending_interrupt
 from app.core.engine.agent_input import build_input_messages
 from app.core.engine.agent_llm import build_agent_llms
-from app.core.engine.arthur_skill_runtime import (
+from arthur.runtime.skill_runtime import (
     ARTHUR_ENGINE_VERSION,
     ARTHUR_PROMPT_VERSION,
     arthur_runtime_enabled,
@@ -114,7 +114,7 @@ from app.core.engine.reply_guard import ensure_non_empty_reply
 from app.core.utils.phone_utils import normalize_phone
 from app.core.domain.agent_quota_service import get_owner_subscription, is_quota_exempt_builder_agent
 from app.core.domain.subscription_service import QuotaExceeded, assert_token_quota_available
-from app.core.tools.builder_payment_tools import (
+from arthur.tools.builder_payment_tools import (
     payment_user_reply,
     verified_payment_payload,
 )
@@ -1022,6 +1022,30 @@ async def run_agent(
     db.add(run_record)
 
     await db.flush()
+
+    # System-agent availability is an explicit plugin concern.  This gate runs
+    # after a Run exists so the retirement response is observable, but before
+    # quota checks, LLM construction, prompts, or legacy Arthur tools load.
+    from app.core.system_agents.registry import get_system_agent_status
+
+    system_agent_status = get_system_agent_status(tools_config)
+    if system_agent_status is not None and not system_agent_status.enabled:
+        run_record.status = "completed"
+        run_record.completed_at = datetime.now(timezone.utc)
+        run_record.tokens_used = 0
+        run_record.runtime_metadata = {
+            **dict(run_record.runtime_metadata or {}),
+            "system_plugin": system_agent_status.key,
+            "system_plugin_enabled": False,
+        }
+        await db.flush()
+        return AgentRunResult(
+            reply=system_agent_status.disabled_reply,
+            steps=[],
+            run_id=run_id,
+            tokens_used=0,
+            usage={},
+        )
 
     # HITL action_requests use .get("name", ...) and .get("args", ...);
     # compatibility tests also assert .get("name", ...) remains documented here.
@@ -3411,6 +3435,12 @@ async def run_agent(
         agent_id=agent_id,
         api_key=settings.api_key,
         log=log,
+        # Arthur V2 configures another assistant's Google integration.  Its
+        # control-plane run does not itself invoke that assistant's MCP tools.
+        control_plane_run=(
+            str((tools_config or {}).get("system_plugin") or "").strip()
+            == "arthur_v2"
+        ),
     )
     _google_mcp_auth_err = _google_mcp_auth_err_before_override or _extract_google_mcp_step_error(steps)
     _google_mcp_has_artifact = (
@@ -3482,6 +3512,7 @@ async def run_agent(
         user_message=execution_user_message,
         builder_whatsapp_action=_builder_whatsapp_action,
         decision_trace=_reply_guard_trace,
+        system_plugin=str((tools_config or {}).get("system_plugin") or "").strip(),
     )
     if final_reply != _reply_before_non_empty_guard:
         _reply_guard_reason = _reply_guard_trace.get("reason", "fallback_other")

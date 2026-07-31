@@ -7,6 +7,7 @@ from app.api.integrations import (
     GoogleOAuthSuccessEvent,
     _deliver_google_oauth_success_whatsapp,
     _google_oauth_success_message,
+    _mark_google_workspace_connected,
     _oauth_identity_candidates,
 )
 
@@ -123,3 +124,36 @@ async def test_oauth_success_reports_when_no_whatsapp_session_exists() -> None:
 
     assert status_code == 404
     assert payload == {"notified": False, "reason": "whatsapp_session_not_found"}
+
+
+@pytest.mark.asyncio
+async def test_oauth_success_marks_the_owned_target_agent_connected() -> None:
+    agent = _agent(builder=False, wa_device_id="device", agent_id=uuid.uuid4())
+    agent.tools_config = {
+        "mcp": {"enabled": True, "servers": {"google_workspace": {"url": "http://mcp"}}},
+        "integration_status": {"google_workspace": "auth_pending"},
+    }
+    agent.version = 4
+
+    class FakeDB:
+        committed = False
+
+        async def get(self, model, target_id):
+            assert model is not None
+            assert str(target_id) == str(agent.id)
+            return agent
+
+        async def commit(self):
+            self.committed = True
+
+    db = FakeDB()
+    synced = await _mark_google_workspace_connected(
+        db=db,
+        event=GoogleOAuthSuccessEvent(external_user_id="+628111@s.whatsapp.net", agent_id=str(agent.id)),
+    )
+
+    assert synced is True
+    assert db.committed is True
+    assert agent.tools_config["mcp"]["enabled"] is True
+    assert agent.tools_config["integration_status"]["google_workspace"] == "connected"
+    assert agent.version == 5

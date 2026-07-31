@@ -15,11 +15,11 @@ make deploy-api-fast
 docker exec deploy-api-1 alembic upgrade head
 ```
 
-If `system-message-builder.md` or `scripts/seed_arthur.py` changed:
+If `arthur_v2/`, system-agent registry, or Arthur V2 integrations changed:
 
 ```bash
-docker exec deploy-api-1 python scripts/seed_arthur.py --dry-run
-docker exec deploy-api-1 python scripts/seed_arthur.py
+# V1 is retired; do not run scripts/seed_arthur.py in production.
+docker exec deploy-api-1 python -m arthur_v2.seed
 ```
 
 ## API and scheduler changes

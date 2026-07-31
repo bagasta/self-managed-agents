@@ -68,11 +68,11 @@ def _make_agent(operator_ids=None, name="Test", tools_config=None, wa_device_id=
 
 class TestSeedScript:
     def test_seed_script_exists(self):
-        p = pathlib.Path(__file__).parent.parent / "scripts/seed_arthur.py"
-        assert p.exists(), "scripts/seed_arthur.py harus ada"
+        p = pathlib.Path(__file__).parent.parent / "arthur/seed.py"
+        assert p.exists(), "seed Arthur legacy harus ada di paket system agent"
 
     def test_seed_script_has_arthur_config(self):
-        p = pathlib.Path(__file__).parent.parent / "scripts/seed_arthur.py"
+        p = pathlib.Path(__file__).parent.parent / "arthur/seed.py"
         src = p.read_text()
         assert "capabilities" in src
         assert "Arthur" in src
@@ -82,7 +82,7 @@ class TestSeedScript:
         import subprocess
         import sys
         result = subprocess.run(
-            [sys.executable, "scripts/seed_arthur.py", "--dry-run"],
+            [sys.executable, "-m", "arthur.seed", "--dry-run"],
             cwd=str(pathlib.Path(__file__).parent.parent),
             capture_output=True,
             text=True,
@@ -97,12 +97,12 @@ class TestSeedScript:
 
 class TestArthurConfig:
     def test_rulebook_referenced_in_seed(self):
-        p = pathlib.Path(__file__).parent.parent / "scripts/seed_arthur.py"
+        p = pathlib.Path(__file__).parent.parent / "arthur/seed.py"
         src = p.read_text()
         assert "system-message-builder.md" in src
 
     def test_arthur_tools_config_uses_internal_builder_tools_and_wa_manager(self):
-        p = pathlib.Path(__file__).parent.parent / "scripts/seed_arthur.py"
+        p = pathlib.Path(__file__).parent.parent / "arthur/seed.py"
         src = p.read_text()
         assert '"http": False' in src or "'http': False" in src, \
             "Arthur harus memakai builder tools internal, bukan HTTP/ngrok platform"
@@ -112,28 +112,28 @@ class TestArthurConfig:
             "Arthur butuh wa_agent_manager untuk kirim QR ke user"
 
     def test_arthur_seed_has_unlimited_quota(self):
-        p = pathlib.Path(__file__).parent.parent / "scripts/seed_arthur.py"
+        p = pathlib.Path(__file__).parent.parent / "arthur/seed.py"
         src = p.read_text()
         assert '"token_quota": 0' in src, "Arthur harus unlimited quota; 0 berarti tidak dibatasi"
 
     def test_rulebook_uses_current_arthur_model(self):
         root = pathlib.Path(__file__).parent.parent
-        seed_src = (root / "scripts/seed_arthur.py").read_text()
+        seed_src = (root / "arthur/seed.py").read_text()
         legacy_src = (root / "system-message-builder.md").read_text()
-        kernel_src = (root / "arthur-skills/KERNEL.md").read_text()
+        kernel_src = (root / "arthur/assets/skills/KERNEL.md").read_text()
         assert '"model": "deepseek/deepseek-v4-flash"' in seed_src
         assert "Model Arthur sendiri: deepseek/deepseek-v4-flash" in legacy_src
         assert "openai/gpt-4.1-mini" not in kernel_src
         assert "Model writer untuk blueprint/instructions/manual/soul: deepseek/deepseek-v4-pro" in legacy_src
 
     def test_arthur_has_system_capabilities(self):
-        p = pathlib.Path(__file__).parent.parent / "scripts/seed_arthur.py"
+        p = pathlib.Path(__file__).parent.parent / "arthur/seed.py"
         src = p.read_text()
         assert "capabilities" in src
         assert '"system"' in src or "'system'" in src
 
     def test_arthur_allowed_senders_null(self):
-        p = pathlib.Path(__file__).parent.parent / "scripts/seed_arthur.py"
+        p = pathlib.Path(__file__).parent.parent / "arthur/seed.py"
         src = p.read_text()
         assert "allowed_senders': None" in src or '"allowed_senders": None' in src or \
                "allowed_senders=None" in src or "allowed_senders\": None" in src, \

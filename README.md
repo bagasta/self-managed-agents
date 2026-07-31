@@ -137,6 +137,12 @@ make mcp-smoke-live-reauth
 make mcp-smoke-live
 ```
 
+## Arthur V2 Production Deploy
+
+Arthur V2 is the active builder system agent; Arthur legacy remains retired.
+For VPS deployment, seeding, and verification use
+[`docs/deploy/ARTHUR_V2_VPS_DEPLOY.md`](docs/deploy/ARTHUR_V2_VPS_DEPLOY.md).
+
 ---
 
 ## Menjalankan via Docker Compose

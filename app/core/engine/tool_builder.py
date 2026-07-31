@@ -1098,7 +1098,7 @@ def build_builder_tools(
         device_id/default_target: konteks WhatsApp saat tersedia
         session_id: UUID sesi saat ini — untuk membaca file yang dikirim user di workspace
     """
-    from app.core.tools.builder_tools import build_builder_tools as _build
+    from arthur.tools.builder_tools import build_builder_tools as _build
     return _build(
         db_factory=db_factory,
         owner_phone=owner_phone,

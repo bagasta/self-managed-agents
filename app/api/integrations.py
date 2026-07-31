@@ -161,6 +161,55 @@ async def _deliver_google_oauth_success_whatsapp(
     return {"notified": True}, 200
 
 
+async def _mark_google_workspace_connected(
+    *,
+    db: AsyncSession,
+    event: GoogleOAuthSuccessEvent,
+) -> bool:
+    """Synchronize the target assistant after its OAuth callback commits.
+
+    The integration service owns tokens, but Arthur and the dashboard read this
+    lightweight state from the assistant configuration.  Keeping it in sync
+    prevents a successful OAuth flow from looking perpetually ``auth_pending``.
+    """
+    target_agent_id = str(event.agent_id or "").strip()
+    if not target_agent_id:
+        return False
+
+    try:
+        agent = await db.get(Agent, target_agent_id)
+    except (TypeError, ValueError):
+        logger.warning("integrations.google.oauth_success_invalid_agent_id", agent_id=target_agent_id)
+        return False
+    if agent is None:
+        logger.warning("integrations.google.oauth_success_agent_not_found", agent_id=target_agent_id)
+        return False
+
+    owner_phone = normalize_phone(str(agent.owner_external_id or "").split("@", 1)[0])
+    event_phones = {
+        normalize_phone(candidate.split("@", 1)[0])
+        for candidate in _oauth_identity_candidates(event.external_user_id)
+    }
+    event_phones.discard("")
+    if not owner_phone or owner_phone not in event_phones:
+        logger.warning(
+            "integrations.google.oauth_success_owner_mismatch",
+            agent_id=target_agent_id,
+            external_user_id=event.external_user_id,
+        )
+        return False
+
+    config = dict(agent.tools_config or {})
+    integration_status = dict(config.get("integration_status") or {})
+    integration_status["google_workspace"] = "connected"
+    config["integration_status"] = integration_status
+    agent.tools_config = config
+    agent.version += 1
+    await db.commit()
+    logger.info("integrations.google.oauth_success_agent_synced", agent_id=target_agent_id)
+    return True
+
+
 def _integration_service_url() -> str:
     url = str(settings.google_integration_service_url).rstrip("/")
     if not url:
@@ -225,6 +274,8 @@ async def notify_google_oauth_success(
     event: GoogleOAuthSuccessEvent,
     db: AsyncSession = Depends(get_db),
 ) -> JSONResponse:
-    """Receive a post-commit OAuth event and notify the matching WhatsApp user."""
+    """Receive a post-commit OAuth event, sync the target, then notify WhatsApp."""
+    synced = await _mark_google_workspace_connected(db=db, event=event)
     payload, status_code = await _deliver_google_oauth_success_whatsapp(db=db, event=event)
+    payload["agent_synced"] = synced
     return JSONResponse(payload, status_code=status_code)

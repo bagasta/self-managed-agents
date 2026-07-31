@@ -10,10 +10,10 @@ import sys
 from typing import Any
 
 
-PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
+PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.seed_arthur import (  # noqa: E402
+from arthur.seed import (  # noqa: E402
     ARTHUR_SKILL_BUNDLE_VERSION,
     load_arthur_source_bundle,
 )

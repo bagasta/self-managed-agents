@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     arthur_image_model: str = "openai/gpt-4.1-mini"
     arthur_engine_version: str = "arthur-progressive-v9"
     arthur_prompt_version: str = "arthur-kernel-v18"
+    # Allows the legacy Arthur plugin to be retired without disabling generic
+    # agent CRUD, dashboard management, scheduler, or WhatsApp services.
+    arthur_legacy_enabled: bool = False
     llm_request_timeout_seconds: float = 120.0
     llm_max_retries: int = 1
 

@@ -1,5 +1,9 @@
 # Arthur Progressive Skills — Production Deploy Runbook
 
+> Historical runbook for Arthur legacy/progressive runtime. Do not use its
+> `scripts/seed_arthur.py` commands for current production. Deploy Arthur V2
+> with [ARTHUR_V2_VPS_DEPLOY.md](ARTHUR_V2_VPS_DEPLOY.md).
+
 Tanggal: 22 Juli 2026
 Target: `managed-agent.chiefaiofficer.id`
 Release: Arthur progressive runtime, persistent build state, DeepSeek V4 Flash, Mistral document route, dan GPT-4.1 Mini image route
@@ -87,7 +91,7 @@ PROD_COMPOSE=(docker compose -f deploy/docker-compose.prod.yml)
 
 ```bash
 "${PROD_COMPOSE[@]}" run --rm --no-deps api alembic current
-"${PROD_COMPOSE[@]}" run --rm --no-deps api python scripts/seed_arthur.py --dry-run
+# Obsolete for current production: follow ARTHUR_V2_VPS_DEPLOY.md instead.
 ```
 
 Dry-run harus menunjukkan:
@@ -107,7 +111,7 @@ Urutannya wajib migration dahulu, baru seed:
 ```bash
 "${PROD_COMPOSE[@]}" run --rm --no-deps api alembic upgrade head
 "${PROD_COMPOSE[@]}" run --rm --no-deps api alembic current
-"${PROD_COMPOSE[@]}" run --rm --no-deps api python scripts/seed_arthur.py
+# Obsolete for current production: run `python -m arthur_v2.seed` per the V2 runbook.
 ```
 
 Gate:
@@ -254,8 +258,8 @@ Rollback aplikasi memakai image sebelumnya dan seed dari image sebelumnya. Janga
 ```bash
 export IMAGE_TAG="${PREVIOUS_IMAGE_TAG}"
 PROD_COMPOSE=(docker compose -f deploy/docker-compose.prod.yml)
-"${PROD_COMPOSE[@]}" run --rm --no-deps api python scripts/seed_arthur.py --dry-run
-"${PROD_COMPOSE[@]}" run --rm --no-deps api python scripts/seed_arthur.py
+# Obsolete for current production: Arthur V2 rollback/seed instructions live in
+# ARTHUR_V2_VPS_DEPLOY.md; legacy must not be seeded automatically.
 "${PROD_COMPOSE[@]}" up -d --no-deps api scheduler
 ```
 

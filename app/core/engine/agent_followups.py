@@ -545,7 +545,7 @@ def _requested_builder_whatsapp_action(
     input_messages: list[Any] | None = None,
 ) -> str | None:
     """Return the concrete WhatsApp action explicitly selected by the user."""
-    from app.core.engine.arthur_skill_runtime import (
+    from arthur.runtime.skill_runtime import (
         classify_builder_whatsapp_action,
     )
 

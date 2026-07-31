@@ -40,9 +40,9 @@ install-dev:
 test-arthur:
 	python -m pytest -q \
 		tests/test_reply_guard.py \
-		tests/test_arthur_discovery_gate.py \
-		tests/test_arthur_skill_runtime.py \
-		tests/test_arthur_fast_intake.py \
+		arthur/tests/test_arthur_discovery_gate.py \
+		arthur/tests/test_arthur_skill_runtime.py \
+		arthur/tests/test_arthur_fast_intake.py \
 		tests/test_builder_create_completion.py \
 		tests/test_agent_builder_phase4.py \
 		tests/test_skill_service.py

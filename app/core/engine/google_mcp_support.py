@@ -2319,7 +2319,7 @@ def filter_google_mcp_tools_by_services(
         if str(service).strip()
     }
     if not allowed and requirement_text:
-        from app.core.tools.builder_google import infer_google_workspace_services
+        from arthur.tools.builder_google import infer_google_workspace_services
 
         allowed = set(infer_google_workspace_services(requirement_text))
     if not allowed:
@@ -3157,6 +3157,7 @@ async def apply_google_mcp_reply_overrides(
     agent_id: uuid.UUID,
     api_key: str,
     log: Any,
+    control_plane_run: bool = False,
 ) -> tuple[str, list, str | None]:
     google_mcp_err = mcp_errors.get("google_workspace") if isinstance(mcp_errors, dict) else None
     google_mcp_step_err = _extract_google_mcp_step_error(steps)
@@ -3206,7 +3207,8 @@ async def apply_google_mcp_reply_overrides(
         )
 
     must_override_google_not_executed = (
-        not google_mcp_err
+        not control_plane_run
+        and not google_mcp_err
         and not must_override_google_auth
         and _is_google_mcp_intent(user_message)
         and not _has_google_mcp_step(steps)

@@ -1,5 +1,8 @@
 # Arthur Conversational Remediation Release
 
+> Historical Arthur legacy release note. The production builder is now Arthur
+> V2; use [ARTHUR_V2_VPS_DEPLOY.md](ARTHUR_V2_VPS_DEPLOY.md) for deployment.
+
 **Date:** 2026-07-28
 
 ## Release identity
@@ -40,10 +43,8 @@
 ```bash
 make install-dev
 make test-arthur
-python scripts/seed_arthur.py --dry-run
-python scripts/preflight_arthur_release.py \
-  --image managed-agents-app:<release-tag> \
-  --expected-api-replicas 5
+# Obsolete for current production: use `python -m arthur_v2.seed` and the
+# verification checklist in ARTHUR_V2_VPS_DEPLOY.md.
 ```
 
 ## Rollout boundary

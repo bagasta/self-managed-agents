@@ -1,0 +1,42 @@
+{
+  "name": "Arthur natural interview smoke",
+  "reset_before": true,
+  "turns": [
+    {
+      "send": "Halo",
+      "expect": {
+        "must_include_any": ["Arthur", "AI Staff"],
+        "must_not_include": ["seluruh fakta", "perencanaan"],
+        "max_questions": 1,
+        "max_length": 350
+      }
+    },
+    {
+      "send": "Mau bikin agent AI untuk CS bisa?",
+      "expect": {
+        "must_include_any": ["kewalahan", "masalah", "kendala", "dibantu"],
+        "must_not_include": ["pribadi atau bisnis"],
+        "max_questions": 1,
+        "max_length": 500
+      }
+    },
+    {
+      "send": "Balasin chat customer yang mau beli di WA dalam waktu bersamaan, lalu catat ordernya ke Google Sheet.",
+      "expect": {
+        "must_include_any": ["nama", "name"],
+        "must_not_include": ["pribadi atau bisnis", "personal or business"],
+        "max_questions": 1,
+        "max_length": 500
+      }
+    },
+    {
+      "send": "English please",
+      "expect": {
+        "must_include_any": ["name", "call the agent"],
+        "must_not_include": ["Saya tidak akan memilih nama", "pribadi atau bisnis"],
+        "max_questions": 1,
+        "max_length": 500
+      }
+    }
+  ]
+}

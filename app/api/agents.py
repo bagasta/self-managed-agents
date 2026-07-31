@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config_schema import ToolsConfig
-from app.core.tools.builder_identity import owner_filter
+from app.core.domain.agent_ownership import owner_filter
 from app.database import get_db
 from app.deps import verify_api_key
 from app.models.agent import Agent
@@ -119,6 +119,20 @@ async def list_agents(
         limit=limit,
         offset=offset,
     )
+
+
+@router.post("/system/arthur-v2/ensure", response_model=AgentResponse)
+async def ensure_arthur_v2(
+    _: str = Depends(verify_api_key),
+) -> AgentResponse:
+    """Create or refresh only the independent Arthur V2 system record.
+
+    This is intentionally separate from the legacy Arthur seed so UI-DEV can
+    provision the version it manages before starting the WhatsApp QR flow.
+    """
+    from arthur_v2.seed import seed
+
+    return AgentResponse.model_validate(await seed())
 
 
 @router.get("/{agent_id}", response_model=AgentResponse)

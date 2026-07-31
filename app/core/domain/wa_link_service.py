@@ -21,7 +21,7 @@ import structlog
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.tools.builder_identity import is_probable_lid
+from app.core.domain.agent_ownership import is_probable_lid
 from app.core.utils.phone_utils import normalize_phone
 from app.models.subscription import SubscriptionPlan, User, UserSubscription
 from app.models.wa_link_code import WaLinkCode

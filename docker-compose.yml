@@ -42,7 +42,7 @@ services:
         condition: service_healthy
     command: >
       bash -c "alembic upgrade head &&
-               python scripts/seed_arthur.py &&
+               python -m arthur_v2.seed &&
                uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
 
 volumes:
