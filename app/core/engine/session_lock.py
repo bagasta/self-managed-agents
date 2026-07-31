@@ -184,6 +184,13 @@ async def register_active_task(session_id: UUID, task: asyncio.Task) -> None:
         _active_tasks[session_id] = task
 
 
+async def has_active_run(session_id: UUID) -> bool:
+    """Return whether this session currently has a live agent task."""
+    async with _task_registry_lock:
+        task = _active_tasks.get(session_id)
+        return task is not None and not task.done()
+
+
 async def unregister_active_task(session_id: UUID, task: asyncio.Task | None = None) -> None:
     """Remove the task entry when a run finishes."""
     async with _task_registry_lock:

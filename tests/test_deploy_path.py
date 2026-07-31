@@ -394,6 +394,26 @@ def test_deploy_followup_needed_after_subagent_codes_without_url():
     ) is True
 
 
+def test_deploy_followup_continues_after_acknowledgement_when_html_exists():
+    """A follow-up must still deploy when the latest turn is merely 'ok'."""
+    from app.core.engine.agent_runner import _needs_deploy_followup
+
+    steps = [
+        {
+            "tool": "write_file",
+            "args": {"file_path": "/workspace/index.html"},
+            "result": "Updated file /workspace/index.html",
+        }
+    ]
+
+    assert _needs_deploy_followup(
+        "ok",
+        {"deploy": True},
+        steps,
+        "Saya tulis dulu file website-nya.",
+    ) is True
+
+
 def test_deploy_followup_not_needed_when_public_url_exists():
     """A returned deploy URL is the completion proof; do not redeploy."""
     from app.core.engine.agent_runner import _needs_deploy_followup

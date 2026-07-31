@@ -61,13 +61,12 @@ def build_system_agent_tools(*, tools_config: dict[str, Any] | None, **context: 
     if key == ARTHUR_V2_PLUGIN:
         from arthur_v2 import build_arthur_v2_tools
 
-        # The engine supplies channel/session details used by the legacy builder.
-        # Arthur V2 deliberately has a smaller control-plane contract, so pass
-        # only the context its factory owns.  This keeps WhatsApp metadata such
-        # as device_id from breaking normal inbound-message runs.
+        # Arthur V2 owns a narrow control-plane contract.  The session ID is
+        # included solely to resolve the current inbound document workspace for
+        # its RAG ingestion tool; channel/device metadata remains excluded.
         v2_context = {
             field: context[field]
-            for field in ("db_factory", "owner_phone", "self_agent_id", "default_target")
+            for field in ("db_factory", "owner_phone", "self_agent_id", "default_target", "session_id")
             if field in context
         }
         return build_arthur_v2_tools(**v2_context)

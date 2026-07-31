@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
 
@@ -66,6 +67,10 @@ class CreateAssistantInput(BaseModel):
     workflow: AssistantWorkflowInput | None = Field(
         default=None,
         description="Wajib dan lengkap untuk assistant bisnis; tidak diperlukan untuk personal assistant sederhana.",
+    )
+    enable_deploy: bool = Field(
+        default=False,
+        description="Aktifkan hanya untuk assistant yang perlu membuat dan mempublikasikan website/aplikasi. Otomatis mengaktifkan sandbox dan tool deployment.",
     )
     confirmed: bool = Field(default=False, description="True hanya setelah pengguna memberi konfirmasi eksplisit untuk membuat assistant.")
 
@@ -144,6 +149,14 @@ or an approved platform setup; never invent an endpoint or credential. For
 payments, only use get_payment_link after the user explicitly asks to buy or
 upgrade a plan.
 
+For a website or web-app request, create the assistant with enable_deploy=true
+in the same confirmed create_assistant call. That also enables its sandbox. The
+target website assistant must build from the approved brief, use deploy_app,
+verify the deployment status, and return the actual public URL to the user.
+Never claim a website or public link exists until that assistant's deployment
+tool has returned a URL. Arthur configures this capability; it does not invent
+or pre-announce a deployment result from the builder chat.
+
 When configuring Google Workspace for another assistant, distinguish setup from
 execution. A connected OAuth status and an MCP configuration mean that target
 assistant is ready to use Google; they do not create a Sheet, document, file,
@@ -151,6 +164,13 @@ or business record during this Arthur run. Report the configuration that was
 confirmed, then direct the user to test the target assistant's workflow. Never
 claim the target assistant created or wrote a Google resource unless its own
 run returned a concrete Google tool result or artifact link.
+
+When the user explicitly asks to add a document they sent as knowledge for an
+existing assistant, first identify that assistant with
+list_managed_assistants/inspect_managed_assistant, then call
+add_assistant_knowledge with confirmed=true. This stores the document as RAG
+knowledge; do not paste the document's full contents into the assistant's
+instructions. Do not claim it was added unless that tool returns ok=true.
 
 Use list_managed_assistants and inspect_managed_assistant before changing an
 existing assistant. You can only manage the caller's assistants. Keep replies
@@ -175,6 +195,7 @@ def build_arthur_v2_tools(
     owner_phone: str | None,
     self_agent_id: str | None,
     default_target: str = "",
+    session_id: str | None = None,
 ) -> list:
     """Build ownership-scoped tools exposed to Arthur V2's Deep Agent graph."""
 
@@ -271,6 +292,7 @@ def build_arthur_v2_tools(
         instructions: str,
         assistant_kind: str = "personal",
         workflow: AssistantWorkflowInput | dict[str, str] | None = None,
+        enable_deploy: bool = False,
         confirmed: bool = False,
     ) -> dict[str, Any]:
         """Create an assistant after explicit confirmation; business assistants require a concrete operating workflow."""
@@ -321,6 +343,8 @@ def build_arthur_v2_tools(
                 owner_external_id=owner_phone,
                 operator_ids=[owner_phone] if owner_phone else [],
                 tools_config={
+                    "sandbox": bool(enable_deploy),
+                    "deploy": bool(enable_deploy),
                     "assistant_profile": {
                         "kind": normalized_kind,
                         "workflow": workflow_data,
@@ -333,7 +357,16 @@ def build_arthur_v2_tools(
             db.add(agent)
             await db.commit()
             await db.refresh(agent)
-        return {"ok": True, "assistant": _summary(agent), "next_step": "Assistant dibuat. Hubungkan WhatsApp saat user siap mencoba."}
+        return {
+            "ok": True,
+            "assistant": _summary(agent),
+            "runtime": {"sandbox": bool(enable_deploy), "deploy": bool(enable_deploy)},
+            "next_step": (
+                "Assistant website siap menerima brief dan akan mengirim URL publik setelah deployment berhasil."
+                if enable_deploy
+                else "Assistant dibuat. Hubungkan WhatsApp saat user siap mencoba."
+            ),
+        }
 
     @tool
     async def update_assistant(
@@ -366,6 +399,130 @@ def build_arthur_v2_tools(
             return {"ok": True, "assistant": _summary(managed)}
 
     @tool
+    async def add_assistant_knowledge(
+        agent_id: str,
+        filename: str = "",
+        title: str = "",
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Add a document from this WhatsApp session to one owned assistant's RAG knowledge base.
+
+        The document is extracted, chunked, embedded, and saved to the target
+        assistant. Use only after the user explicitly asks or confirms that the
+        uploaded document should become that assistant's knowledge.
+        """
+        if not confirmed:
+            return {
+                "ok": False,
+                "needs_confirmation": True,
+                "error": "Minta konfirmasi eksplisit sebelum menambahkan dokumen ke knowledge assistant.",
+            }
+        if not session_id:
+            return {
+                "ok": False,
+                "error": "Konteks sesi file tidak tersedia. Minta user mengirim ulang dokumen.",
+            }
+
+        agent = await _owned(agent_id)
+        if agent is None:
+            return {"ok": False, "error": "Assistant tidak ditemukan atau bukan milik pengguna ini."}
+
+        from app.config import get_settings
+        from app.core.domain.document_service import create_document
+        from app.core.domain.file_processor import SUPPORTED_EXTENSIONS, chunk_text, extract_text
+        from app.core.infra.sandbox import get_workspace_dir
+
+        workspace = get_workspace_dir(session_id).resolve()
+        search_roots = (workspace / "shared" / "current_input", workspace / "shared", workspace)
+        requested_name = Path(filename.strip()).name if filename.strip() else ""
+        candidates: list[Path] = []
+        for root in search_roots:
+            if not root.is_dir():
+                continue
+            for path in root.iterdir():
+                if not path.is_file() or path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+                    continue
+                if requested_name and path.name != requested_name:
+                    continue
+                candidates.append(path)
+        if not candidates:
+            requested = f" '{requested_name}'" if requested_name else ""
+            return {
+                "ok": False,
+                "error": (
+                    f"Dokumen{requested} tidak ditemukan pada sesi ini. "
+                    "Kirim ulang file PDF, DOCX, PPTX, TXT, MD, atau CSV."
+                ),
+            }
+        target_file = max(candidates, key=lambda path: path.stat().st_mtime)
+        try:
+            target_file.resolve().relative_to(workspace)
+            raw = target_file.read_bytes()
+        except (OSError, ValueError):
+            return {"ok": False, "error": "Dokumen sesi tidak dapat dibaca dengan aman."}
+        if not raw:
+            return {"ok": False, "error": f"Dokumen {target_file.name} kosong."}
+
+        try:
+            full_text = await extract_text(
+                content=raw,
+                filename=target_file.name,
+                content_type=None,
+                mistral_api_key=get_settings().mistral_api_key,
+            )
+        except Exception as exc:
+            return {"ok": False, "error": f"Gagal mengekstrak teks dari {target_file.name}: {exc}"}
+        if not full_text.strip():
+            return {"ok": False, "error": f"Tidak ada teks yang bisa diekstrak dari {target_file.name}."}
+        chunks = chunk_text(full_text)
+        if not chunks:
+            return {"ok": False, "error": f"Dokumen {target_file.name} tidak menghasilkan knowledge yang dapat disimpan."}
+
+        doc_title = title.strip() or target_file.name
+        try:
+            async with db_factory() as db:
+                managed = await db.get(Agent, agent.id)
+                if managed is None or managed.is_deleted or not agent_belongs_to_owner(managed, owner_phone):
+                    return {"ok": False, "error": "Assistant tidak ditemukan atau bukan milik pengguna ini."}
+                total = len(chunks)
+                for index, content in enumerate(chunks, start=1):
+                    chunk_title = doc_title if total == 1 else f"{doc_title} (Part {index}/{total})"
+                    await create_document(
+                        agent_id=managed.id,
+                        title=chunk_title,
+                        content=content,
+                        source=target_file.name,
+                        doc_metadata={
+                            "original_filename": target_file.name,
+                            "chunk_index": index,
+                            "total_chunks": total,
+                            "added_by": "arthur_v2",
+                        },
+                        db=db,
+                    )
+                config = dict(managed.tools_config or {})
+                rag_was_enabled = bool(config.get("rag"))
+                if not rag_was_enabled:
+                    config["rag"] = True
+                    managed.tools_config = config
+                managed.version += 1
+                await db.commit()
+                assistant = _summary(managed)
+        except Exception as exc:
+            return {"ok": False, "error": f"Gagal menyimpan knowledge ke assistant: {exc}"}
+
+        return {
+            "ok": True,
+            "assistant": assistant,
+            "filename": target_file.name,
+            "title": doc_title,
+            "chunks_added": len(chunks),
+            "extracted_chars": len(full_text),
+            "rag_enabled": True,
+            "rag_was_already_enabled": rag_was_enabled,
+        }
+
+    @tool
     async def delete_assistant(agent_id: str, confirmed: bool = False) -> dict[str, Any]:
         """Soft-delete a caller-owned assistant only after explicit confirmation."""
         if not confirmed:
@@ -384,13 +541,14 @@ def build_arthur_v2_tools(
     async def configure_assistant_runtime(
         agent_id: str,
         enable_sandbox: bool = False,
+        enable_deploy: bool = False,
         subagent_ids: list[str] | None = None,
         mcp_servers: dict[str, str] | None = None,
         confirmed: bool = False,
     ) -> dict[str, Any]:
-        """Configure sandbox, owned subagents, and approved MCP servers for one assistant after explicit confirmation."""
+        """Configure sandbox, public deployment, owned subagents, and approved MCP servers after explicit confirmation."""
         if not confirmed:
-            return {"ok": False, "needs_confirmation": True, "error": "Minta konfirmasi eksplisit sebelum mengaktifkan sandbox, subagent, atau MCP."}
+            return {"ok": False, "needs_confirmation": True, "error": "Minta konfirmasi eksplisit sebelum mengaktifkan sandbox, deploy, subagent, atau MCP."}
         agent = await _owned(agent_id)
         if agent is None:
             return {"ok": False, "error": "Assistant tidak ditemukan atau bukan milik pengguna ini."}
@@ -408,7 +566,9 @@ def build_arthur_v2_tools(
         async with db_factory() as db:
             managed = await db.get(Agent, agent.id)
             config = dict(managed.tools_config or {})
-            config["sandbox"] = bool(enable_sandbox)
+            sandbox_enabled = bool(enable_sandbox or enable_deploy)
+            config["sandbox"] = sandbox_enabled
+            config["deploy"] = bool(enable_deploy)
             config["subagents"] = {"enabled": bool(requested_subagents), "agent_ids": requested_subagents}
             config["mcp"] = {"enabled": bool(servers), "servers": servers}
             managed.tools_config = config
@@ -418,7 +578,7 @@ def build_arthur_v2_tools(
         return {
             "ok": True,
             "assistant": _summary(managed),
-            "runtime": {"sandbox": bool(enable_sandbox), "subagent_count": len(requested_subagents), "mcp_servers": sorted(servers)},
+            "runtime": {"sandbox": sandbox_enabled, "deploy": bool(enable_deploy), "subagent_count": len(requested_subagents), "mcp_servers": sorted(servers)},
         }
 
     @tool
@@ -600,6 +760,7 @@ def build_arthur_v2_tools(
         inspect_managed_assistant,
         create_assistant,
         update_assistant,
+        add_assistant_knowledge,
         delete_assistant,
         configure_assistant_runtime,
         get_payment_link,

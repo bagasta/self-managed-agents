@@ -263,6 +263,15 @@ def _has_code_creation_evidence(steps: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _has_website_creation_evidence(steps: list[dict[str, Any]]) -> bool:
+    """Detect HTML/CSS output when the latest user turn is only an acknowledgement."""
+    markers = ("index.html", ".html", ".css", "<html", "<!doctype html")
+    return any(
+        any(marker in _step_text(step).lower() for marker in markers)
+        for step in steps or []
+    )
+
+
 _BUILD_PROGRESS_TOOLS = frozenset(
     {
         "plan_agent",
@@ -600,7 +609,7 @@ def _needs_deploy_followup(
     """Detect website/app work that stopped after coding without public deploy URL."""
     if not _is_enabled(tools_config, "deploy", default=False):
         return False
-    if not _is_website_or_app_request(user_message):
+    if not _is_website_or_app_request(user_message) and not _has_website_creation_evidence(steps):
         return False
     if _has_public_url_in_text(final_reply) or _has_public_url_in_steps(steps):
         return False
