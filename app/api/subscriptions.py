@@ -12,12 +12,13 @@ from datetime import datetime, timedelta, timezone
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.deps import verify_api_key
-from app.models.subscription import SubscriptionPlan, UserSubscription, TokenTopup
+from app.models.agent import Agent
+from app.models.subscription import SubscriptionPlan, User, UserSubscription, TokenTopup
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/v1/subscriptions", tags=["subscriptions"])
@@ -292,6 +293,24 @@ async def upgrade_subscription(
     sub.started_at = now
     sub.expires_at = expires_at
     sub.grace_until = grace_until
+
+    # Owned agents are charged from the shared subscription pool.  Keep their
+    # legacy expiry metadata aligned so older admin/API surfaces stay accurate.
+    if expires_at is not None:
+        owner_external_id = (
+            await db.execute(select(User.external_id).where(User.id == user_id))
+        ).scalar_one()
+        await db.execute(
+            update(Agent)
+            .where(
+                Agent.owner_external_id == owner_external_id,
+                Agent.is_deleted.is_(False),
+            )
+            .values(
+                active_until=expires_at,
+                quota_period_days=new_plan.period_days,
+            )
+        )
 
     await db.flush()
 

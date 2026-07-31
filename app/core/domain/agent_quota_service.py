@@ -73,8 +73,38 @@ async def get_owner_subscription(agent: Any, db: AsyncSession):
 
 
 async def check_agent_quota(agent: Any, db: AsyncSession, *, now: datetime | None = None) -> AgentQuotaCheck:
-    """Return a hard gate for any run that would call the LLM."""
+    """Return a hard gate for any run that would call the LLM.
+
+    Subscription-owned agents share their owner's subscription quota.  The
+    per-agent quota is retained only as a fallback for standalone/legacy
+    agents that have no usable subscription record to charge against.
+    """
     if is_quota_exempt_builder_agent(agent):
+        return AgentQuotaCheck(allowed=True)
+
+    _, subscription = await get_owner_subscription(agent, db)
+    if subscription is not None:
+        if not getattr(subscription, "is_usable", False):
+            return AgentQuotaCheck(
+                allowed=False,
+                reason="owner_subscription_inactive",
+                detail="Owner subscription is not usable.",
+                user_message="Maaf, subscription pemilik agent ini sedang tidak aktif. Silakan renew atau upgrade untuk melanjutkan.",
+            )
+
+        if _quota_exhausted(getattr(subscription, "tokens_used", 0), getattr(subscription, "token_quota", 0)):
+            detail = _quota_detail(
+                "Subscription",
+                getattr(subscription, "tokens_used", 0),
+                getattr(subscription, "token_quota", 0),
+            )
+            return AgentQuotaCheck(
+                allowed=False,
+                reason="owner_subscription_token_quota_exhausted",
+                detail=detail,
+                user_message="Maaf, kuota token subscription pemilik agent ini sudah habis. Silakan top up atau renew untuk melanjutkan.",
+            )
+
         return AgentQuotaCheck(allowed=True)
 
     current = now or datetime.now(timezone.utc)
@@ -98,31 +128,6 @@ async def check_agent_quota(agent: Any, db: AsyncSession, *, now: datetime | Non
             reason="agent_token_quota_exhausted",
             detail=detail,
             user_message="Maaf, kuota token agent ini sudah habis. Silakan top up atau renew untuk melanjutkan.",
-        )
-
-    _, subscription = await get_owner_subscription(agent, db)
-    if subscription is None:
-        return AgentQuotaCheck(allowed=True)
-
-    if not getattr(subscription, "is_usable", False):
-        return AgentQuotaCheck(
-            allowed=False,
-            reason="owner_subscription_inactive",
-            detail="Owner subscription is not usable.",
-            user_message="Maaf, subscription pemilik agent ini sedang tidak aktif. Silakan renew atau upgrade untuk melanjutkan.",
-        )
-
-    if _quota_exhausted(getattr(subscription, "tokens_used", 0), getattr(subscription, "token_quota", 0)):
-        detail = _quota_detail(
-            "Subscription",
-            getattr(subscription, "tokens_used", 0),
-            getattr(subscription, "token_quota", 0),
-        )
-        return AgentQuotaCheck(
-            allowed=False,
-            reason="owner_subscription_token_quota_exhausted",
-            detail=detail,
-            user_message="Maaf, kuota token subscription pemilik agent ini sudah habis. Silakan top up atau renew untuk melanjutkan.",
         )
 
     return AgentQuotaCheck(allowed=True)
