@@ -1,11 +1,27 @@
 """Google Workspace MCP OAuth client owned by Arthur V2."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
 from app.config import get_settings
+
+
+@dataclass(frozen=True)
+class GoogleOAuthStartResult:
+    """Outcome of asking the integration service to connect Google.
+
+    ``connected`` is deliberately distinct from ``auth_url``: the service
+    returns an empty URL when an active connection already exists.  Treating
+    that idempotent response as an error left the target assistant without its
+    MCP configuration.
+    """
+
+    connected: bool
+    auth_url: str | None
+    email: str | None = None
 
 
 def google_mcp_url() -> str:
@@ -15,7 +31,9 @@ def google_mcp_url() -> str:
     return url
 
 
-async def start_google_oauth(*, external_user_id: str, agent_id: str, scopes: list[str]) -> str:
+async def start_google_oauth(
+    *, external_user_id: str, agent_id: str, scopes: list[str]
+) -> GoogleOAuthStartResult:
     settings = get_settings()
     base_url = str(settings.google_integration_service_url or "").rstrip("/")
     if not base_url:
@@ -32,9 +50,12 @@ async def start_google_oauth(*, external_user_id: str, agent_id: str, scopes: li
     response.raise_for_status()
     data = response.json()
     url = str(data.get("auth_url") or data.get("authorization_url") or "").strip()
+    email = str(data.get("email") or "").strip() or None
+    if bool(data.get("connected")):
+        return GoogleOAuthStartResult(connected=True, auth_url=None, email=email)
     if not url:
         raise RuntimeError("integration service tidak mengembalikan auth_url")
-    return url
+    return GoogleOAuthStartResult(connected=False, auth_url=url, email=email)
 
 
 async def get_google_oauth_status(*, external_user_id: str, agent_id: str) -> dict[str, Any]:

@@ -91,6 +91,37 @@ def _google_integration_state(oauth: dict[str, Any]) -> str:
     return "connected" if bool(oauth.get("connected")) else "auth_pending"
 
 
+def _with_google_workspace_mcp(
+    tools_config: dict[str, Any] | None,
+    *,
+    mcp_url: str,
+    integration_status: str,
+) -> dict[str, Any]:
+    """Enable Google MCP without discarding an assistant's other MCP servers."""
+    config = dict(tools_config or {})
+    raw_mcp = config.get("mcp")
+    mcp = dict(raw_mcp) if isinstance(raw_mcp, dict) else {}
+    if "servers" in mcp or "enabled" in mcp:
+        servers = dict(mcp.get("servers") or {})
+    else:
+        servers = {
+            name: dict(server)
+            for name, server in mcp.items()
+            if isinstance(server, dict) and ("url" in server or "command" in server)
+        }
+
+    google_server = dict(servers.get("google_workspace") or {})
+    google_server["url"] = mcp_url
+    google_server.setdefault("transport", "streamable_http")
+    servers["google_workspace"] = google_server
+    config["mcp"] = {"enabled": True, "servers": servers}
+
+    statuses = dict(config.get("integration_status") or {})
+    statuses["google_workspace"] = integration_status
+    config["integration_status"] = statuses
+    return config
+
+
 def build_arthur_v2_system_prompt() -> str:
     return """You are Arthur, an AI assistant designer for Clevio.
 
@@ -704,7 +735,11 @@ def build_arthur_v2_tools(
         requested_scopes = [scope.strip() for scope in (scopes or []) if scope.strip()]
         try:
             mcp_url = google_mcp_url()
-            auth_url = await start_google_oauth(external_user_id=owner_phone, agent_id=str(agent.id), scopes=requested_scopes)
+            oauth_start = await start_google_oauth(
+                external_user_id=owner_phone,
+                agent_id=str(agent.id),
+                scopes=requested_scopes,
+            )
         except Exception as exc:
             return {
                 "ok": False,
@@ -713,13 +748,27 @@ def build_arthur_v2_tools(
             }
         async with db_factory() as db:
             managed = await db.get(Agent, agent.id)
-            config = dict(managed.tools_config or {})
-            config["mcp"] = {"enabled": True, "servers": {"google_workspace": {"url": mcp_url}}}
-            config["integration_status"] = {"google_workspace": "auth_pending"}
-            managed.tools_config = config
+            managed.tools_config = _with_google_workspace_mcp(
+                managed.tools_config,
+                mcp_url=mcp_url,
+                integration_status="connected" if oauth_start.connected else "auth_pending",
+            )
             managed.version += 1
             await db.commit()
-        return {"ok": True, "assistant": _summary(agent), "auth_url": auth_url, "status": "auth_pending", "next_step": "Buka link OAuth, pilih akun Google, lalu cek status sebelum memakai tool Google MCP."}
+        if oauth_start.connected:
+            return {
+                "ok": True,
+                "assistant": _summary(agent),
+                "status": "connected",
+                "next_step": "Google Workspace sudah terhubung dan siap dipakai oleh assistant ini.",
+            }
+        return {
+            "ok": True,
+            "assistant": _summary(agent),
+            "auth_url": oauth_start.auth_url,
+            "status": "auth_pending",
+            "next_step": "Buka link OAuth, pilih akun Google, lalu cek status sebelum memakai tool Google MCP.",
+        }
 
     @tool
     async def get_google_mcp_oauth_status(agent_id: str) -> dict[str, Any]:
