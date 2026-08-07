@@ -57,7 +57,7 @@ def _get_post_create_steps(preset_id: str, channel: str, tc: dict) -> list[str]:
         )
         steps.append(
             "Jika user memilih demo, gunakan create_wa_dev_trial_link; "
-            "jika memilih nomor khusus, gunakan send_agent_wa_qr"
+            "jika memilih nomor khusus, gunakan send_agent_wa_pairing_code"
         )
     if tc.get("rag"):
         steps.append("Upload dokumen: POST /v1/agents/{id}/documents/upload (PDF/DOCX/TXT)")

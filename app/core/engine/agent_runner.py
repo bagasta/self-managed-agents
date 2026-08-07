@@ -74,6 +74,7 @@ from app.core.engine.agent_google_routing import (
     _google_workspace_server_has_auth,
     _is_google_chat_intent,
     _is_google_workspace_mcp_authorized_for_session,
+    allows_delegated_google_workspace_runtime,
     _repair_partial_builder_google_auth_link,
     _remove_google_workspace_mcp_server,
     _route_google_workspace_blocker_to_owner_if_customer,
@@ -141,6 +142,12 @@ from app.core.engine.google_mcp_support import (
     _is_google_mcp_intent,
     _is_google_sheets_authoring_intent,
     _is_google_slides_relayout_intent,
+    has_verified_google_pdf_artifact,
+    is_google_pdf_report_followup,
+    is_google_spreadsheet_pdf_report_intent,
+    resolve_google_spreadsheet_pdf_report_intent,
+    google_spreadsheet_pdf_report_directive,
+    scope_google_pdf_report_tools,
     _looks_like_progress_claim,
     _needs_google_forms_followup,
     _needs_google_sheets_followup,
@@ -635,7 +642,7 @@ async def _invoke_builder_whatsapp_action_tool(
     tool_name = (
         "create_wa_dev_trial_link"
         if action == "trial_link"
-        else "send_agent_wa_qr"
+        else "send_agent_wa_pairing_code"
     )
     selected_tool = next(
         (tool for tool in tools if getattr(tool, "name", "") == tool_name),
@@ -711,13 +718,7 @@ async def _invoke_builder_whatsapp_action_tool(
                     tool=tool_name,
                 )
                 return False
-        args = {
-            "agent_id": agent_id,
-            "caption": (
-                "Scan sekali dari WhatsApp untuk memasang agent ke nomor kamu. "
-                "Berlaku sekitar 20 detik."
-            ),
-        }
+        args = {"agent_id": agent_id}
 
     try:
         raw_result = await selected_tool.ainvoke(args)
@@ -1263,6 +1264,63 @@ async def run_agent(
         else None
     )
     execution_user_message = google_auth_recovery_request or user_message
+    _direct_google_pdf_report_intent = is_google_spreadsheet_pdf_report_intent(
+        execution_user_message
+    )
+    google_pdf_report_intent = resolve_google_spreadsheet_pdf_report_intent(
+        execution_user_message,
+        history_rows,
+    )
+    _session_metadata = dict(getattr(session, "metadata_", None) or {})
+    _active_pdf_workflow = _session_metadata.get("active_google_pdf_workflow")
+    _has_active_pdf_workflow = (
+        isinstance(_active_pdf_workflow, dict)
+        and _active_pdf_workflow.get("status") == "pending"
+    )
+    if not google_pdf_report_intent and is_google_pdf_report_followup(execution_user_message):
+        if _has_active_pdf_workflow:
+            google_pdf_report_intent = True
+            log.info("agent_run.google_pdf_report_resumed_from_session_state")
+        else:
+            # Migration/recovery path for a workflow started before session task
+            # state existed. It is deliberately used only for an explicit report
+            # follow-up, never for arbitrary future chat.
+            _full_history_rows = await load_history(session.id, db, max_turns=None)
+            if any(
+                is_google_spreadsheet_pdf_report_intent(
+                    str(getattr(row, "content", "") or "")
+                )
+                for row in _full_history_rows
+                if str(getattr(row, "role", "") or "") == "user"
+            ):
+                google_pdf_report_intent = True
+                log.info("agent_run.google_pdf_report_recovered_from_history")
+
+    if google_pdf_report_intent and (
+        _direct_google_pdf_report_intent or not _has_active_pdf_workflow
+    ):
+        _session_metadata["active_google_pdf_workflow"] = {
+            "status": "pending",
+            "kind": "spreadsheet_pdf_report",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        session.metadata_ = _session_metadata
+        log.info("agent_run.google_pdf_report_session_state_pending")
+    # Include only recent user turns. This preserves an explicit “lanjut
+    # eksekusi” workflow without allowing an old agent reply to reactivate it.
+    google_pdf_report_context = "\n".join(
+        [
+            str(getattr(row, "content", "") or "")
+            for row in history_rows
+            if str(getattr(row, "role", "") or "") == "user"
+        ][-6:]
+        + [str(execution_user_message or "")]
+    )[-6000:]
+    if google_pdf_report_intent:
+        google_pdf_report_context += (
+            "\n[ACTIVE WORKFLOW: create a PDF report from a Google Spreadsheet; "
+            "do not use Python or sandbox.]"
+        )
     log.debug("agent_run.history_loaded", turns=len(prior_messages) // 2)
     direct_wa_text_send_context = (
         getattr(session, "channel_type", None) == "whatsapp"
@@ -1448,6 +1506,7 @@ async def run_agent(
     google_mcp_role_denied = (
         is_google_workspace_mcp_configured(tools_config)
         and not _is_google_workspace_mcp_authorized_for_session(session, agent_model)
+        and not allows_delegated_google_workspace_runtime(agent_model)
         and customer_survey_resource is None
     )
     if google_mcp_role_denied:
@@ -1511,14 +1570,22 @@ async def run_agent(
         agent_id=agent_id,
         memory_scope=_memory_scope,
         api_key=settings.api_key,
-        user_message=execution_user_message,
+        user_message=(
+            google_pdf_report_context
+            if google_pdf_report_intent
+            else execution_user_message
+        ),
         system_prompt=system_prompt,
         log=log,
         fallback_external_user_id=_google_fallback_external_user_id,
     )
     system_prompt = google_mcp.system_prompt
     _google_mcp_auth_url = google_mcp.auth_url
-    if customer_survey_resource is not None:
+    delegated_customer_session = (
+        allows_delegated_google_workspace_runtime(agent_model)
+        and not _is_google_workspace_mcp_authorized_for_session(session, agent_model)
+    )
+    if customer_survey_resource is not None or delegated_customer_session:
         tools = [
             tool
             for tool in tools
@@ -1553,6 +1620,12 @@ async def run_agent(
                 log=log,
             )
             mcp_tools = sanitize_google_forms_tools(mcp_tools, log)
+            if google_pdf_report_intent:
+                mcp_tools = scope_google_pdf_report_tools(mcp_tools, log=log)
+                system_prompt = (
+                    (system_prompt if isinstance(system_prompt, str) else "")
+                    + google_spreadsheet_pdf_report_directive(google_pdf_report_context)
+                )
             if customer_survey_resource is not None:
                 mcp_tools = build_customer_survey_append_tools(
                     mcp_tools,
@@ -1601,6 +1674,21 @@ async def run_agent(
             # Put MCP tools first so model/tool-router bias favors the connected
             # external service over sandbox helpers when both could appear useful.
             tools = mcp_tools + tools
+            if google_pdf_report_intent:
+                # Context engineering, not a reply guard: a spreadsheet-to-PDF
+                # workflow has a complete Google-native tool path. Do not spend
+                # prompt budget on unrelated sandbox/filesystem schemas, and do
+                # not offer Python as an alternative execution path.
+                tools = mcp_tools
+                subagent_list = []
+                active_groups = [
+                    group for group in active_groups
+                    if not str(group).startswith(("sandbox", "subagents("))
+                ]
+                log.info(
+                    "agent_run.google_pdf_report_runtime_tools_scoped",
+                    tools=[getattr(tool, "name", "") for tool in mcp_tools],
+                )
             active_groups.append(f"mcp({len(mcp_tools)} tools)")
             if isinstance(system_prompt, str):
                 system_prompt += build_mcp_tool_priority_notice(
@@ -1770,9 +1858,56 @@ async def run_agent(
                     subagents=subagent_list or None,
                     checkpointer=_checkpointer,
                 )
+                if backend is not None:
+                    # Deep Agents' native long-term memory mechanism loads
+                    # AGENTS.md from its configured backend. The database stays
+                    # canonical for this SaaS; this compact file is the
+                    # per-session projection supplied to the agent at startup.
+                    _deep_memory_path = ".deepagents/AGENTS.md"
+                    _deep_memory_summary = (context_summary or "").strip()
+                    _deep_memory_content = (
+                        "# Session Memory\n\n"
+                        "Use this as durable context. Treat tool-call progress text as internal trace, "
+                        "not proof that a task is complete. Preserve unresolved user requests and the "
+                        "latest verified artifact or next action.\n\n"
+                        "## Conversation summary\n"
+                        f"{_deep_memory_summary or 'No compact summary is available yet.'}\n"
+                    )
+                    _memory_upload = await backend.aupload_files([
+                        (_deep_memory_path, _deep_memory_content.encode("utf-8")),
+                    ])
+                    if _memory_upload and _memory_upload[0].error is None:
+                        _dag_kwargs["memory"] = [_deep_memory_path]
+                        log.info(
+                            "agent_run.deepagents_memory_loaded",
+                            path=_deep_memory_path,
+                            summary_len=len(_deep_memory_summary),
+                        )
+                    else:
+                        log.warning("agent_run.deepagents_memory_unavailable")
                 # Outermost: turn any tool exception into recoverable feedback so one
                 # failed tool call (e.g. MCP/Gmail 400) can't abort the whole run.
                 _middleware: list[AgentMiddleware] = [ToolErrorRecoveryMiddleware()]
+                if google_pdf_report_intent:
+                    try:
+                        from langchain.agents.middleware import TodoListMiddleware
+
+                        # This is the native Deep Agents mechanism for keeping a
+                        # multi-step task plan in graph state for the current run.
+                        _middleware.append(TodoListMiddleware())
+                        log.info(
+                            "agent_run.google_pdf_report_task_planning_enabled",
+                            agent_id=str(agent.id),
+                            run_id=str(run.id),
+                        )
+                    except ImportError:
+                        # Retain the Google-native workflow and artifact guard for
+                        # deployments which are still upgrading LangChain.
+                        log.warning(
+                            "agent_run.google_pdf_report_task_planning_unavailable",
+                            agent_id=str(agent.id),
+                            run_id=str(run.id),
+                        )
                 if (
                     runtime_policy.policy_class == "operational"
                     and google_mcp.enabled
@@ -2627,14 +2762,27 @@ async def run_agent(
         # Fall back to result_parser count if callback produced nothing (e.g. mocked LLM).
         _cb_tokens = _agent_logger.total_tokens_from_callbacks
         total_tokens_used = _cb_tokens if _cb_tokens > 0 else parsed["total_tokens_used"]
+        _google_pdf_retry_required = (
+            google_pdf_report_intent
+            and not has_verified_google_pdf_artifact(steps)
+        )
         if (
-            _is_google_mcp_intent(execution_user_message)
-            and mcp_tools
-            and not _has_google_mcp_step(steps)
-            and _has_external_service_fallback_blocked_step(steps)
+            mcp_tools
+            and (
+                _google_pdf_retry_required
+                or (
+                    _is_google_mcp_intent(execution_user_message)
+                    and not _has_google_mcp_step(steps)
+                    and _has_external_service_fallback_blocked_step(steps)
+                )
+            )
         ):
             log.warning(
-                "agent_run.google_mcp_retry_after_blocked_fallback",
+                (
+                    "agent_run.google_pdf_report_retry_after_incomplete_workflow"
+                    if _google_pdf_retry_required
+                    else "agent_run.google_mcp_retry_after_blocked_fallback"
+                ),
                 mcp_tools=len(mcp_tools),
             )
             try:
@@ -2643,14 +2791,33 @@ async def run_agent(
                 _mcp_only_prompt = (
                     (system_prompt if isinstance(system_prompt, str) else "")
                     + "\n\n## Google Workspace Tool Retry\n"
-                    "The previous attempt incorrectly used a delegated/sandbox fallback for a Google Workspace action. "
-                    "Retry now using only the Google Workspace tools. "
+                    "The previous attempt did not complete the required Google Workspace tool workflow. "
+                    "Retry now using only the Google Workspace tools and make the required tool calls; do not answer with a plan. "
                     "Do not call task, filesystem, sandbox, or non-Google tools. "
                     "Return the Google Workspace URL only after the Google tool output contains it. "
                     "Do not mention internal tool protocol terms to the user."
                 )
                 _mcp_only_graph = _cra(llm, tools=mcp_tools, prompt=_mcp_only_prompt)
                 _mcp_retry_input = _sanitize_input_messages(input_messages)
+                if _google_pdf_retry_required:
+                    _prior_tool_evidence = "\n".join(
+                        (
+                            f"- {str(step.get('tool') or '?')}: "
+                            f"{str(step.get('result') or '')[:4000]}"
+                        )
+                        for step in steps
+                    )[:12000]
+                    _mcp_retry_input.append(
+                        HumanMessage(
+                            content=(
+                                "Continue the active Spreadsheet-to-PDF workflow now. "
+                                "The previous model response was incomplete; do not send a progress message. "
+                                "Use Google tools to create the report document and export it to PDF. "
+                                "Execution evidence from this run:\n"
+                                f"{_prior_tool_evidence}"
+                            )
+                        )
+                    )
                 async with asyncio.timeout(settings.agent_timeout_seconds):
                     result = await _mcp_only_graph.ainvoke(
                         {"messages": _mcp_retry_input}, config=_graph_config
@@ -2965,7 +3132,11 @@ async def run_agent(
                     error=str(_verify_completion_exc)[:300],
                 )
 
-        _builder_whatsapp_action = _requested_builder_whatsapp_action(
+        # Arthur V2 owns its typed pairing-code tool. The legacy builder
+        # completion flow tries to invoke legacy channel tools and can replace
+        # a valid V2 pairing code with obsolete QR guidance.
+        _is_arthur_v2 = str((tools_config or {}).get("system_plugin") or "").strip() == "arthur_v2"
+        _builder_whatsapp_action = None if _is_arthur_v2 else _requested_builder_whatsapp_action(
             execution_user_message,
             input_messages,
         )
@@ -3431,7 +3602,11 @@ async def run_agent(
         runtime=google_mcp,
         auth_url=_google_mcp_auth_url,
         llm_raw=llm_raw,
-        user_message=execution_user_message,
+        user_message=(
+            google_pdf_report_context
+            if google_pdf_report_intent
+            else execution_user_message
+        ),
         agent_id=agent_id,
         api_key=settings.api_key,
         log=log,
@@ -3442,6 +3617,11 @@ async def run_agent(
             == "arthur_v2"
         ),
     )
+    if google_pdf_report_intent and has_verified_google_pdf_artifact(steps):
+        _session_metadata = dict(getattr(session, "metadata_", None) or {})
+        if _session_metadata.pop("active_google_pdf_workflow", None) is not None:
+            session.metadata_ = _session_metadata
+            log.info("agent_run.google_pdf_report_session_state_completed")
     _google_mcp_auth_err = _google_mcp_auth_err_before_override or _extract_google_mcp_step_error(steps)
     _google_mcp_has_artifact = (
         _contains_google_workspace_artifact(final_reply)

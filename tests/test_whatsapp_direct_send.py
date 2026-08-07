@@ -52,6 +52,16 @@ def _agent(**overrides):
     return SimpleNamespace(**values)
 
 
+def test_escalation_toolset_exposes_reply_trackable_owner_notification():
+    tools = build_escalation_tools(
+        uuid.uuid4(),
+        uuid.uuid4(),
+        lambda: None,
+    )
+    names = {tool.name for tool in tools}
+    assert {"escalate_to_human", "notify_owner", "reply_to_user", "send_to_number"} <= names
+
+
 def test_verified_owner_identity_question_uses_platform_identity():
     agent = _agent(
         name="Minsel",

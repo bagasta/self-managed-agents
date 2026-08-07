@@ -575,7 +575,7 @@ def _needs_builder_whatsapp_action_completion(
     expected_tool = (
         "create_wa_dev_trial_link"
         if action == "trial_link"
-        else "send_agent_wa_qr"
+        else "send_agent_wa_pairing_code"
     )
     return not any(
         str(step.get("tool") or "").strip() == expected_tool
@@ -587,9 +587,9 @@ def _builder_whatsapp_action_directive(action: str) -> str:
     if action == "dedicated_qr":
         return (
             "USER SUDAH MEMILIH NOMOR WHATSAPP KHUSUS. Selesaikan sekarang di turn ini: "
-            "temukan agent target yang benar dari konteks, lalu panggil send_agent_wa_qr. "
-            "QR harus dikirim ke identitas owner sesi yang terverifikasi. Jangan arahkan user "
-            "ke dashboard, jangan mengklaim QR terkirim sebelum hasil tool menyatakan QR_SENT."
+            "temukan agent target yang benar dari konteks, lalu panggil send_agent_wa_pairing_code. "
+            "Kode harus dibuat untuk identitas owner sesi yang terverifikasi. Jangan arahkan user "
+            "ke dashboard, dan jangan mengklaim nomor terhubung sebelum status backend connected."
         )
     return (
         "USER SUDAH MEMILIH NOMOR DEMO ARTHUR. Selesaikan sekarang di turn ini: "

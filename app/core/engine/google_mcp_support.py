@@ -110,6 +110,139 @@ def _is_google_mcp_intent(message: str) -> bool:
     return any(k in m for k in keywords)
 
 
+def is_google_spreadsheet_pdf_report_intent(message: str) -> bool:
+    """Detect a Google Sheets-backed PDF deliverable.
+
+    This is intentionally outcome-based, not tied to one report template.  It
+    lets the runtime constrain only the tools needed to move from a verified
+    spreadsheet source to a verified PDF artifact.
+    """
+    text = str(message or "").casefold()
+    wants_pdf = any(marker in text for marker in ("pdf", "laporan", "report"))
+    has_sheet_source = any(
+        marker in text
+        for marker in ("spreadsheet", "google sheet", "google sheets", "sheet ", "sheetnya")
+    )
+    return wants_pdf and has_sheet_source
+
+
+def resolve_google_spreadsheet_pdf_report_intent(
+    message: str,
+    history_rows: list[Any] | None = None,
+) -> bool:
+    """Resolve a PDF workflow across an explicit follow-up turn.
+
+    A WhatsApp user commonly says “langsung eksekusi” after the agent has
+    acknowledged a Spreadsheet -> PDF request.  The latest message then has no
+    resource keywords, so one-turn intent detection loses the active workflow.
+    Only inherit the intent for clear continuation language and only from recent
+    *user* messages; stale agent replies must never activate a workflow.
+    """
+    if is_google_spreadsheet_pdf_report_intent(message):
+        return True
+
+    current = str(message or "").casefold().strip()
+    continuation_markers = (
+        "lanjut", "lanjutin", "lanjutkan", "langsung", "eksekusi", "kerjakan",
+        "jalanin", "jalankan", "gas", "buat sekarang", "coba lagi",
+    )
+    if not current or not any(marker in current for marker in continuation_markers):
+        return False
+
+    recent_user_requests = [
+        str(getattr(row, "content", "") or "")
+        for row in (history_rows or [])
+        if str(getattr(row, "role", "") or "") == "user"
+    ][-6:]
+    return any(is_google_spreadsheet_pdf_report_intent(text) for text in recent_user_requests)
+
+
+def is_google_pdf_report_followup(message: str) -> bool:
+    """Whether a terse user message refers to an outstanding PDF deliverable."""
+    text = str(message or "").casefold()
+    return any(
+        marker in text
+        for marker in (
+            "mana laporan", "mana laporannya", "laporannya", "mana pdf",
+            "file pdf", "pdf nya", "pdfnya", "generate", "eksekusi",
+            "lanjut", "lanjutin", "lanjutkan", "langsung", "kerjakan",
+            "jalanin", "jalankan", "coba lagi",
+        )
+    )
+
+
+_GOOGLE_PDF_REPORT_TOOL_NAMES = frozenset(
+    {
+        "search_drive_files",
+        "get_spreadsheet_info",
+        "read_sheet_values",
+        "create_report_doc",
+        "create_doc",
+        "modify_doc_text",
+        "get_doc_content",
+        "export_doc_to_pdf",
+        "get_drive_file_download_url",
+    }
+)
+
+
+def scope_google_pdf_report_tools(mcp_tools: list[Any], *, log: Any) -> list[Any]:
+    """Expose the smallest Google-native PDF workflow tool surface.
+
+    Deep Agents include tool schemas in the prompt on every model call.  A
+    narrow, outcome-specific list reduces prompt pressure and gives the model a
+    deterministic source -> document -> PDF path.
+    """
+    scoped = [
+        tool for tool in mcp_tools
+        if str(getattr(tool, "name", "") or "") in _GOOGLE_PDF_REPORT_TOOL_NAMES
+    ]
+    required = {"read_sheet_values", "export_doc_to_pdf"}
+    scoped_names = {str(getattr(tool, "name", "") or "") for tool in scoped}
+    if not required.issubset(scoped_names):
+        # Never reduce the tool surface to an unusable subset if an MCP server
+        # has a different capability profile than the production server.
+        log.warning(
+            "agent_run.google_pdf_report_tools_scope_skipped",
+            missing=sorted(required - scoped_names),
+        )
+        return mcp_tools
+    log.info(
+        "agent_run.google_pdf_report_tools_scoped",
+        tools=sorted(scoped_names),
+        removed=max(0, len(mcp_tools) - len(scoped)),
+    )
+    return scoped
+
+
+def google_spreadsheet_pdf_report_directive(user_message: str) -> str:
+    """Prompt contract for a verified Google-native spreadsheet PDF workflow."""
+    return (
+        "\n\n[SYSTEM NOTICE - VERIFIED SPREADSHEET PDF WORKFLOW]\n"
+        "User meminta PDF berdasarkan spreadsheet. Ini adalah task multi-langkah; buat dan perbarui task plan "
+        "sampai setiap tahap selesai. Gunakan HANYA tool Google yang tersedia pada run ini.\n"
+        "Urutan wajib: (1) temukan atau konfirmasi spreadsheet, (2) panggil read_sheet_values PADA RUN INI, "
+        "(3) buat dokumen laporan dari hasil baca memakai create_report_doc atau create_doc lalu modify_doc_text, "
+        "(4) panggil export_doc_to_pdf, (5) berikan URL PDF hanya dari output export.\n"
+        "Jangan gunakan sandbox/Python untuk menggantikan baca Spreadsheet atau export PDF Google. Jangan mengklaim "
+        "PDF dibuat, diupload, atau dikirim tanpa output tool export_doc_to_pdf yang memuat URL nyata.\n"
+        f"Permintaan asli: {str(user_message or '').strip()[:1200]}\n"
+        "[/SYSTEM NOTICE]\n"
+    )
+
+
+def has_verified_google_pdf_artifact(steps: list[dict[str, Any]]) -> bool:
+    """Return true only for a successful PDF export with a concrete URL."""
+    for step in steps or []:
+        if str((step or {}).get("tool") or "") != "export_doc_to_pdf":
+            continue
+        result = str((step or {}).get("result") or "")
+        lowered = result.casefold()
+        if result and "http" in result and "error" not in lowered and "failed" not in lowered:
+            return True
+    return False
+
+
 def _is_plain_google_form_link_reference(message: str) -> bool:
     """A shared Google Form URL can be business info, not a request to run Google tools."""
     if not message:
@@ -505,17 +638,24 @@ def remember_created_google_spreadsheet(
 
 
 def build_google_workspace_resource_notice(tools_config: dict[str, Any]) -> str:
-    """Inject a verified default Sheet into the runtime prompt."""
+    """Inject a configured or verified default Sheet into the runtime prompt."""
     resources = (tools_config or {}).get("google_workspace_resources")
     if not isinstance(resources, dict):
         return ""
     spreadsheet_id = str(resources.get("default_spreadsheet_id") or "").strip()
-    if (
-        resources.get("default_spreadsheet_verified") is not True
-        or not spreadsheet_id
-    ):
+    if not spreadsheet_id:
         return ""
     title = str(resources.get("default_spreadsheet_title") or "").strip()
+    if resources.get("default_spreadsheet_verified") is not True:
+        if resources.get("default_spreadsheet_configured") is not True:
+            return ""
+        return (
+            "\n\n[SYSTEM NOTICE - CONFIGURED GOOGLE SHEET]\n"
+            f"Spreadsheet yang dipilih Owner untuk workflow ini: {spreadsheet_id}. "
+            "Gunakan ID ini, lalu WAJIB panggil tool baca untuk mengetahui tab, header, dan akses sebelum cek stok atau menulis. "
+            "Jangan menganggap akses berhasil sebelum tool baca sukses; jangan mengganti ID atau membuat spreadsheet baru.\n"
+            "[/SYSTEM NOTICE]\n"
+        )
     return (
         "\n\n[SYSTEM NOTICE - VERIFIED GOOGLE RESOURCE]\n"
         f"Spreadsheet utama agent yang sudah dibuat dan diverifikasi: {spreadsheet_id}"
@@ -2337,6 +2477,22 @@ def filter_google_mcp_tools_by_services(
         "contacts": ("contact",),
         "chat": ("chat", "message"),
     }
+    # Some Sheets tools use generic names (for example append_table_rows), so
+    # substring matching alone silently removed them from Sheets-only agents.
+    # Keep the exception an explicit capability allowlist.
+    explicit_service_tools: dict[str, set[str]] = {
+        "sheets": {
+            "read_sheet_values",
+            "modify_sheet_values",
+            "append_table_rows",
+            "list_sheet_tables",
+            "create_sheet",
+            "create_spreadsheet",
+            "format_sheet_range",
+            "add_sheet_row",
+            "delete_sheet_row",
+        },
+    }
     kept: list[Any] = []
     removed: list[str] = []
     for mcp_tool in mcp_tools:
@@ -2346,7 +2502,11 @@ def filter_google_mcp_tools_by_services(
             for service, markers in service_markers.items()
             if any(marker in name for marker in markers)
         }
-        if matched_services & allowed:
+        explicitly_allowed = any(
+            name in explicit_service_tools.get(service, set())
+            for service in allowed
+        )
+        if matched_services & allowed or explicitly_allowed:
             kept.append(mcp_tool)
         else:
             removed.append(name)
@@ -2354,7 +2514,8 @@ def filter_google_mcp_tools_by_services(
         log.info(
             "agent_run.google_mcp_service_allowlist_applied",
             allowed_services=sorted(allowed),
-            removed_tools=sorted(removed),
+            removed_count=len(removed),
+            removed_sample=sorted(removed)[:12],
         )
     return kept
 
@@ -2973,19 +3134,29 @@ async def prepare_google_mcp_runtime(
         str(get_settings().google_integration_service_url).rstrip("/")
     )
     channel_cfg = session.channel_config if isinstance(session.channel_config, dict) else {}
-    candidate_ids = _candidate_external_user_ids(
-        memory_scope or getattr(session, "external_user_id", None) or fallback_external_user_id,
-        channel_cfg.get("user_phone") or fallback_external_user_id,
+    delegated_runtime_access = bool(
+        isinstance(workspace_server, dict)
+        and workspace_server.get("delegated_runtime_access") is True
     )
-    # Operational customer workflows may use one explicitly delegated,
-    # resource-bound tool. In that case authentication still belongs to the
-    # Owner, never to the customer identity.
-    for owner_candidate in _candidate_external_user_ids(
-        fallback_external_user_id,
-        fallback_external_user_id,
-    ):
-        if owner_candidate not in candidate_ids:
-            candidate_ids.append(owner_candidate)
+    if delegated_runtime_access:
+        # The Google credential belongs to the Owner's configured agent, not
+        # the customer who happened to trigger the workflow.  In particular,
+        # never create an OAuth request for a customer WhatsApp identity.
+        candidate_ids = _candidate_external_user_ids(
+            fallback_external_user_id,
+            fallback_external_user_id,
+        )
+    else:
+        candidate_ids = _candidate_external_user_ids(
+            memory_scope or getattr(session, "external_user_id", None) or fallback_external_user_id,
+            channel_cfg.get("user_phone") or fallback_external_user_id,
+        )
+        for owner_candidate in _candidate_external_user_ids(
+            fallback_external_user_id,
+            fallback_external_user_id,
+        ):
+            if owner_candidate not in candidate_ids:
+                candidate_ids.append(owner_candidate)
 
     connected_user_id: str | None = None
     auth_url: str | None = None
@@ -3066,6 +3237,12 @@ async def prepare_google_mcp_runtime(
             if jwt:
                 workspace_server.setdefault("headers", {})["Authorization"] = f"Bearer {jwt}"
                 connected_user_id = jwt_external_user_id
+                # mcp_client_context keeps a short-lived client/schema cache
+                # per target agent + delegated Owner. The key deliberately
+                # excludes the bearer token, which may rotate every run.
+                workspace_server["tool_cache_key"] = (
+                    f"google_workspace:{agent_id}:{jwt_external_user_id}"
+                )
                 auth_url = None
                 preflight_error = None
                 log.info("agent_run.google_mcp_token_injected", external_user_id=jwt_external_user_id)

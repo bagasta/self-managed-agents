@@ -595,7 +595,7 @@ def infer_workflow_state(
         return "agent_created"
     if "create_wa_dev_trial_link" in tool_names and succeeded("create_wa_dev_trial_link"):
         return "demo_ready"
-    if "send_agent_wa_qr" in tool_names and succeeded("send_agent_wa_qr"):
+    if "send_agent_wa_pairing_code" in tool_names and succeeded("send_agent_wa_pairing_code"):
         return "demo_ready"
     if any("auth" in name or "oauth" in name for name in tool_names):
         return "integration_auth_pending"

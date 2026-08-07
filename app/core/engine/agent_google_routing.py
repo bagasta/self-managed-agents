@@ -43,13 +43,19 @@ logger = structlog.get_logger(__name__)
 
 def _extract_auth_url_from_builder_steps(steps: list[dict[str, Any]]) -> str | None:
     for step in reversed(steps or []):
-        if step.get("tool") != "generate_google_auth_link":
-            continue
         data = _parse_step_result_json(step.get("result"))
+        google_auth = data.get("google_auth") if isinstance(data, dict) and isinstance(data.get("google_auth"), dict) else {}
         if data:
-            auth_url = data.get("auth_url") or data.get("authorization_url")
+            auth_url = (
+                data.get("auth_url")
+                or data.get("authorization_url")
+                or google_auth.get("auth_url")
+                or google_auth.get("authorization_url")
+            )
             if auth_url:
                 return str(auth_url)
+        if step.get("tool") != "generate_google_auth_link":
+            continue
         result_text = str(step.get("result") or "")
         match = re.search(r"https?://[^\s\"'<>]+", result_text)
         if match:
@@ -76,16 +82,18 @@ def _builder_google_auth_agent_id(steps: list[dict[str, Any]]) -> str | None:
     if any((step or {}).get("tool") == "generate_google_auth_link" for step in steps or []):
         return None
     for step in reversed(steps or []):
-        if step.get("tool") not in {"create_agent", "update_agent"}:
-            continue
         data = _parse_step_result_json(step.get("result"))
-        if not data or data.get("success") is not True:
+        if not data or (data.get("success") is not True and data.get("ok") is not True):
             continue
+        google_auth = data.get("google_auth") if isinstance(data.get("google_auth"), dict) else {}
+        if google_auth.get("connected") is True:
+            return None
         readback = data.get("readback") if isinstance(data.get("readback"), dict) else {}
         needs_auth = (
             data.get("needs_google_auth") is True
             or data.get("google_workspace_enabled") is True
             or readback.get("tools_config_has_google_workspace") is True
+            or google_auth.get("needs_google_auth") is True
         )
         if needs_auth:
             agent_id = str(data.get("agent_id") or "").strip()
@@ -202,6 +210,21 @@ def _is_google_workspace_mcp_authorized_for_session(session: Session, agent_mode
     if not sender:
         return False
     return sender in _normalized_agent_operator_ids(agent_model)
+
+
+def allows_delegated_google_workspace_runtime(agent_model: Any) -> bool:
+    """Whether a business agent may use its Owner-delegated Google tools for customers.
+
+    The customer's WhatsApp identity is never used to authenticate to Google.
+    This opt-in only permits the *agent* to execute its already-configured
+    workflow with the Owner's delegated credential.
+    """
+    config = getattr(agent_model, "tools_config", None)
+    config = config if isinstance(config, dict) else {}
+    mcp = config.get("mcp") if isinstance(config.get("mcp"), dict) else {}
+    servers = mcp.get("servers") if isinstance(mcp.get("servers"), dict) else mcp
+    google = servers.get("google_workspace") if isinstance(servers, dict) else None
+    return bool(isinstance(google, dict) and google.get("delegated_runtime_access") is True)
 
 
 def _google_workspace_mcp_unauthorized_reply() -> str:

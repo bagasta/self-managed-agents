@@ -5,7 +5,12 @@ from types import SimpleNamespace
 import pytest
 
 from app.api.channels import _is_arthur_system_agent, _is_passive_deploy_acknowledgement
-from arthur_v2.plugin import CreateAssistantInput, build_arthur_v2_system_prompt, build_arthur_v2_tools
+from arthur_v2.plugin import (
+    CreateAssistantInput,
+    _merge_runtime_config,
+    build_arthur_v2_system_prompt,
+    build_arthur_v2_tools,
+)
 
 
 def test_arthur_v2_exposes_owned_knowledge_tool() -> None:
@@ -33,6 +38,38 @@ def test_arthur_v2_exposes_deploy_for_website_assistants() -> None:
     assert "enable_deploy" in schema["properties"]
     assert "enable_deploy" in runtime_tool.args_schema.model_json_schema()["properties"]
     assert "deploy_app" in prompt
+
+
+def test_runtime_config_preserves_omitted_deploy_and_subagents() -> None:
+    config, sandbox, deploy, subagent_ids = _merge_runtime_config(
+        {
+            "sandbox": True,
+            "deploy": True,
+            "subagents": {"enabled": True, "agent_ids": ["agent-1"]},
+        },
+        enable_sandbox=None,
+        enable_deploy=None,
+        subagent_ids=None,
+    )
+
+    assert sandbox is True
+    assert deploy is True
+    assert subagent_ids == ["agent-1"]
+    assert config["subagents"] == {"enabled": True, "agent_ids": ["agent-1"]}
+
+
+def test_runtime_config_explicit_empty_subagents_uses_system_subagents() -> None:
+    config, sandbox, deploy, subagent_ids = _merge_runtime_config(
+        {"sandbox": False, "deploy": False},
+        enable_sandbox=None,
+        enable_deploy=True,
+        subagent_ids=[],
+    )
+
+    assert sandbox is True
+    assert deploy is True
+    assert subagent_ids == []
+    assert config["subagents"] == {"enabled": True, "agent_ids": []}
 
 
 def test_only_explicit_arthur_system_plugins_bypass_spam_guard() -> None:

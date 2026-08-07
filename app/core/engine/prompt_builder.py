@@ -106,7 +106,7 @@ def _build_arthur_tool_category_guide() -> str:
         "cek active_until, lalu panggil renew_agent bila expired. Hanya setelah renewal berhasil "
         "boleh buat kode trial baru. Jangan mengirim kode baru sebagai pengganti diagnosis.\n"
         "- Channel Management: WhatsApp sebagai satu-satunya channel user-facing untuk agent yang dipasang atau dicoba. "
-        "Untuk WhatsApp gunakan create_wa_dev_trial_link, send_agent_wa_qr, "
+        "Untuk WhatsApp gunakan create_wa_dev_trial_link, send_agent_wa_pairing_code, "
         "list_available_wa_devices, dan WhatsApp media tools sesuai konteks. "
         "Kirim QR hanya saat user meminta menghubungkan nomor/agent. Jangan pernah "
         "mengarang pekerjaan yang masih berjalan, nama file, chart, atau artifact lalu "
@@ -589,8 +589,12 @@ async def maybe_summarize_context(
             "Buat ringkasan padat (maksimal 300 kata) yang mencakup:\n"
             "- Topik utama yang dibahas\n"
             "- Keputusan atau hasil penting yang sudah dicapai\n"
-            "- Konteks yang relevan untuk melanjutkan percakapan\n\n"
-            f"Riwayat percakapan:\n{history_text[:6000]}"
+            "- Task yang masih terbuka, artefak yang belum dibuat, dan next step konkret\n"
+            "- Abaikan janji/progress agent yang belum dibuktikan oleh hasil tool\n\n"
+            # The newest turns determine the active task. Keeping the prefix
+            # caused summaries to become permanently anchored to the oldest
+            # conversation, even after the user changed tasks many times.
+            f"Riwayat percakapan terbaru:\n{history_text[-6000:]}"
         )
         resp = await llm.ainvoke([_HM(content=summary_prompt)])
         summary = resp.content if isinstance(resp.content, str) else str(resp.content)
@@ -987,8 +991,8 @@ def build_system_prompt(
             "- Setelah semua grup lengkap, rangkum kebutuhan faktual dan minta user membalas eksplisit `setuju`, `sudah`, `sesuai`, atau `sudah sesuai`. Balasan `ok`/`oke` juga sah bila langsung menjawab rangkuman lengkap yang tidak ambigu. Setelah konfirmasi menjadi pesan user aktif/terakhir, isi user_confirmed=true beserta `_evidence.user_confirmed` yang mengutip pesan itu, lalu WAJIB jalankan alur create pada turn yang sama: plan_agent -> compose_agent_blueprint -> compose_agent_operating_manual -> compose_agent_instructions -> validate_agent_config -> compose_agent_soul -> create_agent(discovery_answers yang sama) -> verify_agent. Panggil create_agent SATU KALI dengan file_capability canonical yang sama. Jika plan_status sudah ready, dilarang membalas dengan rangkuman/progress lagi sebelum create_agent benar-benar dipanggil. Jika create gagal, ikuti error_code; retry internal maksimal satu kali dan hanya bila retryable=true.\n"
             "- Nama bisnis/brand tidak wajib untuk create. Jika user belum memberikannya, gunakan frasa generik `bisnis ini` atau deskripsi bisnis; DILARANG membuat placeholder seperti `[Nama Bisnis]` dan DILARANG menanyakannya setelah rangkuman sudah dikonfirmasi kecuali identitas brand memang mengubah workflow.\n"
             "- Kamu menyiapkan agent sampai user tahu langkah berikutnya, tetapi inisiatif hanya boleh mengikuti kebutuhan yang sudah dikonfirmasi. Jangan menambah workflow, integrasi, operator, nama, atau keputusan sendiri.\n"
-            "- DILARANG menawarkan webchat, embed website, API, atau kelola web sebagai channel/produk agent. Channel user-facing yang tersedia hanya WhatsApp: nomor demo Arthur atau nomor WhatsApp milik user yang dipasang dengan scan sekali dari WhatsApp.\n"
-            "- DILARANG bertanya `mau channel apa?`, `WhatsApp atau webchat?`, atau variasi sejenis. Untuk agent baru, langsung set channel ke WhatsApp; setelah agent jadi tawarkan tepat dua jalur: uji coba di nomor demo Arthur atau pemasangan ke nomor khusus milik user dengan scan sekali dari WhatsApp.\n"
+            "- DILARANG menawarkan webchat, embed website, API, atau kelola web sebagai channel/produk agent. Channel user-facing yang tersedia hanya WhatsApp: nomor demo Arthur atau nomor WhatsApp milik user yang dipasang memakai kode tautan WhatsApp.\n"
+            "- DILARANG bertanya `mau channel apa?`, `WhatsApp atau webchat?`, atau variasi sejenis. Untuk agent baru, langsung set channel ke WhatsApp; setelah agent jadi tawarkan tepat dua jalur: uji coba di nomor demo Arthur atau pemasangan ke nomor khusus milik user dengan kode tautan WhatsApp.\n"
             "- Untuk setiap agent bisnis, tentukan dan masukkan workflow nyata: data yang dikumpulkan, kapan minta pembayaran, bukti apa yang diminta, siapa admin/operatornya, kapan eskalasi, dan kapan hasil boleh dikirim. Jangan hanya membuat persona umum.\n"
             "- Setiap agent yang kamu buat harus sadar bahwa dia dibuat oleh Arthur, punya Owner, dan Owner adalah bos/superadmin. Masukkan pemahaman ini ke instructions/soul agent, termasuk aturan minta bantuan Owner saat butuh keputusan manusia, izin Google, akses akun, atau menghadapi masalah yang tidak bisa diselesaikan sendiri.\n"
             "- Jangan mengunci preset hanya dari satu kata kunci kalau kebutuhan user masih berupa keluhan, ide kasar, atau workflow custom. Gali satu hal paling menentukan dulu: hasil akhir yang diharapkan, siapa pemakainya, cara mencoba lewat WhatsApp, data yang perlu dikumpulkan, atau aksi otomatis yang wajib dilakukan.\n"
@@ -1020,11 +1024,11 @@ def build_system_prompt(
             "- Setelah verify_agent mengembalikan setup_status_for_owner, pakai field itu sebagai sumber kebenaran untuk menjelaskan status setup ke Owner. Sampaikan summary_for_owner, next_steps, dan item yang butuh setup dengan bahasa awam. Jangan menyebut blockers/warnings/raw JSON ke user.\n"
             "- Setelah create_agent atau update_agent sukses, final reply harus menyebut perubahan paling penting yang benar-benar sudah diterapkan. Untuk kasus payment/admin approval, sebut ringkas: agent minta bayar dulu, minta bukti transfer, teruskan ke admin untuk approval, lalu kirim hasil setelah approved.\n"
             "- Setelah create_agent atau update_agent sukses, lanjutkan hanya setup yang sudah diminta/disetujui: link demo, scan nomor sendiri jika user memintanya, atau link Google jika integrasi Google aktif.\n"
-            "- Setelah agent WhatsApp dibuat, tawarkan tepat dua pilihan: `nomor demo Arthur` (wajib kirim link wa.me + kode lewat create_wa_dev_trial_link setelah dipilih) atau `nomor khusus milik user` (wajib kirim scan sekali dari WhatsApp lewat send_agent_wa_qr setelah dipilih). Semua dilakukan lewat chat WhatsApp ini; jangan pernah mengarahkan user ke dashboard atau menu Settings.\n"
+            "- Setelah agent WhatsApp dibuat, tawarkan tepat dua pilihan: `nomor demo Arthur` (wajib kirim link wa.me + kode lewat create_wa_dev_trial_link setelah dipilih) atau `nomor khusus milik user` (wajib buat kode tautan lewat send_agent_wa_pairing_code setelah dipilih). Semua dilakukan lewat chat WhatsApp ini; jangan pernah mengarahkan user ke dashboard atau menu Settings.\n"
             "- Setelah create_agent sukses, jangan berhenti hanya dengan `agent sudah jadi` atau ID agent. Jika user belum memilih jalur, tampilkan dua pilihan WhatsApp tersebut secara ringkas. Jika sudah memilih, langsung jalankan tool channel yang sesuai pada turn yang sama.\n"
             "- Jika user bertanya `terus gimana pakenya?`, `cara pakainya gimana?`, `habis ini gimana?`, atau sejenisnya tanpa memilih jalur, jelaskan dua pilihan WhatsApp dan tunggu pilihan. Panggil create_wa_dev_trial_link hanya bila user memilih nomor demo.\n"
             "- User boleh memilih nomor demo atau nomor khusus langsung. Jangan memaksa demo lebih dulu. Untuk pertanyaan umum `cara pasang`, jelaskan kedua opsi dan tunggu user memilih salah satu.\n"
-            "- Untuk user awam: sebut `scan sekali dari WhatsApp`, bukan `QR`; sebut `nomor demo Arthur`, bukan `shared number`, `shared trial`, `wa-dev`, atau `device/session`.\n"
+            "- Untuk user awam: sebut `masukkan kode tautan di WhatsApp`; sebut `nomor demo Arthur`, bukan `shared number`, `shared trial`, `wa-dev`, atau `device/session`.\n"
             "- Setelah create_agent sukses, simpan agent_id dari hasil tool sebagai agent terbaru dalam percakapan. Untuk permintaan `nomor trial`, `link coba`, atau `nomer trial aja`, panggil create_wa_dev_trial_link memakai agent_id terbaru itu.\n"
             "- Jangan pakai agent_id lama dari memory/history jika baru saja ada create_agent sukses untuk agent lain. Jika user punya beberapa agent dan targetnya tidak jelas, tanyakan nama agent; jangan fallback ke agent terbaru untuk permintaan nomor demo.\n"
             "- Jika user meminta agent lama diaktifkan untuk Google Docs/Sheets/Drive/Gmail/Calendar, cari agent yang benar dengan list_my_agents/get_agent_detail, lalu panggil update_agent dengan enable_google_workspace=True.\n"
@@ -1100,6 +1104,12 @@ def build_system_prompt(
             "JANGAN tulis atau kirim pesan apapun ke operator.\n"
             "- Output akhirmu adalah pesan singkat untuk USER: "
             "beritahu user bahwa pertanyaannya sedang diteruskan ke tim dan akan segera dibalas.\n\n"
+            "### Notifikasi Owner yang terkait customer\n"
+            "- Untuk pesanan baru, komplain, stok habis, atau update workflow lain yang perlu diketahui Owner, "
+            "panggil `notify_owner(reason, summary)`, BUKAN `send_to_number` ke nomor Owner. "
+            "Tool ini membuat case yang menyimpan nomor customer dan ID pesan WhatsApp agar Owner dapat reply pesan itu secara aman.\n"
+            "- `send_to_number` hanya untuk nomor pihak ketiga yang memang eksplisit diminta user/operator (misalnya supplier), "
+            "bukan untuk Owner/operator yang terkonfigurasi.\n\n"
             "### Notifikasi Progress\n"
             "Default: JANGAN kirim progress message. Cukup bekerja sampai final reply.\n"
             "Gunakan `notify_user(message)` maksimal 1x hanya untuk retry/error atau blocker nyata yang perlu diketahui user. DILARANG mengirim placeholder statik seperti `masih saya proses` atau `akan saya kirim setelah selesai`.\n"
@@ -1218,7 +1228,7 @@ def build_system_prompt(
     if "whatsapp_media" in active_groups:
         cap_parts.append("WhatsApp media tools (send_whatsapp_image, send_whatsapp_document)")
     if "wa_agent_manager" in active_groups:
-        cap_parts.append("WA agent manager (send_agent_wa_qr)")
+        cap_parts.append("WA agent manager (send_agent_wa_pairing_code)")
     if "deploy" in active_groups:
         cap_parts.append("deployment tools (deploy_app/stop_deployment/get_deployment_status/get_deployment_logs)")
 

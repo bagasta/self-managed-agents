@@ -92,6 +92,17 @@ async def get_wa_status(device_id: str) -> dict:
         return resp.json()
 
 
+async def create_wa_pairing_code(device_id: str, phone: str) -> dict:
+    """Create a WhatsApp ``Link with phone number`` pairing code."""
+    async with httpx.AsyncClient(timeout=_WA_TIMEOUT_CREATE) as client:
+        resp = await client.post(
+            f"{_base_url()}/devices/{device_id}/pairing-code",
+            json={"phone": phone},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
 async def send_wa_message(device_id: str, to: str, text: str) -> dict:
     """Send a WhatsApp text message via Go service."""
     if device_id.startswith("wadev_"):

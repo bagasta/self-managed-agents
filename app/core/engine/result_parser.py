@@ -189,7 +189,11 @@ def parse_agent_result(
                     ).strip()
                 else:
                     text = str(msg.content).replace("\x00", "")
-                if text:
+                # An AIMessage carrying tool calls is an intermediate thought,
+                # not a user-facing final answer.  Keeping it as final_reply
+                # makes channels send “I will do X now” even though the graph is
+                # still executing (or was truncated before its next turn).
+                if text and not msg.tool_calls:
                     final_reply = _clean_final_reply(text)
                 db_messages.append(Message(
                     session_id=session_id,

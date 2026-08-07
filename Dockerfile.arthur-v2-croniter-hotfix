@@ -1,0 +1,5 @@
+# Production dependency hotfix. The normal Dockerfile installs requirements.txt;
+# this small layer keeps the live Arthur V2 image and adds only croniter.
+FROM managed-agents-app:arthur-v2-hotfix-20260805-r1
+
+RUN pip install --no-cache-dir "croniter>=2.0.0,<7.0.0"

@@ -1,0 +1,4 @@
+services:
+  api:
+    image: managed-agents-app:arthur-v2-hotfix-20260805-r2
+    build: !reset null

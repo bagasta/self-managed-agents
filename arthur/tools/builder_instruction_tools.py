@@ -178,7 +178,7 @@ def build_builder_instruction_tools(
             )
         if tc_preset.get("wa_agent_manager"):
             tool_hints.append(
-                "- send_agent_wa_qr(agent_id, caption, phone) — kirim QR WhatsApp ke nomor tertentu agar user bisa scan dan connect."
+                "- send_agent_wa_pairing_code(agent_id) — buat kode tautan WhatsApp untuk nomor owner terverifikasi."
             )
         tool_hints.append(
             "- create_wa_dev_trial_link(agent_id, agent_name, phone, force_new_code, send_contact) — "

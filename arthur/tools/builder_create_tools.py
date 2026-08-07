@@ -62,6 +62,39 @@ StringTransformer = Callable[[str], str]
 BlockProvider = Callable[[], str]
 
 
+def _capability_context_for_memory(tools_config: dict[str, Any]) -> str:
+    """Return non-secret capability facts that must survive the create handoff.
+
+    Tool configuration determines what is injected at runtime, but it does not
+    tell the model *why* or *how* to use a capability.  Keep this small and
+    deterministic so a missing LLM-generated blueprint cannot erase critical
+    scheduler/Google context.  OAuth URLs and credentials intentionally never
+    belong here.
+    """
+    context: list[str] = []
+    if bool(tools_config.get("scheduler")):
+        context.append(
+            "Scheduler aktif: buat, lihat, atau batalkan pengingat hanya dengan "
+            "set_reminder/set_multiple_reminders, list_reminders, dan cancel_reminder. "
+            "Jangan mengklaim pengingat aktif sebelum tool mengembalikan sukses."
+        )
+
+    if _has_google_workspace_tools(tools_config):
+        mcp = tools_config.get("mcp") if isinstance(tools_config.get("mcp"), dict) else {}
+        servers = mcp.get("servers") if isinstance(mcp.get("servers"), dict) else mcp
+        google = servers.get("google_workspace") if isinstance(servers, dict) else {}
+        services = google.get("allowed_services") if isinstance(google, dict) else []
+        service_text = ", ".join(str(item) for item in services if str(item).strip())
+        context.append(
+            "Google Workspace aktif"
+            + (f" untuk {service_text}" if service_text else "")
+            + ". Akses memerlukan OAuth owner yang valid; jangan mengklaim aksi Google berhasil "
+            "tanpa hasil tool. URL OAuth dan token tidak disimpan di memory."
+        )
+
+    return "\n".join(context)
+
+
 class _LoggerProxy:
     def __init__(self, provider: LoggerProvider) -> None:
         self._provider = provider
@@ -747,7 +780,13 @@ def build_builder_create_tools(
 
                 memory_keys_seeded: list[str] = []
                 builder_memory_updated = False
-                if soul.strip() or blueprint.strip() or (platform_identity_added and hasattr(Agent, "__table__")):
+                capability_context = _capability_context_for_memory(tc)
+                if (
+                    soul.strip()
+                    or blueprint.strip()
+                    or capability_context
+                    or (platform_identity_added and hasattr(Agent, "__table__"))
+                ):
                     from app.core.domain.memory_service import upsert_memory
 
                     if soul.strip():
@@ -756,6 +795,15 @@ def build_builder_create_tools(
                     if blueprint.strip():
                         await upsert_memory(agent.id, "agent_blueprint", blueprint.strip(), db, scope=None)
                         memory_keys_seeded.append("agent_blueprint")
+                    if capability_context:
+                        await upsert_memory(
+                            agent.id,
+                            "capability_context",
+                            capability_context,
+                            db,
+                            scope=None,
+                        )
+                        memory_keys_seeded.append("capability_context")
                     if platform_identity_added and hasattr(Agent, "__table__"):
                         await upsert_memory(
                             agent.id,

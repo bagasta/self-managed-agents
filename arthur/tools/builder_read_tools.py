@@ -87,7 +87,7 @@ def build_builder_read_tools(
                 "payment": "get_payment_link untuk link pembayaran Starter/tier_1, Pro/tier_2, dan Enterprise/tier_3",
                 "whatsapp": (
                     "create_wa_dev_trial_link untuk nomor demo Arthur; "
-                    "send_agent_wa_qr untuk nomor khusus milik user"
+                    "send_agent_wa_pairing_code untuk nomor khusus milik user"
                 ),
                 "coding": "sandbox + deploy + subagents sys_coder",
                 "browsing": "tavily_search/tavily_extract untuk web search dan baca URL",

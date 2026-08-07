@@ -1,0 +1,11 @@
+# Lightweight production hotfix: retain the verified runtime image and replace
+# only Arthur V2's setup path. This intentionally avoids rebuilding Python deps.
+FROM managed-agents-app:arthur-v2-google-mcp-cache-20260804-r4
+
+WORKDIR /app
+COPY arthur_v2/plugin.py arthur_v2/plugin.py
+COPY app/core/engine/agent_runner.py app/core/engine/agent_runner.py
+COPY app/core/engine/agent_google_routing.py app/core/engine/agent_google_routing.py
+COPY app/core/engine/agent_tool_setup.py app/core/engine/agent_tool_setup.py
+COPY app/core/infra/wa_client.py app/core/infra/wa_client.py
+COPY app/core/system_agents/registry.py app/core/system_agents/registry.py

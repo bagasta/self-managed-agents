@@ -1052,7 +1052,64 @@ def build_wa_agent_manager_tools(session: Any, db_factory: async_sessionmaker) -
         except Exception as exc:
             return f"[error] Gagal mengirim QR: {exc}"
 
-    return [send_agent_wa_qr]
+    @tool
+    async def send_agent_wa_pairing_code(agent_id: str) -> str:
+        """Buat kode untuk menghubungkan nomor WhatsApp owner ke agent.
+
+        Ini adalah jalur utama pemasangan nomor sendiri. User memasukkan kode
+        dari WhatsApp mereka lewat Perangkat tertaut > Tautkan dengan nomor
+        telepon, sehingga tidak perlu memindai QR dari layar HP yang sama.
+        QR lama tetap tersedia di backend untuk pemulihan manual, tetapi tidak
+        diekspos pada alur Arthur saat ini.
+        """
+        target = _resolve_qr_target("")
+        if not target:
+            return (
+                "[error] Nomor WhatsApp owner belum terbaca sebagai nomor asli. "
+                "Minta user mengirim pesan dari nomor WhatsApp aslinya dulu."
+            )
+
+        from app.core.infra.wa_client import create_wa_pairing_code
+        from app.models.agent import Agent as _Agent
+        from sqlalchemy import select as _select
+        import uuid as _uuid
+
+        try:
+            agent_uuid = _uuid.UUID(agent_id)
+        except ValueError:
+            return f"[error] agent_id tidak valid: '{agent_id}' — harus berupa UUID"
+
+        async with db_factory() as _db:
+            result = await _db.execute(
+                _select(_Agent).where(_Agent.id == agent_uuid, _Agent.is_deleted.is_(False))
+            )
+            agent_row = result.scalar_one_or_none()
+            if not agent_row:
+                return f"[error] Agent '{agent_id}' tidak ditemukan"
+            if not agent_row.wa_device_id:
+                agent_row.wa_device_id = str(_uuid.uuid4())
+                agent_row.channel_type = "whatsapp"
+                await _db.commit()
+            wa_dev_id = str(agent_row.wa_device_id)
+
+        try:
+            response = await create_wa_pairing_code(wa_dev_id, target)
+        except Exception as exc:
+            return f"[error] Gagal membuat kode pemasangan WhatsApp: {exc}"
+
+        code = str(response.get("pairing_code") or "").strip()
+        if not code:
+            return "[error] Layanan WhatsApp tidak mengembalikan kode pemasangan."
+        expires = int(response.get("expires_in_seconds") or 160)
+        return (
+            f"[PAIRING_CODE] Kode pemasangan untuk nomor {target}, agent '{agent_id}': {code}\n"
+            "Di WhatsApp: Setelan > Perangkat tertaut > Tautkan dengan nomor telepon, "
+            f"lalu masukkan kode ini. Kode berlaku sekitar {expires} detik."
+        )
+
+    # QR is deliberately retained above for an operator-only/manual recovery
+    # path, but pairing code is the only self-service method Arthur exposes.
+    return [send_agent_wa_pairing_code]
 
 
 # ---------------------------------------------------------------------------

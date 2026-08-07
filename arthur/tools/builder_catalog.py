@@ -755,7 +755,7 @@ RUNTIME_LIMITATIONS: dict[str, dict] = {
         "severity": "info",
         "affects": ["cs_whatsapp_basic", "scheduler_assistant"],
         "description": "User harus scan QR untuk menghubungkan nomor WA ke agent sebelum bisa dipakai.",
-        "mitigation": "Gunakan send_agent_wa_qr() setelah create untuk kirim QR ke user.",
+        "mitigation": "Gunakan send_agent_wa_pairing_code() setelah create untuk membuat kode tautan WhatsApp user.",
         "user_message": "Perlu scan QR WhatsApp sebelum agent bisa digunakan.",
     },
     "rag_requires_documents_uploaded_first": {
@@ -814,7 +814,7 @@ _PLATFORM_CHANNELS = [
         "type": "whatsapp",
         "description": (
             "Channel user-facing yang tersedia. Bisa dicoba lewat nomor demo Arthur "
-            "atau dipasang ke nomor WhatsApp user dengan scan sekali dari WhatsApp."
+            "atau dipasang ke nomor WhatsApp user dengan kode tautan WhatsApp."
         ),
     },
 ]

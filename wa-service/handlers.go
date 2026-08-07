@@ -127,6 +127,48 @@ func (h *Handlers) getStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// POST /devices/{id}/pairing-code
+// Body: {"phone": "628xxx"}. The code is entered in WhatsApp's
+// "Link with phone number" flow and remains valid for up to about 160 seconds.
+func (h *Handlers) createPairingCode(w http.ResponseWriter, r *http.Request) {
+	deviceID := r.PathValue("id")
+	if deviceID == "" {
+		writeError(w, http.StatusBadRequest, "device id required")
+		return
+	}
+	var req struct {
+		Phone string `json:"phone"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Phone == "" {
+		writeError(w, http.StatusBadRequest, "phone required")
+		return
+	}
+
+	// PairPhone needs an already-connected login websocket. A prior pairing
+	// attempt expires when WhatsApp closes that login socket (about 160 seconds).
+	// Recreate an unlinked waiting device so a requested *new* code always gets
+	// a fresh socket; no QR is returned by this endpoint.
+	status, _, err := h.dm.GetStatus(deviceID)
+	if err != nil || status != StatusConnected {
+		if _, err := h.dm.CreateDevice(deviceID); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+
+	code, err := h.dm.GetPairingCode(deviceID, req.Phone)
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"device_id":          deviceID,
+		"pairing_code":       code,
+		"status":             StatusWaitingQR,
+		"expires_in_seconds": 160,
+	})
+}
+
 // POST /devices/{id}/send
 // Body: {"to": "+628xxx", "message": "..."}
 func (h *Handlers) sendMessage(w http.ResponseWriter, r *http.Request) {

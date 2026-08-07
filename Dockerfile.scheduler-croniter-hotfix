@@ -1,0 +1,5 @@
+# Scheduler currently has its own production image, so add the same runtime
+# dependency without rebuilding unrelated application services.
+FROM managed-agents-app:arthur-v2-tool-contract-20260804
+
+RUN pip install --no-cache-dir "croniter>=2.0.0,<7.0.0"

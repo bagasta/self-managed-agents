@@ -198,7 +198,10 @@ func (dm *DeviceManager) CreateDevice(deviceID string) (string, error) {
 	existing, ok := dm.devices[deviceID]
 	dm.mu.RUnlock()
 
-	if ok && existing.Status == StatusConnected {
+	// A login websocket is connected while an unlinked device is waiting for a
+	// QR/pairing code. That is not a completed WhatsApp connection: only a
+	// persisted device JID proves the device has actually been linked.
+	if ok && existing.Status == StatusConnected && existing.Client.Store.ID != nil {
 		return "", nil // already connected, no QR needed
 	}
 
@@ -356,6 +359,33 @@ func (dm *DeviceManager) GetStatus(deviceID string) (DeviceStatus, string, error
 		return "", "", fmt.Errorf("device %s not found", deviceID)
 	}
 	return info.Status, info.PhoneNumber, nil
+}
+
+// GetPairingCode creates a phone-number pairing code for an unlinked device.
+// Unlike a QR image, this can be entered on the same phone that owns WhatsApp.
+func (dm *DeviceManager) GetPairingCode(deviceID, phone string) (string, error) {
+	dm.mu.RLock()
+	info, ok := dm.devices[deviceID]
+	dm.mu.RUnlock()
+	if !ok {
+		return "", fmt.Errorf("device %s not found", deviceID)
+	}
+	if info.Status == StatusConnected || info.Client.Store.ID != nil {
+		return "", fmt.Errorf("device %s already connected", deviceID)
+	}
+	if !info.Client.IsConnected() {
+		return "", fmt.Errorf("device %s is not connected to WhatsApp pairing service", deviceID)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	return info.Client.PairPhone(
+		ctx,
+		phone,
+		true,
+		whatsmeow.PairClientChrome,
+		"Chrome (Linux)",
+	)
 }
 
 // SendMessage sends a text message to a WhatsApp number.
@@ -586,13 +616,24 @@ func (dm *DeviceManager) makeEventHandler(deviceID string) func(interface{}) {
 		case *events.Connected:
 			dm.mu.Lock()
 			if di, ok := dm.devices[deviceID]; ok {
-				di.Status = StatusConnected
+				// Connected is also emitted for the temporary login websocket used
+				// to issue QR and phone-number pairing codes. Do not represent that
+				// as a linked device before WhatsApp has assigned a device JID.
+				if di.Client.Store.ID != nil {
+					di.Status = StatusConnected
+				} else {
+					di.Status = StatusWaitingQR
+				}
 				di.LatestQR = ""
 				if di.Client.Store.ID != nil {
 					di.PhoneNumber = di.Client.Store.ID.User
 				}
 			}
 			dm.mu.Unlock()
+		case *events.PairSuccess:
+			log.Printf("[%s] pairing completed for +%s (platform: %s)", deviceID, v.ID.User, v.Platform)
+		case *events.PairError:
+			log.Printf("[%s] pairing failed for +%s: %v", deviceID, v.ID.User, v.Error)
 		case *events.Disconnected:
 			dm.mu.Lock()
 			if di, ok := dm.devices[deviceID]; ok {

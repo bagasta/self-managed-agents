@@ -30,7 +30,7 @@ _BUILDER_TOOL_NAMES = {
     "verify_agent", "update_agent", "generate_google_auth_link", "set_agent_memory", "delete_agent",
     "get_agent_detail", "list_my_agents", "renew_agent", "add_agent_knowledge",
     "get_user_subscription", "link_dashboard_account", "get_payment_link", "create_wa_dev_trial_link",
-    "send_agent_wa_qr",
+    "send_agent_wa_qr", "send_agent_wa_pairing_code",
 }
 
 _SKILL_TOOL_ALLOWLISTS = {
@@ -51,7 +51,7 @@ _SKILL_TOOL_ALLOWLISTS = {
     },
     "arthur-whatsapp-demo-channel": {
         "list_my_agents", "get_agent_detail", "verify_agent", "list_available_wa_devices",
-        "create_wa_dev_trial_link", "send_agent_wa_qr",
+        "create_wa_dev_trial_link", "send_agent_wa_qr", "send_agent_wa_pairing_code",
     },
     "arthur-subscription-payment": {
         "get_user_subscription", "get_payment_link",
@@ -130,7 +130,7 @@ def scope_arthur_builder_tools(
     if primary_skill == "arthur-create-agent" and whatsapp_action == "trial_link":
         allowed.add("create_wa_dev_trial_link")
     elif primary_skill == "arthur-create-agent" and whatsapp_action == "dedicated_qr":
-        allowed.update({"list_available_wa_devices", "send_agent_wa_qr"})
+        allowed.update({"list_available_wa_devices", "send_agent_wa_pairing_code"})
     # During discovery an integration mention is a requirement to record, not
     # authorization to mutate Google or an existing agent.
     if primary_skill != "arthur-discovery":
@@ -144,7 +144,7 @@ def scope_arthur_builder_tools(
         if (
             primary_skill == "arthur-whatsapp-demo-channel"
             and whatsapp_action == "trial_link"
-            and name == "send_agent_wa_qr"
+            and name in {"send_agent_wa_qr", "send_agent_wa_pairing_code"}
         ):
             removed.append(name)
             continue
@@ -152,6 +152,13 @@ def scope_arthur_builder_tools(
             primary_skill == "arthur-whatsapp-demo-channel"
             and whatsapp_action == "dedicated_qr"
             and name == "create_wa_dev_trial_link"
+        ):
+            removed.append(name)
+            continue
+        if (
+            primary_skill == "arthur-whatsapp-demo-channel"
+            and whatsapp_action == "dedicated_qr"
+            and name == "send_agent_wa_qr"
         ):
             removed.append(name)
             continue

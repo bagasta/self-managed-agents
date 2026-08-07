@@ -61,12 +61,13 @@ def build_system_agent_tools(*, tools_config: dict[str, Any] | None, **context: 
     if key == ARTHUR_V2_PLUGIN:
         from arthur_v2 import build_arthur_v2_tools
 
-        # Arthur V2 owns a narrow control-plane contract.  The session ID is
-        # included solely to resolve the current inbound document workspace for
-        # its RAG ingestion tool; channel/device metadata remains excluded.
+        # Arthur V2 owns a narrow control-plane contract. The session ID is
+        # used for its inbound document workspace and sender_device_id is used
+        # only to deliver an explicitly requested QR image to the verified
+        # owner through Arthur's existing WhatsApp session.
         v2_context = {
             field: context[field]
-            for field in ("db_factory", "owner_phone", "self_agent_id", "default_target", "session_id")
+            for field in ("db_factory", "owner_phone", "self_agent_id", "sender_device_id", "default_target", "session_id")
             if field in context
         }
         return build_arthur_v2_tools(**v2_context)

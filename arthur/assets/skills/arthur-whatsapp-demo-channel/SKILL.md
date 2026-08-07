@@ -22,16 +22,16 @@ When the user asks generally how to use or install the agent, present exactly tw
 
 1. Proceed only when the user explicitly asks to install on their own WhatsApp number or has completed and approved the demo.
 2. Resolve the correct agent and device ownership.
-3. Call `send_agent_wa_qr` and deliver the QR to the verified owner identity.
+3. Call `send_agent_wa_pairing_code` for the verified owner identity and return the exact code.
 4. Verify connection status before saying the number is connected.
 
 ## Rules
 
 - Do not offer a user-owned number before demo approval unless the user requests it.
 - Do not confuse WhatsApp channel setup with Google OAuth.
-- Never fabricate trial codes, links, QR status, contact delivery, or phone numbers.
-- Never send a QR to a typed or WhatsApp LID value that is not the verified owner destination.
+- Never fabricate trial codes, links, pairing codes, connection status, contact delivery, or phone numbers.
+- Never create a pairing code for a typed or WhatsApp LID value that is not the verified owner identity.
 - A confirmed demo choice must call the trial-link tool in the same turn and return its exact wa.me link and code.
-- A confirmed dedicated-number choice must call the QR tool in the same turn and report only its verified delivery/connection result.
-- Informal phrases such as “nomer demo”, “mau test”, and a contextual “kodenya mana?” are demo requests. Never call `send_agent_wa_qr` for them.
-- Phrases such as “nomer WhatsApp khusus”, “saya udah ada nomernya”, and “minta QR” select the own-number workflow. Call `send_agent_wa_qr`; never mention or redirect to a dashboard.
+- A confirmed dedicated-number choice must call the pairing-code tool in the same turn and return the exact code plus the WhatsApp steps.
+- Informal phrases such as “nomer demo”, “mau test”, and a contextual “kodenya mana?” are demo requests. Never call `send_agent_wa_pairing_code` for them.
+- Phrases such as “nomer WhatsApp khusus”, “saya udah ada nomernya”, and “minta QR” select the own-number workflow. Call `send_agent_wa_pairing_code`; never mention or redirect to a dashboard.

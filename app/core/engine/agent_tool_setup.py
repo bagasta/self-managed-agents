@@ -270,7 +270,7 @@ async def build_agent_tool_setup(
             db_factory=AsyncSessionLocal,
             owner_phone=_resolve_builder_owner_phone(session),
             self_agent_id=str(agent_id),
-            device_id=channel_cfg.get("device_id", "") or "",
+            sender_device_id=channel_cfg.get("device_id", "") or "",
             default_target=channel_cfg.get("user_phone", "") or "",
             session_id=str(session.id),
             sender_name=channel_cfg.get("sender_name") or "",

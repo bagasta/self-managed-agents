@@ -198,7 +198,7 @@ def test_affirmative_after_trial_offer_requires_trial_link_tool():
     )
 
 
-def test_explicit_dedicated_number_requires_qr_tool():
+def test_explicit_dedicated_number_requires_pairing_code_tool():
     action = _requested_builder_whatsapp_action(
         "Saya pilih nomor khusus, kirim QR",
         [],
@@ -207,7 +207,7 @@ def test_explicit_dedicated_number_requires_qr_tool():
     assert action == "dedicated_qr"
     assert _needs_builder_whatsapp_action_completion(action, [], is_builder=True)
     directive = _builder_whatsapp_action_directive(action).lower()
-    assert "send_agent_wa_qr" in directive
+    assert "send_agent_wa_pairing_code" in directive
     assert "jangan arahkan user ke dashboard" in directive
 
 
@@ -324,7 +324,7 @@ async def test_deterministic_demo_fallback_calls_trial_tool_not_qr():
 
 
 @pytest.mark.asyncio
-async def test_deterministic_qr_fallback_resolves_single_owned_agent():
+async def test_deterministic_pairing_code_fallback_resolves_single_owned_agent():
     from app.core.engine.agent_runner import (
         _invoke_builder_whatsapp_action_tool,
     )
@@ -345,7 +345,7 @@ async def test_deterministic_qr_fallback_resolves_single_owned_agent():
                         "agents": [{"id": agent_id, "name": "Minsel"}],
                     }
                 )
-            return "[QR_SENT] QR Minsel sudah dikirim"
+            return "[PAIRING_CODE] Kode pemasangan Minsel: ABCD-EFGH"
 
     parsed = {
         "final_reply": "",
@@ -357,7 +357,7 @@ async def test_deterministic_qr_fallback_resolves_single_owned_agent():
     done = await _invoke_builder_whatsapp_action_tool(
         tools=[
             FakeTool("list_my_agents"),
-            FakeTool("send_agent_wa_qr"),
+            FakeTool("send_agent_wa_pairing_code"),
         ],
         action="dedicated_qr",
         parsed=parsed,
@@ -377,9 +377,9 @@ async def test_deterministic_qr_fallback_resolves_single_owned_agent():
 
     assert done is True
     assert calls[0] == ("list_my_agents", {})
-    assert calls[1][0] == "send_agent_wa_qr"
+    assert calls[1][0] == "send_agent_wa_pairing_code"
     assert calls[1][1]["agent_id"] == agent_id
     assert [step["tool"] for step in parsed["steps"]] == [
         "list_my_agents",
-        "send_agent_wa_qr",
+        "send_agent_wa_pairing_code",
     ]

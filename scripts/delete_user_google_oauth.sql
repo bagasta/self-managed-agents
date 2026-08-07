@@ -1,5 +1,5 @@
 -- RESET USER TOTAL: membuat user WhatsApp benar-benar dianggap user baru.
--- PostgreSQL. Jalankan seluruh script sekaligus.
+-- PostgreSQL database `managed_agents`. Jalankan seluruh script sekaligus.
 --
 -- Ganti nilai pada SATU tempat di bawah ini:
 --     62895626765423
@@ -17,10 +17,25 @@
 -- Catatan: ini menghapus token OAuth lokal, tetapi tidak mencabut grant dari
 -- halaman keamanan akun Google milik user.
 
+-- Menutup transaksi yang mungkin masih terbuka di SQL client sebelum reset.
+ROLLBACK;
+
 BEGIN;
 
 SET LOCAL lock_timeout = '10s';
 SET LOCAL statement_timeout = '120s';
+
+-- Guard penting: service Google Workspace MCP yang aktif memakai database
+-- `managed_agents` (pakai huruf s). Jangan sampai reset dijalankan pada DB
+-- lain yang kebetulan ada di server/pgAdmin.
+DO $$
+BEGIN
+    IF current_database() <> 'managed_agents' THEN
+        RAISE EXCEPTION
+            'Database salah: terhubung ke "%". Pilih database "managed_agents" di pgAdmin.',
+            current_database();
+    END IF;
+END $$;
 
 DROP TABLE IF EXISTS _reset_target;
 DROP TABLE IF EXISTS _reset_identities;
@@ -32,7 +47,7 @@ DROP TABLE IF EXISTS _reset_counts;
 CREATE TEMP TABLE _reset_target (
     raw_input text NOT NULL,
     canonical_phone text NOT NULL
-) ON COMMIT DROP;
+) ON COMMIT PRESERVE ROWS;
 
 -- Hanya bagian ini yang perlu diubah.
 INSERT INTO _reset_target (raw_input, canonical_phone)
@@ -63,19 +78,19 @@ END $$;
 
 CREATE TEMP TABLE _reset_identities (
     identity text PRIMARY KEY
-) ON COMMIT DROP;
+) ON COMMIT PRESERVE ROWS;
 
 CREATE TEMP TABLE _reset_user_ids (
     user_id uuid PRIMARY KEY
-) ON COMMIT DROP;
+) ON COMMIT PRESERVE ROWS;
 
 CREATE TEMP TABLE _reset_agent_ids (
     agent_id uuid PRIMARY KEY
-) ON COMMIT DROP;
+) ON COMMIT PRESERVE ROWS;
 
 CREATE TEMP TABLE _reset_session_ids (
     session_id uuid PRIMARY KEY
-) ON COMMIT DROP;
+) ON COMMIT PRESERVE ROWS;
 
 CREATE TEMP TABLE _reset_counts (
     item text PRIMARY KEY,
@@ -299,12 +314,21 @@ CROSS JOIN LATERAL (
 WHERE candidate IS NOT NULL AND btrim(candidate) <> ''
 ON CONFLICT DO NOTHING;
 
--- 1. Hapus state Google yang tidak punya FK/cascade ke user atau agent.
+-- 1. Hapus state Google dan token OAuth yang tidak punya FK/cascade ke user
+-- atau agent. Google Workspace MCP sekarang memakai database managed_agents.
 WITH deleted AS (
     DELETE FROM oauth_states oauth
+    USING _reset_target target
     WHERE btrim(oauth.external_user_id) IN (
             SELECT identity FROM _reset_identities
         )
+       OR CASE
+            WHEN regexp_replace(split_part(oauth.external_user_id, '@', 1), '[^0-9]', '', 'g') LIKE '0%'
+                THEN '62' || substr(regexp_replace(split_part(oauth.external_user_id, '@', 1), '[^0-9]', '', 'g'), 2)
+            WHEN regexp_replace(split_part(oauth.external_user_id, '@', 1), '[^0-9]', '', 'g') LIKE '8%'
+                THEN '62' || regexp_replace(split_part(oauth.external_user_id, '@', 1), '[^0-9]', '', 'g')
+            ELSE regexp_replace(split_part(oauth.external_user_id, '@', 1), '[^0-9]', '', 'g')
+          END = target.canonical_phone
        OR oauth.agent_id IN (
             SELECT agent_id::text FROM _reset_agent_ids
         )
@@ -314,9 +338,17 @@ INSERT INTO _reset_counts VALUES ('oauth_states', (SELECT count(*) FROM deleted)
 
 WITH deleted AS (
     DELETE FROM google_integrations integration
+    USING _reset_target target
     WHERE btrim(integration.external_user_id) IN (
             SELECT identity FROM _reset_identities
         )
+       OR CASE
+            WHEN regexp_replace(split_part(integration.external_user_id, '@', 1), '[^0-9]', '', 'g') LIKE '0%'
+                THEN '62' || substr(regexp_replace(split_part(integration.external_user_id, '@', 1), '[^0-9]', '', 'g'), 2)
+            WHEN regexp_replace(split_part(integration.external_user_id, '@', 1), '[^0-9]', '', 'g') LIKE '8%'
+                THEN '62' || regexp_replace(split_part(integration.external_user_id, '@', 1), '[^0-9]', '', 'g')
+            ELSE regexp_replace(split_part(integration.external_user_id, '@', 1), '[^0-9]', '', 'g')
+          END = target.canonical_phone
        OR integration.agent_id IN (
             SELECT agent_id::text FROM _reset_agent_ids
         )
@@ -418,7 +450,145 @@ WITH deleted AS (
 )
 INSERT INTO _reset_counts VALUES ('wa_link_codes', (SELECT count(*) FROM deleted));
 
--- 6. Hard-delete agent milik user. FK cascade membersihkan memories agent,
+-- 6. API key yang dilabeli berdasarkan nomor WhatsApp tidak memiliki FK user.
+WITH deleted AS (
+    DELETE FROM user_api_keys api_key
+    USING _reset_target target
+    WHERE btrim(COALESCE(api_key.label, '')) IN (
+            SELECT 'wa:' || identity FROM _reset_identities
+        )
+       OR (
+            api_key.label LIKE 'wa:%'
+            AND CASE
+                WHEN regexp_replace(
+                    split_part(substring(api_key.label FROM 4), '@', 1),
+                    '[^0-9]', '', 'g'
+                ) LIKE '0%'
+                    THEN '62' || substr(
+                        regexp_replace(
+                            split_part(substring(api_key.label FROM 4), '@', 1),
+                            '[^0-9]', '', 'g'
+                        ), 2
+                    )
+                WHEN regexp_replace(
+                    split_part(substring(api_key.label FROM 4), '@', 1),
+                    '[^0-9]', '', 'g'
+                ) LIKE '8%'
+                    THEN '62' || regexp_replace(
+                        split_part(substring(api_key.label FROM 4), '@', 1),
+                        '[^0-9]', '', 'g'
+                    )
+                ELSE regexp_replace(
+                    split_part(substring(api_key.label FROM 4), '@', 1),
+                    '[^0-9]', '', 'g'
+                )
+            END = target.canonical_phone
+       )
+    RETURNING 1
+)
+INSERT INTO _reset_counts VALUES ('user_api_keys', (SELECT count(*) FROM deleted));
+
+-- 7. Bila nomor target adalah operator pada agent milik orang lain, hapus
+-- hanya referensinya. Agent bersama tersebut tidak boleh ikut terhapus.
+WITH updated AS (
+    UPDATE agents a
+    SET operator_ids = (
+        SELECT COALESCE(
+            jsonb_agg(to_jsonb(entry.value) ORDER BY entry.position),
+            '[]'::jsonb
+        )
+        FROM jsonb_array_elements_text(
+            CASE
+                WHEN jsonb_typeof(a.operator_ids) = 'array'
+                    THEN a.operator_ids
+                ELSE '[]'::jsonb
+            END
+        ) WITH ORDINALITY AS entry(value, position)
+        CROSS JOIN _reset_target target
+        WHERE btrim(entry.value) NOT IN (SELECT identity FROM _reset_identities)
+          AND CASE
+                WHEN regexp_replace(split_part(entry.value, '@', 1), '[^0-9]', '', 'g') LIKE '0%'
+                    THEN '62' || substr(regexp_replace(split_part(entry.value, '@', 1), '[^0-9]', '', 'g'), 2)
+                WHEN regexp_replace(split_part(entry.value, '@', 1), '[^0-9]', '', 'g') LIKE '8%'
+                    THEN '62' || regexp_replace(split_part(entry.value, '@', 1), '[^0-9]', '', 'g')
+                ELSE regexp_replace(split_part(entry.value, '@', 1), '[^0-9]', '', 'g')
+              END <> target.canonical_phone
+    )
+    WHERE a.id NOT IN (SELECT agent_id FROM _reset_agent_ids)
+      AND EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements_text(
+              CASE WHEN jsonb_typeof(a.operator_ids) = 'array'
+                   THEN a.operator_ids ELSE '[]'::jsonb END
+          ) entry(value)
+          CROSS JOIN _reset_target target
+          WHERE btrim(entry.value) IN (SELECT identity FROM _reset_identities)
+             OR CASE
+                    WHEN regexp_replace(split_part(entry.value, '@', 1), '[^0-9]', '', 'g') LIKE '0%'
+                        THEN '62' || substr(regexp_replace(split_part(entry.value, '@', 1), '[^0-9]', '', 'g'), 2)
+                    WHEN regexp_replace(split_part(entry.value, '@', 1), '[^0-9]', '', 'g') LIKE '8%'
+                        THEN '62' || regexp_replace(split_part(entry.value, '@', 1), '[^0-9]', '', 'g')
+                    ELSE regexp_replace(split_part(entry.value, '@', 1), '[^0-9]', '', 'g')
+                END = target.canonical_phone
+      )
+    RETURNING 1
+)
+INSERT INTO _reset_counts VALUES ('shared_agents_operator_cleaned', (SELECT count(*) FROM updated));
+
+WITH updated AS (
+    UPDATE agents a
+    SET allowed_senders = (
+        SELECT COALESCE(
+            jsonb_agg(to_jsonb(entry.value) ORDER BY entry.position),
+            '[]'::jsonb
+        )
+        FROM jsonb_array_elements_text(
+            CASE
+                WHEN jsonb_typeof(a.allowed_senders) = 'array'
+                    THEN a.allowed_senders
+                ELSE '[]'::jsonb
+            END
+        ) WITH ORDINALITY AS entry(value, position)
+        CROSS JOIN _reset_target target
+        WHERE btrim(entry.value) NOT IN (SELECT identity FROM _reset_identities)
+          AND regexp_replace(split_part(entry.value, '@', 1), '[^0-9]', '', 'g') <> target.canonical_phone
+    )
+    WHERE a.id NOT IN (SELECT agent_id FROM _reset_agent_ids)
+      AND a.allowed_senders IS NOT NULL
+      AND EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements_text(
+              CASE WHEN jsonb_typeof(a.allowed_senders) = 'array'
+                   THEN a.allowed_senders ELSE '[]'::jsonb END
+          ) entry(value)
+          CROSS JOIN _reset_target target
+          WHERE btrim(entry.value) IN (SELECT identity FROM _reset_identities)
+             OR regexp_replace(split_part(entry.value, '@', 1), '[^0-9]', '', 'g') = target.canonical_phone
+      )
+    RETURNING 1
+)
+INSERT INTO _reset_counts VALUES ('shared_agents_sender_cleaned', (SELECT count(*) FROM updated));
+
+WITH updated AS (
+    UPDATE agents a
+    SET escalation_config = COALESCE(a.escalation_config, '{}'::jsonb) - 'operator_phone'
+    FROM _reset_target target
+    WHERE a.id NOT IN (SELECT agent_id FROM _reset_agent_ids)
+      AND COALESCE(a.escalation_config, '{}'::jsonb) ? 'operator_phone'
+      AND (
+          btrim(COALESCE(a.escalation_config ->> 'operator_phone', '')) IN (
+              SELECT identity FROM _reset_identities
+          )
+          OR regexp_replace(
+              split_part(COALESCE(a.escalation_config ->> 'operator_phone', ''), '@', 1),
+              '[^0-9]', '', 'g'
+          ) = target.canonical_phone
+      )
+    RETURNING 1
+)
+INSERT INTO _reset_counts VALUES ('shared_agents_escalation_cleaned', (SELECT count(*) FROM updated));
+
+-- 8. Hard-delete agent milik user. FK cascade membersihkan memories agent,
 -- documents, skills, custom_tools, manuals, jobs, dan session yang tersisa.
 WITH deleted AS (
     DELETE FROM agents a
@@ -427,7 +597,7 @@ WITH deleted AS (
 )
 INSERT INTO _reset_counts VALUES ('agents', (SELECT count(*) FROM deleted));
 
--- 7. User delete meng-cascade subscription, token top-up, dan link code.
+-- 9. User delete meng-cascade subscription, token top-up, dan link code.
 WITH deleted AS (
     DELETE FROM users u
     WHERE u.id IN (SELECT user_id FROM _reset_user_ids)
@@ -472,17 +642,21 @@ BEGIN
 
     IF EXISTS (
         SELECT 1 FROM oauth_states oauth
+        CROSS JOIN _reset_target target
         WHERE btrim(oauth.external_user_id) IN (
                 SELECT identity FROM _reset_identities
             )
+           OR regexp_replace(split_part(oauth.external_user_id, '@', 1), '[^0-9]', '', 'g') = target.canonical_phone
            OR oauth.agent_id IN (
                 SELECT agent_id::text FROM _reset_agent_ids
             )
     ) OR EXISTS (
         SELECT 1 FROM google_integrations integration
+        CROSS JOIN _reset_target target
         WHERE btrim(integration.external_user_id) IN (
                 SELECT identity FROM _reset_identities
             )
+           OR regexp_replace(split_part(integration.external_user_id, '@', 1), '[^0-9]', '', 'g') = target.canonical_phone
            OR integration.agent_id IN (
                 SELECT agent_id::text FROM _reset_agent_ids
             )
@@ -511,6 +685,51 @@ FROM _reset_counts
 ORDER BY item;
 
 COMMIT;
+
+-- Ini adalah result set TERAKHIR yang akan ditampilkan pgAdmin. Semua kolom
+-- harus bernilai 0. Temp table sengaja dipertahankan sampai koneksi Query Tool
+-- ditutup agar audit ini tetap dapat dibuat setelah COMMIT.
+SELECT
+    (
+        SELECT count(*)
+        FROM users u
+        CROSS JOIN _reset_target target
+        WHERE regexp_replace(split_part(COALESCE(u.phone_number, ''), '@', 1), '[^0-9]', '', 'g') = target.canonical_phone
+           OR regexp_replace(split_part(COALESCE(u.external_id, ''), '@', 1), '[^0-9]', '', 'g') = target.canonical_phone
+           OR regexp_replace(split_part(COALESCE(u.wa_lid, ''), '@', 1), '[^0-9]', '', 'g') = target.canonical_phone
+    ) AS users_remaining,
+    (SELECT count(*) FROM agents a WHERE a.id IN (SELECT agent_id FROM _reset_agent_ids)) AS agents_remaining,
+    (SELECT count(*) FROM sessions s WHERE s.id IN (SELECT session_id FROM _reset_session_ids)) AS sessions_remaining,
+    (
+        SELECT count(*)
+        FROM agent_memories memory
+        CROSS JOIN _reset_target target
+        WHERE regexp_replace(split_part(COALESCE(memory.scope, ''), '@', 1), '[^0-9]', '', 'g') = target.canonical_phone
+    ) AS memories_remaining,
+    (
+        SELECT count(*)
+        FROM google_integrations integration
+        CROSS JOIN _reset_target target
+        WHERE CASE
+            WHEN regexp_replace(split_part(integration.external_user_id, '@', 1), '[^0-9]', '', 'g') LIKE '0%'
+                THEN '62' || substr(regexp_replace(split_part(integration.external_user_id, '@', 1), '[^0-9]', '', 'g'), 2)
+            WHEN regexp_replace(split_part(integration.external_user_id, '@', 1), '[^0-9]', '', 'g') LIKE '8%'
+                THEN '62' || regexp_replace(split_part(integration.external_user_id, '@', 1), '[^0-9]', '', 'g')
+            ELSE regexp_replace(split_part(integration.external_user_id, '@', 1), '[^0-9]', '', 'g')
+        END = target.canonical_phone
+    ) AS google_integrations_remaining,
+    (
+        SELECT count(*)
+        FROM oauth_states oauth
+        CROSS JOIN _reset_target target
+        WHERE CASE
+            WHEN regexp_replace(split_part(oauth.external_user_id, '@', 1), '[^0-9]', '', 'g') LIKE '0%'
+                THEN '62' || substr(regexp_replace(split_part(oauth.external_user_id, '@', 1), '[^0-9]', '', 'g'), 2)
+            WHEN regexp_replace(split_part(oauth.external_user_id, '@', 1), '[^0-9]', '', 'g') LIKE '8%'
+                THEN '62' || regexp_replace(split_part(oauth.external_user_id, '@', 1), '[^0-9]', '', 'g')
+            ELSE regexp_replace(split_part(oauth.external_user_id, '@', 1), '[^0-9]', '', 'g')
+        END = target.canonical_phone
+    ) AS oauth_states_remaining;
 
 -- Setelah COMMIT, chat berikutnya akan membuat user/session baru dan Arthur
 -- tidak lagi memiliki messages atau scoped memory dari percakapan sebelumnya.

@@ -23,6 +23,7 @@ python-pptx>=1.0.0
 python-multipart>=0.0.9
 
 apscheduler>=3.10.0
+croniter>=2.0.0,<7.0.0
 cryptography>=42.0.0
 
 structlog==24.4.0
