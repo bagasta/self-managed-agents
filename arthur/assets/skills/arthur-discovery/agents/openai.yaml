@@ -1,0 +1,4 @@
+interface:
+  display_name: "Arthur Discovery"
+  short_description: "Gali kebutuhan agent tanpa asumsi"
+  default_prompt: "Use $arthur-discovery to discover and confirm a user's AI agent requirements."

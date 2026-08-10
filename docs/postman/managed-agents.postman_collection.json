@@ -1,0 +1,126 @@
+{
+  "info": {
+    "name": "Managed Agents API - CRUD, RAG, Memory, MCP, Subagent & Sandbox",
+    "description": "Current API contract collection. MCP, subagent, and sandbox are configured through an agent's tools_config, then exercised through the session/message endpoint. Populate api_key before use; no secret is stored in this file.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://127.0.0.1:8000" },
+    { "key": "api_key", "value": "", "type": "string" },
+    { "key": "agent_id", "value": "", "type": "string" },
+    { "key": "agent_key", "value": "", "type": "string" },
+    { "key": "session_id", "value": "", "type": "string" },
+    { "key": "doc_id", "value": "", "type": "string" },
+    { "key": "run_id", "value": "", "type": "string" },
+    { "key": "memory_key", "value": "postman_smoke", "type": "string" },
+    { "key": "mcp_url", "value": "http://host.docker.internal:8080/mcp", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "00 - Health",
+      "item": [
+        {
+          "name": "GET /health",
+          "request": { "method": "GET", "url": "{{base_url}}/health" },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('server healthy', () => pm.response.to.have.status(200));"] } }]
+        },
+        {
+          "name": "GET /health/detailed",
+          "request": { "method": "GET", "url": "{{base_url}}/health/detailed" }
+        }
+      ]
+    },
+    {
+      "name": "01 - Agent CRUD",
+      "item": [
+        {
+          "name": "POST /v1/agents - Create smoke agent",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "X-API-Key", "value": "{{api_key}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Postman Smoke Agent\",\n  \"description\": \"Created by the current API collection.\",\n  \"instructions\": \"Answer briefly and truthfully.\",\n  \"model\": \"openai/gpt-4.1-mini\",\n  \"temperature\": 0.2,\n  \"tools_config\": {\"memory\": true, \"skills\": false, \"rag\": false, \"mcp\": false, \"sandbox\": false, \"subagents\": {\"enabled\": false}},\n  \"sandbox_config\": {},\n  \"safety_policy\": {},\n  \"escalation_config\": {},\n  \"operator_ids\": [],\n  \"allowed_senders\": null,\n  \"capabilities\": [],\n  \"token_quota\": 100000,\n  \"quota_period_days\": 30,\n  \"channel_type\": null\n}" },
+            "url": "{{base_url}}/v1/agents"
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('created', () => pm.response.to.have.status(201));", "const body = pm.response.json();", "pm.collectionVariables.set('agent_id', body.id);", "pm.collectionVariables.set('agent_key', body.api_key);"] } }]
+        },
+        { "name": "GET /v1/agents", "request": { "method": "GET", "header": [{ "key": "X-API-Key", "value": "{{api_key}}" }], "url": "{{base_url}}/v1/agents?limit=20&offset=0" } },
+        { "name": "GET /v1/agents/:agent_id", "request": { "method": "GET", "header": [{ "key": "X-API-Key", "value": "{{api_key}}" }], "url": "{{base_url}}/v1/agents/{{agent_id}}" } },
+        { "name": "PATCH /v1/agents/:agent_id", "request": { "method": "PATCH", "header": [{ "key": "X-API-Key", "value": "{{api_key}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\"description\": \"Updated by Postman smoke flow.\"}" }, "url": "{{base_url}}/v1/agents/{{agent_id}}" } },
+        { "name": "DELETE /v1/agents/:agent_id (run last)", "request": { "method": "DELETE", "header": [{ "key": "X-API-Key", "value": "{{api_key}}" }], "url": "{{base_url}}/v1/agents/{{agent_id}}" } }
+      ]
+    },
+    {
+      "name": "02 - Session and Run",
+      "item": [
+        {
+          "name": "POST /v1/agents/:agent_id/sessions",
+          "request": { "method": "POST", "header": [{ "key": "X-API-Key", "value": "{{api_key}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{}" }, "url": "{{base_url}}/v1/agents/{{agent_id}}/sessions" },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('session created', () => pm.expect(pm.response.code).to.be.oneOf([200, 201]));", "pm.collectionVariables.set('session_id', pm.response.json().id);"] } }]
+        },
+        { "name": "GET /v1/agents/:agent_id/sessions", "request": { "method": "GET", "header": [{ "key": "X-API-Key", "value": "{{api_key}}" }], "url": "{{base_url}}/v1/agents/{{agent_id}}/sessions?limit=20" } },
+        { "name": "GET /v1/agents/:agent_id/sessions/:session_id", "request": { "method": "GET", "header": [{ "key": "X-API-Key", "value": "{{api_key}}" }], "url": "{{base_url}}/v1/agents/{{agent_id}}/sessions/{{session_id}}" } },
+        {
+          "name": "POST message - exercise configured tools",
+          "request": { "method": "POST", "header": [{ "key": "X-Agent-Key", "value": "{{agent_key}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\"message\": \"Balas singkat: smoke test berhasil.\", \"metadata\": {\"source\": \"postman\"}}" }, "url": "{{base_url}}/v1/agents/{{agent_id}}/sessions/{{session_id}}/messages" },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('message accepted', () => pm.response.to.have.status(200));", "const runId = pm.response.json().run_id; if (runId) pm.collectionVariables.set('run_id', runId);"] } }]
+        },
+        { "name": "GET /v1/runs/:run_id", "request": { "method": "GET", "header": [{ "key": "X-API-Key", "value": "{{api_key}}" }], "url": "{{base_url}}/v1/runs/{{run_id}}" } }
+      ]
+    },
+    {
+      "name": "03 - Memory",
+      "item": [
+        { "name": "POST memory", "request": { "method": "POST", "header": [{ "key": "X-API-Key", "value": "{{api_key}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\"key\": \"{{memory_key}}\", \"value\": \"created by current Postman collection\"}" }, "url": "{{base_url}}/v1/agents/{{agent_id}}/memory" } },
+        { "name": "GET memory", "request": { "method": "GET", "header": [{ "key": "X-API-Key", "value": "{{api_key}}" }], "url": "{{base_url}}/v1/agents/{{agent_id}}/memory" } },
+        { "name": "DELETE memory (run last)", "request": { "method": "DELETE", "header": [{ "key": "X-API-Key", "value": "{{api_key}}" }], "url": "{{base_url}}/v1/agents/{{agent_id}}/memory/{{memory_key}}" } }
+      ]
+    },
+    {
+      "name": "04 - Documents and RAG",
+      "item": [
+        {
+          "name": "PATCH agent - enable RAG",
+          "request": { "method": "PATCH", "header": [{ "key": "X-API-Key", "value": "{{api_key}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\"tools_config\": {\"memory\": true, \"skills\": false, \"rag\": true, \"mcp\": false, \"sandbox\": false, \"subagents\": {\"enabled\": false}}}" }, "url": "{{base_url}}/v1/agents/{{agent_id}}" }
+        },
+        {
+          "name": "POST document",
+          "request": { "method": "POST", "header": [{ "key": "X-API-Key", "value": "{{api_key}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\"title\": \"Postman knowledge\", \"content\": \"Managed Agents RAG smoke document. The support escalation policy is documented here.\", \"source\": \"postman\", \"doc_metadata\": {\"scope\": \"smoke\"}}" }, "url": "{{base_url}}/v1/agents/{{agent_id}}/documents" },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.collectionVariables.set('doc_id', pm.response.json().id);"] } }]
+        },
+        { "name": "GET documents", "request": { "method": "GET", "header": [{ "key": "X-API-Key", "value": "{{api_key}}" }], "url": "{{base_url}}/v1/agents/{{agent_id}}/documents?limit=20&offset=0" } },
+        { "name": "GET document by ID", "request": { "method": "GET", "header": [{ "key": "X-API-Key", "value": "{{api_key}}" }], "url": "{{base_url}}/v1/agents/{{agent_id}}/documents/{{doc_id}}" } },
+        { "name": "POST semantic search", "request": { "method": "POST", "header": [{ "key": "X-API-Key", "value": "{{api_key}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\"query\": \"What does the support escalation policy say?\", \"max_results\": 5}" }, "url": "{{base_url}}/v1/agents/{{agent_id}}/documents/search" } },
+        { "name": "POST document upload (select a file first)", "request": { "method": "POST", "header": [{ "key": "X-API-Key", "value": "{{api_key}}" }], "body": { "mode": "formdata", "formdata": [{ "key": "file", "type": "file", "src": "" }, { "key": "title", "value": "Postman uploaded document", "type": "text" }, { "key": "source", "value": "postman-upload", "type": "text" }] }, "url": "{{base_url}}/v1/agents/{{agent_id}}/documents/upload" } },
+        { "name": "PATCH document", "request": { "method": "PATCH", "header": [{ "key": "X-API-Key", "value": "{{api_key}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\"source\": \"postman-updated\"}" }, "url": "{{base_url}}/v1/agents/{{agent_id}}/documents/{{doc_id}}" } },
+        { "name": "DELETE document (run last)", "request": { "method": "DELETE", "header": [{ "key": "X-API-Key", "value": "{{api_key}}" }], "url": "{{base_url}}/v1/agents/{{agent_id}}/documents/{{doc_id}}" } }
+      ]
+    },
+    {
+      "name": "05 - MCP through Agent Configuration",
+      "item": [
+        {
+          "name": "PATCH agent - enable streamable HTTP MCP",
+          "request": { "method": "PATCH", "header": [{ "key": "X-API-Key", "value": "{{api_key}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\"tools_config\": {\"memory\": true, \"skills\": false, \"rag\": false, \"sandbox\": false, \"subagents\": {\"enabled\": false}, \"mcp\": {\"enabled\": true, \"servers\": {\"example\": {\"url\": \"{{mcp_url}}\", \"transport\": \"streamable_http\"}}}}}" }, "url": "{{base_url}}/v1/agents/{{agent_id}}" },
+          "description": "Requires a reachable MCP server. This verifies API configuration; execute a message only when mcp_url is valid for the target environment."
+        },
+        { "name": "POST message - MCP smoke (requires server)", "request": { "method": "POST", "header": [{ "key": "X-Agent-Key", "value": "{{agent_key}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\"message\": \"Use the available MCP tool to report its capabilities.\"}" }, "url": "{{base_url}}/v1/agents/{{agent_id}}/sessions/{{session_id}}/messages" } }
+      ]
+    },
+    {
+      "name": "06 - Subagent and Sandbox through Agent Configuration",
+      "item": [
+        {
+          "name": "PATCH agent - enable subagents",
+          "request": { "method": "PATCH", "header": [{ "key": "X-API-Key", "value": "{{api_key}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\"tools_config\": {\"memory\": true, \"skills\": false, \"rag\": false, \"mcp\": false, \"sandbox\": false, \"subagents\": {\"enabled\": true, \"agent_ids\": []}}}" }, "url": "{{base_url}}/v1/agents/{{agent_id}}" },
+          "description": "Empty agent_ids selects the platform system subagents; execution may need configured model and sandbox resources."
+        },
+        {
+          "name": "PATCH agent - enable sandbox",
+          "request": { "method": "PATCH", "header": [{ "key": "X-API-Key", "value": "{{api_key}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\"tools_config\": {\"memory\": true, \"skills\": false, \"rag\": false, \"mcp\": false, \"sandbox\": true, \"subagents\": {\"enabled\": false}}, \"sandbox_config\": {\"memory\": \"512m\", \"cpu\": \"1.0\"}}" }, "url": "{{base_url}}/v1/agents/{{agent_id}}" },
+          "description": "Requires sandbox image, Docker socket access, and SANDBOX_SUBAGENTS_ENABLED=true on the target runtime."
+        },
+        { "name": "POST message - sandbox smoke (requires Docker)", "request": { "method": "POST", "header": [{ "key": "X-Agent-Key", "value": "{{agent_key}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\"message\": \"Use the sandbox to calculate 21 multiplied by 2, then return only the result.\"}" }, "url": "{{base_url}}/v1/agents/{{agent_id}}/sessions/{{session_id}}/messages" } }
+      ]
+    }
+  ]
+}

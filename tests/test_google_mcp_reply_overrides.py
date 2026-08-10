@@ -1,0 +1,1344 @@
+import pytest
+
+from app.core.engine.agent_google_routing import (
+    _google_workspace_mcp_unauthorized_reply,
+    _is_google_workspace_mcp_authorized_for_session,
+)
+from app.core.engine.agent_runner import (
+    _build_google_mcp_auth_failure_reply,
+    _build_google_mcp_unavailable_reply,
+    _extract_google_mcp_step_error,
+    _is_google_auth_or_scope_error,
+    _route_google_workspace_blocker_to_owner_if_customer,
+)
+from app.core.engine.google_mcp_support import (
+    GoogleMcpRuntime,
+    build_customer_survey_append_tools,
+    customer_survey_google_resource,
+    _fetch_google_auth_link,
+    _google_integration_runtime_url,
+    _has_google_mcp_step,
+    _extract_google_mcp_resource_error,
+    _is_google_resource_not_found_error,
+    _is_google_mcp_intent,
+    build_google_workspace_resource_notice,
+    extract_created_spreadsheet_resource,
+    google_missing_spreadsheet_recovery_directive,
+    remember_created_google_spreadsheet,
+    should_retry_missing_spreadsheet_resource,
+    _sanitize_user_facing_google_terms,
+    _looks_like_google_auth_recovery_reply,
+    apply_google_mcp_reply_overrides,
+    build_google_mcp_runtime_state_notice,
+    find_last_google_workspace_user_request,
+    is_google_auth_recovery_followup,
+    prepare_google_mcp_runtime,
+)
+
+
+def test_google_scope_error_markers_include_google_api_scope_messages() -> None:
+    err = "Request had insufficient authentication scopes. Required scope: https://www.googleapis.com/auth/presentations"
+    assert _is_google_auth_or_scope_error(err) is True
+
+
+def test_google_resource_404_is_not_misclassified_as_oauth_failure() -> None:
+    err = '{"error": {"code": 404, "message": "Requested entity was not found."}}'
+    steps = [{"tool": "read_sheet_values", "result": err}]
+
+    assert _is_google_resource_not_found_error(err) is True
+    assert _extract_google_mcp_resource_error(steps) == err
+    assert _is_google_auth_or_scope_error(err) is False
+
+
+def test_customer_survey_google_delegation_requires_verified_bound_resource() -> None:
+    agent = type(
+        "Agent",
+        (),
+        {
+            "owner_external_id": "628owner",
+            "operator_ids": ["628owner"],
+            "escalation_config": {"operator_phone": "628owner"},
+            "tools_config": {
+                "google_workspace_resources": {
+                    "survey_spreadsheet_id": "verified-sheet-id",
+                    "survey_sheet_name": "Survey",
+                    "survey_headers": [f"Column {index}" for index in range(9)],
+                    "verified": True,
+                    "customer_append_enabled": True,
+                }
+            },
+        },
+    )()
+    customer = type(
+        "Session",
+        (),
+        {
+            "channel_type": "whatsapp",
+            "external_user_id": "628customer",
+            "channel_config": {"phone_number": "628customer"},
+        },
+    )()
+    owner = type(
+        "Session",
+        (),
+        {
+            "channel_type": "whatsapp",
+            "external_user_id": "628owner",
+            "channel_config": {"phone_number": "628owner"},
+        },
+    )()
+
+    resource = customer_survey_google_resource(customer, agent)
+
+    assert resource == {
+        "spreadsheet_id": "verified-sheet-id",
+        "sheet_name": "Survey",
+        "headers": [f"Column {index}" for index in range(9)],
+    }
+    assert customer_survey_google_resource(owner, agent) is None
+
+
+def test_customer_survey_tool_schema_never_exposes_google_resource_arguments() -> None:
+    fake_read = type("Tool", (), {"name": "read_sheet_values"})()
+    fake_modify = type("Tool", (), {"name": "modify_sheet_values"})()
+    log = type("Log", (), {"info": lambda *args, **kwargs: None})()
+
+    tools = build_customer_survey_append_tools(
+        [fake_read, fake_modify],
+        resource={"spreadsheet_id": "secret-id", "sheet_name": "Survey"},
+        customer_phone="628customer",
+        log=log,
+    )
+
+    assert [tool.name for tool in tools] == ["append_sheet_survey_response"]
+    assert "spreadsheet_id" not in tools[0].args
+    assert "range_name" not in tools[0].args
+    assert tools[0].args["satisfaction_score"]["minimum"] == 1
+    assert tools[0].args["satisfaction_score"]["maximum"] == 10
+
+
+def test_google_term_sanitizer_preserves_mcp_auth_url_hostname() -> None:
+    auth_url = "https://google-workspace-mcp.chiefaiofficer.id/v1/integrations/google/start?t=abc123"
+    reply = f"Klik link ini untuk reconnect Google lewat MCP:\n{auth_url}"
+
+    sanitized = _sanitize_user_facing_google_terms(reply)
+
+    assert auth_url in sanitized
+    assert "google-workspace-integrasi Google" not in sanitized
+    assert "lewat integrasi Google" in sanitized
+
+
+def test_google_workspace_mcp_authorization_restricts_whatsapp_to_owner_or_operator() -> None:
+    agent = type(
+        "Agent",
+        (),
+        {
+            "owner_external_id": "628111",
+            "operator_ids": ["628222"],
+            "escalation_config": {"operator_phone": "628333"},
+        },
+    )()
+
+    customer_session = type(
+        "Session",
+        (),
+        {
+            "channel_type": "whatsapp",
+            "external_user_id": "628999",
+            "channel_config": {"phone_number": "628999", "user_phone": "628999@s.whatsapp.net"},
+        },
+    )()
+    owner_session = type(
+        "Session",
+        (),
+        {
+            "channel_type": "whatsapp",
+            "external_user_id": "628111",
+            "channel_config": {"phone_number": "628111", "user_phone": "628111@s.whatsapp.net"},
+        },
+    )()
+    operator_session = type(
+        "Session",
+        (),
+        {
+            "channel_type": "whatsapp",
+            "external_user_id": "628222",
+            "channel_config": {},
+        },
+    )()
+
+    assert _is_google_workspace_mcp_authorized_for_session(customer_session, agent) is False
+    assert _is_google_workspace_mcp_authorized_for_session(owner_session, agent) is True
+    assert _is_google_workspace_mcp_authorized_for_session(operator_session, agent) is True
+    assert "Admin/operator" in _google_workspace_mcp_unauthorized_reply()
+
+
+@pytest.mark.asyncio
+async def test_customer_google_auth_blocker_notifies_owner_and_hides_admin_phone(monkeypatch) -> None:
+    sent = []
+
+    async def fake_send_message(*, channel_type, channel_config, text, to_override=None):
+        sent.append(
+            {
+                "channel_type": channel_type,
+                "channel_config": channel_config,
+                "text": text,
+                "to_override": to_override,
+            }
+        )
+        return {"message_id": "m1"}
+
+    monkeypatch.setattr("app.core.infra.channel_service.send_message", fake_send_message)
+
+    agent = type(
+        "Agent",
+        (),
+        {
+            "name": "LaundryJemput",
+            "owner_external_id": "62895619356936",
+            "operator_ids": ["62895619356936"],
+            "escalation_config": {"operator_phone": "62895619356936"},
+            "wa_device_id": "dev-1",
+        },
+    )()
+    session = type(
+        "Session",
+        (),
+        {
+            "channel_type": "whatsapp",
+            "external_user_id": "6283890930647",
+            "channel_config": {
+                "device_id": "dev-1",
+                "user_phone": "6283890930647@s.whatsapp.net",
+                "phone_number": "6283890930647",
+            },
+        },
+    )()
+    log = type(
+        "Log",
+        (),
+        {
+            "info": lambda *args, **kwargs: None,
+            "warning": lambda *args, **kwargs: None,
+        },
+    )()
+
+    reply = await _route_google_workspace_blocker_to_owner_if_customer(
+        reply="Google Workspace expired. Hubungi admin 62895619356936.",
+        session=session,
+        agent_model=agent,
+        user_message="Sipp sudah okk",
+        error_text="Google Workspace belum terhubung atau token sudah expired",
+        auth_url="https://auth.example/start?t=abc",
+        log=log,
+    )
+
+    assert sent
+    assert sent[0]["channel_type"] == "whatsapp"
+    assert sent[0]["channel_config"]["user_phone"] == "62895619356936"
+    assert "https://auth.example/start?t=abc" in sent[0]["text"]
+    assert "Sipp sudah okk" in sent[0]["text"]
+    assert "62895619356936" not in reply
+    assert "https://auth.example/start?t=abc" not in reply
+    assert "Google Workspace" not in reply
+    assert "Owner" in reply
+
+
+@pytest.mark.asyncio
+async def test_owner_google_auth_blocker_keeps_auth_reply(monkeypatch) -> None:
+    async def fail_send_message(*args, **kwargs):
+        raise AssertionError("owner chat should not be rerouted to owner notification")
+
+    monkeypatch.setattr("app.core.infra.channel_service.send_message", fail_send_message)
+
+    agent = type(
+        "Agent",
+        (),
+        {
+            "name": "LaundryJemput",
+            "owner_external_id": "62895619356936",
+            "operator_ids": ["62895619356936"],
+            "escalation_config": {"operator_phone": "62895619356936"},
+            "wa_device_id": "dev-1",
+        },
+    )()
+    session = type(
+        "Session",
+        (),
+        {
+            "channel_type": "whatsapp",
+            "external_user_id": "62895619356936",
+            "channel_config": {
+                "device_id": "dev-1",
+                "user_phone": "62895619356936@s.whatsapp.net",
+                "phone_number": "62895619356936",
+            },
+        },
+    )()
+    log = type("Log", (), {"info": lambda *args, **kwargs: None, "warning": lambda *args, **kwargs: None})()
+
+    original = "Klik link reconnect Google: https://auth.example/start?t=abc"
+    reply = await _route_google_workspace_blocker_to_owner_if_customer(
+        reply=original,
+        session=session,
+        agent_model=agent,
+        user_message="sambungkan google",
+        error_text="Google Workspace belum terhubung atau token sudah expired",
+        auth_url="https://auth.example/start?t=abc",
+        log=log,
+    )
+
+    assert reply == original
+
+
+@pytest.mark.asyncio
+async def test_owner_google_auth_blocker_notifies_again_via_arthur(monkeypatch) -> None:
+    sent = []
+
+    async def fake_arthur_config(agent_model, owner_target):
+        assert owner_target == "62895619356936"
+        return {
+            "device_id": "arthur-device",
+            "user_phone": "owner-lid@lid",
+            "phone_number": "62895619356936",
+        }
+
+    async def fake_send_message(*, channel_type, channel_config, text, to_override=None):
+        sent.append((channel_type, channel_config, text))
+        return {"message_id": "reauth-1"}
+
+    monkeypatch.setattr(
+        "app.core.engine.agent_google_routing._arthur_owner_notification_channel_config",
+        fake_arthur_config,
+    )
+    monkeypatch.setattr(
+        "app.core.infra.channel_service.send_message",
+        fake_send_message,
+    )
+    agent = type(
+        "Agent",
+        (),
+        {
+            "name": "JuleAI",
+            "owner_external_id": "62895619356936",
+            "operator_ids": ["62895619356936"],
+            "escalation_config": {"operator_phone": "62895619356936"},
+            "wa_device_id": "demo-device",
+        },
+    )()
+    session = type(
+        "Session",
+        (),
+        {
+            "channel_type": "whatsapp",
+            "external_user_id": "62895619356936",
+            "channel_config": {
+                "device_id": "demo-device",
+                "phone_number": "62895619356936",
+            },
+        },
+    )()
+    log = type(
+        "Log",
+        (),
+        {
+            "info": lambda *args, **kwargs: None,
+            "warning": lambda *args, **kwargs: None,
+        },
+    )()
+    auth_url = "https://auth.example/start?t=new"
+
+    reply = await _route_google_workspace_blocker_to_owner_if_customer(
+        reply=f"Klik link reconnect Google: {auth_url}",
+        session=session,
+        agent_model=agent,
+        user_message="catat ya",
+        error_text="Google Workspace belum terhubung atau token sudah expired",
+        auth_url=auth_url,
+        log=log,
+    )
+
+    assert reply == f"Klik link reconnect Google: {auth_url}"
+    assert len(sent) == 1
+    assert sent[0][0] == "whatsapp"
+    assert sent[0][1]["device_id"] == "arthur-device"
+    assert sent[0][1]["user_phone"] == "owner-lid@lid"
+    assert auth_url in sent[0][2]
+    assert "JuleAI" in sent[0][2]
+
+
+@pytest.mark.asyncio
+async def test_owner_google_resource_blocker_routes_to_arthur_without_oauth(monkeypatch) -> None:
+    async def fail_send_message(*args, **kwargs):
+        raise AssertionError("owner chat should receive direct setup guidance")
+
+    monkeypatch.setattr("app.core.infra.channel_service.send_message", fail_send_message)
+    agent = type(
+        "Agent",
+        (),
+        {
+            "name": "Minsel",
+            "owner_external_id": "62895626765423",
+            "operator_ids": ["62895626765423"],
+            "escalation_config": {"operator_phone": "62895626765423"},
+            "wa_device_id": "dev-1",
+        },
+    )()
+    session = type(
+        "Session",
+        (),
+        {
+            "channel_type": "whatsapp",
+            "external_user_id": "62895626765423",
+            "channel_config": {
+                "device_id": "dev-1",
+                "phone_number": "62895626765423",
+            },
+        },
+    )()
+    log = type("Log", (), {"info": lambda *args, **kwargs: None, "warning": lambda *args, **kwargs: None})()
+
+    reply = await _route_google_workspace_blocker_to_owner_if_customer(
+        reply="Berikan link atau ID Google Sheets.",
+        session=session,
+        agent_model=agent,
+        user_message="ya",
+        error_text='{"code": 404, "message": "Requested entity was not found."}',
+        auth_url=None,
+        log=log,
+    )
+
+    assert "Koneksi Google untuk Minsel aktif" in reply
+    assert "siapkan Google Sheet utama untuk Minsel sesuai tugasnya" in reply
+    assert "login" not in reply.casefold()
+
+
+@pytest.mark.asyncio
+async def test_customer_google_resource_blocker_notifies_owner_without_oauth_link(monkeypatch) -> None:
+    sent = []
+
+    async def fake_send_message(*, channel_type, channel_config, text, to_override=None):
+        sent.append(text)
+        return {"message_id": "m-resource"}
+
+    monkeypatch.setattr("app.core.infra.channel_service.send_message", fake_send_message)
+    agent = type(
+        "Agent",
+        (),
+        {
+            "name": "Minsel",
+            "owner_external_id": "628owner",
+            "operator_ids": ["628owner"],
+            "escalation_config": {"operator_phone": "628owner"},
+            "wa_device_id": "dev-1",
+        },
+    )()
+    session = type(
+        "Session",
+        (),
+        {
+            "channel_type": "whatsapp",
+            "external_user_id": "628customer",
+            "channel_config": {
+                "device_id": "dev-1",
+                "phone_number": "628customer",
+            },
+        },
+    )()
+    log = type("Log", (), {"info": lambda *args, **kwargs: None, "warning": lambda *args, **kwargs: None})()
+
+    reply = await _route_google_workspace_blocker_to_owner_if_customer(
+        reply="Tolong kirim ID Sheet.",
+        session=session,
+        agent_model=agent,
+        user_message="ya",
+        error_text="Requested entity was not found. HTTP 404",
+        auth_url=None,
+        log=log,
+    )
+
+    assert sent
+    assert "Koneksi Google aktif" in sent[0]
+    assert "siapkan Google Sheet utama untuk Minsel sesuai tugasnya" in sent[0]
+    assert "reconnect" not in sent[0].casefold()
+    assert "Owner" in reply
+    assert "konfigurasi teknis" in reply
+
+
+def test_owner_sheet_write_with_404_gets_automatic_resource_recovery() -> None:
+    steps = [
+        {
+            "tool": "read_sheet_values",
+            "result": 'HTTP 404: Requested entity was not found.',
+        }
+    ]
+
+    assert should_retry_missing_spreadsheet_resource(
+        steps,
+        user_message="catat ya",
+    )
+    assert not should_retry_missing_spreadsheet_resource(
+        steps,
+        user_message="tolong baca isi sheet ini",
+    )
+    directive = google_missing_spreadsheet_recovery_directive("catat ya")
+    assert "JANGAN gunakan lagi" in directive
+    assert "Buat spreadsheet pengganti" in directive
+    assert "jangan delegasikan OCR" in directive
+
+
+def test_successful_created_spreadsheet_is_persisted_as_verified_default() -> None:
+    steps = [
+        {
+            "tool": "create_spreadsheet",
+            "args": {"title": "Catatan Keuangan JuleAI"},
+            "result": (
+                "Successfully created spreadsheet 'Catatan Keuangan JuleAI'. "
+                "ID: valid-sheet-12345 | URL: "
+                "https://docs.google.com/spreadsheets/d/valid-sheet-12345/edit"
+            ),
+        }
+    ]
+    log = type("Log", (), {"info": lambda *args, **kwargs: None})()
+    agent = type(
+        "Agent",
+        (),
+        {
+            "id": "agent-1",
+            "version": 1,
+            "instructions": "Catat keuangan dan laporan keuangan.",
+            "tools_config": {"mcp": {"enabled": True}},
+        },
+    )()
+
+    extracted = extract_created_spreadsheet_resource(steps)
+    assert extracted == {
+        "spreadsheet_id": "valid-sheet-12345",
+        "url": "https://docs.google.com/spreadsheets/d/valid-sheet-12345/edit",
+        "title": "Catatan Keuangan JuleAI",
+    }
+    assert remember_created_google_spreadsheet(
+        agent,
+        steps,
+        user_message="catat pengeluaran",
+        log=log,
+    )
+
+    resources = agent.tools_config["google_workspace_resources"]
+    assert resources["default_spreadsheet_id"] == "valid-sheet-12345"
+    assert resources["default_spreadsheet_verified"] is True
+    assert agent.version == 2
+    notice = build_google_workspace_resource_notice(agent.tools_config)
+    assert "valid-sheet-12345" in notice
+    assert "Jangan pernah mengarang" in notice
+
+
+def test_google_auth_error_markers_include_preflight_not_connected_message() -> None:
+    err = "Google Workspace belum terhubung atau token sudah expired"
+    assert _is_google_auth_or_scope_error(err) is True
+
+
+def test_google_mcp_intent_detects_google_auth_requests() -> None:
+    assert _is_google_mcp_intent("sambungkan akun Google saya ke MCP")
+    assert _is_google_mcp_intent("tolong login google dulu")
+
+
+def test_google_form_link_reference_is_not_google_workspace_intent() -> None:
+    assert not _is_google_mcp_intent(
+        "cara order: pelanggan isi google form ini https://forms.gle/pe5C1XncFhu56E7M9"
+    )
+    assert not _is_google_mcp_intent(
+        "cara order pelanggan isi google form yang udah aku buat ini linknya https://forms.gle/pe5C1XncFhu56E7M9"
+    )
+    assert not _is_google_mcp_intent(
+        "https://forms.gle/pe5C1XncFhu56E7M9 ini link yang pelanggan isi kalau mau order"
+    )
+    assert _is_google_mcp_intent("tolong bikin google form survei dan kirim link")
+
+
+def test_google_auth_recovery_reply_is_not_success_claim() -> None:
+    assert _looks_like_google_auth_recovery_reply(
+        "Karena saat ini saya belum terhubung dengan akun Gmail kamu melalui MCP, "
+        "saya tidak bisa langsung cek email terbaru."
+    )
+
+
+def test_google_auth_recovery_followup_detects_short_done_reply() -> None:
+    rows = [
+        type("Msg", (), {"role": "user", "content": "buatkan Google Slides tentang bahaya rokok"})(),
+        type(
+            "Msg",
+            (),
+            {
+                "role": "assistant",
+                "content": (
+                    "Google Workspace belum terhubung atau tokennya sudah expired.\n"
+                    "Klik link ini untuk reconnect Google: https://example.test/start?t=abc"
+                ),
+            },
+        )(),
+    ]
+
+    assert is_google_auth_recovery_followup("ok sudah", rows) is True
+
+
+def test_google_auth_recovery_followup_ignores_unrelated_done_reply() -> None:
+    rows = [
+        type("Msg", (), {"role": "user", "content": "buat file txt"})(),
+        type("Msg", (), {"role": "assistant", "content": "File sudah dibuat."})(),
+    ]
+
+    assert is_google_auth_recovery_followup("sudah", rows) is False
+
+
+def test_google_auth_recovery_followup_accepts_agent_role_history() -> None:
+    rows = [
+        type(
+            "Msg",
+            (),
+            {
+                "role": "agent",
+                "content": (
+                    "Layanan Google Workspace sedang tidak terhubung. "
+                    "Silakan klik tautan berikut untuk melakukan autentikasi ulang."
+                ),
+            },
+        )(),
+    ]
+
+    assert is_google_auth_recovery_followup("sudah", rows) is True
+
+
+def test_find_last_google_workspace_user_request_skips_auth_confirmation() -> None:
+    rows = [
+        type("Msg", (), {"role": "user", "content": "buatkan Google Slides 5 halaman tentang bahaya rokok"})(),
+        type("Msg", (), {"role": "assistant", "content": "Google Workspace belum terhubung. Klik link reconnect."})(),
+        type("Msg", (), {"role": "user", "content": "sudah"})(),
+    ]
+
+    assert (
+        find_last_google_workspace_user_request(rows)
+        == "buatkan Google Slides 5 halaman tentang bahaya rokok"
+    )
+
+
+def test_google_integration_runtime_url_prefers_local_for_devtunnel_when_enabled(monkeypatch) -> None:
+    class FakeSettings:
+        workspace_mcp_prefer_local = "true"
+
+    monkeypatch.setattr("app.config.get_settings", lambda: FakeSettings())
+
+    assert (
+        _google_integration_runtime_url("https://msj90wr2-8003.asse.devtunnels.ms")
+        == "http://localhost:8003"
+    )
+
+
+@pytest.mark.asyncio
+async def test_google_auth_failure_reply_includes_reconnect_link_immediately() -> None:
+    reply = await _build_google_mcp_auth_failure_reply(
+        llm=None,
+        user_message="buatkan Google Slides 5 halaman tentang bahaya rokok",
+        error_text="Google Workspace belum terhubung atau token sudah expired",
+        auth_url="http://localhost:8003/v1/integrations/google/start?t=abc",
+    )
+
+    lowered = reply.lower()
+    assert "belum menjalankan request" in lowered
+    assert "mau saya buatkan" not in lowered
+    assert "http://localhost:8003/v1/integrations/google/start?t=abc" in reply
+
+
+@pytest.mark.asyncio
+async def test_fetch_google_auth_link_accepts_short_start_url(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 200
+        text = "{}"
+
+        def json(self):
+            return {
+                "auth_url": "https://devtunnel.example/v1/integrations/google/start?t=abc"
+            }
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr("httpx.AsyncClient", FakeClient)
+
+    auth_url = await _fetch_google_auth_link(
+        integration_url="https://devtunnel.example",
+        api_key="test",
+        agent_id="00000000-0000-0000-0000-000000000000",
+        candidate_user_ids=["628111"],
+    )
+
+    assert auth_url == "https://devtunnel.example/v1/integrations/google/start?t=abc"
+
+
+@pytest.mark.asyncio
+async def test_prepare_google_mcp_runtime_uses_agent_owner_fallback_for_auth(monkeypatch) -> None:
+    calls = []
+
+    class FakeSettings:
+        google_integration_service_url = "https://devtunnel.example"
+
+    class FakeResponse:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+            self.text = "{}"
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, **kwargs):
+            calls.append(("GET", url, kwargs))
+            return FakeResponse(200, {"connected": False})
+
+        async def post(self, url, **kwargs):
+            calls.append(("POST", url, kwargs))
+            return FakeResponse(
+                200,
+                {"auth_url": "https://devtunnel.example/v1/integrations/google/start?t=abc"},
+            )
+
+    monkeypatch.setattr("app.config.get_settings", lambda: FakeSettings())
+    monkeypatch.setattr("httpx.AsyncClient", FakeClient)
+
+    runtime = await prepare_google_mcp_runtime(
+        tools_config={
+            "mcp": {
+                "enabled": True,
+                "servers": {
+                    "google_workspace": {
+                        "url": "http://localhost:8002/mcp",
+                        "transport": "streamable_http",
+                    }
+                },
+            }
+        },
+        tools=[],
+        active_groups=[],
+        session=type("Session", (), {"channel_config": {}, "external_user_id": None})(),
+        agent_id="00000000-0000-0000-0000-000000000000",
+        memory_scope=None,
+        api_key="test",
+        user_message="sambungkan google",
+        system_prompt="",
+        log=type("Log", (), {"warning": lambda *args, **kwargs: None, "info": lambda *args, **kwargs: None})(),
+        fallback_external_user_id="62895619356936",
+    )
+
+    assert runtime.auth_url == "https://devtunnel.example/v1/integrations/google/start?t=abc"
+    assert runtime.candidate_user_ids[0] == "62895619356936"
+    assert "## Google Workspace Runtime State" in runtime.system_prompt
+    assert "State: enabled_needs_auth" in runtime.system_prompt
+    assert "Owner membuka link otentikasi" in runtime.system_prompt
+    assert any(call[0] == "POST" and call[2]["json"]["external_user_id"] == "62895619356936" for call in calls)
+
+
+@pytest.mark.asyncio
+async def test_prepare_google_mcp_runtime_clears_stale_preflight_when_fallback_token_works(monkeypatch) -> None:
+    class FakeSettings:
+        google_integration_service_url = "https://devtunnel.example"
+
+    class FakeResponse:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+            self.text = "{}"
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, **kwargs):
+            params = kwargs.get("params", {})
+            external_user_id = params.get("external_user_id")
+            if url.endswith("/status"):
+                return FakeResponse(200, {"connected": external_user_id == "owner-user"})
+            if url.endswith("/token") and external_user_id == "owner-user":
+                return FakeResponse(200, {"bearer_token": "owner-token"})
+            return FakeResponse(404, {})
+
+        async def post(self, *args, **kwargs):
+            return FakeResponse(
+                200,
+                {"auth_url": "https://devtunnel.example/v1/integrations/google/start?t=session"},
+            )
+
+    monkeypatch.setattr("app.config.get_settings", lambda: FakeSettings())
+    monkeypatch.setattr("httpx.AsyncClient", FakeClient)
+
+    workspace_server = {
+        "url": "http://localhost:8002/mcp",
+        "transport": "streamable_http",
+    }
+    runtime = await prepare_google_mcp_runtime(
+        tools_config={
+            "mcp": {
+                "enabled": True,
+                "servers": {"google_workspace": workspace_server},
+            }
+        },
+        tools=[],
+        active_groups=[],
+        session=type("Session", (), {"channel_config": {}, "external_user_id": "session-user"})(),
+        agent_id="00000000-0000-0000-0000-000000000000",
+        memory_scope="session-user",
+        api_key="test",
+        user_message="buatkan Google Slides",
+        system_prompt="",
+        log=type("Log", (), {"warning": lambda *args, **kwargs: None, "info": lambda *args, **kwargs: None})(),
+        fallback_external_user_id="owner-user",
+    )
+
+    assert runtime.connected_user_id == "owner-user"
+    assert runtime.preflight_error is None
+    assert runtime.auth_url is None
+    assert workspace_server["headers"]["Authorization"] == "Bearer owner-token"
+    assert "State: connected" in runtime.system_prompt
+    assert "jangan klaim sukses sebelum tool Google berhasil" not in runtime.system_prompt
+
+
+def test_google_mcp_runtime_state_notice_disabled() -> None:
+    notice = build_google_mcp_runtime_state_notice(
+        GoogleMcpRuntime(
+            enabled=False,
+            workspace_server=None,
+            connected_user_id=None,
+            auth_url=None,
+            preflight_error=None,
+            integration_url="",
+            candidate_user_ids=[],
+            system_prompt="",
+        )
+    )
+
+    assert "State: disabled" in notice
+    assert "Jangan klaim bisa mengakses Google" in notice
+
+
+def test_google_enabled_without_auth_asks_owner_for_auth() -> None:
+    notice = build_google_mcp_runtime_state_notice(
+        GoogleMcpRuntime(
+            enabled=True,
+            workspace_server={"url": "http://localhost:8002/mcp"},
+            connected_user_id=None,
+            auth_url="https://devtunnel.example/v1/integrations/google/start?t=abc",
+            preflight_error=None,
+            integration_url="https://devtunnel.example",
+            candidate_user_ids=["62895619356936"],
+            system_prompt="",
+        )
+    )
+
+    assert "State: enabled_needs_auth" in notice
+    assert "Owner membuka link otentikasi" in notice
+    assert "jangan mengarang hasil" in notice
+    assert "https://devtunnel.example/v1/integrations/google/start?t=abc" in notice
+
+
+def test_google_auth_expired_asks_owner_to_reconnect() -> None:
+    notice = build_google_mcp_runtime_state_notice(
+        GoogleMcpRuntime(
+            enabled=True,
+            workspace_server={"url": "http://localhost:8002/mcp"},
+            connected_user_id=None,
+            auth_url=None,
+            preflight_error="Google Workspace belum terhubung atau token sudah expired",
+            integration_url="https://devtunnel.example",
+            candidate_user_ids=["62895619356936"],
+            system_prompt="",
+        )
+    )
+
+    assert "State: auth_error" in notice
+    assert "Owner perlu menghubungkan ulang" in notice
+    assert "Preflight Error: Google Workspace belum terhubung atau token sudah expired" in notice
+
+
+@pytest.mark.asyncio
+async def test_google_auth_tool_returns_preflight_auth_url_without_refetch(monkeypatch) -> None:
+    class FakeSettings:
+        google_integration_service_url = "https://devtunnel.example"
+
+    class FakeResponse:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+            self.text = "{}"
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, *args, **kwargs):
+            return FakeResponse(200, {"connected": False})
+
+        async def post(self, *args, **kwargs):
+            return FakeResponse(
+                200,
+                {"auth_url": "https://devtunnel.example/v1/integrations/google/start?t=preflight"},
+            )
+
+    monkeypatch.setattr("app.config.get_settings", lambda: FakeSettings())
+    monkeypatch.setattr("httpx.AsyncClient", FakeClient)
+
+    tools = []
+    runtime = await prepare_google_mcp_runtime(
+        tools_config={
+            "mcp": {
+                "enabled": True,
+                "servers": {
+                    "google_workspace": {
+                        "url": "http://localhost:8002/mcp",
+                        "transport": "streamable_http",
+                    }
+                },
+            }
+        },
+        tools=tools,
+        active_groups=[],
+        session=type("Session", (), {"channel_config": {}, "external_user_id": None})(),
+        agent_id="00000000-0000-0000-0000-000000000000",
+        memory_scope=None,
+        api_key="test",
+        user_message="cek gmail terbaru",
+        system_prompt="",
+        log=type("Log", (), {"warning": lambda *args, **kwargs: None, "info": lambda *args, **kwargs: None})(),
+        fallback_external_user_id="62895619356936",
+    )
+
+    auth_tool = next(tool for tool in tools if tool.name == "get_google_workspace_auth_link")
+
+    async def fail_refetch(*args, **kwargs):
+        raise AssertionError("auth link should not be refetched when preflight URL exists")
+
+    monkeypatch.setattr("app.core.engine.google_mcp_support._fetch_google_auth_link", fail_refetch)
+
+    assert runtime.auth_url == "https://devtunnel.example/v1/integrations/google/start?t=preflight"
+    assert await auth_tool.ainvoke({}) == runtime.auth_url
+
+
+def test_extract_google_mcp_step_error_detects_scope_failure_from_tool_result() -> None:
+    steps = [
+        {
+            "tool": "create_presentation",
+            "result": "Google API error: Request had insufficient authentication scopes. Required scope: https://www.googleapis.com/auth/presentations",
+        }
+    ]
+    assert _extract_google_mcp_step_error(steps) is not None
+
+
+def test_google_mcp_step_detection_includes_high_level_workspace_tools() -> None:
+    assert _has_google_mcp_step([{"tool": "create_slide_deck", "result": "ok"}])
+    assert _has_google_mcp_step([{"tool": "create_survey_form", "result": "ok"}])
+    assert _has_google_mcp_step([{"tool": "manage_event", "result": "ok"}])
+    assert _has_google_mcp_step(
+        [
+            {
+                "tool": "task",
+                "result": "URL: https://docs.google.com/presentation/d/presentation-id/edit",
+            }
+        ]
+    )
+    assert not _has_google_mcp_step([{"tool": "task", "result": "claimed ok"}])
+
+
+def test_extract_google_mcp_step_error_detects_forms_scope_failure() -> None:
+    steps = [
+        {
+            "tool": "create_survey_form",
+            "result": "Google API error: Request had insufficient authentication scopes. Required scope: https://www.googleapis.com/auth/forms.body",
+        }
+    ]
+    assert _extract_google_mcp_step_error(steps) is not None
+
+
+def test_unavailable_reply_for_timeout_does_not_claim_progress() -> None:
+    reply = _build_google_mcp_unavailable_reply(
+        "Server error '504 Gateway Timeout' for url 'https://example.com/mcp'"
+    )
+    lowered = reply.lower()
+    assert "belum berhasil" in lowered
+    assert "masih berjalan" not in lowered
+    assert "akan kirim" not in lowered
+
+
+@pytest.mark.asyncio
+async def test_google_mcp_success_claim_without_google_tool_is_overridden() -> None:
+    runtime = GoogleMcpRuntime(
+        enabled=True,
+        workspace_server={},
+        connected_user_id="user@example.com",
+        auth_url=None,
+        preflight_error=None,
+        integration_url="http://localhost:8002",
+        candidate_user_ids=["user@example.com"],
+        system_prompt="",
+    )
+
+    reply, steps, _ = await apply_google_mcp_reply_overrides(
+        final_reply=(
+            "Presentasi Google Slides tentang bahaya merokok dekat anak kecil "
+            "sudah saya buat menggunakan MCP tool. Link presentasi sudah saya siapkan."
+        ),
+        steps=[{"tool": "task", "result": "done"}],
+        mcp_errors={},
+        runtime=runtime,
+        auth_url=None,
+        llm_raw=None,
+        user_message="tolong buatkan slide dengan mcp google slide",
+        agent_id="00000000-0000-0000-0000-000000000000",
+        api_key="test",
+        log=type("Log", (), {"warning": lambda *args, **kwargs: None})(),
+    )
+
+    lowered = reply.lower()
+    assert "belum berhasil" in lowered or "belum ada" in lowered
+    assert "tidak memanggil tool google" in lowered
+    assert "mcp" not in lowered
+    assert steps == [{"tool": "task", "result": "done"}]
+
+
+@pytest.mark.asyncio
+async def test_google_mcp_control_plane_configuration_is_not_treated_as_target_execution() -> None:
+    """Arthur V2 may configure another agent without running that agent's MCP."""
+    runtime = GoogleMcpRuntime(
+        enabled=True,
+        workspace_server={},
+        connected_user_id="user@example.com",
+        auth_url=None,
+        preflight_error=None,
+        integration_url="http://localhost:8002",
+        candidate_user_ids=["user@example.com"],
+        system_prompt="",
+    )
+    final_reply = (
+        "Minsel sudah terhubung ke Google Workspace. Google Sheet akan dibuat "
+        "saat Minsel menerima workflow order pertamanya."
+    )
+
+    reply, steps, _ = await apply_google_mcp_reply_overrides(
+        final_reply=final_reply,
+        steps=[{"tool": "update_assistant", "result": "done"}],
+        mcp_errors={},
+        runtime=runtime,
+        auth_url=None,
+        llm_raw=None,
+        user_message="sudah login Google untuk Minsel",
+        agent_id="00000000-0000-0000-0000-000000000000",
+        api_key="test",
+        log=type("Log", (), {"warning": lambda *args, **kwargs: None})(),
+        control_plane_run=True,
+    )
+
+    assert reply == final_reply
+    assert steps == [{"tool": "update_assistant", "result": "done"}]
+
+
+@pytest.mark.asyncio
+async def test_google_form_order_link_reply_is_not_overridden_without_google_step() -> None:
+    runtime = GoogleMcpRuntime(
+        enabled=True,
+        workspace_server={},
+        connected_user_id="user@example.com",
+        auth_url=None,
+        preflight_error=None,
+        integration_url="http://localhost:8002",
+        candidate_user_ids=["user@example.com"],
+        system_prompt="",
+    )
+    original = (
+        "Sip, link Google Form itu saya catat sebagai link order pelanggan. "
+        "Nanti agent akan mengarahkan pelanggan untuk isi form tersebut."
+    )
+
+    reply, steps, _ = await apply_google_mcp_reply_overrides(
+        final_reply=original,
+        steps=[],
+        mcp_errors={},
+        runtime=runtime,
+        auth_url=None,
+        llm_raw=None,
+        user_message=(
+            "cara order pelanggan isi google form yang udah aku buat ini linknya "
+            "https://forms.gle/pe5C1XncFhu56E7M9"
+        ),
+        agent_id="00000000-0000-0000-0000-000000000000",
+        api_key="test",
+        log=type("Log", (), {"warning": lambda *args, **kwargs: None})(),
+    )
+
+    assert reply == original
+    assert steps == []
+
+
+@pytest.mark.asyncio
+async def test_google_auth_recovery_reply_is_preserved_and_gets_link() -> None:
+    runtime = GoogleMcpRuntime(
+        enabled=True,
+        workspace_server={},
+        connected_user_id="628111",
+        auth_url="https://devtunnel.example/v1/integrations/google/start?t=abc",
+        preflight_error=None,
+        integration_url="https://devtunnel.example",
+        candidate_user_ids=["628111"],
+        system_prompt="",
+    )
+    original = (
+        "Karena saat ini saya belum terhubung dengan akun Gmail kamu melalui MCP, "
+        "saya tidak bisa langsung cek email terbaru. Kalau kamu mau, saya bisa buatkan "
+        "link otentikasi Google terbaru."
+    )
+
+    reply, steps, auth_url = await apply_google_mcp_reply_overrides(
+        final_reply=original,
+        steps=[],
+        mcp_errors={},
+        runtime=runtime,
+        auth_url=runtime.auth_url,
+        llm_raw=None,
+        user_message="cek gmail terbaru",
+        agent_id="00000000-0000-0000-0000-000000000000",
+        api_key="test",
+        log=type("Log", (), {"warning": lambda *args, **kwargs: None})(),
+    )
+
+    assert "Run ini tidak memanggil tool Google MCP" not in reply
+    assert "MCP" not in reply
+    assert "melalui integrasi Google" in reply
+    assert "https://devtunnel.example/v1/integrations/google/start?t=abc" in reply
+    assert steps == []
+    assert auth_url == runtime.auth_url
+
+
+@pytest.mark.asyncio
+async def test_google_auth_recovery_reply_with_link_is_preserved() -> None:
+    runtime = GoogleMcpRuntime(
+        enabled=True,
+        workspace_server={},
+        connected_user_id="628111",
+        auth_url="https://devtunnel.example/v1/integrations/google/start?t=abc",
+        preflight_error=None,
+        integration_url="https://devtunnel.example",
+        candidate_user_ids=["628111"],
+        system_prompt="",
+    )
+    original = (
+        "Ini link otentikasi Google-nya: "
+        "https://devtunnel.example/v1/integrations/google/start?t=abc"
+    )
+
+    reply, _, _ = await apply_google_mcp_reply_overrides(
+        final_reply=original,
+        steps=[],
+        mcp_errors={},
+        runtime=runtime,
+        auth_url=runtime.auth_url,
+        llm_raw=None,
+        user_message="iya tolong buatkan",
+        agent_id="00000000-0000-0000-0000-000000000000",
+        api_key="test",
+        log=type("Log", (), {"warning": lambda *args, **kwargs: None})(),
+    )
+
+    assert reply == original
+
+
+@pytest.mark.asyncio
+async def test_google_mcp_artifact_inside_task_is_not_overridden() -> None:
+    runtime = GoogleMcpRuntime(
+        enabled=True,
+        workspace_server={},
+        connected_user_id="user@example.com",
+        auth_url=None,
+        preflight_error=None,
+        integration_url="http://localhost:8002",
+        candidate_user_ids=["user@example.com"],
+        system_prompt="",
+    )
+    final_reply = (
+        "Presentasi Google Slides sudah saya buat: "
+        "https://docs.google.com/presentation/d/presentation-id/edit"
+    )
+
+    reply, _, _ = await apply_google_mcp_reply_overrides(
+        final_reply=final_reply,
+        steps=[
+            {
+                "tool": "task",
+                "result": (
+                    "Created and populated slide deck. URL: "
+                    "https://docs.google.com/presentation/d/presentation-id/edit"
+                ),
+            }
+        ],
+        mcp_errors={},
+        runtime=runtime,
+        auth_url=None,
+        llm_raw=None,
+        user_message="tolong buatkan slide dengan mcp google slide",
+        agent_id="00000000-0000-0000-0000-000000000000",
+        api_key="test",
+        log=type("Log", (), {"warning": lambda *args, **kwargs: None})(),
+    )
+
+    assert reply == final_reply
+
+
+@pytest.mark.asyncio
+async def test_google_mcp_success_artifact_is_not_overridden_by_stale_auth_error() -> None:
+    runtime = GoogleMcpRuntime(
+        enabled=True,
+        workspace_server={},
+        connected_user_id="user@example.com",
+        auth_url="https://devtunnel.example/v1/integrations/google/start?t=abc",
+        preflight_error=None,
+        integration_url="http://localhost:8002",
+        candidate_user_ids=["user@example.com"],
+        system_prompt="",
+    )
+    final_reply = (
+        "Google Slides 5 halaman sudah selesai dibuat: "
+        "https://docs.google.com/presentation/d/presentation-id/edit"
+    )
+
+    reply, steps, _ = await apply_google_mcp_reply_overrides(
+        final_reply=final_reply,
+        steps=[
+            {
+                "tool": "create_presentation",
+                "result": (
+                    "Presentation Created Successfully. URL: "
+                    "https://docs.google.com/presentation/d/presentation-id/edit"
+                ),
+            },
+            {
+                "tool": "batch_update_presentation",
+                "result": "Batch Update Completed for presentation-id",
+            },
+        ],
+        mcp_errors={"google_workspace": "401 Unauthorized invalid_token"},
+        runtime=runtime,
+        auth_url=runtime.auth_url,
+        llm_raw=None,
+        user_message="buatkan Google Slides 5 halaman",
+        agent_id="00000000-0000-0000-0000-000000000000",
+        api_key="test",
+        log=type("Log", (), {"warning": lambda *args, **kwargs: None})(),
+    )
+
+    assert reply == final_reply
+    assert len(steps) == 2
+
+
+def test_subscription_tool_step_is_not_google_mcp_error() -> None:
+    # Regression: "get_user_subscription" contains "script" as substring and its
+    # LID error contains "belum terhubung" — must not be treated as Google MCP auth error.
+    steps = [
+        {
+            "tool": "get_user_subscription",
+            "result": (
+                '{"error": "WhatsApp kamu masih terbaca sebagai LID dan belum terhubung '
+                'ke akun dashboard yang punya subscription.", "status": "identity_unlinked"}'
+            ),
+        }
+    ]
+    assert _extract_google_mcp_step_error(steps) is None
+    assert not _has_google_mcp_step(steps)
+
+
+@pytest.mark.asyncio
+async def test_builder_agent_reply_is_never_replaced_by_customer_blocker(monkeypatch) -> None:
+    async def fail_send_message(*args, **kwargs):
+        raise AssertionError("builder session should not notify owner")
+
+    monkeypatch.setattr("app.core.infra.channel_service.send_message", fail_send_message)
+
+    agent = type(
+        "Agent",
+        (),
+        {
+            "name": "Arthur",
+            "capabilities": ["builder"],
+            "tools_config": {"builder": True},
+            "owner_external_id": "6280000000000",
+            "operator_ids": [],
+            "escalation_config": {},
+            "wa_device_id": "dev-1",
+        },
+    )()
+    session = type(
+        "Session",
+        (),
+        {
+            "channel_type": "whatsapp",
+            "external_user_id": "6285798982332",
+            "channel_config": {
+                "device_id": "dev-1",
+                "user_phone": "6285798982332@s.whatsapp.net",
+                "phone_number": "6285798982332",
+            },
+        },
+    )()
+    log = type(
+        "Log",
+        (),
+        {
+            "info": lambda *args, **kwargs: None,
+            "warning": lambda *args, **kwargs: None,
+        },
+    )()
+
+    original = "Plan kamu saat ini: Free Trial, sisa slot agent 1."
+    reply = await _route_google_workspace_blocker_to_owner_if_customer(
+        reply=original,
+        session=session,
+        agent_model=agent,
+        user_message="cek plan gua yang terbaru",
+        error_text="Google Workspace belum terhubung atau token sudah expired",
+        auth_url=None,
+        log=log,
+    )
+
+    assert reply == original

@@ -1,0 +1,241 @@
+"""Reply guards for task/escalation turns.
+
+Extracted from agent_runner.py — PURE refactor, zero behaviour change.
+"""
+from __future__ import annotations
+
+import json
+import re
+from typing import Any
+
+from app.core.engine.agent_step_utils import (
+    _URL_RE,
+    _has_whatsapp_media_send_step,
+    _is_operator_envelope,
+    _operator_message_payload,
+)
+from app.core.engine.agent_identity import _session_sender_phone
+from app.core.engine.agent_whatsapp_guards import _has_reply_to_user_step, _has_send_to_number_step
+from app.core.utils.phone_utils import normalize_phone
+
+
+_MEDIA_CLAIM_SPLIT_RE = re.compile(r"[\n.!?;]+")
+_OWNER_IDENTITY_QUESTIONS = {
+    "gua siapa",
+    "gue siapa",
+    "aku siapa",
+    "saya siapa",
+    "siapa saya",
+    "who am i",
+}
+
+
+def _owner_identity_reply_guard(
+    final_reply: str,
+    user_message: str,
+    session: Any,
+    agent_model: Any,
+) -> str:
+    """Answer identity questions deterministically for the verified Owner.
+
+    Owner identity is platform state, not something the operational agent
+    should guess from chat history.  This guard only runs when the sender's
+    normalized phone exactly matches ``owner_external_id``.
+    """
+    owner_phone = normalize_phone(str(getattr(agent_model, "owner_external_id", "") or ""))
+    if not owner_phone or _session_sender_phone(session) != owner_phone:
+        return final_reply
+
+    payload = _operator_message_payload(user_message).casefold()
+    normalized_question = re.sub(r"[^a-z0-9]+", " ", payload).strip()
+    if normalized_question not in _OWNER_IDENTITY_QUESTIONS:
+        return final_reply
+
+    cfg = session.channel_config if isinstance(getattr(session, "channel_config", None), dict) else {}
+    escalation_cfg = getattr(agent_model, "escalation_config", None)
+    escalation_cfg = escalation_cfg if isinstance(escalation_cfg, dict) else {}
+    owner_name = str(
+        cfg.get("sender_name")
+        or escalation_cfg.get("operator_name")
+        or "Owner"
+    ).strip()
+    agent_name = str(getattr(agent_model, "name", "") or "agent ini").strip()
+    return f"Kamu adalah {owner_name}, Owner dan superadmin {agent_name}."
+
+
+def _has_media_delivery_claim(text: str) -> bool:
+    lowered = (text or "").lower()
+    media_nouns = ("file", "dokumen", "pdf", "gambar", "foto", "laporan", "attachment", "lampiran")
+    delivery_markers = (
+        "sudah saya kirim",
+        "sudah dikirim",
+        "sudah terkirim",
+        "berhasil saya kirim",
+        "saya kirim sekarang",
+        "saya kirim file",
+        "saya kirim dokumen",
+        "saya kirim pdf",
+        "saya akan kirim",
+        "berikut saya kirim",
+        "berikut saya kirimkan",
+        "mengirim file",
+        "mengirim dokumen",
+        "siap saya kirim",
+        "siap dikirim",
+    )
+    for segment in _MEDIA_CLAIM_SPLIT_RE.split(lowered):
+        if any(noun in segment for noun in media_nouns) and any(marker in segment for marker in delivery_markers):
+            return True
+    return False
+
+
+def _task_result_guard_reply(final_reply: str, steps: list[dict[str, Any]], user_message: str) -> str:
+    """Prevent parent agents from claiming subagent work succeeded when it did not."""
+    if not steps:
+        return final_reply
+
+    task_results = [
+        str(step.get("result") or "")
+        for step in steps
+        if step.get("tool") == "task" and step.get("result")
+    ]
+    if not task_results:
+        return final_reply
+
+    task_payload_text = "\n".join(
+        json.dumps(step.get("args") or {}, ensure_ascii=False)
+        for step in steps
+        if step.get("tool") == "task"
+    ).lower()
+    user_lower = (user_message or "").lower()
+    artifact_required = any(
+        marker in f"{task_payload_text}\n{user_lower}"
+        for marker in (
+            "deploy",
+            "trycloudflare",
+            "website",
+            "web app",
+            "landing page",
+            "html",
+            "css",
+            "javascript",
+            "prototype",
+            "portfolio",
+            "portofolio",
+            "aplikasi",
+            "app web",
+            "url",
+            "link website",
+            "file final",
+            "dokumen final",
+            "kirim file",
+            "cv ats",
+            "buat cv",
+        )
+    )
+
+    combined = "\n".join(task_results)
+    combined_lower = combined.lower()
+
+    has_success_artifact = bool(
+        _URL_RE.search(combined)
+        or "[document_sent]" in combined_lower
+        or "[image_sent]" in combined_lower
+        or _has_whatsapp_media_send_step(steps)
+        or " terkirim" in combined_lower
+        or "deployment berhasil" in combined_lower
+    )
+    blocker_markers = (
+        "belum menemukan",
+        "belum menerima",
+        "mohon bagikan",
+        "tolong kirim",
+        "perlu informasi",
+        "butuh informasi",
+        "tidak menemukan",
+        "file cv",
+        "isi cv",
+    )
+    has_blocker = any(marker in combined_lower for marker in blocker_markers)
+    if not artifact_required:
+        return final_reply
+    if has_success_artifact:
+        return final_reply
+    if has_blocker:
+        return (
+            "Belum bisa saya lanjutkan karena bahan yang dibutuhkan belum tersedia di workspace agent. "
+            "Subagent minta isi/file CV dikirim ulang atau ditempel di chat dulu, baru saya bisa buat web HTML/CSS/JS-nya."
+        )
+    return final_reply
+
+
+def _operator_escalation_reply_guard(
+    final_reply: str,
+    steps: list[dict[str, Any]],
+    user_message: str,
+    escalation_user_jid: str | None,
+) -> str:
+    """Block operator turns from hallucinating completed customer deliverables."""
+    if not escalation_user_jid or not _is_operator_envelope(user_message):
+        return final_reply
+    if _has_reply_to_user_step(steps) or _has_send_to_number_step(steps):
+        return final_reply
+
+    text = (final_reply or "").strip()
+    lowered = text.lower()
+    if "draft" in lowered and ("ketik" in lowered or "sudah ok" in lowered):
+        return final_reply
+
+    deliverable_markers = (
+        "cv",
+        "file",
+        "pdf",
+        "dokumen",
+        "document",
+        "website",
+        "web",
+    )
+    unsafe_completion_markers = (
+        "sudah selesai",
+        "selesai dibuat",
+        "siap dikirim",
+        "siap saya kirim",
+        "berhasil dibuat",
+        "akan saya kirim",
+        "harus dilakukan secara manual",
+    )
+    if not (
+        any(marker in lowered for marker in deliverable_markers)
+        and any(marker in lowered for marker in unsafe_completion_markers)
+    ):
+        return final_reply
+
+    operator_text = _operator_message_payload(user_message).lower()
+    if any(marker in operator_text for marker in ("pembayaran", "transfer", "bayar", "payment", "paid", "valid", "approve")):
+        return (
+            "Draft pesan untuk customer:\n"
+            "----\n"
+            "Halo, pembayaran Anda sudah kami terima. Proses pembuatan CV akan kami lanjutkan, "
+            "dan hasilnya akan kami kirimkan setelah siap.\n"
+            "----\n"
+            "Sudah OK? Ketik 'kirim' untuk saya teruskan ke customer."
+        )
+
+    return (
+        "Saya belum mengirim atau membuat ulang deliverable dari sesi operator ini. "
+        "Silakan tulis pesan yang ingin diteruskan ke customer, lalu ketik 'kirim' setelah draft-nya sudah OK."
+    )
+
+
+def _whatsapp_media_delivery_guard_reply(final_reply: str, steps: list[dict[str, Any]]) -> str:
+    """Block claims/promises that a WA media file was sent when no media-send tool ran."""
+    if not final_reply or _has_whatsapp_media_send_step(steps):
+        return final_reply
+    if not _has_media_delivery_claim(final_reply):
+        return final_reply
+
+    return (
+        "Belum saya kirim. Saya belum menemukan eksekusi tool kirim dokumen/gambar WhatsApp "
+        "di run ini, jadi saya tidak akan mengklaim file sudah terkirim. "
+        "Kirim ulang `kirim file PDF` supaya saya coba kirim dokumennya langsung."
+    )

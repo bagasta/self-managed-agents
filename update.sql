@@ -1,0 +1,1 @@
+UPDATE agents SET tools_config = '{"mcp": {"enabled": true, "servers": {"google_workspace": {"allowed_services": ["gmail", "calendar"]}}}, "deploy": true, "memory": true, "skills": true, "sandbox": true, "whatsapp_media": true}' WHERE id = 'fede08d8-945f-4ea8-b76b-998179ba00bf';

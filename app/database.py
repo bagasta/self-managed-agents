@@ -1,0 +1,56 @@
+from collections.abc import AsyncGenerator
+
+from sqlalchemy import event
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase
+
+from app.config import get_settings
+
+settings = get_settings()
+
+engine = create_async_engine(
+    settings.database_url,
+    echo=False,
+    pool_pre_ping=True,
+    pool_size=max(1, settings.db_pool_size),
+    max_overflow=max(0, settings.db_max_overflow),
+    pool_timeout=max(1.0, settings.db_pool_timeout_seconds),
+    pool_recycle=max(60, settings.db_pool_recycle_seconds),
+    pool_use_lifo=True,
+)
+
+
+@event.listens_for(engine.sync_engine, "connect")
+def _register_pgvector(dbapi_connection, _connection_record):
+    """
+    Register pgvector's asyncpg type codec on every new connection so that
+    SQLAlchemy can read/write vector(N) columns without manual casting.
+    """
+    try:
+        from pgvector.asyncpg import register_vector
+        dbapi_connection.run_sync(register_vector)
+    except Exception:
+        # pgvector extension not installed — vector columns will still work
+        # via text fallback; search queries will fail until extension is enabled.
+        pass
+
+
+AsyncSessionLocal = async_sessionmaker(
+    engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+)
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+            await session.commit()
+        except BaseException:
+            await session.rollback()
+            raise

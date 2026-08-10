@@ -1,0 +1,591 @@
+{
+  "info": {
+    "name": "Google Workspace MCP",
+    "description": "Test collection untuk flow OAuth + MCP integration.\n\n== SETUP ==\n1. Import collection ini ke Postman\n2. Pilih collection \u2192 Variables tab\n3. Ganti external_user_id dan agent_id sesuai user yang mau ditest\n4. Jalankan step 1 \u2192 2 \u2192 3 berurutan",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_8003",
+      "value": "http://localhost:8003",
+      "description": "Integration API \u2014 OAuth management"
+    },
+    {
+      "key": "base_8002",
+      "value": "https://msj90wr2-8002.asse.devtunnels.ms",
+      "description": "workspace-mcp \u2014 MCP server (tunnel URL, untuk hit dari browser/agent)"
+    },
+    {
+      "key": "external_user_id",
+      "value": "test_user_1",
+      "description": "ID user di platform. Ganti sesuai user yang mau ditest."
+    },
+    {
+      "key": "agent_id",
+      "value": "",
+      "description": "UUID agent. Kosongkan jika tidak per-agent."
+    },
+    {
+      "key": "jwt_token",
+      "value": "",
+      "description": "Otomatis diisi setelah jalankan step 2c."
+    },
+    {
+      "key": "auth_url",
+      "value": "",
+      "description": "Otomatis diisi setelah jalankan step 2a. Buka di browser."
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Health Check",
+      "item": [
+        {
+          "name": "1a. Health \u2014 Integration API (8003)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Service OK', () => {",
+                  "    var json = pm.response.json();",
+                  "    pm.expect(json.status).to.eql('ok');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_8003}}/health",
+              "host": [
+                "{{base_8003}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": "Cek service 8003 jalan.\n\nExpect 200:\n{\"status\": \"ok\"}"
+          }
+        },
+        {
+          "name": "1b. Health \u2014 workspace-mcp OAuth Metadata (8002)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Has authorization_endpoint', () => {",
+                  "    var json = pm.response.json();",
+                  "    pm.expect(json).to.have.property('authorization_endpoint');",
+                  "    pm.expect(json).to.have.property('token_endpoint');",
+                  "    pm.expect(json).to.have.property('registration_endpoint');",
+                  "    console.log('authorization_endpoint:', json.authorization_endpoint);",
+                  "    console.log('token_endpoint:', json.token_endpoint);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_8002}}/.well-known/oauth-authorization-server",
+              "host": [
+                "{{base_8002}}"
+              ],
+              "path": [
+                ".well-known",
+                "oauth-authorization-server"
+              ]
+            },
+            "description": "Cek workspace-mcp jalan.\n\nExpect 200: JSON dengan authorization_endpoint, token_endpoint, registration_endpoint, scopes_supported.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json, text/event-stream"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. OAuth Flow (jalankan berurutan)",
+      "item": [
+        {
+          "name": "2a. Generate Auth URL",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "var json = pm.response.json();",
+                  "if (json.auth_url) {",
+                  "    pm.collectionVariables.set('auth_url', json.auth_url);",
+                  "    pm.test('auth_url ada', () => pm.expect(json.auth_url).to.include('/authorize'));",
+                  "    console.log('');",
+                  "    console.log('========================================');",
+                  "    console.log('\u2705 BUKA URL INI DI BROWSER:');",
+                  "    console.log(json.auth_url);",
+                  "    console.log('========================================');",
+                  "    console.log('');",
+                  "} else {",
+                  "    console.log('\u274c Error:', JSON.stringify(json));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_8003}}/v1/integrations/google/connect",
+              "host": [
+                "{{base_8003}}"
+              ],
+              "path": [
+                "v1",
+                "integrations",
+                "google",
+                "connect"
+              ]
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"external_user_id\": \"{{external_user_id}}\",\n  \"agent_id\": \"{{agent_id}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Generate OAuth URL untuk user connect Google.\n\nExpect 200:\n{\n  \"auth_url\": \"https://msj90wr2-8002.asse.devtunnels.ms/authorize?client_id=...&code_challenge=...&state=...\"\n}\n\nSetelah dapat auth_url:\n\u2192 Lihat di Postman Console (Cmd+Alt+C / Ctrl+Alt+C)\n\u2192 Buka URL di browser\n\u2192 Login Google & klik Allow\n\u2192 Browser redirect ke callback \u2192 JWT tersimpan ke DB otomatis\n\u2192 Lanjut ke step 2b"
+          }
+        },
+        {
+          "name": "2b. Cek Status Koneksi",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "var json = pm.response.json();",
+                  "pm.test('Response valid', () => pm.expect(json).to.have.property('connected'));",
+                  "if (json.connected) {",
+                  "    console.log('\u2705 User sudah connect Google');",
+                  "    console.log('Email:', json.email || '(email tidak tersimpan)');",
+                  "    console.log('\u2192 Lanjut ke step 2c untuk ambil token');",
+                  "} else {",
+                  "    console.log('\u274c User belum connect \u2192 jalankan step 2a dulu');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_8003}}/v1/integrations/google/status?external_user_id={{external_user_id}}&agent_id={{agent_id}}",
+              "host": [
+                "{{base_8003}}"
+              ],
+              "path": [
+                "v1",
+                "integrations",
+                "google",
+                "status"
+              ],
+              "query": [
+                {
+                  "key": "external_user_id",
+                  "value": "{{external_user_id}}"
+                },
+                {
+                  "key": "agent_id",
+                  "value": "{{agent_id}}"
+                }
+              ]
+            },
+            "description": "Cek apakah user sudah connect Google.\n\nExpect sudah connect:\n{\"connected\": true, \"email\": \"user@gmail.com\", \"scopes\": []}\n\nExpect belum connect:\n{\"connected\": false, \"email\": null, \"scopes\": []}"
+          }
+        },
+        {
+          "name": "2c. Ambil JWT Token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    var json = pm.response.json();",
+                  "    pm.collectionVariables.set('jwt_token', json.bearer_token);",
+                  "    pm.test('Token ada', () => pm.expect(json.bearer_token).to.be.a('string'));",
+                  "    console.log('\u2705 JWT tersimpan ke variable jwt_token');",
+                  "    console.log('Token preview:', json.bearer_token.substring(0, 40) + '...');",
+                  "    console.log('\u2192 Lanjut ke step 3b untuk test hit MCP');",
+                  "} else if (pm.response.code === 404) {",
+                  "    pm.test('User belum connect', () => pm.expect(true).to.be.false);",
+                  "    console.log('\u274c 404 \u2014 User belum connect Google');",
+                  "    console.log('\u2192 Jalankan step 2a dulu');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_8003}}/v1/integrations/google/token?external_user_id={{external_user_id}}&agent_id={{agent_id}}",
+              "host": [
+                "{{base_8003}}"
+              ],
+              "path": [
+                "v1",
+                "integrations",
+                "google",
+                "token"
+              ],
+              "query": [
+                {
+                  "key": "external_user_id",
+                  "value": "{{external_user_id}}"
+                },
+                {
+                  "key": "agent_id",
+                  "value": "{{agent_id}}"
+                }
+              ]
+            },
+            "description": "Ambil JWT untuk inject ke MCP.\n\nExpect 200:\n{\"bearer_token\": \"eyJhbGci...\"}\n\nExpect 404 \u2192 user belum connect, jalankan 2a dulu.\n\n\u26a0\ufe0f JWT expire dalam 1 jam. Selalu fetch fresh, jangan cache."
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. MCP Test",
+      "item": [
+        {
+          "name": "3a. Hit MCP tanpa token (expect 401)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Expect 401 Unauthorized', () => pm.response.to.have.status(401));",
+                  "console.log('\u2705 401 expected \u2014 auth memang required');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_8002}}/mcp",
+              "host": [
+                "{{base_8002}}"
+              ],
+              "path": [
+                "mcp"
+              ]
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json, text/event-stream"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"initialize\",\n  \"params\": {\n    \"protocolVersion\": \"2024-11-05\",\n    \"capabilities\": {},\n    \"clientInfo\": {\"name\": \"postman-test\", \"version\": \"1\"}\n  },\n  \"id\": 1\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Hit MCP tanpa token.\n\nExpect: 401 Unauthorized\n{\n  \"error\": \"invalid_token\",\n  \"error_description\": \"...\"\n}\n\n\u2192 Konfirmasi auth required sebelum test dengan token."
+          }
+        },
+        {
+          "name": "3b. Initialize MCP dengan JWT",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "    var json = pm.response.json();",
+                  "    console.log('\u2705 MCP connected!');",
+                  "    if (json.result && json.result.serverInfo) {",
+                  "        console.log('Server:', json.result.serverInfo.name);",
+                  "    }",
+                  "    console.log('\u2192 Lanjut ke 3c untuk list tools');",
+                  "} else if (pm.response.code === 401) {",
+                  "    pm.test('JWT expired atau invalid', () => pm.expect(true).to.be.false);",
+                  "    console.log('\u274c 401 \u2014 JWT expired atau invalid');",
+                  "    console.log('\u2192 Jalankan step 2c lagi untuk refresh token');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_8002}}/mcp",
+              "host": [
+                "{{base_8002}}"
+              ],
+              "path": [
+                "mcp"
+              ]
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{jwt_token}}"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json, text/event-stream"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"initialize\",\n  \"params\": {\n    \"protocolVersion\": \"2024-11-05\",\n    \"capabilities\": {},\n    \"clientInfo\": {\"name\": \"postman-test\", \"version\": \"1\"}\n  },\n  \"id\": 1\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Hit MCP dengan JWT dari step 2c.\n\nExpect 200:\n{\n  \"result\": {\n    \"protocolVersion\": \"2024-11-05\",\n    \"serverInfo\": {\"name\": \"Google Workspace MCP\", \"version\": \"...\"},\n    \"capabilities\": {...}\n  }\n}\n\nExpect 401 \u2192 JWT expired, ulangi step 2c."
+          }
+        },
+        {
+          "name": "3c. List Tools",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "    var json = pm.response.json();",
+                  "    var tools = json.result && json.result.tools ? json.result.tools : [];",
+                  "    console.log('\u2705 Tools tersedia:', tools.length, 'tools');",
+                  "    tools.forEach(t => console.log(' -', t.name));",
+                  "} else {",
+                  "    console.log('\u274c', pm.response.code, pm.response.text());",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_8002}}/mcp",
+              "host": [
+                "{{base_8002}}"
+              ],
+              "path": [
+                "mcp"
+              ]
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{jwt_token}}"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json, text/event-stream"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"tools/list\",\n  \"params\": {},\n  \"id\": 2\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "List semua tools yang tersedia.\n\nExpect 200:\n{\n  \"result\": {\n    \"tools\": [\n      {\"name\": \"gmail_search\", \"description\": \"...\"},\n      {\"name\": \"calendar_list_events\", \"description\": \"...\"},\n      ...\n    ]\n  }\n}"
+          }
+        },
+        {
+          "name": "3d. Call Tool \u2014 Gmail Search",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "    console.log('\u2705 Gmail search berhasil');",
+                  "} else {",
+                  "    console.log('\u274c', pm.response.code);",
+                  "    console.log('Cek nama tool yang benar via step 3c');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_8002}}/mcp",
+              "host": [
+                "{{base_8002}}"
+              ],
+              "path": [
+                "mcp"
+              ]
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{jwt_token}}"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json, text/event-stream"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"tools/call\",\n  \"params\": {\n    \"name\": \"gmail_search\",\n    \"arguments\": {\n      \"query\": \"is:unread\",\n      \"max_results\": 5\n    }\n  },\n  \"id\": 3\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Contoh call tool Gmail search.\n\nArguments:\n- query: Gmail search query (sama seperti di kotak search Gmail)\n- max_results: jumlah email yang dikembalikan\n\nExpect 200: list email unread.\nExpect error method not found \u2192 cek nama tool yang benar via step 3c."
+          }
+        },
+        {
+          "name": "3e. Call Tool \u2014 Calendar List Events",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_8002}}/mcp",
+              "host": [
+                "{{base_8002}}"
+              ],
+              "path": [
+                "mcp"
+              ]
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{jwt_token}}"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json, text/event-stream"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"tools/call\",\n  \"params\": {\n    \"name\": \"calendar_list_events\",\n    \"arguments\": {\n      \"max_results\": 5,\n      \"time_min\": \"2026-05-15T00:00:00Z\"\n    }\n  },\n  \"id\": 4\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Contoh call tool Calendar.\n\nExpect 200: list events calendar user."
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Disconnect",
+      "item": [
+        {
+          "name": "4a. Disconnect Google",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    pm.collectionVariables.set('jwt_token', '');",
+                  "    pm.test('Disconnected', () => pm.response.to.have.status(200));",
+                  "    console.log('\u2705 Google disconnected');",
+                  "    console.log('jwt_token variable dikosongkan');",
+                  "} else if (pm.response.code === 404) {",
+                  "    console.log('\u274c User tidak ditemukan di DB');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "url": {
+              "raw": "{{base_8003}}/v1/integrations/google/disconnect?external_user_id={{external_user_id}}&agent_id={{agent_id}}",
+              "host": [
+                "{{base_8003}}"
+              ],
+              "path": [
+                "v1",
+                "integrations",
+                "google",
+                "disconnect"
+              ],
+              "query": [
+                {
+                  "key": "external_user_id",
+                  "value": "{{external_user_id}}"
+                },
+                {
+                  "key": "agent_id",
+                  "value": "{{agent_id}}"
+                }
+              ]
+            },
+            "description": "Revoke akses Google user.\n\nExpect 200: {\"disconnected\": true}\nExpect 404: user tidak ada di DB\n\nSetelah ini:\n- GET /status \u2192 {\"connected\": false}\n- GET /token \u2192 404"
+          }
+        }
+      ]
+    }
+  ]
+}

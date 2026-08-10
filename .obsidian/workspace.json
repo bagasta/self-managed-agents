@@ -1,0 +1,208 @@
+{
+  "main": {
+    "id": "0e278fa2252ca7d5",
+    "type": "split",
+    "children": [
+      {
+        "id": "b01d84cc92e56aef",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "aea1d80e6483b14f",
+            "type": "leaf",
+            "state": {
+              "type": "empty",
+              "state": {},
+              "icon": "lucide-file",
+              "title": "New tab"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "127fc223b7976381",
+    "type": "split",
+    "children": [
+      {
+        "id": "98014c2aca1049ff",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "f4f33e5e717c690b",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false
+              },
+              "icon": "lucide-folder-closed",
+              "title": "Files"
+            }
+          },
+          {
+            "id": "81e8e232d8dc71b4",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Search"
+            }
+          },
+          {
+            "id": "a2b9e6684a006c8c",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {},
+              "icon": "lucide-bookmark",
+              "title": "Bookmarks"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300
+  },
+  "right": {
+    "id": "f975a26c995bef2a",
+    "type": "split",
+    "children": [
+      {
+        "id": "71a2ad5aa2ae3a01",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "ef88f17847f3b8f4",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "file": "docs/ai-architecture/TECH_STACK.md",
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Backlinks for TECH_STACK"
+            }
+          },
+          {
+            "id": "e5dc3a9a21f5ca7d",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "file": "docs/ai-architecture/TECH_STACK.md",
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Outgoing links from TECH_STACK"
+            }
+          },
+          {
+            "id": "8d168359e7afc090",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Tags"
+            }
+          },
+          {
+            "id": "97550178e958cadd",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "All properties"
+            }
+          },
+          {
+            "id": "066def8feedc5eae",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "docs/ai-architecture/TECH_STACK.md",
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Outline of TECH_STACK"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Open quick switcher": false,
+      "graph:Open graph view": false,
+      "canvas:Create new canvas": false,
+      "daily-notes:Open today's daily note": false,
+      "templates:Insert template": false,
+      "command-palette:Open command palette": false,
+      "bases:Create new base": false
+    }
+  },
+  "active": "aea1d80e6483b14f",
+  "lastOpenFiles": [
+    "Work Context/Reference/Runbooks and Verification.md",
+    "Work Context/Reference/Repository Catalogue.md",
+    "Work Context/Google Workspace MCP/Services and Tools.md",
+    "Work Context/Google Workspace MCP/Authorization and Launch.md",
+    "Work Context/Dashboard/Google OAuth and Payments.md",
+    "Work Context/Dashboard/Routes and API Client.md",
+    "Work Context/Backend/WhatsApp and Scheduler.md",
+    "Work Context/Backend/Agent Runtime.md",
+    "Work Context/Backend/API Surface.md",
+    "Work Context/00 - Master Index.md",
+    "Work Context/Reference",
+    "Work Context/Google Workspace MCP",
+    "Work Context/Dashboard",
+    "Work Context/Backend",
+    "Untitled.base",
+    "Untitled.canvas",
+    "Untitled",
+    "docs/ai-architecture/TECH_STACK.md",
+    "docs/ai-architecture/TESTING_STRATEGY.md",
+    "docs/ai-architecture/CODING_STANDARDS.md",
+    "docs/ai-architecture/API_SPEC.md",
+    "docs/ai-architecture/AGENT_ARCHITECTURE.md",
+    "docs/ai-architecture/ACCEPTANCE_CRITERIA.md"
+  ]
+}

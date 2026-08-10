@@ -1,0 +1,4 @@
+interface:
+  display_name: "Arthur Files Knowledge"
+  short_description: "Atur kemampuan file dan knowledge agent"
+  default_prompt: "Use $arthur-files-knowledge to define and verify an agent's file and knowledge capabilities."

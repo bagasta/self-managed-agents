@@ -1,0 +1,4 @@
+interface:
+  display_name: "Arthur Create Agent"
+  short_description: "Buat agent dari kebutuhan terkonfirmasi"
+  default_prompt: "Use $arthur-create-agent to create and verify an AI agent from confirmed requirements."

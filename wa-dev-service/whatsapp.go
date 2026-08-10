@@ -1,0 +1,742 @@
+package main
+
+import (
+	"context"
+	"encoding/base64"
+	"fmt"
+	"log"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/skip2/go-qrcode"
+	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/store/sqlstore"
+	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
+	waLog "go.mau.fi/whatsmeow/util/log"
+	"google.golang.org/protobuf/proto"
+
+	_ "github.com/mattn/go-sqlite3"
+)
+
+type WAStatus string
+
+const (
+	WAStatusWaitingQR     WAStatus = "waiting_qr"
+	WAStatusConnected     WAStatus = "connected"
+	WAStatusDisconnected  WAStatus = "disconnected"
+	typingRefreshInterval          = 4 * time.Second
+)
+
+type IncomingMessage struct {
+	From              string
+	PhoneFrom         string // resolved phone (LID → PN); empty if LID cannot be resolved
+	ChatID            string
+	SenderAlt         string
+	AddressingMode    string
+	Text              string
+	MessageID         string
+	PushName          string // WhatsApp display name of sender
+	MediaType         string // "image" | "document" | "sticker" | "audio" | "ptt" | ""
+	MediaData         string // base64
+	MediaFilename     string
+	MediaMimetype     string
+	QuotedText        string
+	QuotedStanzaID    string
+	QuotedParticipant string
+	QuotedRemoteJID   string
+	Timestamp         int64
+}
+
+type WhatsAppClient struct {
+	mu            sync.RWMutex
+	client        *whatsmeow.Client
+	container     *sqlstore.Container
+	status        WAStatus
+	phoneNumber   string
+	latestQR      string
+	latestQRRaw   string // raw QR code text for terminal rendering
+	onMessage     func(msg IncomingMessage)
+	needsReset    bool // device was logged out/deleted; client must be rebuilt before next pair
+	typingCancels sync.Map
+}
+
+func quotedMessageText(ctx *waE2E.ContextInfo) string {
+	if ctx == nil {
+		return ""
+	}
+	qm := ctx.GetQuotedMessage()
+	if qm == nil {
+		return ""
+	}
+	if q := qm.GetConversation(); q != "" {
+		return q
+	}
+	if qe := qm.GetExtendedTextMessage(); qe != nil {
+		return qe.GetText()
+	}
+	if qi := qm.GetImageMessage(); qi != nil {
+		return qi.GetCaption()
+	}
+	if qd := qm.GetDocumentMessage(); qd != nil {
+		if caption := qd.GetCaption(); caption != "" {
+			return caption
+		}
+		if name := qd.GetFileName(); name != "" {
+			return name
+		}
+	}
+	if qs := qm.GetStickerMessage(); qs != nil {
+		return "[Sticker]"
+	}
+	return ""
+}
+
+func applyQuotedContext(msg *IncomingMessage, ctx *waE2E.ContextInfo) {
+	if ctx == nil || msg == nil {
+		return
+	}
+	msg.QuotedText = quotedMessageText(ctx)
+	msg.QuotedStanzaID = ctx.GetStanzaID()
+	msg.QuotedParticipant = ctx.GetParticipant()
+	msg.QuotedRemoteJID = ctx.GetRemoteJID()
+}
+
+func NewWhatsAppClient(storeDir string, onMessage func(msg IncomingMessage)) (*WhatsAppClient, error) {
+	if err := os.MkdirAll(storeDir, 0755); err != nil {
+		return nil, fmt.Errorf("mkdir store: %w", err)
+	}
+
+	dbPath := fmt.Sprintf("file:%s/dev.db?_foreign_keys=on", storeDir)
+	container, err := sqlstore.New(context.Background(), "sqlite3", dbPath, waLog.Stdout("DB", "ERROR", true))
+	if err != nil {
+		return nil, fmt.Errorf("sqlstore: %w", err)
+	}
+
+	deviceStore, err := container.GetFirstDevice(context.Background())
+	if err != nil {
+		deviceStore = container.NewDevice()
+	}
+
+	client := whatsmeow.NewClient(deviceStore, waLog.Stdout("WA", "ERROR", true))
+
+	wa := &WhatsAppClient{
+		client:    client,
+		container: container,
+		status:    WAStatusDisconnected,
+		onMessage: onMessage,
+	}
+
+	client.AddEventHandler(wa.eventHandler)
+
+	if client.Store.ID != nil {
+		if err = client.Connect(); err != nil {
+			log.Printf("wa-dev reconnect err: %v", err)
+		} else {
+			wa.status = WAStatusConnected
+			wa.phoneNumber = client.Store.ID.User
+			log.Printf("wa-dev reconnected (+%s)", wa.phoneNumber)
+		}
+	} else {
+		wa.status = WAStatusWaitingQR
+	}
+
+	return wa, nil
+}
+
+func (wa *WhatsAppClient) Connect() (string, error) {
+	wa.mu.Lock()
+	if wa.status == WAStatusConnected {
+		wa.mu.Unlock()
+		return "", nil
+	}
+
+	// If the previous device was logged out/deleted, the whatsmeow client is
+	// poisoned (Connect returns "invalid use of deleted device"). Rebuild a
+	// fresh device + client so a new QR can be generated without a restart.
+	if wa.needsReset {
+		wa.rebuildClientLocked()
+		wa.needsReset = false
+	}
+
+	// Saved, non-deleted session → just reconnect, no QR needed.
+	if wa.client.Store.ID != nil {
+		client := wa.client
+		wa.mu.Unlock()
+		if err := client.Connect(); err != nil {
+			return "", fmt.Errorf("reconnect: %w", err)
+		}
+		return "", nil
+	}
+
+	client := wa.client
+	wa.mu.Unlock()
+
+	qrChan, err := client.GetQRChannel(context.Background())
+	if err != nil {
+		return "", fmt.Errorf("GetQRChannel: %w", err)
+	}
+	if err = client.Connect(); err != nil {
+		return "", fmt.Errorf("connect: %w", err)
+	}
+
+	firstQR := make(chan string, 1)
+	go func() {
+		for evt := range qrChan {
+			switch evt.Event {
+			case "code":
+				png, encErr := qrcode.Encode(evt.Code, qrcode.High, 512)
+				if encErr != nil {
+					continue
+				}
+				b64 := base64.StdEncoding.EncodeToString(png)
+				wa.mu.Lock()
+				wa.latestQR = b64
+				wa.latestQRRaw = evt.Code
+				wa.mu.Unlock()
+				select {
+				case firstQR <- b64:
+				default:
+				}
+			case "success":
+				wa.mu.Lock()
+				wa.status = WAStatusConnected
+				wa.latestQR = ""
+				wa.latestQRRaw = ""
+				if client.Store.ID != nil {
+					wa.phoneNumber = client.Store.ID.User
+				}
+				wa.mu.Unlock()
+			}
+		}
+	}()
+
+	select {
+	case qr := <-firstQR:
+		return qr, nil
+	case <-time.After(30 * time.Second):
+		return "", fmt.Errorf("timeout waiting for QR")
+	}
+}
+
+// rebuildClientLocked discards the current (logged-out/poisoned) whatsmeow
+// client and creates a fresh device + client so a new QR pairing can start.
+// Caller must hold wa.mu. Safe to call after LoggedOut: the old client is
+// already disconnected, so Disconnect() (which dispatches events on another
+// goroutine) is not invoked here.
+func (wa *WhatsAppClient) rebuildClientLocked() {
+	if wa.client != nil && wa.client.IsConnected() {
+		wa.client.Disconnect()
+	}
+	deviceStore := wa.container.NewDevice()
+	client := whatsmeow.NewClient(deviceStore, waLog.Stdout("WA", "ERROR", true))
+	client.AddEventHandler(wa.eventHandler)
+	wa.client = client
+	wa.status = WAStatusWaitingQR
+	wa.latestQR = ""
+	wa.latestQRRaw = ""
+	wa.phoneNumber = ""
+}
+
+func (wa *WhatsAppClient) GetStatus() (WAStatus, string, string, string) {
+	wa.mu.RLock()
+	defer wa.mu.RUnlock()
+	return wa.status, wa.phoneNumber, wa.latestQR, wa.latestQRRaw
+}
+
+func (wa *WhatsAppClient) SendText(chatID, text string) (types.MessageID, error) {
+	if err := wa.checkConnected(); err != nil {
+		return "", err
+	}
+	jid, err := parseJID(chatID)
+	if err != nil {
+		return "", err
+	}
+	// Stop the keep-alive before sending the actual reply.
+	wa.stopTypingKeepAlive(jid)
+	resp, err := wa.client.SendMessage(context.Background(), jid, &waE2E.Message{
+		Conversation: proto.String(text),
+	})
+	return resp.ID, err
+}
+
+func (wa *WhatsAppClient) startTypingKeepAlive(chatJID types.JID) {
+	typingKey := chatJID.String()
+	if previous, loaded := wa.typingCancels.LoadAndDelete(typingKey); loaded {
+		previous.(context.CancelFunc)()
+	}
+
+	wa.mu.RLock()
+	client := wa.client
+	wa.mu.RUnlock()
+	if client == nil {
+		return
+	}
+
+	typingCtx, typingCancel := context.WithCancel(context.Background())
+	wa.typingCancels.Store(typingKey, typingCancel)
+	_ = client.SendChatPresence(
+		context.Background(),
+		chatJID,
+		types.ChatPresenceComposing,
+		types.ChatPresenceMediaText,
+	)
+	go func() {
+		ticker := time.NewTicker(typingRefreshInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-typingCtx.Done():
+				return
+			case <-ticker.C:
+				_ = client.SendChatPresence(
+					context.Background(),
+					chatJID,
+					types.ChatPresenceComposing,
+					types.ChatPresenceMediaText,
+				)
+			}
+		}
+	}()
+}
+
+func (wa *WhatsAppClient) stopTypingKeepAlive(chatJID types.JID) {
+	typingKey := chatJID.String()
+	if cancel, loaded := wa.typingCancels.LoadAndDelete(typingKey); loaded {
+		cancel.(context.CancelFunc)()
+	}
+	wa.mu.RLock()
+	client := wa.client
+	wa.mu.RUnlock()
+	if client != nil {
+		_ = client.SendChatPresence(
+			context.Background(),
+			chatJID,
+			types.ChatPresencePaused,
+			types.ChatPresenceMediaText,
+		)
+	}
+}
+
+// StartTyping starts or refreshes a composing-presence keep-alive.
+func (wa *WhatsAppClient) StartTyping(to string) error {
+	if err := wa.checkConnected(); err != nil {
+		return err
+	}
+	jid, err := parseJID(to)
+	if err != nil {
+		return err
+	}
+	wa.startTypingKeepAlive(jid)
+	return nil
+}
+
+// StopTyping stops the composing-presence keep-alive.
+func (wa *WhatsAppClient) StopTyping(to string) error {
+	jid, err := parseJID(to)
+	if err != nil {
+		return err
+	}
+	wa.stopTypingKeepAlive(jid)
+	return nil
+}
+
+func (wa *WhatsAppClient) SendContact(to, displayName, phone string) (types.MessageID, error) {
+	if err := wa.checkConnected(); err != nil {
+		return "", err
+	}
+	jid, err := parseJID(to)
+	if err != nil {
+		return "", err
+	}
+	cleanPhone := strings.TrimPrefix(strings.TrimSpace(phone), "+")
+	vcard := fmt.Sprintf("BEGIN:VCARD\nVERSION:3.0\nFN:%s\nTEL;type=CELL;type=VOICE;waid=%s:+%s\nEND:VCARD", displayName, cleanPhone, cleanPhone)
+	resp, err := wa.client.SendMessage(context.Background(), jid, &waE2E.Message{
+		ContactMessage: &waE2E.ContactMessage{
+			DisplayName: proto.String(displayName),
+			Vcard:       proto.String(vcard),
+		},
+	})
+	return resp.ID, err
+}
+
+func (wa *WhatsAppClient) SendImage(to string, imageData []byte, caption, mimetype string) (types.MessageID, error) {
+	if err := wa.checkConnected(); err != nil {
+		return "", err
+	}
+	jid, err := parseJID(to)
+	if err != nil {
+		return "", err
+	}
+	if mimetype == "" {
+		mimetype = "image/jpeg"
+	}
+	resp, err := wa.client.Upload(context.Background(), imageData, whatsmeow.MediaImage)
+	if err != nil {
+		return "", fmt.Errorf("upload image: %w", err)
+	}
+	sendResp, err := wa.client.SendMessage(context.Background(), jid, &waE2E.Message{
+		ImageMessage: &waE2E.ImageMessage{
+			Caption:       proto.String(caption),
+			Mimetype:      proto.String(mimetype),
+			URL:           proto.String(resp.URL),
+			DirectPath:    proto.String(resp.DirectPath),
+			MediaKey:      resp.MediaKey,
+			FileEncSHA256: resp.FileEncSHA256,
+			FileSHA256:    resp.FileSHA256,
+			FileLength:    proto.Uint64(resp.FileLength),
+		},
+	})
+	return sendResp.ID, err
+}
+
+func (wa *WhatsAppClient) SendDocument(to string, docData []byte, filename, caption, mimetype string) (types.MessageID, error) {
+	if err := wa.checkConnected(); err != nil {
+		return "", err
+	}
+	jid, err := parseJID(to)
+	if err != nil {
+		return "", err
+	}
+	if mimetype == "" {
+		mimetype = "application/octet-stream"
+	}
+	if filename == "" {
+		filename = "file"
+	}
+	resp, err := wa.client.Upload(context.Background(), docData, whatsmeow.MediaDocument)
+	if err != nil {
+		return "", fmt.Errorf("upload document: %w", err)
+	}
+	sendResp, err := wa.client.SendMessage(context.Background(), jid, &waE2E.Message{
+		DocumentMessage: &waE2E.DocumentMessage{
+			Caption:       proto.String(caption),
+			Mimetype:      proto.String(mimetype),
+			FileName:      proto.String(filename),
+			URL:           proto.String(resp.URL),
+			DirectPath:    proto.String(resp.DirectPath),
+			MediaKey:      resp.MediaKey,
+			FileEncSHA256: resp.FileEncSHA256,
+			FileSHA256:    resp.FileSHA256,
+			FileLength:    proto.Uint64(resp.FileLength),
+		},
+	})
+	return sendResp.ID, err
+}
+
+// ResolvePhones resolves phone numbers to their WA JIDs via IsOnWhatsApp.
+// Returns map of stripped_phone -> JID string (e.g. "628xxx" -> "9876@lid").
+func (wa *WhatsAppClient) ResolvePhones(phones []string) (map[string]string, error) {
+	wa.mu.RLock()
+	client := wa.client
+	wa.mu.RUnlock()
+	if client == nil || wa.status != WAStatusConnected {
+		return nil, fmt.Errorf("not connected")
+	}
+
+	stripped := make([]string, 0, len(phones))
+	seen := make(map[string]bool)
+	for _, p := range phones {
+		s := strings.TrimPrefix(p, "+")
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		stripped = append(stripped, s)
+	}
+
+	results, err := client.IsOnWhatsApp(context.Background(), stripped)
+	resolved := make(map[string]string)
+	if err != nil {
+		for _, s := range stripped {
+			resolved[s] = s + "@s.whatsapp.net"
+		}
+		return resolved, nil
+	}
+	for _, res := range results {
+		if res.IsIn {
+			resolved[res.Query] = res.JID.String()
+		} else {
+			resolved[res.Query] = res.Query + "@s.whatsapp.net"
+		}
+	}
+	for _, s := range stripped {
+		if _, found := resolved[s]; !found {
+			resolved[s] = s + "@s.whatsapp.net"
+		}
+	}
+	return resolved, nil
+}
+
+func (wa *WhatsAppClient) checkConnected() error {
+	wa.mu.RLock()
+	defer wa.mu.RUnlock()
+	if wa.status != WAStatusConnected {
+		return fmt.Errorf("not connected (status: %s)", wa.status)
+	}
+	return nil
+}
+
+func (wa *WhatsAppClient) Close() {
+	wa.typingCancels.Range(func(key, value any) bool {
+		value.(context.CancelFunc)()
+		wa.typingCancels.Delete(key)
+		return true
+	})
+	if wa.client.IsConnected() {
+		wa.client.Disconnect()
+	}
+	wa.container.Close()
+}
+
+func (wa *WhatsAppClient) eventHandler(evt interface{}) {
+	switch v := evt.(type) {
+	case *events.Message:
+		wa.handleMessage(v)
+	case *events.Connected:
+		wa.mu.Lock()
+		wa.status = WAStatusConnected
+		wa.latestQR = ""
+		if wa.client.Store.ID != nil {
+			wa.phoneNumber = wa.client.Store.ID.User
+		}
+		wa.mu.Unlock()
+		log.Printf("wa-dev connected (+%s)", wa.phoneNumber)
+	case *events.Disconnected:
+		wa.mu.Lock()
+		wa.status = WAStatusDisconnected
+		wa.mu.Unlock()
+		log.Printf("wa-dev disconnected")
+	case *events.LoggedOut:
+		log.Printf("wa-dev logged out (reason: %v)", v.Reason)
+		wa.mu.Lock()
+		wa.status = WAStatusDisconnected
+		wa.latestQR = ""
+		wa.phoneNumber = ""
+		// Delete poisons this device; mark for rebuild so the next Connect()
+		// creates a fresh device instead of reusing the deleted one.
+		_ = wa.client.Store.Delete(context.Background())
+		wa.needsReset = true
+		wa.mu.Unlock()
+	}
+}
+
+func (wa *WhatsAppClient) handleMessage(evt *events.Message) {
+	if evt.Info.IsFromMe || evt.Message == nil {
+		return
+	}
+	chatJID := evt.Info.Chat
+
+	// Skip broadcast and WA Status messages
+	if chatJID.Server == types.BroadcastServer || chatJID.User == "status" {
+		return
+	}
+
+	isGroup := chatJID.Server == types.GroupServer
+
+	from := "+" + evt.Info.Sender.User
+	phoneFrom := from
+	if wa.client.Store != nil && evt.Info.Sender.Server == types.HiddenUserServer {
+		if evt.Info.SenderAlt.Server == types.DefaultUserServer && evt.Info.SenderAlt.User != "" {
+			phoneFrom = "+" + evt.Info.SenderAlt.User
+			log.Printf("wa-dev resolved LID %s -> phone %s via SenderAlt", from, phoneFrom)
+		} else if pnJID, err := wa.client.Store.LIDs.GetPNForLID(context.Background(), evt.Info.Sender.ToNonAD()); err == nil && pnJID.User != "" {
+			phoneFrom = "+" + pnJID.User
+			log.Printf("wa-dev resolved LID %s -> phone %s", from, phoneFrom)
+		} else {
+			phoneFrom = ""
+			log.Printf("wa-dev LID %s unresolved (no PN mapping yet): %v", from, err)
+		}
+	}
+
+	msg := IncomingMessage{
+		From:           from,
+		PhoneFrom:      phoneFrom,
+		ChatID:         chatJID.String(),
+		SenderAlt:      evt.Info.SenderAlt.String(),
+		AddressingMode: string(evt.Info.AddressingMode),
+		MessageID:      evt.Info.ID,
+		PushName:       evt.Info.PushName,
+		Timestamp:      evt.Info.Timestamp.Unix(),
+	}
+
+	var mentionedJIDs []string
+
+	switch {
+	case evt.Message.GetConversation() != "":
+		msg.Text = evt.Message.GetConversation()
+
+	case evt.Message.GetExtendedTextMessage() != nil:
+		ext := evt.Message.GetExtendedTextMessage()
+		msg.Text = ext.GetText()
+		if ctx := ext.GetContextInfo(); ctx != nil {
+			mentionedJIDs = ctx.GetMentionedJID()
+			applyQuotedContext(&msg, ctx)
+		}
+
+	case evt.Message.GetImageMessage() != nil:
+		img := evt.Message.GetImageMessage()
+		msg.MediaType = "image"
+		msg.MediaMimetype = img.GetMimetype()
+		msg.MediaFilename = "image" + mimeToExt(img.GetMimetype(), ".jpg")
+		raw, err := wa.client.Download(context.Background(), img)
+		if err == nil {
+			msg.MediaData = base64.StdEncoding.EncodeToString(raw)
+		} else {
+			log.Printf("[wa-dev] download image err: %v", err)
+		}
+		if ctx := img.GetContextInfo(); ctx != nil {
+			mentionedJIDs = ctx.GetMentionedJID()
+			applyQuotedContext(&msg, ctx)
+		}
+		msg.Text = img.GetCaption()
+		if msg.Text == "" {
+			msg.Text = "[Gambar]"
+		}
+
+	case evt.Message.GetDocumentMessage() != nil:
+		doc := evt.Message.GetDocumentMessage()
+		msg.MediaType = "document"
+		msg.MediaMimetype = doc.GetMimetype()
+		msg.MediaFilename = doc.GetFileName()
+		if msg.MediaFilename == "" {
+			msg.MediaFilename = "file"
+		}
+		raw, err := wa.client.Download(context.Background(), doc)
+		if err == nil {
+			msg.MediaData = base64.StdEncoding.EncodeToString(raw)
+		} else {
+			log.Printf("[wa-dev] download document err: %v", err)
+		}
+		msg.Text = doc.GetCaption()
+		if msg.Text == "" {
+			msg.Text = fmt.Sprintf("[Dokumen: %s]", doc.GetFileName())
+		}
+		if ctx := doc.GetContextInfo(); ctx != nil {
+			mentionedJIDs = ctx.GetMentionedJID()
+			applyQuotedContext(&msg, ctx)
+		}
+
+	case evt.Message.GetAudioMessage() != nil:
+		audio := evt.Message.GetAudioMessage()
+		msg.MediaMimetype = audio.GetMimetype()
+		if audio.GetPTT() {
+			msg.MediaType = "ptt" // push-to-talk / voice note
+			msg.MediaFilename = "voice.ogg"
+			msg.Text = "[Voice note]"
+		} else {
+			msg.MediaType = "audio" // file audio biasa
+			msg.MediaFilename = "audio.ogg"
+			msg.Text = "[Audio]"
+		}
+		raw, err := wa.client.Download(context.Background(), audio)
+		if err == nil {
+			msg.MediaData = base64.StdEncoding.EncodeToString(raw)
+		} else {
+			log.Printf("[wa-dev] download audio err: %v", err)
+		}
+		if ctx := audio.GetContextInfo(); ctx != nil {
+			mentionedJIDs = ctx.GetMentionedJID()
+			applyQuotedContext(&msg, ctx)
+		}
+
+	case evt.Message.GetStickerMessage() != nil:
+		sticker := evt.Message.GetStickerMessage()
+		msg.MediaType = "sticker"
+		msg.MediaMimetype = "image/webp"
+		msg.MediaFilename = "sticker.webp"
+		raw, err := wa.client.Download(context.Background(), sticker)
+		if err == nil {
+			msg.MediaData = base64.StdEncoding.EncodeToString(raw)
+		} else {
+			log.Printf("[wa-dev] download sticker err: %v", err)
+		}
+		msg.Text = "[Sticker]"
+		if ctx := sticker.GetContextInfo(); ctx != nil {
+			mentionedJIDs = ctx.GetMentionedJID()
+			applyQuotedContext(&msg, ctx)
+		}
+
+	default:
+		return
+	}
+
+	// Group messages: only process if the bot is explicitly @mentioned
+	if isGroup {
+		wa.mu.RLock()
+		storeID := wa.client.Store.ID
+		wa.mu.RUnlock()
+
+		if storeID == nil {
+			return
+		}
+
+		botUser := storeID.User
+		botLID := ""
+		if lidJID, err := wa.client.Store.LIDs.GetLIDForPN(context.Background(), *storeID); err == nil {
+			botLID = lidJID.User
+		}
+
+		mentioned := false
+		for _, jidStr := range mentionedJIDs {
+			parsed, err := types.ParseJID(jidStr)
+			if err != nil {
+				continue
+			}
+			if parsed.User == botUser || (botLID != "" && parsed.User == botLID) {
+				mentioned = true
+				break
+			}
+		}
+		if !mentioned {
+			log.Printf("[wa-dev] group msg from +%s ignored (bot not mentioned)", evt.Info.Sender.User)
+			return
+		}
+
+		// Strip the @mention tag from the text
+		msg.Text = strings.ReplaceAll(msg.Text, "@"+botUser, "")
+		msg.Text = strings.TrimSpace(msg.Text)
+		if msg.Text == "" && msg.MediaType == "" {
+			return
+		}
+	}
+
+	if msg.Text == "" && msg.MediaType == "" {
+		return
+	}
+
+	// Send typing indicator so the user sees "typing..." while AI processes.
+	_ = wa.client.SendChatPresence(context.Background(), chatJID, types.ChatPresenceComposing, types.ChatPresenceMediaText)
+
+	if wa.onMessage != nil {
+		go wa.onMessage(msg)
+	}
+}
+
+func mimeToExt(mime, fallback string) string {
+	switch {
+	case strings.Contains(mime, "png"):
+		return ".png"
+	case strings.Contains(mime, "webp"):
+		return ".webp"
+	case strings.Contains(mime, "gif"):
+		return ".gif"
+	default:
+		return fallback
+	}
+}
+
+func parseJID(s string) (types.JID, error) {
+	if strings.Contains(s, "@") {
+		parsed, err := types.ParseJID(s)
+		if err != nil {
+			return types.JID{}, fmt.Errorf("invalid JID %q: %w", s, err)
+		}
+		return parsed, nil
+	}
+	phone := strings.TrimPrefix(s, "+")
+	return types.NewJID(phone, types.DefaultUserServer), nil
+}

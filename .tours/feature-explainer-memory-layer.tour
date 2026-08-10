@@ -1,0 +1,95 @@
+{
+  "$schema": "https://aka.ms/codetour-schema",
+  "title": "Memory Layer — Cara Kerja",
+  "description": "Walkthrough lengkap sistem memory di Managed Agent Platform: dari model DB, CRUD service, tool agent, hingga injeksi ke system prompt dan auto-extraction LTM.",
+  "ref": "main",
+  "steps": [
+    {
+      "directory": "app/core/domain",
+      "title": "1. Orientasi: Pusat Memory Layer",
+      "description": "Semua logika memory terpusat di `memory_service.py`. File ini berisi CRUD, layered-memory loader, dan auto-extraction LTM. File lain di folder ini (subscription_service, agent_sop_service) tidak terlibat dalam memory runtime."
+    },
+    {
+      "file": "app/models/memory.py",
+      "line": 11,
+      "title": "2. Model DB: agent_memories",
+      "description": "**Situasi**: Tabel `agent_memories` adalah storage tunggal untuk semua memory.\n\n**Mekanisme**: Setiap baris punya 3 kolom kunci:\n- `agent_id` — memory terikat ke satu agent\n- `scope` — phone number / external_user_id pengirim. `NULL` = global agent (shared semua user, e.g. `soul`)\n- `key` / `value_data` — key-value bebas\n\nUnique constraint `(agent_id, scope, key)` memastikan satu agent + satu user + satu key = satu baris.\n\n**Gotcha**: PostgreSQL memperlakukan `NULL != NULL` di unique constraint. Untuk scope=NULL, upsert manual (SELECT dulu) diperlukan — lihat step 4."
+    },
+    {
+      "file": "app/core/engine/agent_tool_setup.py",
+      "line": 135,
+      "title": "3. Scoping: memory_scope dari session",
+      "description": "**Situasi**: Sebelum tools di-build, `memory_scope` di-resolve dari `session.external_user_id` (nomor WA / ID pengguna).\n\n**Mekanisme**: Semua operasi memory dari agent dalam sesi ini akan di-scope ke nomor WA pengirim. User A dan User B yang chat ke agent yang sama mendapat memori terpisah sepenuhnya.\n\n**Implication**: Isolasi memori per-user berjalan otomatis — agent tidak bisa mencampur ingatan dari dua user berbeda.\n\n**Gotcha**: `scope=None` (global) dipakai untuk key seperti `soul` dan `agent_blueprint` yang memang harus sama untuk semua user."
+    },
+    {
+      "file": "app/core/domain/memory_service.py",
+      "line": 74,
+      "title": "4. CRUD: upsert_memory — workaround NULL constraint",
+      "description": "**Situasi**: Fungsi inti untuk menyimpan atau update satu fact.\n\n**Mekanisme**: Ada dua jalur:\n1. `scope is None` → manual SELECT dulu, lalu UPDATE atau INSERT. Ini karena PostgreSQL tidak bisa pakai `ON CONFLICT` untuk nilai NULL.\n2. `scope != None` → `pg_insert(...).on_conflict_do_update(...)`. Atomic upsert.\n\n**Implication**: API `remember('key', 'value')` dari agent selalu melewati sini — aman dari race condition via `on_conflict_do_update`."
+    },
+    {
+      "file": "app/core/engine/tool_builder.py",
+      "line": 88,
+      "title": "5. Tools Agent: remember / recall / forget / update_daily / update_longterm",
+      "description": "**Situasi**: Lima tool yang di-inject ke setiap agent run (selalu aktif, default).\n\n**Mekanisme**:\n- `remember(key, value)` → upsert_memory(scope=phone)\n- `recall(query)` → get_memory(key), fallback list semua key jika tidak ketemu\n- `forget(key)` → delete_memory\n- `update_daily(content)` → append ke key `daily:YYYY-MM-DD` (scoped)\n- `update_longterm(content)` → append ke key `longterm` (scoped)\n\n**Gotcha**: `db_factory` di-inject via closure — setiap tool call membuka koneksi DB sendiri (`async with db_factory() as db`). Ini sengaja agar tool calls tidak berbagi transaksi dengan agent runner."
+    },
+    {
+      "file": "app/core/domain/memory_service.py",
+      "line": 202,
+      "title": "6. build_memory_context — injeksi KV biasa ke system prompt",
+      "description": "**Situasi**: Dipanggil sebelum agent run untuk mengambil semua memory scoped ke user ini.\n\n**Mekanisme**: Mengambil semua rows dari `agent_memories` (scope=phone), lalu:\n- Filter key layered (`soul`, `user_profile`, `longterm`, `daily:*`) — layer ini di-render terpisah\n- Format sisanya sebagai markdown `## Long-Term Memory\\n- key: value`\n\n**Implication**: Key yang agent simpan via `remember()` muncul otomatis di system prompt turn berikutnya sebagai blok Long-Term Memory."
+    },
+    {
+      "file": "app/core/domain/memory_service.py",
+      "line": 230,
+      "title": "7. load_layered_memory — OpenClaw-style layered memory",
+      "description": "**Situasi**: Memory layer premium untuk agent yang sudah dikonfigurasi dengan `soul` key.\n\n**Mekanisme**: Loads 4 layer:\n1. **soul** → identitas/kepribadian agent (scope=NULL, global per agent). Bisa versioned (`soul:v2`).\n2. **user_profile** → profil user ini (scope=phone). Agent nulis sendiri via `remember('user_profile', ...)`.\n3. **daily:YYYY-MM-DD** (hari ini + kemarin) → log harian, append-only via `update_daily()`.\n4. `agent_context_version` → version number untuk versioned soul.\n\n**Gotcha**: Jika agent tidak punya `soul` key, sistem tidak pakai layered rendering — jatuh ke `base_instructions` biasa."
+    },
+    {
+      "file": "app/core/engine/prompt_builder.py",
+      "line": 619,
+      "title": "8. Injeksi ke System Prompt — layered rendering",
+      "description": "**Situasi**: Semua memory di-render menjadi section di system prompt yang LLM terima.\n\n**Mekanisme**: Jika `soul` atau `user_profile` atau `daily_today` ada, sistem switch ke 'Panduan Operasional' mode:\n- `## Identitasmu` ← isi `soul` (atau `base_instructions` jika soul kosong)\n- `## User yang Kamu Bantu` ← `user_profile`\n- `## Konteks Hari Ini` ← `daily_today` + `daily_yesterday`\n- `## Memory — Cara Kerjanya` ← instruksi kapan harus recall/update\n\n**Implication**: Agent yang punya `soul` mendapat system prompt yang jauh lebih kaya dan personal.\n\n**Gotcha**: Blok `## Long-Term Memory` (dari `build_memory_context`) tetap ditambahkan terpisah di bawahnya via `memory_block`."
+    },
+    {
+      "file": "app/core/engine/agent_runner.py",
+      "line": 684,
+      "title": "9. Titik Perakitan di agent_runner",
+      "description": "**Situasi**: Di `run_agent()`, sebelum graph LangGraph dijalankan, tiga komponen memory dirakit:\n\n```\n_memory_scope = tool_setup.memory_scope      # phone number user\nmemory_block = await build_memory_context()  # KV biasa → markdown\nlayered_memory = await load_layered_memory() # soul/profile/daily\nhistory_rows = await load_history(session.id) # short-term: 20 turns\n```\n\nSemua ini dikirim ke `build_system_prompt(...)` untuk menghasilkan satu string system prompt.\n\n**Gotcha**: `_memory_scope` konsisten antara apa yang LLM lihat di system prompt dan apa yang tool `remember/recall` baca/tulis."
+    },
+    {
+      "file": "app/core/engine/prompt_builder.py",
+      "line": 500,
+      "title": "10. Short-term: Context Summary (auto setelah 10 pesan)",
+      "description": "**Situasi**: Saat percakapan sudah panjang (>= 10 pesan user), history mulai terlalu besar untuk LLM context window.\n\n**Mekanisme**: `maybe_summarize_context()` dipanggil setiap run. Jika count >= `context_summary_trigger` (default 10), LLM dipanggil untuk meringkas seluruh history menjadi max 300 kata. Ringkasan di-cache di `session.metadata_['context_summary']`, diperbarui setiap 10 pesan berikutnya.\n\n**Implication**: Ketika summary aktif, `short_term_memory_turns` dikurangi setengah (dari 20 → 10) untuk menghindari duplikasi konteks.\n\n**Gotcha**: Summary di-generate ulang setiap kelipatan 10 pesan — ada window di mana summary bisa sedikit stale."
+    },
+    {
+      "file": "app/core/engine/agent_runner.py",
+      "line": 2243,
+      "title": "11. Long-term Memory Auto-Extraction (setiap 5 pesan)",
+      "description": "**Situasi**: Di akhir setiap run, setelah response dikirim, sistem auto-extract facts dari percakapan terbaru.\n\n**Mekanisme**: Setiap `ltm_extraction_every` (default 5) pesan user, `extract_long_term_memory()` dipanggil:\n1. Ambil 5 pesan terakhir dari history\n2. Kirim ke LLM dengan prompt yang minta ekstrak facts (nama user, preferensi, task selesai, dll)\n3. LLM return JSON `{key: value, ...}`\n4. Setiap key di-prefix `auto_` dan di-upsert ke `agent_memories` (scope=phone)\n\n**Implication**: Tanpa agent pernah memanggil `remember()` sendiri, facts penting sudah tersimpan otomatis setiap 5 pesan.\n\n**Gotcha**: Seluruh fungsi di-wrap `try/except` — kegagalan extraction tidak pernah crash ke caller. Silent failure, dicatat di log `ltm.extraction.failed`."
+    },
+    {
+      "file": "app/core/domain/memory_service.py",
+      "line": 265,
+      "title": "12. extract_long_term_memory — detail LTM extractor",
+      "description": "**Situasi**: Fungsi yang dipanggil dari step 11.\n\n**Mekanisme**:\n1. Build plain-text conversation dari `recent_messages`\n2. Detect apakah ini business agent (e-commerce, toko) untuk decide apakah CV/profile key boleh di-extract\n3. Prompt LLM dengan kategori: identitas user, deployed apps, files created, user preferences, business data\n4. Parse JSON dari response (dengan fallback strip markdown fence)\n5. Upsert setiap fact sebagai `auto_{key}` (key max 80 char, value max 1000 char)\n\n**Gotcha**: Business agent detection via keyword matching (`toko`, `order`, `pelanggan`, dll) mencegah agent e-commerce menyimpan CV personal user sebagai memory."
+    },
+    {
+      "file": "app/api/memory.py",
+      "line": 1,
+      "title": "13. REST API Memory — CRUD dari luar",
+      "description": "**Situasi**: Memory juga bisa dikelola via REST API, tidak hanya oleh agent sendiri.\n\n**Mekanisme**: `GET/POST/DELETE /v1/agents/{id}/memory` memanggil `list_memories`, `upsert_memory`, `delete_memory` langsung. Scope bisa dikirim via query param `scope=phone_number`.\n\n**Implication**: Admin bisa inject context ke agent sebelum user pertama kali chat — misalnya pre-populate `user_profile` atau `soul`.\n\n**Gotcha**: API tidak melewati agent runner — tidak ada validasi schema atau size limit yang ada di tools."
+    },
+    {
+      "file": "app/config.py",
+      "line": 35,
+      "title": "14. Konfigurasi Memory — Tiga Angka Penting",
+      "description": "**Tiga parameter yang mengendalikan seluruh memory system**:\n\n```python\nshort_term_memory_turns: int = 20   # turns percakapan di context window\nltm_extraction_every: int = 5       # auto-extract LTM setiap N pesan\ncontext_summary_trigger: int = 10   # summarize history setelah N pesan\n```\n\nAliran: setiap 5 pesan → LTM extraction; setiap 10 pesan → context summary aktif + short-term dikurangi ke 10 turns.\n\n**Rekomendasi tuning**: Untuk agent yang sering dipakai (banyak pesan per sesi), turunkan `ltm_extraction_every` ke 3 agar facts lebih cepat tersimpan. Untuk agent ringan, naikkan ke 10 untuk hemat token."
+    },
+    {
+      "title": "15. Ringkasan Aliran Lengkap",
+      "description": "```\n[Turn N masuk]\n  |\n  +-- load_layered_memory()     -> soul / user_profile / daily:{today}\n  +-- build_memory_context()    -> semua KV biasa (auto_*, custom keys)\n  +-- load_history()            -> 20 turns terakhir (short-term)\n  +-- maybe_summarize_context() -> ringkasan LLM jika > 10 pesan\n  |\n  v\n  build_system_prompt()  ->  satu string ke LLM\n  |\n  v\n  Agent berjalan\n  +-- agent memanggil remember() / update_daily() / update_longterm()\n  |    -> upsert_memory(scope=phone) -> DB langsung\n  |\n[Turn N selesai]\n  +-- jika count % 5 == 0:\n       extract_long_term_memory() -> LLM extractor -> auto_{key} -> DB\n```\n\n| Layer | Key | Scope | Penulis | Kapan di-load |\n|---|---|---|---|---|\n| Soul | `soul` | NULL | Admin/builder | Setiap run |\n| User profile | `user_profile` | phone | Agent/admin | Setiap run |\n| Daily log | `daily:YYYY-MM-DD` | phone | `update_daily()` | Setiap run (2 hari) |\n| Long-term curated | `longterm` | phone | `update_longterm()` | Via `recall('longterm')` |\n| Auto-extracted | `auto_*` | phone | LTM extractor | Via `build_memory_context` |\n| KV bebas | bebas | phone | `remember()` | Via `build_memory_context` |"
+    }
+  ]
+}

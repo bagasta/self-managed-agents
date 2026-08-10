@@ -1,0 +1,5 @@
+wa-store/
+*.db
+*.db-wal
+*.db-shm
+wa-service

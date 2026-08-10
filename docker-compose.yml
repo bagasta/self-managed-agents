@@ -1,0 +1,60 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: Binatanglaut123.
+      POSTGRES_DB: managed_agents
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:Binatanglaut123.@postgres:5432/managed_agents
+      # Sandbox containers are spawned as SIBLINGS on the host daemon, so bind-mount
+      # sources are resolved against the HOST filesystem. The workspace dir must live
+      # at an IDENTICAL path on host and inside this container so both sides (app-side
+      # file ops and sibling exec/deploy) target the same directory. See SANDBOX_HOST_BASE_DIR.
+      SANDBOX_BASE_DIR: /opt/agent-sandboxes
+      SANDBOX_HOST_BASE_DIR: /opt/agent-sandboxes
+    volumes:
+      - ./:/app
+      # Identical host:container path — NOT a named volume (a named volume would make the
+      # app write into Docker-managed storage while siblings mount an empty literal host path).
+      - /opt/agent-sandboxes:/opt/agent-sandboxes
+      - /var/run/docker.sock:/var/run/docker.sock  # DinD-lite: sandbox containers are siblings on host daemon
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      bash -c "alembic upgrade head &&
+               python -m arthur_v2.seed &&
+               uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+
+volumes:
+  postgres_data:
+  redis_data:

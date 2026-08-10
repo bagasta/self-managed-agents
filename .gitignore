@@ -1,0 +1,89 @@
+# Environment
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+env/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Testing & coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Linting
+.ruff_cache/
+.mypy_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code local config
+.claude/
+
+# Scratch notes / scraped docs (not part of source)
+jawaban.md
+langchain-docs.md
+Pitching Prep/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Sandbox workspaces
+/tmp/agent-sandboxes/
+
+# Alembic
+alembic/versions/__pycache__/
+
+# Logs
+*.log
+logs/
+
+# Go compiled binaries
+wa-service/wa-service
+wa-dev-service/wa-dev-service
+
+# WhatsApp SQLite session stores (runtime data, never commit)
+wa-service/wa-store/
+wa-dev-service/wa-dev-store/
+
+# wa-dev runtime state
+wa-dev-service/connections.json
+
+# Notes / Sensitive Info (contain server IP, passwords, API keys)
+deploy/note-deploy.md
+deploy/SOP-deploy.md
+deploy_paramiko.py
+
+# SQLite DB (runtime data)
+*.db
+
+# Ad-hoc test/debug scripts (may contain hardcoded keys or local paths)
+test_*.py
+!tests/test_*.py
+check_db.py
+patch_subagents.py
+update_schema.py
+test_out.txt
+
+# System message drafts (large markdown, managed via scripts/seed_*.py)
+
+
+
+# Local DB dumps (contain data/secrets — never commit)
+db_backup_*.sql

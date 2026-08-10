@@ -1,0 +1,200 @@
+x-app-image: &app-image
+  image: managed-agents-app:${IMAGE_TAG:-latest}
+
+x-app-build: &app-build
+  build:
+    context: ..
+    dockerfile: Dockerfile
+
+x-app-runtime: &app-runtime
+  REDIS_URL: redis://redis:6379/0
+  DB_POOL_SIZE: "${DB_POOL_SIZE:-16}"
+  DB_MAX_OVERFLOW: "${DB_MAX_OVERFLOW:-16}"
+  DB_POOL_TIMEOUT_SECONDS: "${DB_POOL_TIMEOUT_SECONDS:-10}"
+  DB_POOL_RECYCLE_SECONDS: "${DB_POOL_RECYCLE_SECONDS:-1800}"
+  REDIS_MAX_CONNECTIONS: "${REDIS_MAX_CONNECTIONS:-64}"
+  REDIS_POOL_TIMEOUT_SECONDS: "${REDIS_POOL_TIMEOUT_SECONDS:-5}"
+  REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS: "${REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS:-3}"
+  REDIS_SOCKET_TIMEOUT_SECONDS: "${REDIS_SOCKET_TIMEOUT_SECONDS:-10}"
+  REDIS_HEALTH_CHECK_INTERVAL_SECONDS: "${REDIS_HEALTH_CHECK_INTERVAL_SECONDS:-30}"
+  MAX_CONCURRENT_AGENT_RUNS: "${MAX_CONCURRENT_AGENT_RUNS:-24}"
+
+services:
+  api:
+    <<: [*app-image, *app-build]
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 60s
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+        --limit-concurrency "$${API_LIMIT_CONCURRENCY:-128}"
+        --backlog "$${API_BACKLOG:-2048}"
+        --timeout-keep-alive "$${API_KEEP_ALIVE_SECONDS:-5}"
+        --timeout-graceful-shutdown "$${API_GRACEFUL_SHUTDOWN_SECONDS:-45}"
+    env_file:
+      - .env.prod
+    environment:
+      <<: *app-runtime
+      WA_SERVICE_URL: http://wa-service:8080
+      WA_DEV_SERVICE_URL: http://wa-dev-service:8081
+      API_LIMIT_CONCURRENCY: "${API_LIMIT_CONCURRENCY:-128}"
+      API_BACKLOG: "${API_BACKLOG:-2048}"
+      API_KEEP_ALIVE_SECONDS: "${API_KEEP_ALIVE_SECONDS:-5}"
+      API_GRACEFUL_SHUTDOWN_SECONDS: "${API_GRACEFUL_SHUTDOWN_SECONDS:-45}"
+      EMBEDDED_SCHEDULER_ENABLED: "false"
+      # Arthur V1 is retired. Only the separately seeded `arthur_v2` system
+      # agent is allowed to execute builder actions in production.
+      ARTHUR_LEGACY_ENABLED: "${ARTHUR_LEGACY_ENABLED:-false}"
+    volumes:
+      - /tmp/agent-sandboxes:/tmp/agent-sandboxes
+      - /var/run/docker.sock:/var/run/docker.sock
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - internal
+      - root_default
+    depends_on:
+      redis:
+        condition: service_healthy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.managed-agents.rule=Host(`managed-agent.chiefaiofficer.id`)"
+      - "traefik.http.routers.managed-agents.entrypoints=web,websecure"
+      - "traefik.http.routers.managed-agents.tls=true"
+      - "traefik.http.routers.managed-agents.tls.certresolver=mytlschallenge"
+      - "traefik.http.services.managed-agents.loadbalancer.server.port=8000"
+      - "traefik.docker.network=root_default"
+
+  scheduler:
+    <<: *app-image
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 60s
+    command: python -m app.scheduler_worker
+    env_file:
+      - .env.prod
+    environment:
+      <<: *app-runtime
+      WA_SERVICE_URL: http://wa-service:8080
+      WA_DEV_SERVICE_URL: http://wa-dev-service:8081
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - internal
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.scheduler_healthcheck"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    init: true
+    restart: unless-stopped
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --save 60 1
+    stop_grace_period: 30s
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - redis_data:/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  wa-service:
+    build:
+      context: ../wa-service
+      dockerfile: Dockerfile
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 45s
+    environment:
+      PORT: "8080"
+      PYTHON_WEBHOOK_URL: http://api:8000/v1/channels/wa/incoming
+      WEBHOOK_MAX_IN_FLIGHT: "${WA_SERVICE_WEBHOOK_MAX_IN_FLIGHT:-48}"
+      WA_STORE_DIR: /data/wa-store
+    volumes:
+      - wa_store:/data/wa-store
+    networks:
+      - internal   # hanya akses internal, tidak expose ke internet langsung
+
+  wa-dev-service:
+    build:
+      context: ../wa-dev-service
+      dockerfile: Dockerfile
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 45s
+    env_file:
+      - .env.prod
+    environment:
+      PORT: "8081"
+      WA_DEV_STORE_DIR: /data/wa-dev-store
+      MAIN_API_URL: http://api:8000
+      AGENT_MAX_IN_FLIGHT: "${WA_DEV_AGENT_MAX_IN_FLIGHT:-48}"
+      CONNECTIONS_FILE: /data/wa-dev-store/connections.json
+    volumes:
+      - wa_dev_store:/data/wa-dev-store
+    networks:
+      - internal
+      - root_default
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.wa-dev.rule=Host(`managed-agent.chiefaiofficer.id`) && PathPrefix(`/wa-dev`)"
+      - "traefik.http.routers.wa-dev.entrypoints=web,websecure"
+      - "traefik.http.routers.wa-dev.tls=true"
+      - "traefik.http.routers.wa-dev.tls.certresolver=mytlschallenge"
+      - "traefik.http.routers.wa-dev.middlewares=wa-dev-strip"
+      - "traefik.http.middlewares.wa-dev-strip.stripprefix.prefixes=/wa-dev"
+      - "traefik.http.services.wa-dev.loadbalancer.server.port=8081"
+      - "traefik.docker.network=root_default"
+
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    init: true
+    restart: unless-stopped
+    env_file:
+      - .env.prod
+    environment:
+      # Pgbouncer needs to know where to route
+      DB_HOST: host.docker.internal
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 1000
+      DEFAULT_POOL_SIZE: 30
+      RESERVE_POOL_SIZE: 10
+      RESERVE_POOL_TIMEOUT: 3
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - internal
+
+volumes:
+  wa_store:
+  wa_dev_store:
+  redis_data:       # persistent Redis data (survives restart)
+
+networks:
+  internal:
+    driver: bridge
+    # Network isolation: postgres tidak di-expose, hanya api yang perlu akses
+  root_default:
+    external: true
