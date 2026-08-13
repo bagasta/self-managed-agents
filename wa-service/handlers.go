@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -196,6 +197,10 @@ func (h *Handlers) sendMessage(w http.ResponseWriter, r *http.Request) {
 	messageID, err := h.dm.SendMessage(deviceID, req.To, req.Message)
 	if err != nil {
 		log.Printf("[%s] send FAILED → %s: %v", deviceID, req.To, err)
+		if errors.Is(err, ErrTestTargetBlocked) {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

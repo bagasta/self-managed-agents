@@ -566,6 +566,10 @@ def build_arthur_v2_tools(
             "sandbox": bool(enable_deploy),
             "deploy": bool(enable_deploy),
             "scheduler": scheduler_enabled,
+            # Arthur-created assistants may receive knowledge after creation.
+            # Keep retrieval enabled so an owner-provided FAQ/SOP is available
+            # during the next customer turn instead of being ignored.
+            "rag": True,
             "assistant_profile": {
                 "kind": normalized_kind,
                 "workflow": workflow_data,

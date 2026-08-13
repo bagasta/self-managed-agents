@@ -54,6 +54,11 @@ type DeviceManager struct {
 	webhookSlots  chan struct{}
 	storeDir      string
 	typingCancels sync.Map // key: "deviceID:chatJID" → context.CancelFunc
+	// Test-only guards are intentionally inactive unless a caller constructs a
+	// manager with testConfig.Enabled. They keep the test harness from ever
+	// targeting an arbitrary WhatsApp recipient.
+	testConfig TestModeConfig
+	testInbox  *TestInbox
 }
 
 func newPythonWebhookClient() *http.Client {
@@ -390,6 +395,9 @@ func (dm *DeviceManager) GetPairingCode(deviceID, phone string) (string, error) 
 
 // SendMessage sends a text message to a WhatsApp number.
 func (dm *DeviceManager) SendMessage(deviceID, to, text string) (types.MessageID, error) {
+	if dm.testConfig.Enabled && !dm.testConfig.allowsTarget(to) {
+		return "", ErrTestTargetBlocked
+	}
 	dm.mu.RLock()
 	info, ok := dm.devices[deviceID]
 	dm.mu.RUnlock()
@@ -1037,22 +1045,26 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 	}
 	data, _ := json.Marshal(payload)
 
-	go func() {
-		dm.webhookSlots <- struct{}{}
-		defer func() { <-dm.webhookSlots }()
+	go dm.forwardWebhook(data, deviceID, from, chatID, chatJID)
+}
 
-		resp, err := dm.httpClient.Post(dm.pythonWebhook, "application/json", bytes.NewReader(data))
-		if err != nil {
-			log.Printf("[%s] forward to python err: %v", deviceID, err)
-			dm.stopTypingKeepAlive(deviceID, chatJID)
-			return
-		}
-		_, _ = io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode >= 400 {
-			log.Printf("[%s] python webhook returned HTTP %d for msg from %s (chat: %s)", deviceID, resp.StatusCode, from, chatID)
-		} else {
-			log.Printf("[%s] forwarded msg from %s (chat: %s) to python", deviceID, from, chatID)
-		}
-	}()
+// forwardWebhook is kept separate from WhatsApp event parsing so the same
+// bounded webhook path can be exercised without creating live WA events.
+func (dm *DeviceManager) forwardWebhook(data []byte, deviceID, from, chatID string, chatJID types.JID) {
+	dm.webhookSlots <- struct{}{}
+	defer func() { <-dm.webhookSlots }()
+
+	resp, err := dm.httpClient.Post(dm.pythonWebhook, "application/json", bytes.NewReader(data))
+	if err != nil {
+		log.Printf("[%s] forward to python err: %v", deviceID, err)
+		dm.stopTypingKeepAlive(deviceID, chatJID)
+		return
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		log.Printf("[%s] python webhook returned HTTP %d for msg from %s (chat: %s)", deviceID, resp.StatusCode, from, chatID)
+		return
+	}
+	log.Printf("[%s] forwarded msg from %s (chat: %s) to python", deviceID, from, chatID)
 }

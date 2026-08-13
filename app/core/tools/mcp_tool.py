@@ -233,12 +233,13 @@ async def mcp_client_context(
 
     try:
         from langchain_mcp_adapters.client import MultiServerMCPClient
-    except ImportError:
+    except ImportError as exc:
         logger.error(
             "mcp_tools.import_error",
-            hint="Run: pip install langchain-mcp-adapters mcp",
+            error=str(exc),
+            hint="Check compatible langchain-mcp-adapters and mcp package versions.",
         )
-        yield [], {s: "langchain-mcp-adapters not installed" for s in servers}
+        yield [], {s: "MCP client dependency is unavailable or incompatible" for s in servers}
         return
 
     server_map = _build_server_map(servers)

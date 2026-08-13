@@ -4,6 +4,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -12,6 +14,62 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return fn(req)
+}
+
+func TestAgentForwardingLimitsOneHundredConcurrentUsers(t *testing.T) {
+	const total = 100
+	const limit = 48
+	t.Setenv("AGENT_MAX_IN_FLIGHT", "48")
+
+	router := NewRouter("http://main-api.invalid", "test-key", nil, "", "")
+	defer router.Close()
+	block := make(chan struct{})
+	started := make(chan struct{}, total)
+	var current int32
+	var maximum int32
+	router.agentClient = &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		now := atomic.AddInt32(&current, 1)
+		for {
+			seen := atomic.LoadInt32(&maximum)
+			if now <= seen || atomic.CompareAndSwapInt32(&maximum, seen, now) {
+				break
+			}
+		}
+		started <- struct{}{}
+		<-block
+		atomic.AddInt32(&current, -1)
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"status":"ok"}`)), Header: make(http.Header)}, nil
+	})}
+
+	var wg sync.WaitGroup
+	for i := 0; i < total; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			router.forwardToAgent("qa-agent", IncomingMessage{From: "qa-user", ChatID: "qa-chat-" + string(rune(i))})
+		}(i)
+	}
+	for i := 0; i < limit; i++ {
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatal("agent forwards did not reach the configured concurrency")
+		}
+	}
+	if got := atomic.LoadInt32(&maximum); got != limit {
+		t.Fatalf("expected %d in-flight agent forwards, got %d", limit, got)
+	}
+	close(block)
+	finished := make(chan struct{})
+	go func() { wg.Wait(); close(finished) }()
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("all queued agent forwards should finish")
+	}
+	if got := atomic.LoadInt32(&maximum); got > limit {
+		t.Fatalf("agent forwarding concurrency exceeded limit: %d > %d", got, limit)
+	}
 }
 
 func TestRouterUsesSharedBoundedHTTPTransport(t *testing.T) {

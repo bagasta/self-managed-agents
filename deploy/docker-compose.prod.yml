@@ -30,6 +30,8 @@ services:
       - -c
       - >-
         exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+        --log-level info
+        --access-log
         --limit-concurrency "$${API_LIMIT_CONCURRENCY:-128}"
         --backlog "$${API_BACKLOG:-2048}"
         --timeout-keep-alive "$${API_KEEP_ALIVE_SECONDS:-5}"
