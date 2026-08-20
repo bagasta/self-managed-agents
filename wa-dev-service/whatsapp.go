@@ -25,9 +25,10 @@ import (
 type WAStatus string
 
 const (
-	WAStatusWaitingQR    WAStatus = "waiting_qr"
-	WAStatusConnected    WAStatus = "connected"
-	WAStatusDisconnected WAStatus = "disconnected"
+	WAStatusWaitingQR     WAStatus = "waiting_qr"
+	WAStatusConnected     WAStatus = "connected"
+	WAStatusDisconnected  WAStatus = "disconnected"
+	typingRefreshInterval          = 4 * time.Second
 )
 
 type IncomingMessage struct {
@@ -51,15 +52,16 @@ type IncomingMessage struct {
 }
 
 type WhatsAppClient struct {
-	mu          sync.RWMutex
-	client      *whatsmeow.Client
-	container   *sqlstore.Container
-	status      WAStatus
-	phoneNumber string
-	latestQR    string
-	latestQRRaw string // raw QR code text for terminal rendering
-	onMessage   func(msg IncomingMessage)
-	needsReset  bool // device was logged out/deleted; client must be rebuilt before next pair
+	mu            sync.RWMutex
+	client        *whatsmeow.Client
+	container     *sqlstore.Container
+	status        WAStatus
+	phoneNumber   string
+	latestQR      string
+	latestQRRaw   string // raw QR code text for terminal rendering
+	onMessage     func(msg IncomingMessage)
+	needsReset    bool // device was logged out/deleted; client must be rebuilt before next pair
+	typingCancels sync.Map
 }
 
 func quotedMessageText(ctx *waE2E.ContextInfo) string {
@@ -253,12 +255,93 @@ func (wa *WhatsAppClient) SendText(chatID, text string) (types.MessageID, error)
 	if err != nil {
 		return "", err
 	}
-	// Stop typing indicator before sending the actual reply.
-	_ = wa.client.SendChatPresence(context.Background(), jid, types.ChatPresencePaused, types.ChatPresenceMediaText)
+	// Stop the keep-alive before sending the actual reply.
+	wa.stopTypingKeepAlive(jid)
 	resp, err := wa.client.SendMessage(context.Background(), jid, &waE2E.Message{
 		Conversation: proto.String(text),
 	})
 	return resp.ID, err
+}
+
+func (wa *WhatsAppClient) startTypingKeepAlive(chatJID types.JID) {
+	typingKey := chatJID.String()
+	if previous, loaded := wa.typingCancels.LoadAndDelete(typingKey); loaded {
+		previous.(context.CancelFunc)()
+	}
+
+	wa.mu.RLock()
+	client := wa.client
+	wa.mu.RUnlock()
+	if client == nil {
+		return
+	}
+
+	typingCtx, typingCancel := context.WithCancel(context.Background())
+	wa.typingCancels.Store(typingKey, typingCancel)
+	_ = client.SendChatPresence(
+		context.Background(),
+		chatJID,
+		types.ChatPresenceComposing,
+		types.ChatPresenceMediaText,
+	)
+	go func() {
+		ticker := time.NewTicker(typingRefreshInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-typingCtx.Done():
+				return
+			case <-ticker.C:
+				_ = client.SendChatPresence(
+					context.Background(),
+					chatJID,
+					types.ChatPresenceComposing,
+					types.ChatPresenceMediaText,
+				)
+			}
+		}
+	}()
+}
+
+func (wa *WhatsAppClient) stopTypingKeepAlive(chatJID types.JID) {
+	typingKey := chatJID.String()
+	if cancel, loaded := wa.typingCancels.LoadAndDelete(typingKey); loaded {
+		cancel.(context.CancelFunc)()
+	}
+	wa.mu.RLock()
+	client := wa.client
+	wa.mu.RUnlock()
+	if client != nil {
+		_ = client.SendChatPresence(
+			context.Background(),
+			chatJID,
+			types.ChatPresencePaused,
+			types.ChatPresenceMediaText,
+		)
+	}
+}
+
+// StartTyping starts or refreshes a composing-presence keep-alive.
+func (wa *WhatsAppClient) StartTyping(to string) error {
+	if err := wa.checkConnected(); err != nil {
+		return err
+	}
+	jid, err := parseJID(to)
+	if err != nil {
+		return err
+	}
+	wa.startTypingKeepAlive(jid)
+	return nil
+}
+
+// StopTyping stops the composing-presence keep-alive.
+func (wa *WhatsAppClient) StopTyping(to string) error {
+	jid, err := parseJID(to)
+	if err != nil {
+		return err
+	}
+	wa.stopTypingKeepAlive(jid)
+	return nil
 }
 
 func (wa *WhatsAppClient) SendContact(to, displayName, phone string) (types.MessageID, error) {
@@ -398,6 +481,11 @@ func (wa *WhatsAppClient) checkConnected() error {
 }
 
 func (wa *WhatsAppClient) Close() {
+	wa.typingCancels.Range(func(key, value any) bool {
+		value.(context.CancelFunc)()
+		wa.typingCancels.Delete(key)
+		return true
+	})
 	if wa.client.IsConnected() {
 		wa.client.Disconnect()
 	}

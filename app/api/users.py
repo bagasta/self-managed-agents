@@ -265,7 +265,7 @@ async def update_user(
     if payload.email_verified is not None:
         user.email_verified = payload.email_verified
     if payload.phone_number is not None:
-        from app.core.tools.builder_identity import is_probable_lid
+        from app.core.domain.agent_ownership import is_probable_lid
 
         if is_probable_lid(payload.phone_number):
             raise HTTPException(

@@ -6,10 +6,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -48,8 +50,42 @@ type DeviceManager struct {
 	mu            sync.RWMutex
 	devices       map[string]*DeviceInfo
 	pythonWebhook string
+	httpClient    *http.Client
+	webhookSlots  chan struct{}
 	storeDir      string
 	typingCancels sync.Map // key: "deviceID:chatJID" → context.CancelFunc
+	// Test-only guards are intentionally inactive unless a caller constructs a
+	// manager with testConfig.Enabled. They keep the test harness from ever
+	// targeting an arbitrary WhatsApp recipient.
+	testConfig TestModeConfig
+	testInbox  *TestInbox
+}
+
+func newPythonWebhookClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 128
+	transport.MaxIdleConnsPerHost = 64
+	transport.MaxConnsPerHost = 128
+	transport.IdleConnTimeout = 90 * time.Second
+	transport.TLSHandshakeTimeout = 10 * time.Second
+	transport.ExpectContinueTimeout = time.Second
+	transport.ForceAttemptHTTP2 = true
+
+	return &http.Client{
+		Transport: transport,
+		// Agent runs may legitimately take several minutes. This is still finite so
+		// a broken API cannot leak webhook goroutines forever.
+		Timeout: 330 * time.Second,
+	}
+}
+
+func webhookMaxInFlight() int {
+	const fallback = 48
+	value, err := strconv.Atoi(os.Getenv("WEBHOOK_MAX_IN_FLIGHT"))
+	if err != nil || value < 1 {
+		return fallback
+	}
+	return value
 }
 
 func quotedMessageText(ctx *waE2E.ContextInfo) string {
@@ -152,6 +188,8 @@ func NewDeviceManager(pythonWebhook, storeDir string) (*DeviceManager, error) {
 	dm := &DeviceManager{
 		devices:       make(map[string]*DeviceInfo),
 		pythonWebhook: pythonWebhook,
+		httpClient:    newPythonWebhookClient(),
+		webhookSlots:  make(chan struct{}, webhookMaxInFlight()),
 		storeDir:      storeDir,
 	}
 	dm.loadExistingDevices()
@@ -165,7 +203,10 @@ func (dm *DeviceManager) CreateDevice(deviceID string) (string, error) {
 	existing, ok := dm.devices[deviceID]
 	dm.mu.RUnlock()
 
-	if ok && existing.Status == StatusConnected {
+	// A login websocket is connected while an unlinked device is waiting for a
+	// QR/pairing code. That is not a completed WhatsApp connection: only a
+	// persisted device JID proves the device has actually been linked.
+	if ok && existing.Status == StatusConnected && existing.Client.Store.ID != nil {
 		return "", nil // already connected, no QR needed
 	}
 
@@ -325,8 +366,38 @@ func (dm *DeviceManager) GetStatus(deviceID string) (DeviceStatus, string, error
 	return info.Status, info.PhoneNumber, nil
 }
 
+// GetPairingCode creates a phone-number pairing code for an unlinked device.
+// Unlike a QR image, this can be entered on the same phone that owns WhatsApp.
+func (dm *DeviceManager) GetPairingCode(deviceID, phone string) (string, error) {
+	dm.mu.RLock()
+	info, ok := dm.devices[deviceID]
+	dm.mu.RUnlock()
+	if !ok {
+		return "", fmt.Errorf("device %s not found", deviceID)
+	}
+	if info.Status == StatusConnected || info.Client.Store.ID != nil {
+		return "", fmt.Errorf("device %s already connected", deviceID)
+	}
+	if !info.Client.IsConnected() {
+		return "", fmt.Errorf("device %s is not connected to WhatsApp pairing service", deviceID)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	return info.Client.PairPhone(
+		ctx,
+		phone,
+		true,
+		whatsmeow.PairClientChrome,
+		"Chrome (Linux)",
+	)
+}
+
 // SendMessage sends a text message to a WhatsApp number.
 func (dm *DeviceManager) SendMessage(deviceID, to, text string) (types.MessageID, error) {
+	if dm.testConfig.Enabled && !dm.testConfig.allowsTarget(to) {
+		return "", ErrTestTargetBlocked
+	}
 	dm.mu.RLock()
 	info, ok := dm.devices[deviceID]
 	dm.mu.RUnlock()
@@ -482,6 +553,7 @@ func (dm *DeviceManager) Close() {
 		info.Container.Close()
 		log.Printf("[%s] disconnected on shutdown", id)
 	}
+	dm.httpClient.CloseIdleConnections()
 }
 
 // loadExistingDevices reconnects all persisted devices on startup.
@@ -552,13 +624,24 @@ func (dm *DeviceManager) makeEventHandler(deviceID string) func(interface{}) {
 		case *events.Connected:
 			dm.mu.Lock()
 			if di, ok := dm.devices[deviceID]; ok {
-				di.Status = StatusConnected
+				// Connected is also emitted for the temporary login websocket used
+				// to issue QR and phone-number pairing codes. Do not represent that
+				// as a linked device before WhatsApp has assigned a device JID.
+				if di.Client.Store.ID != nil {
+					di.Status = StatusConnected
+				} else {
+					di.Status = StatusWaitingQR
+				}
 				di.LatestQR = ""
 				if di.Client.Store.ID != nil {
 					di.PhoneNumber = di.Client.Store.ID.User
 				}
 			}
 			dm.mu.Unlock()
+		case *events.PairSuccess:
+			log.Printf("[%s] pairing completed for +%s (platform: %s)", deviceID, v.ID.User, v.Platform)
+		case *events.PairError:
+			log.Printf("[%s] pairing failed for +%s: %v", deviceID, v.ID.User, v.Error)
 		case *events.Disconnected:
 			dm.mu.Lock()
 			if di, ok := dm.devices[deviceID]; ok {
@@ -962,17 +1045,26 @@ func (dm *DeviceManager) handleIncoming(deviceID string, evt *events.Message) {
 	}
 	data, _ := json.Marshal(payload)
 
-	go func() {
-		resp, err := http.Post(dm.pythonWebhook, "application/json", bytes.NewReader(data))
-		if err != nil {
-			log.Printf("[%s] forward to python err: %v", deviceID, err)
-			return
-		}
-		resp.Body.Close()
-		if resp.StatusCode >= 400 {
-			log.Printf("[%s] python webhook returned HTTP %d for msg from %s (chat: %s)", deviceID, resp.StatusCode, from, chatID)
-		} else {
-			log.Printf("[%s] forwarded msg from %s (chat: %s) to python", deviceID, from, chatID)
-		}
-	}()
+	go dm.forwardWebhook(data, deviceID, from, chatID, chatJID)
+}
+
+// forwardWebhook is kept separate from WhatsApp event parsing so the same
+// bounded webhook path can be exercised without creating live WA events.
+func (dm *DeviceManager) forwardWebhook(data []byte, deviceID, from, chatID string, chatJID types.JID) {
+	dm.webhookSlots <- struct{}{}
+	defer func() { <-dm.webhookSlots }()
+
+	resp, err := dm.httpClient.Post(dm.pythonWebhook, "application/json", bytes.NewReader(data))
+	if err != nil {
+		log.Printf("[%s] forward to python err: %v", deviceID, err)
+		dm.stopTypingKeepAlive(deviceID, chatJID)
+		return
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		log.Printf("[%s] python webhook returned HTTP %d for msg from %s (chat: %s)", deviceID, resp.StatusCode, from, chatID)
+		return
+	}
+	log.Printf("[%s] forwarded msg from %s (chat: %s) to python", deviceID, from, chatID)
 }

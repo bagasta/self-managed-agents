@@ -594,9 +594,9 @@
 
       <!-- ═══════════════════════════ ARTHUR BUILDER ═══════════════════════════ -->
       <div class="section" id="sec-arthur">
-        <div class="section-title">🏗️ Arthur — Agent Builder</div>
+        <div class="section-title">🏗️ Arthur V2 — Agent Builder</div>
         <p class="text-muted" style="margin-bottom:16px">
-          Manage Arthur (system agent). Setup instruksi, hubungkan ke WhatsApp, dan chat langsung untuk testing.
+          Kelola Arthur V2 (system agent). Setup instruksi, hubungkan nomor WhatsApp dedicated lewat QR, dan chat langsung untuk testing.
         </p>
 
         <!-- ── Status & Quick Actions ── -->
@@ -604,7 +604,8 @@
 
           <div class="card" style="margin:0">
             <div class="card-title">⚡ Status Arthur
-              <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="arthurLoad()">🔄 Refresh</button>
+              <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="ensureArthurV2()">↻ Sync V2</button>
+              <button class="btn btn-ghost btn-sm" onclick="arthurLoad()">🔄 Refresh</button>
             </div>
             <div id="arthur-status-panel">
               <div class="empty-state text-muted">Klik Refresh untuk cari Arthur di database</div>
@@ -614,7 +615,7 @@
           <div class="card" style="margin:0">
             <div class="card-title">📱 WhatsApp Arthur</div>
             <div id="arthur-wa-panel">
-              <div class="text-muted" style="font-size:12px;margin-bottom:12px">Hubungkan Arthur ke nomor WA dev untuk testing.</div>
+              <div class="text-muted" style="font-size:12px;margin-bottom:12px">Hubungkan Arthur V2 ke nomor WhatsApp dedicated: generate QR, lalu scan dari WhatsApp pada nomor tersebut.</div>
               <div class="btn-group" style="flex-wrap:wrap">
                 <button class="btn btn-primary btn-sm" onclick="arthurConnectWA()">🔗 Connect / Generate QR</button>
                 <button class="btn btn-ghost btn-sm" onclick="arthurCheckWAStatus()">📊 Cek Status WA</button>
@@ -668,7 +669,7 @@
           <div class="card-grid">
             <div class="form-group">
               <label>Model</label>
-              <input id="arthur-model" type="text" value="openai/gpt-4.1">
+              <input id="arthur-model" type="text" value="deepseek/deepseek-v4-flash">
             </div>
             <div class="form-group">
               <label>Temperature</label>

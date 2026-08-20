@@ -1,8 +1,21 @@
 from types import SimpleNamespace
 
 import pytest
+from pydantic import BaseModel
 
 from app.core.engine.google_mcp_support import sanitize_google_forms_tools
+
+
+class DriveAccessArgs(BaseModel):
+    file_id: str
+    action: str
+    share_with: str
+    share_type: str
+
+
+class ReadSheetArgs(BaseModel):
+    spreadsheet_id: str
+    range_name: str
 
 
 class FakeTool:
@@ -43,6 +56,48 @@ async def test_modify_sheet_values_accepts_range_alias() -> None:
     assert result == "updated"
     assert modify_sheet.calls[0]["range_name"] == "A1:B2"
     assert "range" not in modify_sheet.calls[0]
+
+
+@pytest.mark.asyncio
+async def test_existing_spreadsheet_must_be_read_before_modification() -> None:
+    read_sheet = FakeTool("read_sheet_values", "header", args_schema=ReadSheetArgs)
+    modify_sheet = FakeTool("modify_sheet_values", "updated")
+    wrapped = sanitize_google_forms_tools([read_sheet, modify_sheet], SimpleNamespace(warning=lambda *a, **k: None))
+    guarded_read = next(tool for tool in wrapped if tool.name == "read_sheet_values")
+    guarded_modify = next(tool for tool in wrapped if tool.name == "modify_sheet_values")
+
+    blocked = await guarded_modify.ainvoke(
+        {"spreadsheet_id": "sheet123", "range_name": "A2:E2", "values": [["baru"]]}
+    )
+    assert blocked.startswith("SHEETS_STRUCTURE_REQUIRED")
+    assert modify_sheet.calls == []
+
+    await guarded_read.ainvoke({"spreadsheet_id": "sheet123", "range_name": "A1:ZZ20"})
+    result = await guarded_modify.ainvoke(
+        {"spreadsheet_id": "sheet123", "range_name": "A2:E2", "values": [["baru"]]}
+    )
+    assert result == "updated"
+    assert read_sheet.calls[0]["range_name"] == "A1:ZZ20"
+    assert modify_sheet.calls[0]["range_name"] == "A2:E2"
+
+
+@pytest.mark.asyncio
+async def test_drive_access_rejects_whatsapp_number_as_user_permission() -> None:
+    drive_access = FakeTool("manage_drive_access", "shared", args_schema=DriveAccessArgs)
+    wrapped = sanitize_google_forms_tools([drive_access], SimpleNamespace(warning=lambda *a, **k: None))
+    guarded = next(tool for tool in wrapped if tool.name == "manage_drive_access")
+
+    result = await guarded.ainvoke(
+        {
+            "file_id": "sheet123",
+            "action": "grant",
+            "share_with": "628221000062",
+            "share_type": "user",
+        }
+    )
+
+    assert result.startswith("DRIVE_EMAIL_REQUIRED")
+    assert drive_access.calls == []
 
 
 @pytest.mark.asyncio

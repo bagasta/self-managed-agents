@@ -54,6 +54,7 @@ from app.core.engine.wa_reply_delivery import should_skip_whatsapp_final_reply
 from app.core.infra.wa_client import resolve_wa_phones, send_wa_message
 from app.database import get_db
 from app.models.agent import Agent
+from app.models.agent_build_draft import AgentBuildDraft
 from app.models.message import Message
 from app.models.session import Session
 
@@ -116,6 +117,19 @@ def _is_wa_owner_sender(agent: Agent, *sender_ids: str | None) -> bool:
     return False
 
 
+def _is_arthur_system_agent(agent: Agent) -> bool:
+    """Arthur is the platform control plane, not a customer-facing agent.
+
+    Its owner can send several short build instructions in succession, so the
+    per-customer spam auto-stop must remain limited to assistants created for
+    users. Do not infer this from the generic ``builder`` capability: only the
+    explicit system plugin marks Arthur itself.
+    """
+    config = getattr(agent, "tools_config", None)
+    plugin = config.get("system_plugin") if isinstance(config, dict) else None
+    return plugin in {"arthur_v2", "arthur_legacy"}
+
+
 def _label_owner_wa_message(
     *,
     message: str,
@@ -153,6 +167,15 @@ def _wa_dev_virtual_device_id(agent_id: uuid.UUID | str) -> str:
 
 def _is_wa_dev_disconnect_command(message: str | None) -> bool:
     return str(message or "").strip().lower() in _WA_DEV_DISCONNECT_COMMANDS
+
+
+def _is_passive_deploy_acknowledgement(agent: Agent, message: str | None) -> bool:
+    """Keep an in-flight website deploy running when the user only acknowledges it."""
+    config = getattr(agent, "tools_config", None)
+    if not isinstance(config, dict) or not bool(config.get("deploy")):
+        return False
+    normalized = sanitize_user_input(message or "").strip().lower().rstrip(".!?")
+    return normalized in {"ok", "oke", "sip", "iya", "ya", "lanjut", "lanjutin", "teruskan"}
 
 
 async def _load_agent_by_id(agent_id: uuid.UUID | str | None, db: AsyncSession) -> Agent | None:
@@ -968,6 +991,11 @@ def _is_low_information_wa_text(message: str | None) -> bool:
     text = sanitize_user_input(message or "").strip()
     if not text or text.startswith("/"):
         return False
+    # A one-digit answer is a normal response to ratings, quantities, menu
+    # choices, and OTP-style questions.  Do not let the anti-spam shortcut
+    # swallow valid survey answers such as "5".
+    if text.isdigit():
+        return False
     return len(text) == 1
 
 
@@ -1422,6 +1450,14 @@ async def wa_dev_claim_code(
     if not agent:
         raise HTTPException(status_code=404, detail="Kode tidak ditemukan atau sudah tidak aktif")
 
+    # A valid reusable trial code is not enough: the target agent must still be
+    # runnable. Without this guard the Go router persists a phone->agent route,
+    # replies "Berhasil switch", then the first customer message is rejected by
+    # the runtime quota gate as expired.
+    quota_check = await check_agent_quota(agent, db)
+    if not quota_check.allowed:
+        raise HTTPException(status_code=409, detail=quota_check.user_message)
+
     virtual_device_id = _wa_dev_virtual_device_id(agent.id)
     if body.phone or body.chat_id:
         reply_target = body.chat_id or body.phone or ""
@@ -1569,6 +1605,9 @@ async def incoming_message(
     # --- /reset intercept ---
     if not is_operator and user_message.strip().lower() == "/reset":
         await db.execute(delete(Message).where(Message.session_id == session.id))
+        await db.execute(
+            delete(AgentBuildDraft).where(AgentBuildDraft.session_id == session.id)
+        )
         session.metadata_ = {}
         db.add(session)
         await db.commit()
@@ -1626,7 +1665,7 @@ async def incoming_message(
                     turn_generation=turn_generation,
                 )
                 return {"status": "stale_ignored", "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
-            if not is_operator:
+            if not is_operator and not _is_arthur_system_agent(agent):
                 await db.refresh(session, attribute_names=["ai_disabled"])
                 if getattr(session, "ai_disabled", False):
                     log.info("channels.incoming.ai_disabled_after_wait", session_id=str(session_id))
@@ -1734,6 +1773,7 @@ async def wa_incoming(
     if not agent:
         log.warning("wa_incoming.agent_not_found")
         raise HTTPException(status_code=404, detail="No agent found for this WhatsApp device")
+    _is_arthur_system = _is_arthur_system_agent(agent)
 
     # phone_from: phone number yang sudah di-resolve dari LID oleh Go wa-service.
     # Untuk akun LID: body.from_ bisa berisi LID/JID, body.phone_from berisi phone number asli.
@@ -1934,6 +1974,20 @@ async def wa_incoming(
             quoted_stanza_id=body.quoted_stanza_id,
         )
 
+    # Clear a historical auto-stop from Arthur sessions. New Arthur turns skip
+    # this guard entirely; user-created assistants still retain it.
+    if _is_arthur_system and getattr(session, "ai_disabled", False):
+        metadata = dict(session.metadata_ or {})
+        metadata.pop("spam_auto_disabled", None)
+        metadata.pop("spam_case_id", None)
+        metadata.pop("spam_count", None)
+        metadata.pop("spam_window_seconds", None)
+        session.metadata_ = metadata
+        session.ai_disabled = False
+        db.add(session)
+        await db.commit()
+        log.info("wa_incoming.arthur_ai_guard_cleared", session_id=str(session.id))
+
     if not _is_operator and _operator_identity and getattr(session, "ai_disabled", False):
         await _reactivate_disabled_session_for_owner_turn(
             agent=agent,
@@ -2020,7 +2074,7 @@ async def wa_incoming(
         elif forwarded is not None:
             return forwarded
 
-    if not _is_operator and not getattr(session, "ai_disabled", False):
+    if not _is_operator and not _is_arthur_system and not getattr(session, "ai_disabled", False):
         spam_window_seconds = 60
         is_spam, spam_count = await check_wa_spam_window(
             agent_id=str(agent.id),
@@ -2060,7 +2114,7 @@ async def wa_incoming(
             }
 
     # 4.5. Fitur 2 — cek ai_disabled (hanya untuk non-operator)
-    if not _is_operator and getattr(session, "ai_disabled", False):
+    if not _is_operator and not _is_arthur_system and getattr(session, "ai_disabled", False):
         log.info("wa_incoming.ai_disabled", session_id=str(session.id))
         await _stop_customer_typing(body.device_id, session, log)
         return {"status": "ai_disabled"}
@@ -2100,12 +2154,24 @@ async def wa_incoming(
         return {"status": "media_payload_missing", "reply": reply, "run_id": "", "steps": [], "messages_to_user": [reply]}
 
     if body.media_type and body.media_data:
+        _arthur_runtime_cfg = (
+            agent.tools_config.get("arthur_runtime", {})
+            if isinstance(getattr(agent, "tools_config", None), dict)
+            else {}
+        )
+        _force_arthur_document_route = bool(
+            "builder" in (getattr(agent, "capabilities", None) or [])
+            and isinstance(_arthur_runtime_cfg, dict)
+            and _arthur_runtime_cfg.get("enabled")
+            and _arthur_runtime_cfg.get("document_routing")
+        )
         media_context, media_image_b64, media_image_mime, media_meta = await process_wa_media(
             media_type=body.media_type,
             media_data=body.media_data,
             media_filename=body.media_filename,
             session_id=session.id,
             logger=log,
+            arthur_model_routing=_force_arthur_document_route,
         )
         if media_meta:
             import time as _time
@@ -2143,7 +2209,13 @@ async def wa_incoming(
             await db.commit()
     elif not body.media_type:
         sess_meta = dict(session.metadata_ or {})
-        if sess_meta.pop("current_turn_media", None) is not None:
+        # Attachments are scoped to the inbound turn that delivered them. Keeping
+        # this key for later text turns makes an old sticker/document override a
+        # newer request such as "lanjutkan website".
+        if (
+            sess_meta.pop("current_turn_media", None) is not None
+            or sess_meta.pop("current_attachment", None) is not None
+        ):
             session.metadata_ = sess_meta
             db.add(session)
             await db.commit()
@@ -2224,6 +2296,7 @@ async def wa_incoming(
     from app.core.engine.agent_runner import run_agent  # deferred to avoid circular import
     from app.core.engine.session_lock import (
         cancel_active_run,
+        has_active_run,
         is_latest_session_turn,
         mark_latest_session_turn,
         register_active_task,
@@ -2243,6 +2316,13 @@ async def wa_incoming(
     session_id = session.id
     turn_generation = 0
     if not _is_operator:
+        if (
+            not body.media_type
+            and _is_passive_deploy_acknowledgement(agent, body.message)
+            and await has_active_run(session_id)
+        ):
+            log.info("wa_incoming.deploy_ack_kept_active_run", session_id=str(session_id))
+            return {"status": "active_run_continues", "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
         turn_generation = await mark_latest_session_turn(session_id)
         _prior_interrupted = await cancel_active_run(session_id)
 
@@ -2255,7 +2335,7 @@ async def wa_incoming(
                     turn_generation=turn_generation,
                 )
                 return {"status": "stale_ignored", "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
-            if not _is_operator:
+            if not _is_operator and not _is_arthur_system:
                 await db.refresh(session, attribute_names=["ai_disabled"])
                 if getattr(session, "ai_disabled", False):
                     log.info("wa_incoming.ai_disabled_after_wait", session_id=str(session_id))

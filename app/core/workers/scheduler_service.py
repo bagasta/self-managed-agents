@@ -19,6 +19,8 @@ import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import case, or_, select
 
+from app.core.infra.redis_client import get_redis
+
 logger = structlog.get_logger(__name__)
 _scheduler: AsyncIOScheduler | None = None
 
@@ -28,6 +30,39 @@ _job_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_JOBS)
 _TICK_INTERVAL_SECONDS = 10
 _RUNNING_JOB_STALE_AFTER = timedelta(minutes=15)
 _running_tasks: set[asyncio.Task] = set()
+_SCHEDULER_HEARTBEAT_KEY = "health:scheduler_worker"
+_SCHEDULER_HEARTBEAT_TTL_SECONDS = max(30, _TICK_INTERVAL_SECONDS * 4)
+
+
+async def publish_scheduler_heartbeat() -> bool:
+    """Publish a short-lived liveness marker for the standalone worker."""
+    redis = await get_redis()
+    if redis is None:
+        logger.error("scheduler_worker.heartbeat_redis_unavailable")
+        return False
+    try:
+        await redis.set(
+            _SCHEDULER_HEARTBEAT_KEY,
+            datetime.now(timezone.utc).isoformat(),
+            ex=_SCHEDULER_HEARTBEAT_TTL_SECONDS,
+        )
+        return True
+    except Exception as exc:
+        logger.error("scheduler_worker.heartbeat_failed", error=str(exc))
+        return False
+
+
+async def get_external_scheduler_health() -> str:
+    """Return ok only when the external worker refreshed its Redis heartbeat."""
+    redis = await get_redis()
+    if redis is None:
+        return "unreachable"
+    try:
+        heartbeat = await redis.get(_SCHEDULER_HEARTBEAT_KEY)
+    except Exception as exc:
+        logger.warning("scheduler_worker.health_read_failed", error=str(exc))
+        return "unreachable"
+    return "ok" if heartbeat else "stopped"
 
 
 def _track_task(task: asyncio.Task) -> None:
@@ -239,6 +274,30 @@ async def _run_heartbeat_job(job, agent_model, db) -> None:
             log.warning("heartbeat.sse_failed", error=str(bus_exc))
 
 
+def _update_job_after_delivery(job: Any, *, now: datetime, delivery_failed: bool) -> None:
+    """Apply retry/cron/one-shot state without shadowing datetime imports."""
+    if delivery_failed:
+        job.next_run_at = now + timedelta(minutes=1)
+        job.status = "active"
+        return
+    if job.cron_expr:
+        try:
+            from croniter import croniter
+
+            # Cron dievaluasi dalam WIB (UTC+7), lalu dikonversi ke UTC.
+            local_tz = timezone(timedelta(hours=7))
+            now_local = now.astimezone(local_tz)
+            next_local = croniter(job.cron_expr, now_local).get_next(datetime)
+            job.next_run_at = next_local.astimezone(timezone.utc)
+            job.status = "active"
+        except ImportError:
+            job.next_run_at = now + timedelta(hours=1)
+            job.status = "active"
+        return
+    job.status = "done"
+    job.next_run_at = None
+
+
 async def _run_job(job_id) -> None:
     """Jalankan satu scheduled job: inject payload ke agent, kirim reply ke channel."""
     from app.core.engine.agent_runner import run_agent
@@ -270,7 +329,6 @@ async def _run_job(job_id) -> None:
                 logger.error("heartbeat.error", job_id=str(job_id), error=str(exc), exc_info=True)
             finally:
                 # Update next_run
-                from datetime import timedelta
                 from croniter import croniter
                 now = datetime.now(timezone.utc)
                 job.last_run_at = now
@@ -340,26 +398,13 @@ async def _run_job(job_id) -> None:
             now = datetime.now(timezone.utc)
             job.last_run_at = now
 
+            _update_job_after_delivery(
+                job,
+                now=now,
+                delivery_failed=delivery_failed,
+            )
             if delivery_failed:
-                job.next_run_at = now + timedelta(minutes=1)
-                job.status = "active"
                 log.warning("scheduler_service.job_retry_scheduled", next_run=str(job.next_run_at))
-            elif job.cron_expr:
-                try:
-                    from croniter import croniter
-                    # Cron dievaluasi dalam WIB (UTC+7), lalu konversi ke UTC untuk disimpan
-                    local_tz = timezone(timedelta(hours=7))
-                    now_local = now.astimezone(local_tz)
-                    next_local = croniter(job.cron_expr, now_local).get_next(datetime)
-                    job.next_run_at = next_local.astimezone(timezone.utc)
-                    job.status = "active"
-                except ImportError:
-                    job.next_run_at = now + timedelta(hours=1)
-                    job.status = "active"
-            else:
-                # One-time job selesai
-                job.status = "done"
-                job.next_run_at = None
 
             await db.commit()
             log.info("scheduler_service.job_done", next_run=str(job.next_run_at))
@@ -403,10 +448,12 @@ async def _tick_with_lock() -> None:
         if not acquired:
             return  # another instance is already ticking
 
-    try:
-        await _tick()
-    finally:
-        async with AsyncSessionLocal() as db:
+        # PostgreSQL advisory locks belong to a physical connection. Keep this
+        # session checked out until the tick finishes so unlock always runs on
+        # the same connection instead of leaking a lock through the pool.
+        try:
+            await _tick()
+        finally:
             await db.execute(text("SELECT pg_advisory_unlock(12345)"))
             await db.commit()
 
@@ -428,6 +475,7 @@ async def run_scheduler_loop() -> None:
 
     while not stop_event.is_set():
         try:
+            await publish_scheduler_heartbeat()
             await _tick_with_lock()
         except Exception as exc:
             logger.error("scheduler_worker.tick_error", error=str(exc))

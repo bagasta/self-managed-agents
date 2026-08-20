@@ -1431,12 +1431,12 @@ async function arthurLoad() {
   const r = await api('GET', '/v1/agents?limit=100');
   if (!r.ok) { panel.innerHTML = `<div class="badge badge-red">Error: ${escHtml(JSON.stringify(r.data))}</div>`; return; }
   const agents = r.data.items || [];
-  const arthur = agents.find(a => a.capabilities && a.capabilities.includes('builder') && !a.is_deleted);
+  const arthur = agents.find(a => a.tools_config?.system_plugin === 'arthur_v2' && !a.is_deleted);
   if (!arthur) {
     panel.innerHTML = `
-      <div class="badge badge-yellow" style="margin-bottom:10px">⚠️ Arthur belum ada di database</div>
-      <p class="text-muted" style="font-size:11px;margin:8px 0">Jalankan seed script:</p>
-      <code style="background:var(--surface-2);padding:6px 10px;border-radius:4px;font-size:11px;display:block">python scripts/seed_arthur.py</code>`;
+      <div class="badge badge-yellow" style="margin-bottom:10px">⚠️ Arthur V2 belum ada di database</div>
+      <p class="text-muted" style="font-size:11px;margin:8px 0">Buat Arthur V2 dari dashboard, lalu hubungkan nomor WhatsApp melalui QR di panel sebelah.</p>
+      <button class="btn btn-primary btn-sm" onclick="ensureArthurV2()">✨ Buat Arthur V2</button>`;
     return;
   }
   Arthur.id = arthur.id;
@@ -1455,6 +1455,21 @@ async function arthurLoad() {
   const tc = arthur.tools_config || {};
   if (!('deploy' in tc)) tc.deploy = false;
   document.getElementById('arthur-tools').value = JSON.stringify(tc, null, 2);
+}
+
+async function ensureArthurV2() {
+  const panel = document.getElementById('arthur-status-panel');
+  panel.innerHTML = `<div class="text-muted">⏳ Menyiapkan Arthur V2...</div>`;
+  const r = await api('POST', '/v1/agents/system/arthur-v2/ensure');
+  if (!r.ok) {
+    panel.innerHTML = `<div class="badge badge-red">❌ Gagal menyiapkan Arthur V2: ${escHtml(JSON.stringify(r.data))}</div>`;
+    return;
+  }
+  Arthur.id = r.data.id;
+  Arthur.apiKey = r.data.api_key;
+  Arthur.deviceId = r.data.wa_device_id || null;
+  await loadAgents();
+  await arthurLoad();
 }
 
 async function arthurConnectWA() {

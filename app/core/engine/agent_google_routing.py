@@ -10,6 +10,7 @@ import copy
 import re
 import uuid
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import structlog
 
@@ -27,6 +28,8 @@ from app.core.engine.agent_step_utils import (
 from app.core.engine.google_mcp_support import (
     _candidate_external_user_ids,
     _fetch_google_auth_link,
+    _is_google_auth_or_scope_error,
+    _is_google_resource_not_found_error,
 )
 from app.core.utils.phone_utils import normalize_phone
 from app.models.session import Session
@@ -40,13 +43,19 @@ logger = structlog.get_logger(__name__)
 
 def _extract_auth_url_from_builder_steps(steps: list[dict[str, Any]]) -> str | None:
     for step in reversed(steps or []):
-        if step.get("tool") != "generate_google_auth_link":
-            continue
         data = _parse_step_result_json(step.get("result"))
+        google_auth = data.get("google_auth") if isinstance(data, dict) and isinstance(data.get("google_auth"), dict) else {}
         if data:
-            auth_url = data.get("auth_url") or data.get("authorization_url")
+            auth_url = (
+                data.get("auth_url")
+                or data.get("authorization_url")
+                or google_auth.get("auth_url")
+                or google_auth.get("authorization_url")
+            )
             if auth_url:
                 return str(auth_url)
+        if step.get("tool") != "generate_google_auth_link":
+            continue
         result_text = str(step.get("result") or "")
         match = re.search(r"https?://[^\s\"'<>]+", result_text)
         if match:
@@ -54,20 +63,37 @@ def _extract_auth_url_from_builder_steps(steps: list[dict[str, Any]]) -> str | N
     return None
 
 
+def _repair_partial_builder_google_auth_link(
+    final_reply: str,
+    steps: list[dict[str, Any]],
+) -> str:
+    """Restore an OAuth URL if a downstream formatter left only ``t=...``."""
+    auth_url = _extract_auth_url_from_builder_steps(steps)
+    if not auth_url:
+        return final_reply
+    token = (parse_qs(urlsplit(auth_url).query).get("t") or [""])[0].strip()
+    if not token:
+        return final_reply
+    partial = re.compile(rf"(?<![?&])\bt={re.escape(token)}\b")
+    return partial.sub(auth_url, str(final_reply or ""))
+
+
 def _builder_google_auth_agent_id(steps: list[dict[str, Any]]) -> str | None:
     if any((step or {}).get("tool") == "generate_google_auth_link" for step in steps or []):
         return None
     for step in reversed(steps or []):
-        if step.get("tool") not in {"create_agent", "update_agent"}:
-            continue
         data = _parse_step_result_json(step.get("result"))
-        if not data or data.get("success") is not True:
+        if not data or (data.get("success") is not True and data.get("ok") is not True):
             continue
+        google_auth = data.get("google_auth") if isinstance(data.get("google_auth"), dict) else {}
+        if google_auth.get("connected") is True:
+            return None
         readback = data.get("readback") if isinstance(data.get("readback"), dict) else {}
         needs_auth = (
             data.get("needs_google_auth") is True
             or data.get("google_workspace_enabled") is True
             or readback.get("tools_config_has_google_workspace") is True
+            or google_auth.get("needs_google_auth") is True
         )
         if needs_auth:
             agent_id = str(data.get("agent_id") or "").strip()
@@ -165,14 +191,14 @@ def _remove_google_workspace_mcp_server(tools_config: dict[str, Any]) -> dict[st
 def _google_workspace_customer_blocker_reply(*, notified_owner: bool) -> str:
     if notified_owner:
         return (
-            "Maaf, jadwalnya belum bisa saya finalkan otomatis sekarang. "
-            "Data pesanan Anda sudah saya catat dan sudah saya teruskan ke Owner untuk dicek. "
-            "Nanti akan dikonfirmasi kembali."
+            "Maaf, permintaan ini belum bisa saya proses otomatis karena ada kendala internal. "
+            "Kendalanya sudah saya teruskan ke Owner untuk ditangani. "
+            "Anda tidak perlu mengurus konfigurasi teknisnya."
         )
     return (
-        "Maaf, jadwalnya belum bisa saya finalkan otomatis sekarang. "
-        "Data pesanan Anda sudah saya catat, tapi saya perlu Owner mengecek sistem penjadwalan dulu. "
-        "Nanti akan dikonfirmasi kembali."
+        "Maaf, permintaan ini belum bisa saya proses otomatis karena ada kendala internal. "
+        "Owner perlu memeriksa konfigurasi agent terlebih dahulu. "
+        "Anda tidak perlu mengurus konfigurasi teknisnya."
     )
 
 
@@ -186,11 +212,82 @@ def _is_google_workspace_mcp_authorized_for_session(session: Session, agent_mode
     return sender in _normalized_agent_operator_ids(agent_model)
 
 
+def allows_delegated_google_workspace_runtime(agent_model: Any) -> bool:
+    """Whether a business agent may use its Owner-delegated Google tools for customers.
+
+    The customer's WhatsApp identity is never used to authenticate to Google.
+    This opt-in only permits the *agent* to execute its already-configured
+    workflow with the Owner's delegated credential.
+    """
+    config = getattr(agent_model, "tools_config", None)
+    config = config if isinstance(config, dict) else {}
+    mcp = config.get("mcp") if isinstance(config.get("mcp"), dict) else {}
+    servers = mcp.get("servers") if isinstance(mcp.get("servers"), dict) else mcp
+    google = servers.get("google_workspace") if isinstance(servers, dict) else None
+    return bool(isinstance(google, dict) and google.get("delegated_runtime_access") is True)
+
+
 def _google_workspace_mcp_unauthorized_reply() -> str:
     return (
         "Maaf, aksi yang terhubung ke Google Workspace hanya bisa dijalankan "
         "oleh Admin/operator agent ini."
     )
+
+
+async def _arthur_owner_notification_channel_config(
+    agent_model: Any,
+    owner_target: str,
+) -> dict[str, Any] | None:
+    """Find the Owner's latest WhatsApp session with the Arthur that built an agent."""
+    creator_id = str(getattr(agent_model, "created_by_agent_id", "") or "").strip()
+    try:
+        creator_uuid = uuid.UUID(creator_id)
+    except (TypeError, ValueError):
+        return None
+    normalized_owner = normalize_phone(owner_target)
+    if not normalized_owner:
+        return None
+
+    from sqlalchemy import select
+
+    from app.database import AsyncSessionLocal
+
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(Session)
+                .where(
+                    Session.agent_id == creator_uuid,
+                    Session.channel_type == "whatsapp",
+                )
+                .order_by(Session.updated_at.desc())
+                .limit(20)
+            )
+            for candidate in result.scalars():
+                cfg = (
+                    candidate.channel_config
+                    if isinstance(candidate.channel_config, dict)
+                    else {}
+                )
+                candidate_owner_ids = {
+                    normalize_phone(str(candidate.external_user_id or "")),
+                    normalize_phone(str(cfg.get("phone_number") or "")),
+                    normalize_phone(str(cfg.get("user_phone") or "")),
+                }
+                if normalized_owner not in candidate_owner_ids:
+                    continue
+                if not str(cfg.get("device_id") or "").strip():
+                    continue
+                if not str(cfg.get("user_phone") or "").strip():
+                    continue
+                return dict(cfg)
+    except Exception as exc:
+        logger.warning(
+            "google_workspace.arthur_owner_channel_lookup_failed",
+            creator_id=creator_id,
+            error=str(exc)[:200],
+        )
+    return None
 
 
 async def _route_google_workspace_blocker_to_owner_if_customer(
@@ -215,41 +312,120 @@ async def _route_google_workspace_blocker_to_owner_if_customer(
     if policy.is_builder:
         return reply
 
+    resource_missing = _is_google_resource_not_found_error(error_text)
     if not _is_customer_whatsapp_session(session, agent_model):
+        sender = _session_sender_phone(session)
+        if resource_missing and sender in _normalized_agent_operator_ids(agent_model):
+            agent_name = str(getattr(agent_model, "name", "") or "agent ini").strip()
+            return (
+                f"Koneksi Google untuk {agent_name} aktif, tetapi Sheet/resource yang dibutuhkan "
+                "belum ditemukan. Percobaan membuat resource pengganti otomatis juga belum berhasil. "
+                f"Buka chat Arthur dan kirim: “siapkan Google Sheet utama untuk {agent_name} sesuai tugasnya”. "
+                "Arthur akan membuat atau memilih Sheet, menyimpan ID yang valid ke agent, lalu menguji penulisannya."
+            )
+        if (
+            sender in _normalized_agent_operator_ids(agent_model)
+            and auth_url
+            and _is_google_auth_or_scope_error(error_text)
+        ):
+            owner_target = _owner_notification_target(agent_model)
+            arthur_cfg = await _arthur_owner_notification_channel_config(
+                agent_model,
+                owner_target,
+            )
+            if arthur_cfg:
+                agent_name = str(
+                    getattr(agent_model, "name", "") or "agent"
+                ).strip()
+                try:
+                    from app.core.infra.channel_service import send_message
+
+                    await send_message(
+                        channel_type="whatsapp",
+                        channel_config=arthur_cfg,
+                        text=(
+                            f"Google untuk {agent_name} perlu dihubungkan ulang.\n\n"
+                            f"Buka link autentikasi ini:\n{auth_url}\n\n"
+                            "Setelah berhasil, balas “sudah” agar proses bisa dilanjutkan."
+                        ),
+                    )
+                    log.info(
+                        "agent_run.google_auth_reconnect_notified_via_arthur",
+                        owner=normalize_phone(owner_target),
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "agent_run.google_auth_reconnect_arthur_notify_failed",
+                        owner=normalize_phone(owner_target),
+                        error=str(exc)[:200],
+                    )
         return reply
 
     cfg = session.channel_config if isinstance(session.channel_config, dict) else {}
-    device_id = str(cfg.get("device_id") or getattr(agent_model, "wa_device_id", "") or "").strip()
     owner_target = _owner_notification_target(agent_model)
+    arthur_cfg = await _arthur_owner_notification_channel_config(
+        agent_model,
+        owner_target,
+    )
+    notification_cfg = arthur_cfg or cfg
+    device_id = str(
+        notification_cfg.get("device_id")
+        or getattr(agent_model, "wa_device_id", "")
+        or ""
+    ).strip()
+    notification_target = str(
+        (
+            notification_cfg.get("user_phone")
+            if arthur_cfg
+            else owner_target
+        )
+        or ""
+    ).strip()
     notified_owner = False
 
-    if device_id and owner_target:
+    if device_id and notification_target:
         agent_name = str(getattr(agent_model, "name", "") or "agent").strip()
         sender = _session_sender_phone(session)
-        owner_text = (
-            f"Perlu tindakan Owner untuk {agent_name}.\n\n"
-            "Ada customer yang sedang dibantu, tapi aksi Google/Calendar belum bisa dijalankan karena koneksi akun perlu dicek.\n\n"
-            f"Customer: {sender or '-'}\n"
-            f"Pesan terakhir: {user_message.strip()[:500] or '-'}\n"
-            f"Error ringkas: {str(error_text or '').strip()[:500] or '-'}"
-        )
-        if auth_url:
+        if resource_missing:
+            owner_text = (
+                f"Perlu tindakan Owner untuk {agent_name}.\n\n"
+                "Koneksi Google aktif, tetapi Sheet/resource yang dibutuhkan agent belum dikonfigurasi "
+                "atau tidak ditemukan. Customer tidak diminta mengurus masalah ini.\n\n"
+                f"Customer: {sender or '-'}\n"
+                f"Pesan terakhir: {user_message.strip()[:500] or '-'}\n"
+                f"Error ringkas: {str(error_text or '').strip()[:500] or '-'}\n\n"
+                f"Buka chat Arthur dan kirim: “siapkan Google Sheet utama untuk {agent_name} sesuai tugasnya”. "
+                "Arthur harus membuat/memilih Sheet, menyimpan ID valid ke agent, dan menjalankan tes tulis."
+            )
+        else:
+            owner_text = (
+                f"Perlu tindakan Owner untuk {agent_name}.\n\n"
+                "Ada customer yang sedang dibantu, tapi aksi Google belum bisa dijalankan karena koneksi akun perlu dicek.\n\n"
+                f"Customer: {sender or '-'}\n"
+                f"Pesan terakhir: {user_message.strip()[:500] or '-'}\n"
+                f"Error ringkas: {str(error_text or '').strip()[:500] or '-'}"
+            )
+        if auth_url and not resource_missing:
             owner_text += (
                 "\n\nBuka link ini untuk hubungkan ulang Google:\n"
                 f"{auth_url}\n\n"
-                "Setelah selesai, balas customer atau minta agent melanjutkan jadwalnya."
+                "Setelah selesai, minta agent melanjutkan proses customer."
             )
-        else:
+        elif not resource_missing:
             owner_text += (
                 "\n\nLink reconnect belum berhasil dibuat otomatis. "
-                "Cek pengaturan integrasi Google agent ini, lalu lanjutkan konfirmasi ke customer."
+                "Buka chat Arthur dan minta Arthur membuat link login ulang untuk agent ini."
             )
         try:
             from app.core.infra.channel_service import send_message
 
             await send_message(
                 channel_type="whatsapp",
-                channel_config={**cfg, "user_phone": owner_target, "device_id": device_id},
+                channel_config={
+                    **notification_cfg,
+                    "user_phone": notification_target,
+                    "device_id": device_id,
+                },
                 text=owner_text,
             )
             notified_owner = True
@@ -257,6 +433,7 @@ async def _route_google_workspace_blocker_to_owner_if_customer(
                 "agent_run.google_workspace_blocker_notified_owner",
                 owner=normalize_phone(owner_target),
                 auth_url_present=bool(auth_url),
+                via_arthur=bool(arthur_cfg),
             )
         except Exception as exc:
             log.warning(
@@ -268,7 +445,7 @@ async def _route_google_workspace_blocker_to_owner_if_customer(
         log.warning(
             "agent_run.google_workspace_blocker_owner_notify_missing_target",
             device_id_present=bool(device_id),
-            owner_target_present=bool(owner_target),
+            owner_target_present=bool(notification_target),
         )
 
     return _google_workspace_customer_blocker_reply(notified_owner=notified_owner)

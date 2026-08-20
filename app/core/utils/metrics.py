@@ -14,6 +14,22 @@ agent_run_duration = Histogram(
     buckets=[1, 5, 10, 30, 60, 120, 300],
 )
 
+agent_runs_active = Gauge(
+    "agent_runs_active",
+    "Number of agent runs currently holding a runtime capacity slot",
+)
+
+agent_runs_queued = Gauge(
+    "agent_runs_queued",
+    "Number of agent runs waiting for a runtime capacity slot",
+)
+
+agent_run_queue_wait = Histogram(
+    "agent_run_queue_wait_seconds",
+    "Time spent waiting for an agent runtime capacity slot",
+    buckets=[0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10, 30, 60, 120],
+)
+
 llm_tokens_used = Counter(
     "llm_tokens_used_total",
     "Total LLM tokens consumed",

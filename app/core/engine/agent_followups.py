@@ -14,7 +14,7 @@ from app.core.engine.agent_step_utils import (
 )
 from app.core.engine.tool_builder import _is_enabled
 
-_SHARED_WORKSPACE_FILE_RE = re.compile(r"(/workspace/shared/[^\s`'\"),]+)")
+_SHARED_WORKSPACE_FILE_RE = re.compile(r"(/workspace/shared/[^\s\\`'\"),]+)")
 
 
 def _has_external_service_fallback_blocked_step(steps: list[dict[str, Any]]) -> bool:
@@ -132,6 +132,18 @@ def _needs_whatsapp_file_delivery_followup(
         return False, None
     path = _extract_shared_workspace_file_from_steps(steps, final_reply)
     if not path:
+        return False, None
+    # Subagents use url.txt as a control-plane handoff for deployed websites.
+    # It is not a customer deliverable: the public URL belongs in the text reply.
+    filename = path.rsplit("/", 1)[-1].lower()
+    if (
+        filename in {"url.txt", "deploy_url.txt", "deployment_url.txt"}
+        and _is_website_or_app_request(user_message)
+        and (
+            _has_public_url_in_text(final_reply)
+            or _has_public_url_in_steps(steps)
+        )
+    ):
         return False, None
     if not _is_whatsapp_file_delivery_request(user_message, steps, final_reply):
         return False, None
@@ -251,6 +263,15 @@ def _has_code_creation_evidence(steps: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _has_website_creation_evidence(steps: list[dict[str, Any]]) -> bool:
+    """Detect HTML/CSS output when the latest user turn is only an acknowledgement."""
+    markers = ("index.html", ".html", ".css", "<html", "<!doctype html")
+    return any(
+        any(marker in _step_text(step).lower() for marker in markers)
+        for step in steps or []
+    )
+
+
 _BUILD_PROGRESS_TOOLS = frozenset(
     {
         "plan_agent",
@@ -259,6 +280,113 @@ _BUILD_PROGRESS_TOOLS = frozenset(
         "compose_agent_soul",
     }
 )
+
+
+def _is_non_actionable_builder_greeting(user_message: str) -> bool:
+    """Return true only for a greeting that must not trigger builder work."""
+    text = " ".join(str(user_message or "").casefold().split()).strip(".,!🙏👋🙂😊")
+    return bool(
+        re.fullmatch(
+            r"(?:halo|hai|hi|hello|p|pagi|siang|sore|malam)"
+            r"(?:\s+(?:arthur|bro|sis|min|admin))?",
+            text,
+        )
+    )
+
+
+def _is_builder_informational_question(user_message: str) -> bool:
+    """Keep product/subscription explanations out of the create-agent gate."""
+    text = " ".join(str(user_message or "").casefold().split())
+    return bool(
+        re.search(
+            r"\b(?:token|kuota|subscription|langganan|paket|plan|slot)\b",
+            text,
+        )
+        or re.search(
+            r"\b(?:berapa|batas|maksimal|maximum|sisa)\b.{0,24}\bagent\b",
+            text,
+        )
+    )
+
+
+def _needs_builder_plan_completion(
+    steps: list[dict[str, Any]],
+    *,
+    is_builder: bool,
+    primary_skill: str | None,
+    workflow_state: str | None,
+    user_message: str = "",
+) -> bool:
+    """Require the deterministic planning gate on every discovery/create turn."""
+    if not is_builder or primary_skill not in {
+        "arthur-discovery",
+        "arthur-create-agent",
+    }:
+        return False
+    if workflow_state not in {
+        "idle",
+        "discovery",
+        "awaiting_confirmation",
+        "ready_to_create",
+        "creating",
+    }:
+        return False
+    # A greeting is not discovery evidence or a request to make/edit an agent.
+    # Running the recovery LLM pass here replaced a perfectly natural greeting
+    # with leaked internal text such as "saya panggil perencanaan".
+    if _is_non_actionable_builder_greeting(user_message):
+        return False
+    if _is_builder_informational_question(user_message):
+        return False
+    tool_names = {
+        str(step.get("tool", "")).strip()
+        for step in (steps or [])
+        if str(step.get("tool", "")).strip()
+    }
+    return not (
+        "plan_agent" in tool_names
+        or "create_agent" in tool_names
+        or "update_agent" in tool_names
+    )
+
+
+def _builder_plan_completion_directive() -> str:
+    return (
+        "RUNTIME GATE: turn discovery/create ini belum memanggil plan_agent. "
+        "Panggil plan_agent SEKARANG tepat satu kali menggunakan seluruh fakta canonical "
+        "dan evidence tersimpan. Jangan mengarang field. Jika hasilnya needs_clarification, "
+        "perlakukan next_question sebagai target semantik internal, bukan teks yang harus "
+        "disalin. Balas natural dalam bahasa user: maksimal satu acknowledgment singkat lalu "
+        "tepat satu pertanyaan lengkap untuk topik tersebut. Jangan menyebut plan_agent, tool, "
+        "state, evidence, atau proses internal. Jika ready, lanjutkan sesuai state contract "
+        "tanpa meminta konfirmasi ulang."
+    )
+
+
+def _builder_plan_preflight_contract(
+    *,
+    primary_skill: str | None,
+    workflow_state: str | None,
+    user_message: str = "",
+) -> str:
+    """Make the planning gate explicit before the first model pass."""
+    if not _needs_builder_plan_completion(
+        [],
+        is_builder=True,
+        primary_skill=primary_skill,
+        workflow_state=workflow_state,
+        user_message=user_message,
+    ):
+        return ""
+    return (
+        "## Mandatory Turn Contract\n"
+        "Before writing the user-facing reply, call `plan_agent` exactly once with all "
+        "canonical facts and matching user evidence available in build state. This is the "
+        "first action for this discovery/create turn. The plan result is authoritative for "
+        "whether to clarify or create, but it is not prescribed copy. If clarification is "
+        "needed, ask one natural question for its semantic learning goal in the user's "
+        "language. Never mention tools, state, evidence, or this contract."
+    )
 
 
 def _needs_builder_create_completion(
@@ -271,8 +399,13 @@ def _needs_builder_create_completion(
     Arthur (on a small model) often stops after plan_agent — e.g. to ask about
     Google — and never chains through to create_agent, leaving the user with a
     confusing "belum berhasil" loop. When that happens with no real plan/
-    entitlement block, the runtime continues the build once internally instead
-    of bouncing it back to the user.
+    entitlement block, the runtime continues the build internally instead of
+    bouncing it back to the user.
+
+    A plan that still needs clarification is deliberately excluded. Previously
+    any ``plan_agent`` call was treated as build-ready, so the continuation told
+    Arthur to invent missing details and create anyway. That turned a valid
+    discovery question into the generic "kendala sistem" fallback.
     """
     if not is_builder:
         return False
@@ -284,19 +417,59 @@ def _needs_builder_create_completion(
         return False
     if "create_agent" in tool_names or "update_agent" in tool_names:
         return False
-    # A real entitlement BLOCK is not something to silently retry. Match the
-    # actual block — NOT the word "entitlement", because plan_agent always emits
-    # a `creation_entitlement_check` field even on success (allowed=true).
-    for step in steps or []:
+    # Only the latest plan result is authoritative. A turn may legitimately
+    # contain an initial clarification result followed by a corrected ready
+    # result. Letting the older result veto the newer one leaves the build
+    # stuck in discovery even though the planning gate has already passed.
+    for step in reversed(steps or []):
+        if str(step.get("tool", "")).strip() != "plan_agent":
+            continue
         result = step.get("result")
         parsed = _parse_step_result_json(result)
-        if isinstance(parsed, dict):
-            check = parsed.get("creation_entitlement_check")
-            if isinstance(check, dict) and check.get("checked") and not check.get("allowed", True):
-                return False
+        if not isinstance(parsed, dict):
+            # Unstructured/legacy output is not enough evidence that discovery
+            # and confirmation were completed.
+            return False
+        plan_status = str(parsed.get("plan_status") or "").strip().lower()
+        if plan_status != "ready":
+            return False
+        check = parsed.get("creation_entitlement_check")
+        if isinstance(check, dict) and check.get("checked") and not check.get("allowed", True):
+            return False
         if "melebihi entitlement" in str(result or "").lower():
             return False
-    return True
+        return True
+    return False
+
+
+def _needs_builder_retryable_plan(
+    steps: list[dict[str, Any]],
+    *,
+    is_builder: bool,
+) -> bool:
+    """Return True when the latest plan failed only on transient evidence I/O."""
+    if not is_builder:
+        return False
+    for step in reversed(steps or []):
+        if str(step.get("tool", "")).strip() != "plan_agent":
+            continue
+        parsed = _parse_step_result_json(step.get("result"))
+        return bool(
+            isinstance(parsed, dict)
+            and parsed.get("retryable") is True
+            and str(parsed.get("plan_status") or "").strip().lower()
+            == "temporarily_unavailable"
+        )
+    return False
+
+
+def _builder_retryable_plan_directive() -> str:
+    return (
+        "ULANGI plan_agent SEKARANG satu kali dengan argumen dan discovery_answers yang sama. "
+        "Kegagalan sebelumnya hanya saat memverifikasi riwayat pesan. Jangan meminta user mengulang "
+        "jawaban, jangan mengubah `_evidence`, jangan mengarang detail, dan jangan create_agent kecuali "
+        "hasil plan_agent yang baru benar-benar berstatus ready."
+    )
 
 
 def _builder_create_completion_directive() -> str:
@@ -304,11 +477,126 @@ def _builder_create_completion_directive() -> str:
     return (
         "LANJUTKAN PEMBUATAN AGENT SEKARANG SAMPAI SELESAI — JANGAN BERHENTI.\n"
         "Kamu sudah merencanakan/menyusun agent tapi belum memanggil create_agent. "
+        "plan_agent sudah berstatus ready dan kebutuhan user sudah dikonfirmasi. "
         "JANGAN bertanya konfirmasi lagi, JANGAN menawarkan Google lagi, JANGAN mengulang plan_agent. "
-        "Langsung jalankan berurutan: compose_agent_blueprint (jika belum) -> compose_agent_instructions -> "
-        "validate_agent_config -> create_agent, memakai konteks bisnis yang sudah ada. "
-        "Kalau ada detail yang belum lengkap, pakai asumsi wajar dan tandai untuk direview nanti — "
-        "jangan berhenti untuk bertanya. Setelah create_agent sukses, balas singkat dan natural bahwa agennya sudah jadi."
+        "Langsung jalankan berurutan: compose_agent_blueprint (jika belum) -> "
+        "compose_agent_operating_manual -> compose_agent_instructions -> validate_agent_config -> "
+        "compose_agent_soul -> create_agent SATU KALI -> verify_agent, memakai BuildSpec/discovery_answers "
+        "canonical yang sama pada setiap langkah. "
+        "DILARANG menambah asumsi atau detail yang tidak pernah diberikan user; gunakan hanya discovery_answers "
+        "yang sudah dikonfirmasi. Jika create_agent gagal, ikuti required action dari error; jangan mengulang "
+        "payload yang sama kecuali retryable=true, dan dalam kasus itu maksimal satu kali. Jangan menurunkan "
+        "capability agar lolos. Setelah create_agent sukses, balas "
+        "singkat sesuai status verify: dibuat, setup pending, atau siap."
+    )
+
+
+def _pending_builder_verify_agent_id(
+    steps: list[dict[str, Any]],
+    *,
+    is_builder: bool,
+) -> str | None:
+    """Return the created agent id only when no later verify step exists."""
+    if not is_builder:
+        return None
+    latest_create_index = -1
+    agent_id = ""
+    for index, step in enumerate(steps or []):
+        if str(step.get("tool") or "").strip() != "create_agent":
+            continue
+        parsed = _parse_step_result_json(step.get("result"))
+        if not isinstance(parsed, dict) or parsed.get("success") is not True:
+            continue
+        candidate = str(parsed.get("agent_id") or "").strip()
+        if candidate:
+            latest_create_index = index
+            agent_id = candidate
+    if latest_create_index < 0:
+        return None
+    if any(
+        str(step.get("tool") or "").strip() == "verify_agent"
+        for step in (steps or [])[latest_create_index + 1 :]
+    ):
+        return None
+    return agent_id
+
+
+def _builder_verify_completion_directive(agent_id: str) -> str:
+    """Force read-after-create verification without authorizing another create."""
+    return (
+        "AGENT SUDAH BERHASIL DIBUAT, TETAPI BELUM DIVERIFIKASI. "
+        f"Panggil verify_agent sekarang untuk agent_id={agent_id}. "
+        "DILARANG memanggil create_agent, plan_agent, composer, atau meminta konfirmasi user lagi. "
+        "Setelah hasil verify diterima, laporkan status persis: launch_ready atau setup masih pending."
+    )
+
+
+def _message_text(message: Any) -> str:
+    if isinstance(message, dict):
+        return str(message.get("content") or "")
+    return str(getattr(message, "content", "") or "")
+
+
+def _latest_agent_text(input_messages: list[Any] | None) -> str:
+    for message in reversed(input_messages or []):
+        role = str(
+            getattr(message, "type", "")
+            or getattr(message, "role", "")
+            or (message.get("role") if isinstance(message, dict) else "")
+        ).lower()
+        if role in {"ai", "agent", "assistant"}:
+            return _message_text(message)
+    return ""
+
+
+def _requested_builder_whatsapp_action(
+    user_message: str,
+    input_messages: list[Any] | None = None,
+) -> str | None:
+    """Return the concrete WhatsApp action explicitly selected by the user."""
+    from arthur.runtime.skill_runtime import (
+        classify_builder_whatsapp_action,
+    )
+
+    return classify_builder_whatsapp_action(
+        user_message,
+        _latest_agent_text(input_messages),
+    )
+
+
+def _needs_builder_whatsapp_action_completion(
+    action: str | None,
+    steps: list[dict[str, Any]],
+    *,
+    is_builder: bool,
+) -> bool:
+    if not is_builder or action not in {"trial_link", "dedicated_qr"}:
+        return False
+    expected_tool = (
+        "create_wa_dev_trial_link"
+        if action == "trial_link"
+        else "send_agent_wa_pairing_code"
+    )
+    return not any(
+        str(step.get("tool") or "").strip() == expected_tool
+        for step in steps or []
+    )
+
+
+def _builder_whatsapp_action_directive(action: str) -> str:
+    if action == "dedicated_qr":
+        return (
+            "USER SUDAH MEMILIH NOMOR WHATSAPP KHUSUS. Selesaikan sekarang di turn ini: "
+            "temukan agent target yang benar dari konteks, lalu panggil send_agent_wa_pairing_code. "
+            "Kode harus dibuat untuk identitas owner sesi yang terverifikasi. Jangan arahkan user "
+            "ke dashboard, dan jangan mengklaim nomor terhubung sebelum status backend connected."
+        )
+    return (
+        "USER SUDAH MEMILIH NOMOR DEMO ARTHUR. Selesaikan sekarang di turn ini: "
+        "temukan agent target yang benar dari konteks, lalu panggil create_wa_dev_trial_link "
+        "dengan send_contact=false. Jawaban final wajib memuat link wa.me dan kode persis dari "
+        "hasil tool tepat satu kali. Jangan kirim vCard kecuali user memintanya eksplisit, "
+        "jangan hanya menjelaskan cara mencoba, dan jangan arahkan user ke dashboard."
     )
 
 
@@ -321,7 +609,7 @@ def _needs_deploy_followup(
     """Detect website/app work that stopped after coding without public deploy URL."""
     if not _is_enabled(tools_config, "deploy", default=False):
         return False
-    if not _is_website_or_app_request(user_message):
+    if not _is_website_or_app_request(user_message) and not _has_website_creation_evidence(steps):
         return False
     if _has_public_url_in_text(final_reply) or _has_public_url_in_steps(steps):
         return False

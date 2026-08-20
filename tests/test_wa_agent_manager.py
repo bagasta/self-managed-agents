@@ -1,8 +1,7 @@
-"""Tests for the WA agent manager tool (send_agent_wa_qr).
+"""Tests for the WA agent manager tool (send_agent_wa_pairing_code).
 
-Regression for the production incident where Arthur sent the connect-QR to a
-chat-typed number (6289477477238) instead of the verified session owner
-(62895619356936), so the owner never received it.
+Regression for pairing-code ownership: the code must be generated only for the
+verified session owner, never a chat-typed number or LID.
 """
 from __future__ import annotations
 
@@ -35,8 +34,8 @@ def _session_with(owner_phone: str | None, user_phone: str, device_id: str = "ar
     return SimpleNamespace(channel_config=cfg)
 
 
-class TestSendAgentWaQr:
-    def test_qr_goes_to_verified_owner_not_chat_typed_phone(self):
+class TestSendAgentWaPairingCode:
+    def test_pairing_code_uses_verified_owner_not_chat_typed_phone(self):
         from app.core.engine.tool_builder import build_wa_agent_manager_tools
 
         agent_id = uuid.uuid4()
@@ -48,34 +47,24 @@ class TestSendAgentWaQr:
             user_phone="151414827434073@lid",       # LID (must never be the target)
         )
 
-        sent: dict[str, str] = {}
+        requested: dict[str, str] = {}
 
-        async def _fake_get_wa_qr(_dev):
-            return {"status": "", "qr_image": "data:image/png;base64,QUJD"}
-
-        async def _fake_send_wa_image(device_id, to, b64, caption, mime):
-            sent["device_id"] = device_id
-            sent["to"] = to
-            return {"status": "ok"}
+        async def _fake_create_pairing_code(device_id, phone):
+            requested["device_id"] = device_id
+            requested["phone"] = phone
+            return {"pairing_code": "ABCD-EFGH", "expires_in_seconds": 160}
 
         tools = build_wa_agent_manager_tools(session, db_factory=db)
-        tool = next(t for t in tools if t.name == "send_agent_wa_qr")
+        tool = next(t for t in tools if t.name == "send_agent_wa_pairing_code")
 
-        with patch("app.core.infra.wa_client.get_wa_qr", _fake_get_wa_qr), patch(
-            "app.core.infra.wa_client.send_wa_image", _fake_send_wa_image
-        ):
-            result = _run(tool.ainvoke({
-                "agent_id": str(agent_id),
-                "phone": "6289477477238",  # chat-typed wrong number — must be ignored
-            }))
+        with patch("app.core.infra.wa_client.create_wa_pairing_code", _fake_create_pairing_code):
+            result = _run(tool.ainvoke({"agent_id": str(agent_id)}))
 
-        # Sent from Arthur's own device, to the VERIFIED owner — not the chat number, not the LID.
-        assert sent.get("device_id") == "arthur-device"
-        assert sent.get("to") == "62895619356936"
-        assert "[QR_SENT]" in result
+        assert requested == {"device_id": "agent-device", "phone": "62895619356936"}
+        assert "[PAIRING_CODE]" in result
         assert "62895619356936" in result
 
-    def test_qr_never_targets_lid_when_no_verified_owner(self):
+    def test_pairing_code_never_targets_lid_when_no_verified_owner(self):
         from app.core.engine.tool_builder import build_wa_agent_manager_tools
 
         agent_id = uuid.uuid4()
@@ -85,23 +74,18 @@ class TestSendAgentWaQr:
         # No verified phone_number; only a LID user_phone available.
         session = _session_with(owner_phone=None, user_phone="151414827434073@lid")
 
-        async def _fake_get_wa_qr(_dev):
-            return {"status": "", "qr_image": "QUJD"}
+        called = {"hit": False}
 
-        send_called = {"hit": False}
-
-        async def _fake_send_wa_image(*_a, **_k):
-            send_called["hit"] = True
-            return {"status": "ok"}
+        async def _fake_create_pairing_code(*_a, **_k):
+            called["hit"] = True
+            return {"pairing_code": "ABCD-EFGH"}
 
         tools = build_wa_agent_manager_tools(session, db_factory=db)
-        tool = next(t for t in tools if t.name == "send_agent_wa_qr")
+        tool = next(t for t in tools if t.name == "send_agent_wa_pairing_code")
 
-        with patch("app.core.infra.wa_client.get_wa_qr", _fake_get_wa_qr), patch(
-            "app.core.infra.wa_client.send_wa_image", _fake_send_wa_image
-        ):
+        with patch("app.core.infra.wa_client.create_wa_pairing_code", _fake_create_pairing_code):
             result = _run(tool.ainvoke({"agent_id": str(agent_id)}))
 
         # A LID is not a real WhatsApp number — refuse rather than mis-send.
-        assert send_called["hit"] is False
+        assert called["hit"] is False
         assert "[error]" in result

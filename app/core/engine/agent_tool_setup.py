@@ -1,7 +1,6 @@
 """Tool and sub-agent setup for agent runs."""
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,7 +20,6 @@ from app.core.engine.agent_policy import (
 from app.core.engine.subagent_builder import build_subagents
 from app.core.engine.tool_builder import (
     _is_enabled,
-    build_builder_tools,
     build_deployment_tools,
     build_http_tools,
     build_loaded_custom_tools,
@@ -36,6 +34,7 @@ from app.core.engine.tool_builder import (
     build_whatsapp_media_tools,
 )
 from app.core.engine.sop_runtime_gate import filter_tools_by_sop
+from app.core.engine.scheduler_intent import looks_like_scheduler_workflow
 from app.core.infra.sandbox import DockerSandbox
 from app.core.utils.phone_utils import normalize_phone
 from app.models.agent import Agent as AgentModel
@@ -57,18 +56,12 @@ def is_operator_turn(user_message: str) -> bool:
     return user_message.startswith("[OPERATOR] ") or user_message.startswith("<OPERATOR>")
 
 
-_WHATSAPP_REMINDER_INTENT_RE = re.compile(
-    r"\b(reminder|remind|pengingat|ingatkan|ingetin|alarm|follow[-\s]?up|jadwalkan|jadwalin)\b",
-    re.IGNORECASE,
-)
-
-
 def _should_self_heal_whatsapp_scheduler(session: Session, user_message: str, tools_config: dict[str, Any]) -> bool:
     if getattr(session, "channel_type", None) != "whatsapp":
         return False
     if _is_enabled(tools_config, "scheduler", default=False):
         return False
-    return bool(_WHATSAPP_REMINDER_INTENT_RE.search(user_message or ""))
+    return looks_like_scheduler_workflow(user_message)
 
 
 def _is_probable_lid(value: str | None) -> bool:
@@ -252,23 +245,36 @@ async def build_agent_tool_setup(
                 reason="whatsapp_media_disabled_but_channel_is_whatsapp",
                 agent_id=str(agent_id),
             )
-        tools.extend(build_whatsapp_media_tools(session, sandbox))
+        # Builder tetap perlu media untuk QR, base64, dan attachment WA saat ini,
+        # tetapi tidak boleh membaca arbitrary /workspace path. Artifact workspace
+        # hanya milik agent file-capable yang benar-benar memiliki sandbox.
+        tools.extend(
+            build_whatsapp_media_tools(
+                session,
+                sandbox,
+                allow_workspace_paths=not builder_agent,
+            )
+        )
         active_groups.append("whatsapp_media")
         if _is_enabled(tools_config, "wa_agent_manager", default=False):
             tools.extend(build_wa_agent_manager_tools(session, db_factory=AsyncSessionLocal))
             active_groups.append("wa_agent_manager")
 
     if (not operator_turn) and builder_agent:
+        from app.core.system_agents.registry import build_system_agent_tools
+
         channel_cfg = getattr(session, "channel_config", None)
         channel_cfg = channel_cfg if isinstance(channel_cfg, dict) else {}
-        tools.extend(build_builder_tools(
+        tools.extend(build_system_agent_tools(
+            tools_config=tools_config,
             db_factory=AsyncSessionLocal,
             owner_phone=_resolve_builder_owner_phone(session),
             self_agent_id=str(agent_id),
-            device_id=channel_cfg.get("device_id", "") or "",
+            sender_device_id=channel_cfg.get("device_id", "") or "",
             default_target=channel_cfg.get("user_phone", "") or "",
             session_id=str(session.id),
             sender_name=channel_cfg.get("sender_name") or "",
+            current_user_message=user_message,
         ))
         active_groups.append("builder")
 

@@ -1,0 +1,4 @@
+services:
+  scheduler:
+    image: managed-agents-app:scheduler-croniter-hotfix-20260805-r1
+    build: !reset null

@@ -92,6 +92,17 @@ async def get_wa_status(device_id: str) -> dict:
         return resp.json()
 
 
+async def create_wa_pairing_code(device_id: str, phone: str) -> dict:
+    """Create a WhatsApp ``Link with phone number`` pairing code."""
+    async with httpx.AsyncClient(timeout=_WA_TIMEOUT_CREATE) as client:
+        resp = await client.post(
+            f"{_base_url()}/devices/{device_id}/pairing-code",
+            json={"phone": phone},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
 async def send_wa_message(device_id: str, to: str, text: str) -> dict:
     """Send a WhatsApp text message via Go service."""
     if device_id.startswith("wadev_"):
@@ -146,10 +157,12 @@ async def send_wa_contact(device_id: str, to: str, display_name: str, phone: str
 async def start_wa_typing(device_id: str, to: str) -> None:
     """Start or refresh the WhatsApp typing keep-alive for a chat."""
     if device_id.startswith("wadev_"):
-        return
+        url = f"{_wa_dev_base_url()}/typing/start"
+    else:
+        url = f"{_base_url()}/devices/{device_id}/typing/start"
     async with httpx.AsyncClient(timeout=_WA_TIMEOUT_DEFAULT) as client:
         resp = await client.post(
-            f"{_base_url()}/devices/{device_id}/typing/start",
+            url,
             json={"to": to},
         )
         resp.raise_for_status()
@@ -158,10 +171,12 @@ async def start_wa_typing(device_id: str, to: str) -> None:
 async def stop_wa_typing(device_id: str, to: str) -> None:
     """Stop the WhatsApp typing keep-alive for a chat."""
     if device_id.startswith("wadev_"):
-        return
+        url = f"{_wa_dev_base_url()}/typing/stop"
+    else:
+        url = f"{_base_url()}/devices/{device_id}/typing/stop"
     async with httpx.AsyncClient(timeout=_WA_TIMEOUT_DEFAULT) as client:
         resp = await client.post(
-            f"{_base_url()}/devices/{device_id}/typing/stop",
+            url,
             json={"to": to},
         )
         resp.raise_for_status()

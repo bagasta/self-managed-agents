@@ -104,6 +104,29 @@ async def test_owner_subscription_quota_is_also_enforced():
 
 
 @pytest.mark.asyncio
+async def test_owner_subscription_pool_overrides_exhausted_legacy_agent_quota():
+    from app.core.domain.agent_quota_service import check_agent_quota
+
+    user = SimpleNamespace(id="user-1")
+    subscription = SimpleNamespace(
+        is_usable=True,
+        tokens_used=1_000_000,
+        token_quota=20_000_000,
+    )
+    result = await check_agent_quota(
+        _agent(
+            owner_external_id="628owner",
+            tokens_used=4_000_000,
+            token_quota=4_000_000,
+            active_until=datetime.now(timezone.utc) - timedelta(days=1),
+        ),
+        _FakeDB(user, subscription),
+    )
+
+    assert result.allowed is True
+
+
+@pytest.mark.asyncio
 async def test_builder_agent_bypasses_agent_and_owner_quota_gates():
     from app.core.domain.agent_quota_service import check_agent_quota
 

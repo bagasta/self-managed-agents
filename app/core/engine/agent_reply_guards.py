@@ -14,10 +14,53 @@ from app.core.engine.agent_step_utils import (
     _is_operator_envelope,
     _operator_message_payload,
 )
+from app.core.engine.agent_identity import _session_sender_phone
 from app.core.engine.agent_whatsapp_guards import _has_reply_to_user_step, _has_send_to_number_step
+from app.core.utils.phone_utils import normalize_phone
 
 
 _MEDIA_CLAIM_SPLIT_RE = re.compile(r"[\n.!?;]+")
+_OWNER_IDENTITY_QUESTIONS = {
+    "gua siapa",
+    "gue siapa",
+    "aku siapa",
+    "saya siapa",
+    "siapa saya",
+    "who am i",
+}
+
+
+def _owner_identity_reply_guard(
+    final_reply: str,
+    user_message: str,
+    session: Any,
+    agent_model: Any,
+) -> str:
+    """Answer identity questions deterministically for the verified Owner.
+
+    Owner identity is platform state, not something the operational agent
+    should guess from chat history.  This guard only runs when the sender's
+    normalized phone exactly matches ``owner_external_id``.
+    """
+    owner_phone = normalize_phone(str(getattr(agent_model, "owner_external_id", "") or ""))
+    if not owner_phone or _session_sender_phone(session) != owner_phone:
+        return final_reply
+
+    payload = _operator_message_payload(user_message).casefold()
+    normalized_question = re.sub(r"[^a-z0-9]+", " ", payload).strip()
+    if normalized_question not in _OWNER_IDENTITY_QUESTIONS:
+        return final_reply
+
+    cfg = session.channel_config if isinstance(getattr(session, "channel_config", None), dict) else {}
+    escalation_cfg = getattr(agent_model, "escalation_config", None)
+    escalation_cfg = escalation_cfg if isinstance(escalation_cfg, dict) else {}
+    owner_name = str(
+        cfg.get("sender_name")
+        or escalation_cfg.get("operator_name")
+        or "Owner"
+    ).strip()
+    agent_name = str(getattr(agent_model, "name", "") or "agent ini").strip()
+    return f"Kamu adalah {owner_name}, Owner dan superadmin {agent_name}."
 
 
 def _has_media_delivery_claim(text: str) -> bool:
@@ -93,7 +136,6 @@ def _task_result_guard_reply(final_reply: str, steps: list[dict[str, Any]], user
 
     combined = "\n".join(task_results)
     combined_lower = combined.lower()
-    final_lower = (final_reply or "").lower()
 
     has_success_artifact = bool(
         _URL_RE.search(combined)
@@ -115,19 +157,6 @@ def _task_result_guard_reply(final_reply: str, steps: list[dict[str, Any]], user
         "isi cv",
     )
     has_blocker = any(marker in combined_lower for marker in blocker_markers)
-    promise_markers = (
-        "nanti",
-        "sedang",
-        "saya mulai",
-        "saya langsung",
-        "langsung buatkan",
-        "akan saya",
-        "hasilnya saya kirim",
-        "lagi saya",
-    )
-    final_is_promise = any(marker in final_lower for marker in promise_markers)
-    user_asks_status = any(k in user_lower for k in ("mana", "belum jadi", "udah jadi", "sudah jadi", "url", "link"))
-
     if not artifact_required:
         return final_reply
     if has_success_artifact:
@@ -136,11 +165,6 @@ def _task_result_guard_reply(final_reply: str, steps: list[dict[str, Any]], user
         return (
             "Belum bisa saya lanjutkan karena bahan yang dibutuhkan belum tersedia di workspace agent. "
             "Subagent minta isi/file CV dikirim ulang atau ditempel di chat dulu, baru saya bisa buat web HTML/CSS/JS-nya."
-        )
-    if final_is_promise or user_asks_status:
-        return (
-            "Belum selesai. Subagent belum mengembalikan URL, file terkirim, atau hasil final yang bisa saya serahkan. "
-            "Saya tidak akan klaim selesai sebelum ada output yang valid."
         )
     return final_reply
 

@@ -31,6 +31,7 @@ _SYNC_URL = _ASYNC_URL.replace("postgresql+asyncpg://", "postgresql+psycopg2://"
 
 from app.database import get_db
 from app.main import app
+from app.models.agent import Agent
 from app.models.subscription import SubscriptionPlan, User, UserSubscription, TokenTopup
 
 # NullPool: each request gets a fresh connection — no pool contention between tests
@@ -78,6 +79,8 @@ def _clear_test_subscriptions(user_ids: list[str]) -> None:
         return
     uuids = [uuid.UUID(u) for u in user_ids]
     with SyncTestSession() as db:
+        external_ids = [user_id[:16] for user_id in user_ids]
+        db.query(Agent).filter(Agent.owner_external_id.in_(external_ids)).delete(synchronize_session=False)
         db.query(TokenTopup).filter(TokenTopup.user_id.in_(uuids)).delete(synchronize_session=False)
         db.query(UserSubscription).filter(UserSubscription.user_id.in_(uuids)).delete(synchronize_session=False)
         db.query(User).filter(User.id.in_(uuids)).delete(synchronize_session=False)
@@ -288,6 +291,36 @@ class TestUpgradeSubscription:
         )
         assert r.status_code == 200
         assert r.json()["expires_at"] is not None
+
+    def test_upgrade_syncs_owned_agent_expiry_metadata(self, client, user_id):
+        self._activate(client, user_id, "trial")
+        original_expiry = datetime.now(timezone.utc) + timedelta(days=14)
+        with SyncTestSession() as db:
+            user = db.query(User).filter_by(id=uuid.UUID(user_id)).one()
+            agent = Agent(
+                name="Legacy owned agent",
+                owner_external_id=user.external_id,
+                token_quota=4_000_000,
+                tokens_used=4_000_000,
+                active_until=original_expiry,
+            )
+            db.add(agent)
+            db.commit()
+            agent_id = agent.id
+
+        r = client.post(
+            f"/v1/subscriptions/{user_id}/upgrade",
+            json={"plan_code": "tier_2", "reference_id": f"INV-{uuid.uuid4().hex[:8]}"},
+            headers={"X-API-Key": ADMIN_KEY},
+        )
+
+        assert r.status_code == 200
+        with SyncTestSession() as db:
+            agent = db.query(Agent).filter_by(id=agent_id).one()
+            sub = db.query(UserSubscription).filter_by(user_id=uuid.UUID(user_id)).one()
+            assert agent.active_until == sub.expires_at
+            assert agent.tokens_used == 4_000_000
+            assert agent.token_quota == 4_000_000
 
     def test_upgrade_to_trial_rejected(self, client, user_id):
         self._activate(client, user_id, "tier_1")

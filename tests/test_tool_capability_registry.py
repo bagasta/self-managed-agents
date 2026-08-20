@@ -32,6 +32,19 @@ def test_runtime_contract_uses_registry_disabled_reasons():
     assert "jangan klaim bisa memakainya" in text
 
 
+def test_runtime_scheduler_contract_overrides_stale_agent_instructions():
+    text = build_runtime_tool_contract_text(
+        tools_config={"scheduler": False},
+        active_groups=["scheduler"],
+    )
+
+    assert "Scheduler: aktif" in text
+    assert "set_reminder(label, message, schedule)" in text
+    assert "set_multiple_reminders(reminders)" in text
+    assert "cancel_reminder(label)" in text
+    assert "Jangan klaim berhasil sebelum hasil tool menyatakan sukses" in text
+
+
 def test_disabled_capability_claims_detects_whatsapp_media_claim():
     claims = disabled_capability_claims(
         "File PDF sudah saya kirim ke WhatsApp.",

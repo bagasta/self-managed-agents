@@ -18,6 +18,7 @@ from app.core.engine.agent_policy import (
 )
 from app.core.engine.agent_tool_setup import build_agent_tool_setup
 from app.core.engine.google_mcp_support import (
+    filter_google_mcp_tools_by_services,
     build_google_mcp_usage_notice,
     _is_google_mcp_intent,
     is_google_workspace_mcp_configured,
@@ -476,3 +477,82 @@ async def test_non_google_intent_keeps_subagent_build(monkeypatch) -> None:
     assert called is True
     assert setup.subagent_list == [{"name": "sys_coder"}]
     assert "subagents(1)" in setup.active_groups
+
+
+def test_google_sheets_allowlist_removes_unrelated_tasks_tools() -> None:
+    tools = [
+        SimpleNamespace(name="create_spreadsheet"),
+        SimpleNamespace(name="modify_sheet_values"),
+        SimpleNamespace(name="search_drive_files"),
+        SimpleNamespace(name="manage_task"),
+        SimpleNamespace(name="manage_event"),
+    ]
+    config = {
+        "mcp": {
+            "enabled": True,
+            "servers": {
+                "google_workspace": {
+                    "allowed_services": ["sheets", "drive"],
+                }
+            },
+        }
+    }
+
+    filtered = filter_google_mcp_tools_by_services(
+        tools,
+        tools_config=config,
+        log=_Log(),
+    )
+
+    assert [tool.name for tool in filtered] == [
+        "create_spreadsheet",
+        "modify_sheet_values",
+        "search_drive_files",
+    ]
+
+
+def test_legacy_google_config_without_allowlist_is_unchanged() -> None:
+    tools = [
+        SimpleNamespace(name="create_spreadsheet"),
+        SimpleNamespace(name="manage_task"),
+    ]
+
+    filtered = filter_google_mcp_tools_by_services(
+        tools,
+        tools_config={
+            "mcp": {
+                "enabled": True,
+                "servers": {"google_workspace": {}},
+            }
+        },
+        log=_Log(),
+    )
+
+    assert filtered == tools
+
+
+def test_legacy_sheets_agent_is_scoped_from_confirmed_instruction_context() -> None:
+    tools = [
+        SimpleNamespace(name="create_spreadsheet"),
+        SimpleNamespace(name="modify_sheet_values"),
+        SimpleNamespace(name="manage_task"),
+    ]
+
+    filtered = filter_google_mcp_tools_by_services(
+        tools,
+        tools_config={
+            "mcp": {
+                "enabled": True,
+                "servers": {"google_workspace": {}},
+            }
+        },
+        requirement_text=(
+            "Agent mencatat transaksi ke Google Spreadsheet dan membuat laporan di Sheet."
+        ),
+        log=_Log(),
+    )
+
+    assert [tool.name for tool in filtered] == [
+        "create_spreadsheet",
+        "modify_sheet_values",
+    ]

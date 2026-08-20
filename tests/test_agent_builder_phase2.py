@@ -45,7 +45,7 @@ class TestRulebookSections:
         assert "http_get" in self.content, "Harus ada daftar tools yang tersedia"
         assert "http_post" in self.content
         assert "http_patch" in self.content
-        assert "send_agent_wa_qr" in self.content
+        assert "send_agent_wa_pairing_code" in self.content
 
     def test_has_platform_rulebook_section(self):
         assert "Platform Rulebook" in self.content or "Kapabilitas" in self.content, \
@@ -127,7 +127,7 @@ class TestToolCategories:
 
         assert "DILARANG menawarkan webchat" in self.content
         assert "nomor demo Arthur" in self.content
-        assert "scan sekali dari WhatsApp" in self.content
+        assert "kode tautan WhatsApp" in self.content
 
 
 class TestWhatsAppBestPractices:

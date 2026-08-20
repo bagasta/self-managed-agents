@@ -42,6 +42,17 @@ _DOMAIN_KEYWORDS: dict[str, tuple[str, ...]] = {
         "umroh",
         "haji",
     ),
+    "personal_assistant": (
+        "personal assistant",
+        "asisten pribadi",
+        "sekretaris pribadi",
+        "reminder pribadi",
+        "pengingat jadwal",
+        "catat keuangan",
+        "catatan keuangan",
+        "laporan keuangan",
+        "foto struk",
+    ),
     "ecommerce": (
         "ecommerce",
         "e-commerce",
@@ -270,6 +281,58 @@ def _template_workflows(domain: str) -> list[dict[str, Any]]:
                 ["Jangan menjamin ketersediaan atau harga final tanpa data/tool.", "Jangan membuat janji refund tanpa kebijakan Owner."],
                 "Ringkasan kebutuhan trip dan next step booking.",
             )
+        ]
+    if domain == "personal_assistant":
+        return [
+            _workflow(
+                "personal_reminder",
+                "Catat dan jalankan pengingat pribadi",
+                "User meminta diingatkan tentang jadwal, tagihan, acara, atau tugas.",
+                "Menyimpan detail pengingat yang lengkap dan memastikan jadwalnya benar.",
+                ["hal yang diingatkan", "tanggal dan waktu", "zona waktu jika ambigu", "pengulangan jika ada"],
+                [
+                    "Pahami hal yang perlu diingatkan.",
+                    "Tanyakan tanggal/waktu hanya jika belum jelas.",
+                    "Simpan pengingat melalui scheduler yang tersedia.",
+                    "Konfirmasi jadwal berdasarkan hasil tool, bukan sekadar janji.",
+                ],
+                [
+                    "Jika waktu ambigu, klarifikasi sebelum menjadwalkan.",
+                    "Jika scheduler gagal, sampaikan kegagalan dengan jujur.",
+                ],
+                ["Eskalasi hanya jika kebutuhan berada di luar wewenang atau memerlukan keputusan Owner."],
+                [
+                    "Jangan mengklaim reminder aktif sebelum scheduler berhasil.",
+                    "Jangan mengarang tanggal, waktu, atau zona waktu.",
+                ],
+                "Konfirmasi pengingat yang sudah tersimpan dan dapat diverifikasi.",
+            ),
+            _workflow(
+                "personal_finance_record",
+                "Catat transaksi dan buat laporan keuangan pribadi",
+                "User mengirim transaksi, nominal, foto struk, atau meminta laporan keuangan.",
+                "Mencatat transaksi secara akurat ke resource keuangan terverifikasi dan menyusun ringkasan.",
+                ["tanggal transaksi", "deskripsi", "nominal", "jenis pemasukan/pengeluaran", "bukti jika ada"],
+                [
+                    "Ekstrak data transaksi dari teks atau gambar yang terlihat.",
+                    "Gunakan hanya spreadsheet_id yang tersimpan dan terverifikasi.",
+                    "Baca header sebelum menambah record.",
+                    "Tulis transaksi lalu verifikasi hasilnya.",
+                    "Susun laporan dari data yang benar-benar terbaca dari resource.",
+                ],
+                [
+                    "Jika nominal atau jenis transaksi ambigu, klarifikasi sebelum menulis.",
+                    "Jika OAuth gagal, kirim link autentikasi ulang ke Owner.",
+                    "Jika resource hilang pada request tulis Owner, buat dan simpan resource pengganti.",
+                ],
+                ["Eskalasi jika autentikasi atau resource tidak dapat dipulihkan otomatis."],
+                [
+                    "Jangan mengarang spreadsheet_id, nominal, atau isi struk.",
+                    "Jangan mengklaim transaksi tercatat sebelum write dan readback berhasil.",
+                    "Jangan menghakimi pengeluaran user.",
+                ],
+                "Transaksi terverifikasi atau laporan keuangan berbasis data tersimpan.",
+            ),
         ]
     if domain == "ecommerce":
         return [
@@ -668,10 +731,11 @@ def build_agent_operating_manual_from_blueprint(
         maturity = "needs_review"
         owner_review_required = True
 
-    assumptions = _as_text_list(payload.get("assumptions"), fallback=[
-        "SOP dibuat dari blueprint Arthur dan harus diikuti sebagai kontrak kerja agent.",
-        "Jika data bisnis belum pasti, agent harus bertanya, memakai tool yang tersedia, atau eskalasi.",
-    ])
+    # A missing assumptions key means the blueprint did not declare any
+    # assumptions. Meta guidance such as "follow this SOP" is a runtime rule,
+    # not an unverified business fact, and must not block a valid deterministic
+    # fallback manual.
+    assumptions = _as_text_list(payload.get("assumptions"))
 
     return {
         "manual_id": "agent_operating_manual",

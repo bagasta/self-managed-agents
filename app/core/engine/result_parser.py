@@ -6,6 +6,7 @@ without a running DB or agent graph.
 """
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any, TypedDict
 
@@ -20,6 +21,15 @@ class ParsedResult(TypedDict):
     total_tokens_used: int
     db_messages: list[Message]
     has_output: bool  # True if graph produced at least one new message
+
+
+def _stored_tool_result(output: str, *, plain_text_limit: int) -> str:
+    """Keep structured tool contracts parseable; cap only unstructured text."""
+    try:
+        json.loads(output)
+    except (TypeError, ValueError):
+        return output[:plain_text_limit]
+    return output
 
 
 def ensure_tool_messages_complete(messages: list[BaseMessage]) -> list[BaseMessage]:
@@ -179,7 +189,11 @@ def parse_agent_result(
                     ).strip()
                 else:
                     text = str(msg.content).replace("\x00", "")
-                if text:
+                # An AIMessage carrying tool calls is an intermediate thought,
+                # not a user-facing final answer.  Keeping it as final_reply
+                # makes channels send “I will do X now” even though the graph is
+                # still executing (or was truncated before its next turn).
+                if text and not msg.tool_calls:
                     final_reply = _clean_final_reply(text)
                 db_messages.append(Message(
                     session_id=session_id,
@@ -216,19 +230,20 @@ def parse_agent_result(
         elif isinstance(msg, ToolMessage):
             output = msg.content if isinstance(msg.content, str) else str(msg.content)
             output = output.replace("\x00", "")
+            runtime_output = _stored_tool_result(output, plain_text_limit=4000)
             tool_call_id = getattr(msg, "tool_call_id", "")
             entry = step_by_tool_call_id.get(tool_call_id)
             if entry is not None:
-                entry["result"] = output[:4000]
+                entry["result"] = runtime_output
             else:
                 for fallback_entry in reversed(steps):
                     if fallback_entry["result"] == "":
-                        fallback_entry["result"] = output[:4000]
+                        fallback_entry["result"] = runtime_output
                         break
 
             record = record_by_tool_call_id.get(tool_call_id)
             if record is not None:
-                record.tool_result = output[:2000]
+                record.tool_result = _stored_tool_result(output, plain_text_limit=2000)
 
     return ParsedResult(
         final_reply=final_reply,

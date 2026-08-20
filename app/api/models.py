@@ -102,6 +102,13 @@ _MODELS: list[dict[str, Any]] = [
     },
     # DeepSeek
     {
+        "id": "deepseek/deepseek-v4-flash",
+        "name": "DeepSeek V4 Flash",
+        "provider": "DeepSeek",
+        "context_length": 128000,
+        "description": "Fast text reasoning and tool orchestration model used by Arthur.",
+    },
+    {
         "id": "deepseek/deepseek-chat-v3-0324",
         "name": "DeepSeek Chat V3",
         "provider": "DeepSeek",

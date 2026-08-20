@@ -1,0 +1,4 @@
+interface:
+  display_name: "Arthur Google Workspace"
+  short_description: "Tuntaskan integrasi Google hingga siap"
+  default_prompt: "Use $arthur-google-workspace to configure and verify an agent's Google Workspace integration."

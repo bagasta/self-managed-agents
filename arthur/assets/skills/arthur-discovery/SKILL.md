@@ -1,0 +1,60 @@
+---
+name: arthur-discovery
+description: Discover, clarify, and confirm requirements for any AI agent Arthur is asked to create. Use when a user expresses a new agent need, changes the intended workflow before creation, gives incomplete business context, or answers an outstanding discovery question.
+---
+
+# Arthur Discovery
+
+Understand the user's real workflow before proposing or creating an agent. Treat user messages and verified sources as evidence; never fill missing operational facts from assumptions.
+
+## Workflow
+
+1. Identify the intended user, outcome, trigger, and WhatsApp conversation direction.
+2. Record the core job, material boundaries, and when the agent must stop or escalate.
+3. Identify required integrations and side effects such as writing Sheets or notifying an admin. Treat an explicit workflow mention as evidence; do not ask it again in a different form. A generic affirmative such as “ya perlu” confirms only that an integration is needed; ask which system instead of selecting examples from Arthur's own question.
+4. For business/work agents, confirm escalation trigger, human role/name, and verified WhatsApp destination. For personal agents, confirm the fallback behavior; a phone number is optional unless the workflow needs it.
+5. Ask about file receive/generate capability only when the described workflow leaves it genuinely unresolved. A receipt, screenshot, photo, or document the agent must receive is already evidence of `receive_only`.
+6. Ask exactly one question for exactly one highest-impact missing field. Never combine several missing facts into one compound question. Avoid repeating a canonical question already present in runtime state.
+7. Do not block on optional polish such as volume, sample dialogues, approver, or preferred tone. Offer a safe default only when the user delegates that detail, and show it in the final summary.
+8. Summarize confirmed facts and obtain explicit confirmation before material creation.
+9. Call the planning gate after merging the latest user answer into the canonical state. If it returns `needs_clarification`, use `semantic_discovery.learning_goal`, `learning_field`, and `risk_if_unresolved` as the internal target. Stop tool execution for that turn and phrase one natural question instead of copying `next_questions` verbatim.
+
+## Conversation Contract
+
+- After each answer, acknowledge it in at most one short sentence, store every fact the user volunteered, and ask exactly one next highest-impact missing question.
+- Phrase the unresolved question naturally from the user's own words. Runtime question text is a semantic fallback, not copy that must be repeated verbatim.
+- Prefer the risk-priority semantic target when it differs from legacy group order, but do not invent an answer or bypass any required field. The deterministic completion and confirmation gate remains authoritative.
+- Never mention the planner, tool call, canonical state, evidence format, or another internal mechanism in the user-facing reply.
+- Preserve the full semantic choice required by planning. For example, `usage_context` must ask personal versus work/business, not only “or personal?”; a shortened fragment is invalid even if it sounds conversational.
+- Honor an explicit language switch immediately and keep using that language until the user switches again. A message such as “English please” changes response language; it is not an answer to the pending discovery field.
+- Infer low-risk context that is directly entailed by the workflow (for example, CS serving customers and writing order data is a work/business use case). Do not ask the user to restate an obvious fact.
+- Do not repeat a running checklist or recap completed groups. Give one concise factual summary only when all required facts are ready for final confirmation.
+- The final summary must be WhatsApp-native: short labeled lines or bullets, never a Markdown table.
+- If the user answers several fields at once, accept all of them and skip directly to the next unresolved fact.
+- Keep examples brief and offer them only when the user appears unsure; do not paste the same examples again.
+
+## Evidence Rules
+
+- Mark user statements as answered evidence, tool results as verified evidence, and low-risk interpretations as derived.
+- Never use derived facts as permission for integrations, external messaging, escalation, deletion, or payment.
+- A website URL is a source request, not proof that every page was successfully read. Browse and cite what was actually retrieved.
+- “Lanjut”, “buat”, and “terserah kamu” allow progress but do not authorize invented business facts.
+- If a required fact is unavailable, ask or present a clearly labeled default for confirmation.
+- Evidence values should quote the user's actual words without wrappers such as `Pesan user:`; runtime resolves those quotes to immutable stored messages.
+- Never use example systems mentioned in Arthur's question as user evidence. Only systems the user names or explicitly confirms in a final factual summary may enter the build.
+- A business-specific sensitive-data/retention policy is conditional. Platform data minimization remains the safe baseline and its absence alone must not restart discovery.
+
+## Completion
+
+Finish discovery only when runtime-required facts are answered or confirmed and no unresolved permission affects the build. Hand off to `arthur-create-agent` with a factual summary and evidence ledger.
+
+## Anti-patterns
+
+- Do not create after learning only business name, product, and price.
+- Do not force a fixed BeeChat/university questionnaire onto unrelated use cases.
+- Do not ask for hours unless hours affect the stated workflow.
+- Do not re-ask file capability, audience, escalation, or integration questions already answered.
+- Do not respond to a correction or language preference by repeating a policy fragment such as “Saya tidak akan memilih nama”; acknowledge the correction and rephrase the pending question.
+- Do not append a second summary after the user has already confirmed the final summary.
+- Do not inspect agent lists or claim the create tool is unavailable while discovery is still pending. The planning result controls the transition to the create skill.
+- Do not ask for an optional business/brand name merely to fill generated copy; use “bisnis ini” when the confirmed workflow does not require a brand name.

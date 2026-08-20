@@ -554,6 +554,7 @@ async def process_wa_media(
     media_filename: str | None,
     session_id: uuid.UUID,
     logger: structlog.BoundLogger,
+    arthur_model_routing: bool = False,
 ) -> tuple[str, str | None, str | None, dict[str, Any] | None]:
     """
     Proses media (gambar/dokumen/stiker/audio) dari pesan WhatsApp.
@@ -649,6 +650,11 @@ async def process_wa_media(
             }
             media_image_mime = mime_map.get(ext, "image/jpeg")
             media_meta["mimetype"] = media_image_mime
+            media_meta.update({
+                "processing_route": "image",
+                "processing_status": "pending",
+                "processor_model": get_settings().arthur_image_model if arthur_model_routing else None,
+            })
             media_image_b64 = media_data
             media_context = (
                 f"\n[Gambar diterima dan ditampilkan di atas. "
@@ -667,6 +673,12 @@ async def process_wa_media(
                         filename=filename,
                         content_type=None,
                         mistral_api_key=get_settings().mistral_api_key,
+                        use_mistral_for_office=arthur_model_routing,
+                        mistral_model=getattr(
+                            get_settings(),
+                            "arthur_document_model",
+                            "mistral-ocr-latest",
+                        ),
                     )
                     extract_stem = Path(filename).stem or "incoming_document"
                     extracted_filename = f"{extract_stem}.extracted.txt"
@@ -680,6 +692,13 @@ async def process_wa_media(
                         "extracted_text_workspace_path": str(current_incoming_extracted_path),
                         "extracted_text_path": f"/workspace/shared/current_input/{extracted_filename}",
                         "extracted_text_subagent_path": f"/workspace/data/incoming/current_input/{extracted_filename}",
+                        "processing_route": "document",
+                        "processing_status": "completed",
+                        "processor_model": (
+                            getattr(get_settings(), "arthur_document_model", "mistral-ocr-latest")
+                            if arthur_model_routing and ext in {".pdf", ".docx", ".pptx"}
+                            else "deterministic-parser"
+                        ),
                     })
                     max_chars = min(
                         int(get_settings().media_doc_max_chars or _INLINE_DOCUMENT_PREVIEW_MAX_CHARS),
@@ -695,7 +714,21 @@ async def process_wa_media(
                     )
                 except Exception as exc:
                     logger.warning("wa_incoming.doc_extract_failed", error=str(exc))
-                    media_context = f"\n[Dokumen diterima: {filename}, {workspace_hint}]"
+                    media_meta.update({
+                        "processing_route": "document",
+                        "processing_status": "failed",
+                        "processor_model": (
+                            getattr(get_settings(), "arthur_document_model", "mistral-ocr-latest")
+                            if arthur_model_routing
+                            else "deterministic-parser"
+                        ),
+                        "processing_error": f"{type(exc).__name__}: {str(exc)[:300]}",
+                    })
+                    media_context = (
+                        f"\n[ATTACHMENT_PROCESSING_FAILED: Dokumen {filename} diterima tetapi ekstraksi gagal. "
+                        "Jangan mengklaim sudah membaca isinya atau menebak dari nama file. "
+                        "Sampaikan blocker dan minta kirim ulang hanya jika isi dokumen diperlukan.]"
+                    )
             else:
                 media_context = f"\n[Dokumen diterima: {filename}, {workspace_hint}]"
 

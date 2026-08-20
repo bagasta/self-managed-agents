@@ -37,13 +37,58 @@ from __future__ import annotations
 
 import inspect
 import os
+import asyncio
+import time
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import AsyncIterator
 
 import structlog
 from langchain_core.tools import BaseTool
 
 logger = structlog.get_logger(__name__)
+
+
+@dataclass
+class _CachedMcpClient:
+    """A short-lived authenticated MCP client kept within one API worker."""
+
+    client: object
+    tools: list[BaseTool]
+    expires_at: float
+    leases: int = 0
+
+
+_GOOGLE_TOOL_CACHE_TTL_SECONDS = 90.0
+_GOOGLE_TOOL_CACHE_MAX_ENTRIES = 32
+_google_mcp_client_cache: dict[str, _CachedMcpClient] = {}
+_google_mcp_client_cache_lock = asyncio.Lock()
+
+
+async def _close_mcp_client(client: object) -> None:
+    close = getattr(client, "aclose", None) or getattr(client, "close", None)
+    if not callable(close):
+        return
+    try:
+        maybe_awaitable = close()
+        if inspect.isawaitable(maybe_awaitable):
+            await maybe_awaitable
+    except Exception as exc:
+        logger.warning("mcp_tools.client_close_failed", error=str(exc))
+
+
+def _google_tool_cache_key(servers: dict, server_map: dict) -> str | None:
+    """Return a non-secret cache key only for the trusted Google connector."""
+    if set(server_map) != {"google_workspace"}:
+        return None
+    raw_google = servers.get("google_workspace")
+    if not isinstance(raw_google, dict):
+        return None
+    identity = str(raw_google.get("tool_cache_key") or "").strip()
+    if not identity:
+        return None
+    selected = server_map["google_workspace"]
+    return f"{identity}|{selected.get('url', '')}|{selected.get('transport', '')}"
 
 
 def _get_cfg_value(key: str, default: str = "") -> str:
@@ -188,17 +233,75 @@ async def mcp_client_context(
 
     try:
         from langchain_mcp_adapters.client import MultiServerMCPClient
-    except ImportError:
+    except ImportError as exc:
         logger.error(
             "mcp_tools.import_error",
-            hint="Run: pip install langchain-mcp-adapters mcp",
+            error=str(exc),
+            hint="Check compatible langchain-mcp-adapters and mcp package versions.",
         )
-        yield [], {s: "langchain-mcp-adapters not installed" for s in servers}
+        yield [], {s: "MCP client dependency is unavailable or incompatible" for s in servers}
         return
 
     server_map = _build_server_map(servers)
     if not server_map:
         yield [], {}
+        return
+
+    cache_key = _google_tool_cache_key(servers, server_map)
+    if cache_key:
+        now = time.monotonic()
+        stale_clients: list[object] = []
+        async with _google_mcp_client_cache_lock:
+            # Close only idle expired entries. An active agent run retains a
+            # lease, so another request can never close its MCP session.
+            for key, entry in list(_google_mcp_client_cache.items()):
+                if entry.leases == 0 and entry.expires_at <= now:
+                    stale_clients.append(entry.client)
+                    _google_mcp_client_cache.pop(key, None)
+
+            entry = _google_mcp_client_cache.get(cache_key)
+            if entry is not None:
+                entry.leases += 1
+                entry.expires_at = now + _GOOGLE_TOOL_CACHE_TTL_SECONDS
+                logger.info("mcp_tools.cache_hit", server="google_workspace", tool_count=len(entry.tools))
+            else:
+                try:
+                    from langchain_mcp_adapters.client import MultiServerMCPClient
+
+                    client = MultiServerMCPClient(server_map)
+                    cached_tools: list[BaseTool] = await client.get_tools()
+                    entry = _CachedMcpClient(
+                        client=client,
+                        tools=cached_tools,
+                        expires_at=now + _GOOGLE_TOOL_CACHE_TTL_SECONDS,
+                        leases=1,
+                    )
+                    _google_mcp_client_cache[cache_key] = entry
+                    logger.info("mcp_tools.cache_miss_loaded", server="google_workspace", count=len(cached_tools))
+                except Exception as exc:
+                    logger.error("mcp_tools.connection_failed", error=str(exc), type=type(exc).__name__)
+                    entry = None
+
+            # Keep the cache bounded without interrupting active runs.
+            idle_entries = [
+                (key, item)
+                for key, item in _google_mcp_client_cache.items()
+                if item.leases == 0
+            ]
+            for key, item in idle_entries[:max(0, len(_google_mcp_client_cache) - _GOOGLE_TOOL_CACHE_MAX_ENTRIES)]:
+                stale_clients.append(item.client)
+                _google_mcp_client_cache.pop(key, None)
+
+        for stale_client in stale_clients:
+            await _close_mcp_client(stale_client)
+        if entry is None:
+            yield [], {"google_workspace": "MCP Google Workspace tidak dapat dihubungi"}
+            return
+        try:
+            yield entry.tools, {}
+        finally:
+            async with _google_mcp_client_cache_lock:
+                entry.leases = max(0, entry.leases - 1)
         return
 
     client = MultiServerMCPClient(server_map)
@@ -222,11 +325,4 @@ async def mcp_client_context(
     try:
         yield tools, {}
     finally:
-        close = getattr(client, "aclose", None) or getattr(client, "close", None)
-        if callable(close):
-            try:
-                maybe_awaitable = close()
-                if inspect.isawaitable(maybe_awaitable):
-                    await maybe_awaitable
-            except Exception as exc:
-                logger.warning("mcp_tools.client_close_failed", error=str(exc))
+        await _close_mcp_client(client)

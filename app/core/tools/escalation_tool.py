@@ -3,6 +3,7 @@ Escalation tools — agent bisa eskalasi ke human operator dan kirim pesan ke ch
 
 Tools yang di-expose ke agent:
   escalate_to_human(reason, summary)  — aktifkan mode eskalasi
+  notify_owner(reason, summary)       — notifikasi Owner yang bisa di-reply dengan aman
   reply_to_user(message)              — kirim pesan ke user via channel sesi
   send_to_number(phone, message)      — kirim pesan ke nomor/target lain
 
@@ -105,6 +106,36 @@ def build_escalation_tools(
     user_message: str = "",
 ) -> list:
 
+    async def _persist_escalation_message_ids(message_ids: list[str]) -> None:
+        """Persist outbound WA ids in a fresh DB session.
+
+        The notification is sent after the first database context has closed.
+        Re-opening the session here is deliberate: a quoted Owner reply can only
+        be routed deterministically when the actual WhatsApp stanza id survives
+        the outbound send.
+        """
+        clean_ids = [str(message_id).strip() for message_id in message_ids if str(message_id).strip()]
+        if not clean_ids:
+            return
+        async with db_factory() as persist_db:
+            result = await persist_db.execute(select(Session).where(Session.id == session_id))
+            persisted_session = result.scalar_one_or_none()
+            if persisted_session is None:
+                logger.warning("escalation_tool.persist_message_id_session_missing", session_id=str(session_id))
+                return
+            metadata = dict(persisted_session.metadata_ or {})
+            existing_ids = metadata.get("escalation_message_ids")
+            if not isinstance(existing_ids, list):
+                existing_ids = []
+            for message_id in clean_ids:
+                if message_id not in existing_ids:
+                    existing_ids.append(message_id)
+            metadata["escalation_message_ids"] = existing_ids
+            metadata["escalation_message_id"] = existing_ids[0]
+            persisted_session.metadata_ = metadata
+            persist_db.add(persisted_session)
+            await persist_db.commit()
+
     @tool
     async def escalate_to_human(reason: str, summary: str = "") -> str:
         """
@@ -130,12 +161,21 @@ def build_escalation_tools(
                 return "[error] Agent tidak ditemukan."
 
             _raw_esc = agent.escalation_config
-            escalation_cfg: dict = _raw_esc if isinstance(_raw_esc, dict) else {}
-            if not escalation_cfg:
-                return "[error] Agent belum dikonfigurasi escalation_config. Tambahkan operator_phone dan channel_type."
-
-            operator_channel = escalation_cfg.get("channel_type", "")
-            operator_phone = escalation_cfg.get("operator_phone", "")
+            escalation_cfg: dict = dict(_raw_esc) if isinstance(_raw_esc, dict) else {}
+            # Arthur V2 agents have ownership identity from creation, while
+            # legacy escalation_config is optional.  Ownership is a trusted
+            # platform field; never infer an operator from a WA display name.
+            configured_operator_ids = getattr(agent, "operator_ids", None)
+            fallback_operator = (
+                getattr(agent, "owner_external_id", None)
+                or (configured_operator_ids[0] if isinstance(configured_operator_ids, list) and configured_operator_ids else "")
+            )
+            operator_channel = str(escalation_cfg.get("channel_type") or session.channel_type or "whatsapp")
+            operator_phone = str(escalation_cfg.get("operator_phone") or fallback_operator or "")
+            if not operator_phone:
+                return "[error] Agent tidak memiliki Owner/operator terverifikasi untuk menerima eskalasi."
+            escalation_cfg.setdefault("channel_type", operator_channel)
+            escalation_cfg.setdefault("operator_phone", operator_phone)
             operator_config = {
                 **escalation_cfg,
                 "user_phone": operator_phone,
@@ -208,11 +248,7 @@ def build_escalation_tools(
             sent_message_ids: list[str] = []
             if isinstance(send_result, dict) and send_result.get("message_id"):
                 sent_message_ids.append(str(send_result["message_id"]))
-                sess_meta = dict(session.metadata_ or {})
-                sess_meta["escalation_message_id"] = sent_message_ids[0]
-                sess_meta["escalation_message_ids"] = sent_message_ids.copy()
-                session.metadata_ = sess_meta
-                await db.commit()
+                await _persist_escalation_message_ids(sent_message_ids)
 
             sess_meta = dict(session.metadata_ or {})
             media_meta = sess_meta.get("last_incoming_media") if isinstance(sess_meta, dict) else None
@@ -244,18 +280,7 @@ def build_escalation_tools(
                         logger.info("escalation_tool.media_not_forwarded_type", media_type=media_type)
                     if isinstance(media_result, dict) and media_result.get("message_id"):
                         sent_message_ids.append(str(media_result["message_id"]))
-                        sess_meta = dict(session.metadata_ or {})
-                        existing_ids = sess_meta.get("escalation_message_ids")
-                        if not isinstance(existing_ids, list):
-                            existing_ids = []
-                        for message_id in sent_message_ids:
-                            if message_id not in existing_ids:
-                                existing_ids.append(message_id)
-                        sess_meta["escalation_message_ids"] = existing_ids
-                        if not sess_meta.get("escalation_message_id") and existing_ids:
-                            sess_meta["escalation_message_id"] = existing_ids[0]
-                        session.metadata_ = sess_meta
-                        await db.commit()
+                        await _persist_escalation_message_ids(sent_message_ids)
                     logger.info(
                         "escalation_tool.forwarded_media_to_operator",
                         media_type=media_type,
@@ -271,6 +296,24 @@ def build_escalation_tools(
             "Tugasmu sekarang: balas USER (bukan operator) dengan 1-2 kalimat singkat bahwa pertanyaannya "
             "sedang diteruskan ke tim yang berwenang dan akan segera dibalas. "
             "JANGAN sebutkan nomor telepon, JID, nama operator, atau detail teknis apapun."
+        )
+
+    @tool
+    async def notify_owner(reason: str, summary: str = "") -> str:
+        """Kirim notifikasi actionable ke Owner dengan case dan routing WhatsApp.
+
+        Gunakan untuk transaksi baru, komplain, stok habis, atau keadaan lain
+        ketika Owner mungkin membalas dan balasannya perlu diteruskan ke
+        customer. Jangan gunakan send_to_number untuk mengirim update workflow
+        ke Owner: pesan itu tidak dapat dipetakan kembali ke customer.
+        """
+        result = await escalate_to_human.ainvoke({"reason": reason, "summary": summary})
+        if str(result).startswith("[error]"):
+            return str(result)
+        return (
+            "Notifikasi Owner berhasil dikirim sebagai case yang dapat di-reply. "
+            "JANGAN kirim pesan tambahan ke Owner. Lanjutkan workflow dan balas customer sesuai status pesanan; "
+            "jangan mengatakan kasus sedang dieskalasi kecuali memang ada masalah yang perlu handoff."
         )
 
     @tool
@@ -337,6 +380,27 @@ def build_escalation_tools(
         from app.models.message import Message as Msg
 
         message = _clean_jid_from_text(message)
+        async with db_factory() as guard_db:
+            agent_result = await guard_db.execute(select(Agent).where(Agent.id == agent_id))
+            guard_agent = agent_result.scalar_one_or_none()
+        escalation_cfg = (
+            getattr(guard_agent, "escalation_config", None)
+            if guard_agent is not None and isinstance(getattr(guard_agent, "escalation_config", None), dict)
+            else {}
+        )
+        configured_operator_ids = getattr(guard_agent, "operator_ids", None) if guard_agent is not None else None
+        operator_phone = _normalize_jid(str(
+            escalation_cfg.get("operator_phone")
+            or getattr(guard_agent, "owner_external_id", None)
+            or (configured_operator_ids[0] if isinstance(configured_operator_ids, list) and configured_operator_ids else "")
+            or ""
+        ))
+        target_phone = _normalize_jid(str(phone_or_target or ""))
+        if operator_phone and target_phone and operator_phone == target_phone:
+            return (
+                "[send_to_number blocked] Notifikasi workflow kepada Owner wajib memakai "
+                "notify_owner(reason, summary) agar nomor customer, case ID, dan quoted reply routing tersimpan."
+            )
         if _looks_like_media_delivery_text(message):
             return (
                 "[send_to_number blocked] Pesan ini mengklaim pengiriman file/dokumen/gambar. "
@@ -402,4 +466,4 @@ def build_escalation_tools(
 
         return f"[SENT_TO_NUMBER:{phone_or_target}] {message}"
 
-    return [escalate_to_human, reply_to_user, send_to_number]
+    return [escalate_to_human, notify_owner, reply_to_user, send_to_number]

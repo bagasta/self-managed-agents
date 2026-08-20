@@ -1,0 +1,4 @@
+interface:
+  display_name: "Arthur Subscription"
+  short_description: "Tangani paket kuota dan pembayaran"
+  default_prompt: "Use $arthur-subscription-payment to handle agent plan, quota, and payment workflows."

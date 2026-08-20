@@ -10,8 +10,19 @@ check for an entitlement BLOCK. Result: the user got "Maaf, lagi ada kendala
 sistem ... coba lagi" instead of a created agent.
 """
 import json
+import uuid
 
-from app.core.engine.agent_followups import _needs_builder_create_completion
+import pytest
+from langchain_core.messages import AIMessage, HumanMessage
+
+from app.core.engine.agent_followups import (
+    _builder_verify_completion_directive,
+    _builder_whatsapp_action_directive,
+    _needs_builder_create_completion,
+    _needs_builder_whatsapp_action_completion,
+    _pending_builder_verify_agent_id,
+    _requested_builder_whatsapp_action,
+)
 
 
 def _plan_step(*, allowed: bool):
@@ -42,6 +53,28 @@ def test_continues_when_plan_succeeded_but_create_not_called():
     assert _needs_builder_create_completion(steps, is_builder=True) is True
 
 
+def test_latest_ready_plan_supersedes_older_clarification():
+    steps = [
+        {
+            "tool": "plan_agent",
+            "result": json.dumps({"plan_status": "needs_clarification"}),
+        },
+        _plan_step(allowed=True),
+    ]
+    assert _needs_builder_create_completion(steps, is_builder=True) is True
+
+
+def test_latest_clarification_plan_supersedes_older_ready_plan():
+    steps = [
+        _plan_step(allowed=True),
+        {
+            "tool": "plan_agent",
+            "result": json.dumps({"plan_status": "needs_clarification"}),
+        },
+    ]
+    assert _needs_builder_create_completion(steps, is_builder=True) is False
+
+
 def test_does_not_continue_on_real_entitlement_block():
     steps = [
         {"tool": "get_user_subscription", "result": "{}"},
@@ -53,3 +86,300 @@ def test_does_not_continue_on_real_entitlement_block():
 def test_does_not_continue_when_create_already_called():
     steps = [_plan_step(allowed=True), {"tool": "create_agent", "result": '{"success": true}'}]
     assert _needs_builder_create_completion(steps, is_builder=True) is False
+
+
+def test_does_not_continue_when_plan_still_needs_discovery():
+    steps = [
+        {
+            "tool": "plan_agent",
+            "result": json.dumps(
+                {
+                    "plan_status": "needs_clarification",
+                    "discovery_progress": {"next_group": {"id": "agent_behavior"}},
+                }
+            ),
+        }
+    ]
+    assert _needs_builder_create_completion(steps, is_builder=True) is False
+
+
+def test_completion_directive_never_authorizes_invented_details():
+    from app.core.engine.agent_followups import _builder_create_completion_directive
+
+    directive = _builder_create_completion_directive().lower()
+
+    assert "dilarang menambah asumsi" in directive
+    assert "pakai asumsi wajar" not in directive
+    assert "compose_agent_operating_manual" in directive
+    assert "create_agent satu kali" in directive
+    assert "jangan mengulang" in directive
+    assert "jangan menurunkan capability" in directive
+
+
+def test_successful_create_without_verify_requires_read_after_create():
+    steps = [
+        _plan_step(allowed=True),
+        {
+            "tool": "create_agent",
+            "result": json.dumps(
+                {"success": True, "agent_id": "agent-julehai", "name": "JULEHAI"}
+            ),
+        },
+    ]
+
+    assert _pending_builder_verify_agent_id(steps, is_builder=True) == "agent-julehai"
+    directive = _builder_verify_completion_directive("agent-julehai").lower()
+    assert "verify_agent" in directive
+    assert "agent_id=agent-julehai" in directive
+    assert "dilarang memanggil create_agent" in directive
+
+
+def test_verify_after_create_closes_verification_recovery():
+    steps = [
+        {
+            "tool": "create_agent",
+            "result": json.dumps({"success": True, "agent_id": "agent-julehai"}),
+        },
+        {
+            "tool": "verify_agent",
+            "result": json.dumps({"status": "launch_ready"}),
+        },
+    ]
+
+    assert _pending_builder_verify_agent_id(steps, is_builder=True) is None
+
+
+def test_retryable_plan_evidence_failure_gets_one_internal_retry():
+    from app.core.engine.agent_followups import _needs_builder_retryable_plan
+
+    steps = [
+        {
+            "tool": "plan_agent",
+            "result": json.dumps(
+                {
+                    "plan_status": "temporarily_unavailable",
+                    "retryable": True,
+                }
+            ),
+        }
+    ]
+
+    assert _needs_builder_retryable_plan(steps, is_builder=True) is True
+
+
+def test_ready_or_clarification_plan_is_not_a_retryable_technical_failure():
+    from app.core.engine.agent_followups import _needs_builder_retryable_plan
+
+    assert _needs_builder_retryable_plan([_plan_step(allowed=True)], is_builder=True) is False
+    clarification = {
+        "tool": "plan_agent",
+        "result": json.dumps({"plan_status": "needs_clarification", "retryable": False}),
+    }
+    assert _needs_builder_retryable_plan([clarification], is_builder=True) is False
+
+
+def test_affirmative_after_trial_offer_requires_trial_link_tool():
+    messages = [
+        AIMessage(content="Mau aku buatin link trial supaya Minsel bisa langsung dicoba?"),
+        HumanMessage(content="iya mau"),
+    ]
+    action = _requested_builder_whatsapp_action("iya mau", messages)
+
+    assert action == "trial_link"
+    assert _needs_builder_whatsapp_action_completion(
+        action,
+        [{"tool": "get_agent_detail", "result": '{"id":"agent-1"}'}],
+        is_builder=True,
+    )
+    assert not _needs_builder_whatsapp_action_completion(
+        action,
+        [{"tool": "create_wa_dev_trial_link", "result": '{"success":true}'}],
+        is_builder=True,
+    )
+
+
+def test_explicit_dedicated_number_requires_pairing_code_tool():
+    action = _requested_builder_whatsapp_action(
+        "Saya pilih nomor khusus, kirim QR",
+        [],
+    )
+
+    assert action == "dedicated_qr"
+    assert _needs_builder_whatsapp_action_completion(action, [], is_builder=True)
+    directive = _builder_whatsapp_action_directive(action).lower()
+    assert "send_agent_wa_pairing_code" in directive
+    assert "jangan arahkan user ke dashboard" in directive
+
+
+def test_informal_demo_request_requires_trial_link_not_qr():
+    action = _requested_builder_whatsapp_action(
+        "mau test pake nomer demo",
+        [],
+    )
+
+    assert action == "trial_link"
+    assert _needs_builder_whatsapp_action_completion(action, [], is_builder=True)
+    directive = _builder_whatsapp_action_directive(action).lower()
+    assert "create_wa_dev_trial_link" in directive
+
+
+def test_code_followup_after_demo_reply_requires_trial_link():
+    messages = [
+        AIMessage(content="Minsel sudah aktif di nomor demo Arthur."),
+        HumanMessage(content="kodenya mana?"),
+    ]
+
+    assert (
+        _requested_builder_whatsapp_action("kodenya mana?", messages)
+        == "trial_link"
+    )
+
+
+def test_informal_dedicated_number_sequence_requires_qr():
+    offer = AIMessage(
+        content=(
+            "Untuk memasang ke nomor khusus milikmu, pilih nomor khusus "
+            "agar saya kirim scan sekali dari WhatsApp."
+        )
+    )
+
+    assert (
+        _requested_builder_whatsapp_action(
+            "kalo mau konekin ke nomer whatsapp khusus gimana?",
+            [],
+        )
+        == "dedicated_qr"
+    )
+    assert (
+        _requested_builder_whatsapp_action(
+            "saya udah ada nomernya",
+            [offer],
+        )
+        == "dedicated_qr"
+    )
+    assert _requested_builder_whatsapp_action("minta qr", []) == "dedicated_qr"
+
+
+def test_generic_whatsapp_setup_question_does_not_choose_for_user():
+    assert (
+        _requested_builder_whatsapp_action(
+            "gimana cara pasang ke whatsappnya?",
+            [],
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_deterministic_demo_fallback_calls_trial_tool_not_qr():
+    from app.core.engine.agent_runner import (
+        _invoke_builder_whatsapp_action_tool,
+    )
+
+    calls = []
+
+    class FakeTool:
+        def __init__(self, name):
+            self.name = name
+
+        async def ainvoke(self, args):
+            calls.append((self.name, args))
+            return (
+                '{"success":true,"agent_name":"Minsel","code":"ABC123",'
+                '"wa_me_url":"https://wa.me/62822?text=ABC123"}'
+            )
+
+    parsed = {
+        "final_reply": "",
+        "steps": [],
+        "total_tokens_used": 0,
+        "has_output": True,
+        "db_messages": [],
+    }
+    done = await _invoke_builder_whatsapp_action_tool(
+        tools=[
+            FakeTool("create_wa_dev_trial_link"),
+            FakeTool("send_agent_wa_qr"),
+        ],
+        action="trial_link",
+        parsed=parsed,
+        session_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        step_index=1,
+        log=type(
+            "Log",
+            (),
+            {
+                "info": lambda *_args, **_kwargs: None,
+                "warning": lambda *_args, **_kwargs: None,
+                "error": lambda *_args, **_kwargs: None,
+            },
+        )(),
+    )
+
+    assert done is True
+    assert calls == [("create_wa_dev_trial_link", {"send_contact": False})]
+    assert parsed["steps"][0]["tool"] == "create_wa_dev_trial_link"
+    assert parsed["db_messages"][0].tool_name == "create_wa_dev_trial_link"
+
+
+@pytest.mark.asyncio
+async def test_deterministic_pairing_code_fallback_resolves_single_owned_agent():
+    from app.core.engine.agent_runner import (
+        _invoke_builder_whatsapp_action_tool,
+    )
+
+    calls = []
+    agent_id = str(uuid.uuid4())
+
+    class FakeTool:
+        def __init__(self, name):
+            self.name = name
+
+        async def ainvoke(self, args):
+            calls.append((self.name, args))
+            if self.name == "list_my_agents":
+                return json.dumps(
+                    {
+                        "count": 1,
+                        "agents": [{"id": agent_id, "name": "Minsel"}],
+                    }
+                )
+            return "[PAIRING_CODE] Kode pemasangan Minsel: ABCD-EFGH"
+
+    parsed = {
+        "final_reply": "",
+        "steps": [],
+        "total_tokens_used": 0,
+        "has_output": True,
+        "db_messages": [],
+    }
+    done = await _invoke_builder_whatsapp_action_tool(
+        tools=[
+            FakeTool("list_my_agents"),
+            FakeTool("send_agent_wa_pairing_code"),
+        ],
+        action="dedicated_qr",
+        parsed=parsed,
+        session_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        step_index=1,
+        log=type(
+            "Log",
+            (),
+            {
+                "info": lambda *_args, **_kwargs: None,
+                "warning": lambda *_args, **_kwargs: None,
+                "error": lambda *_args, **_kwargs: None,
+            },
+        )(),
+    )
+
+    assert done is True
+    assert calls[0] == ("list_my_agents", {})
+    assert calls[1][0] == "send_agent_wa_pairing_code"
+    assert calls[1][1]["agent_id"] == agent_id
+    assert [step["tool"] for step in parsed["steps"]] == [
+        "list_my_agents",
+        "send_agent_wa_pairing_code",
+    ]

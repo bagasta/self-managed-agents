@@ -1,0 +1,7 @@
+version: "1.0.0"
+triggers: ["list", "detail", "delete", "reset", "renew", "disable", "safety"]
+supported_states: ["idle", "awaiting_confirmation", "deleting", "complete", "blocked"]
+allowed_tool_groups: ["lifecycle"]
+trust_level: "system"
+primary: true
+enabled: true

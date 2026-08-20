@@ -6,7 +6,27 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 )
+
+const maxMediaDownloadBytes int64 = 64 << 20
+
+var mediaDownloadClient = newMediaDownloadClient()
+
+func newMediaDownloadClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 32
+	transport.MaxIdleConnsPerHost = 8
+	transport.MaxConnsPerHost = 16
+	transport.IdleConnTimeout = 90 * time.Second
+	transport.TLSHandshakeTimeout = 10 * time.Second
+	transport.ExpectContinueTimeout = time.Second
+
+	return &http.Client{
+		Transport: transport,
+		Timeout:   60 * time.Second,
+	}
+}
 
 type API struct {
 	wa    *WhatsAppClient
@@ -74,6 +94,40 @@ func (a *API) SendText(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]string{"status": "sent", "message_id": string(messageID)})
+}
+
+// POST /typing/start
+// Body: {"to": "+62xxx or chat_id@s.whatsapp.net"}
+func (a *API) StartTyping(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		To string `json:"to"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.To == "" {
+		http.Error(w, `{"error":"to is required"}`, http.StatusBadRequest)
+		return
+	}
+	if err := a.wa.StartTyping(body.To); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "typing"})
+}
+
+// POST /typing/stop
+// Body: {"to": "+62xxx or chat_id@s.whatsapp.net"}
+func (a *API) StopTyping(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		To string `json:"to"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.To == "" {
+		http.Error(w, `{"error":"to is required"}`, http.StatusBadRequest)
+		return
+	}
+	if err := a.wa.StopTyping(body.To); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "paused"})
 }
 
 // POST /send/contact
@@ -230,7 +284,7 @@ func writeJSON(w http.ResponseWriter, v interface{}) {
 }
 
 func downloadURL(url string) ([]byte, error) {
-	resp, err := http.Get(url)
+	resp, err := mediaDownloadClient.Get(url)
 	if err != nil {
 		return nil, err
 	}
@@ -238,5 +292,12 @@ func downloadURL(url string) ([]byte, error) {
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	return io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxMediaDownloadBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxMediaDownloadBytes {
+		return nil, fmt.Errorf("download exceeds %d MiB limit", maxMediaDownloadBytes>>20)
+	}
+	return data, nil
 }

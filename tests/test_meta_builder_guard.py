@@ -45,6 +45,8 @@ META_BUILDER_REQUESTS = [
 ]
 
 BENIGN_REQUESTS = [
+    "Membuat AI agent customer service untuk menjawab pertanyaan produk Veselka",
+    "Bantu bikin AI agent CS WhatsApp untuk toko mukena",
     "Buatkan agent CS WhatsApp untuk toko kue",
     "Bikin agent baru untuk reservasi salon",
     "Mau agent asisten pribadi buat atur jadwal",

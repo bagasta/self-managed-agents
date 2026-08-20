@@ -1,10 +1,15 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 )
 
 type Config struct {
@@ -36,6 +41,7 @@ func main() {
 	}
 
 	router := NewRouter(cfg.MainAPIURL, cfg.MainAPIKey, store, cfg.WebhookURL, getEnv("AUTO_AGENT_ID", ""))
+	defer router.Close()
 
 	wa, err := NewWhatsAppClient(cfg.StoreDir, router.HandleMessage)
 	if err != nil {
@@ -70,6 +76,8 @@ func main() {
 	mux.HandleFunc("POST /send/document", api.SendDocument)
 	mux.HandleFunc("POST /send/document/url", api.SendDocumentURL)
 	mux.HandleFunc("POST /resolve-phones", api.ResolvePhones)
+	mux.HandleFunc("POST /typing/start", api.StartTyping)
+	mux.HandleFunc("POST /typing/stop", api.StopTyping)
 
 	// Dashboard
 	mux.Handle("/", http.FileServer(http.Dir("./dashboard")))
@@ -80,8 +88,32 @@ func main() {
 		log.Printf("webhook: %s", cfg.WebhookURL)
 	}
 
-	if err = http.ListenAndServe(":"+cfg.Port, corsMiddleware(mux)); err != nil {
-		log.Fatalf("server: %v", err)
+	server := &http.Server{
+		Addr:              ":" + cfg.Port,
+		Handler:           corsMiddleware(mux),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      120 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
+
+	shutdownSignal, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	serverErr := make(chan error, 1)
+	go func() { serverErr <- server.ListenAndServe() }()
+
+	select {
+	case <-shutdownSignal.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err = server.Shutdown(shutdownCtx); err != nil {
+			log.Printf("server graceful shutdown: %v", err)
+		}
+	case err = <-serverErr:
+		if !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("server: %v", err)
+		}
 	}
 }
 

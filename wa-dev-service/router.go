@@ -8,6 +8,8 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -15,26 +17,58 @@ import (
 )
 
 type Router struct {
-	mainAPIURL  string
-	mainAPIKey  string
-	webhookURL  string
-	autoAgentID string // if set, all messages auto-route to this agent (test mode)
-	store       *ConnectionStore
-	wa          *WhatsAppClient
-	senderMu    sync.Map // chatID -> *sync.Mutex; serialises per-sender forwards to Python
+	mainAPIURL    string
+	mainAPIKey    string
+	webhookURL    string
+	autoAgentID   string // if set, all messages auto-route to this agent (test mode)
+	store         *ConnectionStore
+	wa            *WhatsAppClient
+	transport     *http.Transport
+	agentClient   *http.Client
+	fastClient    *http.Client
+	webhookClient *http.Client
+	agentSlots    chan struct{}
+	senderMu      sync.Map // chatID -> *sync.Mutex; serialises per-sender forwards to Python
 }
 
 func NewRouter(mainAPIURL, mainAPIKey string, store *ConnectionStore, webhookURL, autoAgentID string) *Router {
 	if autoAgentID != "" {
 		log.Printf("[dev-router] TEST MODE: all messages auto-routed to agent %s", autoAgentID)
 	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 128
+	transport.MaxIdleConnsPerHost = 64
+	transport.MaxConnsPerHost = 128
+	transport.IdleConnTimeout = 90 * time.Second
+	transport.TLSHandshakeTimeout = 10 * time.Second
+	transport.ExpectContinueTimeout = time.Second
+	transport.ForceAttemptHTTP2 = true
+
 	return &Router{
-		mainAPIURL:  mainAPIURL,
-		mainAPIKey:  mainAPIKey,
-		webhookURL:  webhookURL,
-		autoAgentID: autoAgentID,
-		store:       store,
+		mainAPIURL:    mainAPIURL,
+		mainAPIKey:    mainAPIKey,
+		webhookURL:    webhookURL,
+		autoAgentID:   autoAgentID,
+		store:         store,
+		transport:     transport,
+		agentClient:   &http.Client{Transport: transport, Timeout: 330 * time.Second},
+		fastClient:    &http.Client{Transport: transport, Timeout: 5 * time.Second},
+		webhookClient: &http.Client{Transport: transport, Timeout: 30 * time.Second},
+		agentSlots:    make(chan struct{}, agentMaxInFlight()),
 	}
+}
+
+func agentMaxInFlight() int {
+	const fallback = 48
+	value, err := strconv.Atoi(os.Getenv("AGENT_MAX_IN_FLIGHT"))
+	if err != nil || value < 1 {
+		return fallback
+	}
+	return value
+}
+
+func (r *Router) Close() {
+	r.transport.CloseIdleConnections()
 }
 
 func (r *Router) SetWA(wa *WhatsAppClient) {
@@ -271,7 +305,7 @@ func (r *Router) claimTrialCode(codeText, from, phoneFrom, chatID, pushName stri
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-API-Key", r.mainAPIKey)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := r.agentClient.Do(req)
 	if err != nil {
 		log.Printf("[dev-router] claim-code request err: %v", err)
 		return "", "", false
@@ -317,6 +351,9 @@ func (r *Router) forwardToAgentSerial(agentID string, msg IncomingMessage) {
 // virtual device_id of the form "wadev_{agentID}". Python handles session
 // management, media processing, escalation, and reminder delivery.
 func (r *Router) forwardToAgent(agentID string, msg IncomingMessage) {
+	r.agentSlots <- struct{}{}
+	defer func() { <-r.agentSlots }()
+
 	deviceID := "wadev_" + agentID
 	payload := map[string]interface{}{
 		"device_id":          deviceID,
@@ -350,7 +387,7 @@ func (r *Router) forwardToAgent(agentID string, msg IncomingMessage) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-API-Key", r.mainAPIKey)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := r.agentClient.Do(req)
 	if err != nil {
 		log.Printf("[dev-router] forward to python err: %v", err)
 		_, _ = r.wa.SendText(msg.ChatID, "❌ Terjadi error saat menghubungi agent. Coba lagi nanti.")
@@ -405,8 +442,7 @@ func (r *Router) notifyDisconnect(agentID string, msg IncomingMessage) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-API-Key", r.mainAPIKey)
 
-	client := http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := r.fastClient.Do(req)
 	if err != nil {
 		log.Printf("[dev-router] disconnect notify err: %v", err)
 		return
@@ -415,6 +451,8 @@ func (r *Router) notifyDisconnect(agentID string, msg IncomingMessage) {
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(resp.Body)
 		log.Printf("[dev-router] disconnect notify HTTP %d: %s", resp.StatusCode, string(b))
+	} else {
+		_, _ = io.Copy(io.Discard, resp.Body)
 	}
 }
 
@@ -441,13 +479,14 @@ func (r *Router) lookupOperatorAgentOne(phone string) (string, bool) {
 	}
 	req.Header.Set("X-API-Key", r.mainAPIKey)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := r.fastClient.Do(req)
 	if err != nil {
 		return "", false
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, resp.Body)
 		return "", false
 	}
 
@@ -467,7 +506,7 @@ func (r *Router) fetchAgentName(agentID string) (string, error) {
 	}
 	req.Header.Set("X-API-Key", r.mainAPIKey)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := r.fastClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -504,11 +543,12 @@ func (r *Router) forwardWebhook(msg IncomingMessage) {
 		"timestamp":          msg.Timestamp,
 	}
 	data, _ := json.Marshal(payload)
-	resp, err := http.Post(r.webhookURL, "application/json", bytes.NewReader(data))
+	resp, err := r.webhookClient.Post(r.webhookURL, "application/json", bytes.NewReader(data))
 	if err != nil {
 		log.Printf("[dev-router] webhook forward err: %v", err)
 		return
 	}
+	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		log.Printf("[dev-router] webhook returned HTTP %d", resp.StatusCode)

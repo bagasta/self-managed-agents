@@ -8,6 +8,7 @@ Verifies that:
 """
 from __future__ import annotations
 
+import json
 import uuid
 
 import pytest
@@ -310,3 +311,43 @@ class TestParseAgentResult:
             "first_tool": "first result",
             "second_tool": "second result",
         }
+
+    def test_long_structured_tool_result_remains_complete_and_parseable(self):
+        class Log:
+            def warning(self, *args, **kwargs):
+                pass
+
+            def debug(self, *args, **kwargs):
+                pass
+
+        input_messages = [HumanMessage(content="plan")]
+        payload = {
+            "plan_status": "needs_clarification",
+            "next_questions": [{"topic": "capabilities", "question": "Q" * 5000}],
+        }
+        output = json.dumps(payload)
+        result = {
+            "messages": [
+                *input_messages,
+                AIMessage(
+                    content="",
+                    tool_calls=[{"name": "plan_agent", "args": {}, "id": "tc_plan"}],
+                ),
+                ToolMessage(content=output, tool_call_id="tc_plan", name="plan_agent"),
+            ]
+        }
+
+        parsed = parse_agent_result(
+            result=result,
+            input_messages=input_messages,
+            session_id=uuid.uuid4(),
+            run_id=uuid.uuid4(),
+            step_start=1,
+            log=Log(),
+        )
+
+        stored = parsed["steps"][0]["result"]
+        assert len(stored) > 4000
+        assert json.loads(stored) == payload
+        tool_record = next(message for message in parsed["db_messages"] if message.role == "tool")
+        assert json.loads(tool_record.tool_result) == payload
