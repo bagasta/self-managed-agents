@@ -322,6 +322,34 @@ class TestBuilderPipelineFlow:
         assert "include_instructions=true" in data["hint"]
 
 
+def test_natural_language_rename_routes_to_edit_management_scope():
+    from app.core.engine.arthur_skill_runtime import (
+        classify_builder_intent,
+        resolve_primary_skill,
+    )
+
+    for message in (
+        "Halo, saya mau ganti nama Admin Uci menjadi nama lain bisa?",
+        "ganti namanya menjadi Admin Tokyo8",
+        "rename namanya jadi Admin Tokyo8",
+        "ubah nama bot menjadi Admin Tokyo8",
+    ):
+        assert classify_builder_intent(message) == "edit"
+        assert (
+            resolve_primary_skill(
+                classify_builder_intent(message),
+                "idle",
+                user_message=message,
+            )
+            == "arthur-edit-agent"
+        )
+
+    assert (
+        resolve_primary_skill("discover", "agent_created", user_message="tolong sesuaikan")
+        == "arthur-edit-agent"
+    )
+
+
 class TestArthurRuntimeToolGating:
     def test_builder_runtime_skips_sandbox_and_subagents_even_if_config_drifted(self):
         from app.core.engine import agent_tool_setup as setup_mod

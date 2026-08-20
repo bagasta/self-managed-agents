@@ -420,6 +420,21 @@ def classify_builder_intent(
     )
     if google_auth_link_recovery:
         return "edit"
+    # Treat an explicit patch request as an edit even when the user omits the
+    # word "agent".  Once Arthur has asked about an existing agent, natural
+    # follow-ups are commonly short, such as "ganti namanya jadi Tokyo8".  Do
+    # not let an exact phrase allowlist hide update_agent from that turn.
+    # Destructive lifecycle and demo intents are resolved above first.
+    explicit_agent_patch = bool(
+        re.search(
+            r"\b(?:ubah(?:kan)?|ganti(?:kan)?|rename|edit|update|perbaiki|revisi|sesuaikan)\b"
+            r".{0,48}\b(?:nama(?:nya)?|name|agent(?:nya)?|bot(?:nya)?|ai(?:nya)?|"
+            r"instruksi|prompt|deskripsi|model|fitur|fungsi|workflow|sop|tools?)\b",
+            current,
+        )
+    )
+    if explicit_agent_patch:
+        return "edit"
     # Complaints about an already-created agent are diagnosis/edit work, even
     # when the user does not use the literal words "edit" or "update". This is
     # especially important after launch, where Indonesian users naturally say
@@ -611,6 +626,12 @@ def resolve_primary_skill(
         return "arthur-subscription-payment"
     if intent == "lifecycle":
         return "arthur-lifecycle-safety"
+    # After an agent exists, an otherwise unclassified message must land in
+    # management/edit scope rather than the create workflow.  This preserves
+    # readback and patch tools for natural-language changes while keeping
+    # create/delete operations separately gated by their explicit intents.
+    if intent == "discover" and workflow_state in {"agent_created", "setup_pending"}:
+        return "arthur-edit-agent"
     # The shadow state is updated only after a turn completes. An explicit
     # confirmation must expose compose/create tools in this same turn; the hard
     # discovery gate still verifies every answer before material creation.
