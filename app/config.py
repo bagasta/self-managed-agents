@@ -71,6 +71,16 @@ class Settings(BaseSettings):
     wa_dev_public_phone: str = ""
     wa_dev_public_name: str = "Arthur AI Dev"
 
+    # Meta WhatsApp Cloud API / Embedded Signup.  These intentionally have no
+    # usable defaults: a deployment must opt in with its own Meta application.
+    app_public_url: str = ""
+    meta_app_id: str = ""
+    meta_app_secret: str = ""
+    meta_webhook_verify_token: str = ""
+    meta_graph_api_version: str = "v26.0"
+    meta_embedded_signup_config_id: str = ""
+    meta_signup_state_ttl_seconds: int = 600
+
     # Google Workspace MCP runtime routing
     workspace_mcp_url: str = ""
     workspace_mcp_runtime_url: str = ""

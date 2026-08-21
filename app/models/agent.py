@@ -25,6 +25,7 @@ class Agent(Base):
     __table_args__ = (
         Index("ix_agents_api_key", "api_key", unique=True),
         Index("ix_agents_wa_device_id", "wa_device_id", unique=True),
+        Index("ix_agents_wa_phone_number_id", "wa_phone_number_id", unique=True),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -47,6 +48,14 @@ class Agent(Base):
     # --- whatsapp channel ---
     wa_device_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     channel_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    # Meta WhatsApp Cloud API (created through Embedded Signup).
+    wa_phone_number_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    wa_waba_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    wa_access_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    wa_display_phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    wa_business_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    wa_connection_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     # --- operator access ---
     operator_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)

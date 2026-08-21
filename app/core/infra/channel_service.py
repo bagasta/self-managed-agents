@@ -97,6 +97,21 @@ async def _send_whatsapp(to_phone: str, text: str, config: dict) -> dict | None:
     Kirim pesan via Go wa-service (whatsmeow).
     config harus punya: device_id (wa_device_id dari agent).
     """
+    phone_number_id = str(config.get("meta_phone_number_id") or "")
+    encrypted_token = str(config.get("meta_access_token") or "")
+    if phone_number_id and encrypted_token:
+        try:
+            from app.core.utils.text_utils import markdown_to_wa
+            from app.core.infra.wa_cloud_client import send_text_message
+
+            token = decrypt_value(encrypted_token)
+            result = await send_text_message(phone_number_id, to_phone, markdown_to_wa(text), token)
+            logger.info("channel_service.whatsapp.cloud_sent", to=to_phone, phone_number_id=phone_number_id)
+            return result
+        except Exception as exc:
+            logger.error("channel_service.whatsapp.cloud_send_failed", error=str(exc), to=to_phone)
+            return None
+
     device_id = config.get("device_id", "")
     if not device_id:
         logger.warning(

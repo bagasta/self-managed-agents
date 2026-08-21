@@ -1062,6 +1062,32 @@ def build_arthur_v2_tools(
         return {"ok": True, "device_id": agent.wa_device_id, "status": result.get("status", "unknown"), "phone_number": result.get("phone_number", "")}
 
     @tool
+    async def connect_assistant_whatsapp_cloud(agent_id: str, confirmed: bool = False) -> dict[str, Any]:
+        """Create a short-lived official Meta Embedded Signup link for a caller-owned assistant after explicit confirmation."""
+        if not confirmed:
+            return {"ok": False, "needs_confirmation": True, "error": "Minta konfirmasi eksplisit sebelum membuat link koneksi WhatsApp Cloud API."}
+        agent = await _owned(agent_id)
+        if agent is None:
+            return {"ok": False, "error": "Assistant tidak ditemukan atau bukan milik pengguna ini."}
+        try:
+            from app.config import get_settings
+            from app.core.infra.meta_embedded_signup import build_signup_state
+
+            settings = get_settings()
+            if not settings.app_public_url:
+                return {"ok": False, "error": "URL publik aplikasi belum dikonfigurasi untuk Meta Embedded Signup."}
+            state = build_signup_state(agent.id)
+            return {
+                "ok": True,
+                "assistant": _summary(agent),
+                "connection_type": "cloud_api",
+                "signup_url": f"{settings.app_public_url.rstrip('/')}/v1/meta/signup/launch?state={state}",
+                "next_step": "Buka link ini untuk menghubungkan WhatsApp Business melalui Meta Embedded Signup resmi. Link berlaku singkat dan hanya untuk assistant ini.",
+            }
+        except Exception as exc:
+            return {"ok": False, "error": "Link Meta Embedded Signup belum dapat dibuat.", "detail": str(exc)[:200]}
+
+    @tool
     async def refresh_assistant_whatsapp_qr(agent_id: str, confirmed: bool = False) -> dict[str, Any]:
         """Generate a fresh QR for a caller-owned assistant; this may replace its current WhatsApp session, so confirmation is required."""
         if not confirmed:
