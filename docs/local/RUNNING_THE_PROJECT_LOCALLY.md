@@ -89,6 +89,14 @@ cd /home/bagas/managed-agents-project
 make dev
 ```
 
+Untuk memakai port `8001` seperti dashboard yang sedang dibuka di mesin ini:
+
+```bash
+make dev HOST=127.0.0.1 PORT=8001
+```
+
+Target development mengawasi Python dan berkas UI (`.html`, `.js`, `.css`). Saat ada perubahan, server dan dashboard lokal akan reload otomatis.
+
 Backend tersedia di `http://localhost:8000` dan Swagger di `http://localhost:8000/docs`.
 
 UI-DEV tidak memiliki server frontend terpisah; FastAPI menyajikannya di:

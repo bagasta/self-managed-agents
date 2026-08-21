@@ -53,6 +53,21 @@ const S = {
   waModalAgentId: null,
 };
 
+// During local development, reload the page after Uvicorn reloads. This also
+// applies UI script/style changes without a manual server or browser restart.
+if (['127.0.0.1', 'localhost'].includes(window.location.hostname)) {
+  let dashboardWasUnavailable = false;
+  window.setInterval(async () => {
+    try {
+      const response = await fetch('/health', { cache: 'no-store' });
+      if (dashboardWasUnavailable && response.ok) window.location.reload();
+      dashboardWasUnavailable = !response.ok;
+    } catch (_) {
+      dashboardWasUnavailable = true;
+    }
+  }, 1500);
+}
+
 // ── Init ───────────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
   document.getElementById('cfg-url').value = S.baseUrl;

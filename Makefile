@@ -1,5 +1,8 @@
 .PHONY: help install install-dev test-arthur dev db-up migrate upgrade downgrade lint format wa wa-build dev-all wa-dev-build wa-dev sandbox-build sandbox-check seed-agents deploy-api-fast deploy-app deploy-all mcp-smoke-live mcp-smoke-live-strict mcp-smoke-live-reauth mcp-smoke-live-onboard
 
+HOST ?= 0.0.0.0
+PORT ?= 8000
+
 PROD_COMPOSE := docker compose -f deploy/docker-compose.prod.yml
 
 help:
@@ -48,7 +51,7 @@ test-arthur:
 		tests/test_skill_service.py
 
 dev:
-	uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+	.venv/bin/uvicorn app.main:app --host $(HOST) --port $(PORT) --reload --reload-dir app --reload-dir arthur_v2 --reload-dir UI-DEV --reload-include '*.py' --reload-include '*.html' --reload-include '*.js' --reload-include '*.css'
 
 wa: wa-build
 	cd wa-service && PYTHON_WEBHOOK_URL=http://localhost:8000/v1/channels/wa/incoming ./wa-service
