@@ -34,7 +34,9 @@ function renderMd(text) {
 
 // ── State ──────────────────────────────────────────────────────────
 const S = {
-  baseUrl: localStorage.getItem('baseUrl') || 'http://localhost:8000',
+  // Keep the dashboard usable when the API is started on a non-default local
+  // port; an explicitly saved Base URL still takes precedence.
+  baseUrl: localStorage.getItem('baseUrl') || window.location.origin,
   apiKey: localStorage.getItem('apiKey') || '',
   waServiceUrl: localStorage.getItem('waServiceUrl') || 'http://localhost:8080',
   agents: [],
@@ -1041,13 +1043,19 @@ async function loadWAAgent() {
       ? `<span class="text-muted" style="margin-left:8px; font-size:11px">device_id: ${escHtml(agent.wa_device_id)}</span>`
       : '<span class="text-muted" style="margin-left:8px">belum ada device</span>'}`;
 
+  const metaAction = `<div style="margin-top:12px">
+    <button class="btn btn-primary" onclick="connectMetaEmbeddedSignup('${agentId}')">🌐 Connect via Meta Embedded Signup</button>
+    <div class="text-muted" style="margin-top:6px;font-size:11px">Official WhatsApp Cloud API. Requires APP_PUBLIC_URL and Meta credentials on the server.</div>
+    <div id="meta-signup-result" style="margin-top:8px"></div>
+  </div>`;
+
   if (!agent.wa_device_id) {
     document.getElementById('wa-connect-panel').style.display = 'none';
     infoEl.innerHTML += `
       <div style="margin-top:12px">
         <button class="btn btn-success" onclick="connectWADevice('${agentId}')">📱 Connect WhatsApp (Init Device + QR)</button>
         <div class="text-muted" style="margin-top:6px; font-size:11px">Pastikan wa-service sudah aktif (port 8080) sebelum connect.</div>
-      </div>`;
+      </div>${metaAction}`;
     return;
   }
 
@@ -1055,8 +1063,21 @@ async function loadWAAgent() {
   S.waCurrentDeviceId = agent.wa_device_id;
   document.getElementById('wa-connect-panel').style.display = 'block';
   renderWAInfo(agent);
+  infoEl.innerHTML += metaAction;
   await refreshWAStatus();
   await refreshWAQR();
+}
+
+async function connectMetaEmbeddedSignup(agentId) {
+  const result = document.getElementById('meta-signup-result');
+  if (result) result.innerHTML = '<span class="spinner"></span> Membuat link Meta…';
+  const r = await api('POST', `/v1/meta/signup/links/${agentId}`);
+  if (!r.ok) {
+    if (result) result.innerHTML = `<span class="badge badge-red">❌ ${escHtml(r.data?.detail || 'Gagal membuat link Meta')}</span>`;
+    return;
+  }
+  const url = r.data.signup_url;
+  if (result) result.innerHTML = `<a class="btn btn-success btn-sm" href="${escHtml(url)}" target="_blank" rel="noopener">Buka Meta Embedded Signup</a><div class="text-muted" style="margin-top:6px;font-size:11px">Link berlaku ${r.data.expires_in_seconds} detik dan hanya untuk agent ini.</div>`;
 }
 
 async function connectWADevice(agentId) {

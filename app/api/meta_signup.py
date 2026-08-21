@@ -12,12 +12,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.infra.channel_service import encrypt_value
 from app.core.infra.meta_embedded_signup import (
+    build_signup_state,
     exchange_code_for_token,
     get_waba_phone_numbers,
     subscribe_waba_to_webhooks,
     verify_signup_state,
 )
 from app.database import get_db
+from app.deps import verify_api_key
 from app.models.agent import Agent
 
 router = APIRouter(prefix="/v1/meta/signup", tags=["meta-signup"])
@@ -35,6 +37,31 @@ def _agent_for_state(state_value: str) -> uuid.UUID:
         return verify_signup_state(state_value)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Signup link invalid or expired") from exc
+
+
+@router.post("/links/{agent_id}")
+async def create_signup_link(
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(verify_api_key),
+) -> dict:
+    """Dashboard/admin entry point; browser launch itself uses the signed state."""
+    agent = (await db.execute(select(Agent).where(Agent.id == agent_id, Agent.is_deleted.is_(False)))).scalar_one_or_none()
+    if agent is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assistant not found")
+    from app.config import get_settings
+    settings = get_settings()
+    if not settings.app_public_url:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="APP_PUBLIC_URL is required for Meta Embedded Signup")
+    try:
+        state = build_signup_state(agent.id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    return {
+        "agent_id": str(agent.id),
+        "signup_url": f"{settings.app_public_url.rstrip('/')}/v1/meta/signup/launch?state={state}",
+        "expires_in_seconds": settings.meta_signup_state_ttl_seconds,
+    }
 
 
 @router.get("/launch", response_class=HTMLResponse)
