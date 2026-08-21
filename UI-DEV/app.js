@@ -33,10 +33,12 @@ function renderMd(text) {
 }
 
 // ── State ──────────────────────────────────────────────────────────
+const savedBaseUrl = localStorage.getItem('baseUrl') || '';
+const isStaleLocalDefault = /^(https?:\/\/)?(localhost|127\.0\.0\.1):8000$/.test(savedBaseUrl) && savedBaseUrl !== window.location.origin;
 const S = {
   // Keep the dashboard usable when the API is started on a non-default local
   // port; an explicitly saved Base URL still takes precedence.
-  baseUrl: localStorage.getItem('baseUrl') || window.location.origin,
+  baseUrl: (!savedBaseUrl || isStaleLocalDefault) ? window.location.origin : savedBaseUrl,
   apiKey: localStorage.getItem('apiKey') || '',
   waServiceUrl: localStorage.getItem('waServiceUrl') || 'http://localhost:8080',
   agents: [],
@@ -1448,6 +1450,10 @@ const Arthur = { id: null, apiKey: null, sessionId: null, deviceId: null, qrPoll
 
 async function arthurLoad() {
   const panel = document.getElementById('arthur-status-panel');
+  if (!S.apiKey) {
+    panel.innerHTML = `<div class="badge badge-yellow">🔑 Isi API Key di bagian atas lalu klik Save & Ping untuk memuat Arthur.</div>`;
+    return;
+  }
   panel.innerHTML = `<div class="text-muted">🔍 Mencari Arthur...</div>`;
   const r = await api('GET', '/v1/agents?limit=100');
   if (!r.ok) { panel.innerHTML = `<div class="badge badge-red">Error: ${escHtml(JSON.stringify(r.data))}</div>`; return; }
@@ -1480,6 +1486,10 @@ async function arthurLoad() {
 
 async function ensureArthurV2() {
   const panel = document.getElementById('arthur-status-panel');
+  if (!S.apiKey) {
+    panel.innerHTML = `<div class="badge badge-yellow">🔑 Isi API Key di bagian atas lalu klik Save & Ping sebelum membuat Arthur V2.</div>`;
+    return;
+  }
   panel.innerHTML = `<div class="text-muted">⏳ Menyiapkan Arthur V2...</div>`;
   const r = await api('POST', '/v1/agents/system/arthur-v2/ensure');
   if (!r.ok) {
