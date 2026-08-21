@@ -1508,12 +1508,32 @@ async function arthurConnectWA() {
   const qrDiv = document.getElementById('arthur-wa-qr');
   qrDiv.innerHTML = `<div class="text-muted">⏳ Generating QR...</div>`;
   const r = await api('POST', `/v1/agents/${Arthur.id}/whatsapp/connect`);
-  if (!r.ok) { qrDiv.innerHTML = `<div class="badge badge-red">Error: ${escHtml(JSON.stringify(r.data))}</div>`; return; }
+  if (!r.ok) {
+    const detail = r.data?.detail || JSON.stringify(r.data);
+    const hint = /wa-service error: All connection attempts failed/.test(detail)
+      ? '<div class="text-muted" style="margin-top:6px;font-size:11px">wa-service legacy di port 8080 tidak aktif. Gunakan Meta Embedded Signup di atas.</div>'
+      : '';
+    qrDiv.innerHTML = `<div class="badge badge-red">Error: ${escHtml(detail)}</div>${hint}`;
+    return;
+  }
   Arthur.deviceId = r.data.device_id || r.data.wa_device_id || Arthur.deviceId;
   _arthurRenderQR(r.data.qr_image || r.data.qr_base64, r.data.status);
   arthurStopQRPoller();
   Arthur.qrPoller = setInterval(() => arthurRefreshQR(), 18000);
   _arthurPollStatus();
+}
+
+async function arthurConnectMeta() {
+  if (!Arthur.id) await arthurLoad();
+  if (!Arthur.id) { alert('Load Arthur dulu'); return; }
+  const result = document.getElementById('arthur-meta-signup-result');
+  result.innerHTML = '<span class="spinner"></span> Membuat link Meta…';
+  const r = await api('POST', `/v1/meta/signup/links/${Arthur.id}`);
+  if (!r.ok) {
+    result.innerHTML = `<span class="badge badge-red">❌ ${escHtml(r.data?.detail || JSON.stringify(r.data))}</span>`;
+    return;
+  }
+  result.innerHTML = `<a class="btn btn-success btn-sm" href="${escHtml(r.data.signup_url)}" target="_blank" rel="noopener">Buka Meta Embedded Signup</a><div class="text-muted" style="margin-top:6px;font-size:11px">Link berlaku ${r.data.expires_in_seconds} detik dan hanya untuk Arthur ini.</div>`;
 }
 
 async function arthurRefreshQR() {

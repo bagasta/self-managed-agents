@@ -596,7 +596,7 @@
       <div class="section" id="sec-arthur">
         <div class="section-title">🏗️ Arthur V2 — Agent Builder</div>
         <p class="text-muted" style="margin-bottom:16px">
-          Kelola Arthur V2 (system agent). Setup instruksi, hubungkan nomor WhatsApp dedicated lewat QR, dan chat langsung untuk testing.
+          Kelola Arthur V2 (system agent). Setup instruksi, hubungkan WhatsApp resmi lewat Meta Embedded Signup, dan chat langsung untuk testing.
         </p>
 
         <!-- ── Status & Quick Actions ── -->
@@ -615,12 +615,17 @@
           <div class="card" style="margin:0">
             <div class="card-title">📱 WhatsApp Arthur</div>
             <div id="arthur-wa-panel">
-              <div class="text-muted" style="font-size:12px;margin-bottom:12px">Hubungkan Arthur V2 ke nomor WhatsApp dedicated: generate QR, lalu scan dari WhatsApp pada nomor tersebut.</div>
+              <div class="text-muted" style="font-size:12px;margin-bottom:12px">Gunakan Meta Embedded Signup untuk menghubungkan nomor WhatsApp Business resmi ke Arthur. QR di bawah hanya jalur legacy.</div>
               <div class="btn-group" style="flex-wrap:wrap">
-                <button class="btn btn-primary btn-sm" onclick="arthurConnectWA()">🔗 Connect / Generate QR</button>
+                <button class="btn btn-success btn-sm" onclick="arthurConnectMeta()">🟢 Connect via Meta Embedded Signup</button>
                 <button class="btn btn-ghost btn-sm" onclick="arthurCheckWAStatus()">📊 Cek Status WA</button>
                 <button class="btn btn-danger btn-sm" onclick="arthurDisconnectWA()">⛔ Disconnect WA</button>
               </div>
+              <div id="arthur-meta-signup-result" style="margin-top:10px"></div>
+              <details style="margin-top:12px">
+                <summary class="text-muted" style="font-size:11px;cursor:pointer">QR legacy (butuh wa-service lokal)</summary>
+                <div class="btn-group" style="margin-top:8px"><button class="btn btn-ghost btn-sm" onclick="arthurConnectWA()">🔗 Generate QR legacy</button></div>
+              </details>
               <div id="arthur-wa-qr" style="margin-top:12px;text-align:center"></div>
               <div id="arthur-wa-status" style="margin-top:8px;text-align:center"></div>
             </div>
