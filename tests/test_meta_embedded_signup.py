@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import inspect
 import json
 import time
 from types import SimpleNamespace
@@ -49,6 +50,14 @@ def test_short_launch_path_is_registered_for_whatsapp_friendly_links():
     paths = {route.path for route in meta_signup.router.routes}
 
     assert "/v1/meta/signup/l/{state}" in paths
+
+
+def test_signup_launch_page_has_a_branded_onboarding_layout():
+    page_template = inspect.getsource(meta_signup.launch)
+
+    assert "Meta Embedded Signup" in page_template
+    assert "Hubungkan WhatsApp Business" in page_template
+    assert "Kami tidak pernah meminta password Facebook" in page_template
 
 
 def test_webhook_signature_requires_app_secret():

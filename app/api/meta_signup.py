@@ -77,14 +77,36 @@ async def launch(state: str = Query(..., min_length=32), db: AsyncSession = Depe
     name = html.escape(agent.name)
     # The code comes from FB.login; WABA and phone-number IDs arrive via the
     # official WA_EMBEDDED_SIGNUP postMessage event in either order.
-    return f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connect WhatsApp</title></head>
-<body><main><h1>Connect WhatsApp Business</h1><p>Connect <strong>{name}</strong> through Meta's official Embedded Signup.</p><button id="connect">Continue with Meta</button><p id="status" role="status"></p></main>
-<script>const state={state!r};let code='',waba='',phone='';
-const statusEl=document.getElementById('status'); const ready=()=>code&&waba&&phone;
-async function complete(){{if(!ready())return;statusEl.textContent='Saving connection…';const r=await fetch('/v1/meta/signup/complete',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{state:state,code:code,waba_id:waba,phone_number_id:phone}})}});const data=await r.json();statusEl.textContent=r.ok?'Connected. You can return to WhatsApp.':(data.detail||'Connection failed');}}
+    return f'''<!doctype html><html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Hubungkan WhatsApp · {name}</title><style>
+:root {{ color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
+* {{ box-sizing: border-box; }}
+body {{ min-height:100vh; margin:0; color:#edf3ff; background:#08111f; background-image:radial-gradient(circle at 15% 4%,rgba(41,98,255,.24),transparent 32rem),radial-gradient(circle at 88% 88%,rgba(0,187,126,.14),transparent 27rem); }}
+.signup-shell {{ width:min(100% - 32px, 570px); margin:0 auto; padding:64px 0 40px; }}
+.brand {{ display:flex; align-items:center; gap:10px; margin:0 0 30px 4px; color:#bac9df; font-size:14px; font-weight:700; letter-spacing:.02em; }}
+.brand-mark {{ display:grid; place-items:center; width:32px; height:32px; border-radius:10px; background:linear-gradient(145deg,#1c72ff,#814dff); box-shadow:0 8px 20px rgba(37,103,255,.32); color:white; }}
+.signup-card {{ overflow:hidden; border:1px solid rgba(173,199,255,.17); border-radius:24px; background:rgba(15,27,48,.9); box-shadow:0 28px 70px rgba(0,0,0,.36); }}
+.card-main {{ padding:35px; }}
+.eyebrow {{ display:inline-flex; align-items:center; gap:7px; padding:6px 10px; border:1px solid rgba(102,157,255,.3); border-radius:999px; background:rgba(47,111,255,.12); color:#9cc0ff; font-size:12px; font-weight:800; letter-spacing:.04em; text-transform:uppercase; }}
+h1 {{ max-width:430px; margin:18px 0 12px; color:#fff; font-size:clamp(29px,6vw,39px); line-height:1.1; letter-spacing:-.045em; }}
+.lead {{ margin:0; color:#b9c8dd; font-size:16px; line-height:1.58; }}
+.agent {{ color:#fff; font-weight:750; }}
+.steps {{ display:grid; gap:13px; margin:29px 0; }}
+.step {{ display:flex; align-items:flex-start; gap:12px; color:#c6d3e6; font-size:14px; line-height:1.45; }}
+.step-number {{ display:grid; flex:0 0 auto; place-items:center; width:24px; height:24px; border:1px solid rgba(112,160,255,.38); border-radius:50%; color:#a9c8ff; font-size:12px; font-weight:800; }}
+#connect {{ width:100%; border:0; border-radius:13px; padding:15px 18px; cursor:pointer; background:linear-gradient(100deg,#1877f2,#2c65db); box-shadow:0 12px 25px rgba(24,119,242,.28); color:white; font:inherit; font-size:16px; font-weight:800; transition:transform .16s ease,filter .16s ease; }}
+#connect:hover {{ filter:brightness(1.09); transform:translateY(-1px); }} #connect:focus-visible {{ outline:3px solid #96baff; outline-offset:3px; }} #connect:disabled {{ cursor:wait; opacity:.68; transform:none; }}
+#status {{ min-height:22px; margin:16px 0 0; color:#b9c8dd; font-size:13px; line-height:1.45; text-align:center; }} #status[data-state="success"] {{ color:#68e3ac; }} #status[data-state="error"] {{ color:#ff9ca6; }}
+.security {{ display:flex; gap:10px; padding:18px 35px; border-top:1px solid rgba(173,199,255,.12); background:rgba(5,13,27,.32); color:#91a3bd; font-size:12px; line-height:1.5; }}
+.security-icon {{ color:#70dba4; }}
+@media (max-width:520px) {{ .signup-shell {{ width:min(100% - 24px,570px); padding-top:24px; }} .card-main {{ padding:28px 23px; }} .security {{ padding:17px 23px; }} }}
+</style></head>
+<body><main class="signup-shell"><div class="brand"><span class="brand-mark">✦</span><span>Chief AI Officer</span></div><section class="signup-card" aria-labelledby="page-title"><div class="card-main"><span class="eyebrow">◉ Meta Embedded Signup</span><h1 id="page-title">Hubungkan WhatsApp Business</h1><p class="lead">Sambungkan nomor WhatsApp Business resmi untuk <span class="agent">{name}</span> lewat proses aman dari Meta.</p><div class="steps" aria-label="Langkah koneksi"><div class="step"><span class="step-number">1</span><span>Lanjutkan ke akun Facebook/Meta yang mengelola WhatsApp Business Anda.</span></div><div class="step"><span class="step-number">2</span><span>Pilih atau daftarkan nomor yang ingin digunakan oleh {name}.</span></div><div class="step"><span class="step-number">3</span><span>Selesaikan verifikasi Meta; koneksi akan disimpan otomatis.</span></div></div><button id="connect" type="button">Lanjutkan dengan Meta <span aria-hidden="true">→</span></button><p id="status" role="status" aria-live="polite"></p></div><div class="security"><span class="security-icon">●</span><span>Anda akan melanjutkan ke flow resmi Meta. Kami tidak pernah meminta password Facebook atau kode verifikasi Anda di halaman ini.</span></div></section></main>
+<script>const state={state!r};let code='',waba='',phone='';const statusEl=document.getElementById('status');const connectButton=document.getElementById('connect');const ready=()=>code&&waba&&phone;
+function setStatus(message,type=''){{statusEl.textContent=message;statusEl.dataset.state=type;}}
+async function complete(){{if(!ready())return;setStatus('Menyimpan koneksi WhatsApp…');const r=await fetch('/v1/meta/signup/complete',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{state:state,code:code,waba_id:waba,phone_number_id:phone}})}});const data=await r.json();if(r.ok){{setStatus('WhatsApp berhasil terhubung. Anda bisa kembali ke WhatsApp.','success');connectButton.disabled=true;connectButton.textContent='WhatsApp terhubung';}}else{{setStatus(data.detail||'Koneksi belum berhasil. Silakan coba lagi.','error');connectButton.disabled=false;connectButton.innerHTML='Coba lagi dengan Meta <span aria-hidden="true">→</span>';}}}}
 window.addEventListener('message',e=>{{if(e.origin!=='https://www.facebook.com'&&e.origin!=='https://web.facebook.com')return;let d=e.data;try{{if(typeof d==='string')d=JSON.parse(d)}}catch(_e){{return}}if(d&&d.type==='WA_EMBEDDED_SIGNUP'){{waba=d.data?.waba_id||waba;phone=d.data?.phone_number_id||phone;complete();}}}});
 window.fbAsyncInit=()=>FB.init({{appId:{settings.meta_app_id!r},cookie:true,xfbml:true,version:{settings.meta_graph_api_version!r}}});
-document.getElementById('connect').onclick=()=>FB.login(r=>{{code=r.authResponse?.code||'';if(!code){{statusEl.textContent='Meta login was cancelled.';return}}complete();}},{{config_id:{settings.meta_embedded_signup_config_id!r},response_type:'code',override_default_response_type:true,extras:{{setup:{{}}}}}});
+connectButton.onclick=()=>{{connectButton.disabled=true;setStatus('Membuka Meta…');FB.login(r=>{{code=r.authResponse?.code||'';if(!code){{setStatus('Login Meta dibatalkan atau belum selesai.','error');connectButton.disabled=false;return}}complete();}},{{config_id:{settings.meta_embedded_signup_config_id!r},response_type:'code',override_default_response_type:true,extras:{{setup:{{}}}}}});}};
 </script><script async defer crossorigin="anonymous" src="https://connect.facebook.net/en_US/sdk.js"></script></body></html>'''
 
 
