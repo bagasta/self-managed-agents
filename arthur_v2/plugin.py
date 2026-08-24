@@ -1082,7 +1082,7 @@ def build_arthur_v2_tools(
                 "ok": True,
                 "assistant": _summary(agent),
                 "connection_type": "cloud_api",
-                "signup_url": f"{settings.app_public_url.rstrip('/')}/v1/meta/signup/launch?state={state}",
+                "signup_url": f"{settings.app_public_url.rstrip('/')}/v1/meta/signup/l/{state}",
                 "next_step": "Buka link ini untuk menghubungkan WhatsApp Business melalui Meta Embedded Signup resmi. Link berlaku singkat dan hanya untuk assistant ini.",
             }
         except Exception as exc:

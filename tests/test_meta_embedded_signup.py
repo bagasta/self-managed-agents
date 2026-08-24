@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.infra import meta_embedded_signup as signup
+from app.api import meta_signup
 
 
 @pytest.fixture(autouse=True)
@@ -42,6 +43,12 @@ def test_legacy_signup_state_remains_valid_until_expiry():
     signature = hmac.new(b"test-secret", encoded.encode(), hashlib.sha256).hexdigest()
 
     assert str(signup.verify_signup_state(f"{encoded}.{signature}")) == payload["agent_id"]
+
+
+def test_short_launch_path_is_registered_for_whatsapp_friendly_links():
+    paths = {route.path for route in meta_signup.router.routes}
+
+    assert "/v1/meta/signup/l/{state}" in paths
 
 
 def test_webhook_signature_requires_app_secret():

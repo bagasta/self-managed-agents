@@ -59,7 +59,7 @@ async def create_signup_link(
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
     return {
         "agent_id": str(agent.id),
-        "signup_url": f"{settings.app_public_url.rstrip('/')}/v1/meta/signup/launch?state={state}",
+        "signup_url": f"{settings.app_public_url.rstrip('/')}/v1/meta/signup/l/{state}",
         "expires_in_seconds": settings.meta_signup_state_ttl_seconds,
     }
 
@@ -86,6 +86,12 @@ window.addEventListener('message',e=>{{if(e.origin!=='https://www.facebook.com'&
 window.fbAsyncInit=()=>FB.init({{appId:{settings.meta_app_id!r},cookie:true,xfbml:true,version:{settings.meta_graph_api_version!r}}});
 document.getElementById('connect').onclick=()=>FB.login(r=>{{code=r.authResponse?.code||'';if(!code){{statusEl.textContent='Meta login was cancelled.';return}}complete();}},{{config_id:{settings.meta_embedded_signup_config_id!r},response_type:'code',override_default_response_type:true,extras:{{setup:{{}}}}}});
 </script><script async defer crossorigin="anonymous" src="https://connect.facebook.net/en_US/sdk.js"></script></body></html>'''
+
+
+@router.get("/l/{state}", response_class=HTMLResponse)
+async def launch_short(state: str, db: AsyncSession = Depends(get_db)) -> str:
+    """Compact, WhatsApp-friendly alias for the Embedded Signup launch URL."""
+    return await launch(state=state, db=db)
 
 
 @router.post("/complete")
