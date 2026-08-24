@@ -189,15 +189,15 @@ class DockerBackend(SandboxBackendProtocol):
         try:
             p = self._resolve(file_path)
         except ValueError as e:
-            return WriteResult(path=None, error=str(e), files_update=None)
+            return WriteResult(path=None, error=str(e))
         if p.exists():
-            return WriteResult(path=None, error=f"File '{file_path}' already exists. Use edit() to modify it.", files_update=None)
+            return WriteResult(path=None, error=f"File '{file_path}' already exists. Use edit() to modify it.")
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding="utf-8")
-            return WriteResult(path=file_path, error=None, files_update=None)
+            return WriteResult(path=file_path, error=None)
         except Exception as exc:
-            return WriteResult(path=None, error=f"Error writing '{file_path}': {exc}", files_update=None)
+            return WriteResult(path=None, error=f"Error writing '{file_path}': {exc}")
 
     async def awrite(self, file_path: str, content: str) -> WriteResult:
         return self.write(file_path, content)
@@ -210,19 +210,19 @@ class DockerBackend(SandboxBackendProtocol):
         try:
             p = self._resolve(file_path)
         except ValueError as e:
-            return EditResult(path=None, error=str(e), files_update=None, occurrences=None)
+            return EditResult(path=None, error=str(e), occurrences=None)
         if not p.exists():
-            return EditResult(path=None, error=f"File '{file_path}' not found", files_update=None, occurrences=None)
+            return EditResult(path=None, error=f"File '{file_path}' not found", occurrences=None)
         try:
             text = p.read_text(encoding="utf-8", errors="replace")
             count = text.count(old_string)
             if count == 0:
-                return EditResult(path=None, error="old_string not found in file", files_update=None, occurrences=0)
+                return EditResult(path=None, error="old_string not found in file", occurrences=0)
             updated = text.replace(old_string, new_string) if replace_all else text.replace(old_string, new_string, 1)
             p.write_text(updated, encoding="utf-8")
-            return EditResult(path=file_path, error=None, files_update=None, occurrences=count if replace_all else 1)
+            return EditResult(path=file_path, error=None, occurrences=count if replace_all else 1)
         except Exception as exc:
-            return EditResult(path=None, error=f"Error editing '{file_path}': {exc}", files_update=None, occurrences=None)
+            return EditResult(path=None, error=f"Error editing '{file_path}': {exc}", occurrences=None)
 
     async def aedit(self, file_path: str, old_string: str, new_string: str, replace_all: bool = False) -> EditResult:
         return self.edit(file_path, old_string, new_string, replace_all)

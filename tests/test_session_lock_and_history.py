@@ -355,7 +355,19 @@ class TestDockerBackendWriteCreateOnly:
         backend = self._make_backend(tmp_path)
         result = backend.write("new_file.txt", "hello")
         assert result.error is None
+        assert result.path == "new_file.txt"
         assert (tmp_path / "new_file.txt").read_text() == "hello"
+
+    def test_edit_updates_existing_file_with_current_deepagents_result(self, tmp_path):
+        backend = self._make_backend(tmp_path)
+        (tmp_path / "index.html").write_text("before")
+
+        result = backend.edit("index.html", "before", "after")
+
+        assert result.error is None
+        assert result.path == "index.html"
+        assert result.occurrences == 1
+        assert (tmp_path / "index.html").read_text() == "after"
 
     def test_write_rejects_existing_file(self, tmp_path):
         backend = self._make_backend(tmp_path)
