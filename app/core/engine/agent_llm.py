@@ -17,7 +17,14 @@ def build_agent_llms(agent_model: Any, settings: Any, temperature: float) -> tup
         base_url = "https://openrouter.ai/api/v1"
         bare_model = model_name
 
-    max_tokens: int = getattr(agent_model, "max_tokens", None) or settings.llm_max_tokens
+    configured_max_tokens = getattr(agent_model, "max_tokens", None)
+    tools_config = getattr(agent_model, "tools_config", None)
+    is_coding_agent = isinstance(tools_config, dict) and bool(
+        tools_config.get("sandbox") or tools_config.get("deploy")
+    )
+    max_tokens: int = configured_max_tokens or (
+        settings.coding_agent_max_tokens if is_coding_agent else settings.llm_max_tokens
+    )
     llm_raw = ChatOpenAI(
         model=bare_model,
         api_key=api_key,

@@ -76,12 +76,22 @@ def _is_enabled(tools_config: dict[str, Any], key: str, default: bool = False) -
 
 def build_sandbox_binary_tool(sandbox: DockerSandbox) -> list:
     @tool
+    def sandbox_write_text_file(path: str, content: str) -> str:
+        """Write a UTF-8 text or source file in the Docker sandbox workspace.
+
+        Prefer this for HTML, CSS, JavaScript, Python, and other long source
+        files. Do not put long file contents in an execute-command heredoc,
+        because the model response can be truncated before its terminator.
+        """
+        return sandbox.write_file(path, content)
+
+    @tool
     def sandbox_write_binary_file(path: str, base64_content: str) -> str:
         """Decode a base64 string and write it as a binary file in the Docker sandbox workspace (/workspace/).
         Args: path (e.g. 'output.png'), base64_content (raw base64 string without data URI prefix)."""
         return sandbox.write_binary_file(path, base64_content)
 
-    return [sandbox_write_binary_file]
+    return [sandbox_write_text_file, sandbox_write_binary_file]
 
 
 # ---------------------------------------------------------------------------

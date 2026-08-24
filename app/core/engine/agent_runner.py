@@ -2257,6 +2257,9 @@ async def run_agent(
             and tools_config["subagents"].get("enabled")
         )
         _is_builder_or_system_agent = "builder" in _agent_caps or "system" in _agent_caps
+        _is_coding_or_deploy_agent = isinstance(tools_config, dict) and bool(
+            tools_config.get("sandbox") or tools_config.get("deploy")
+        )
         if _is_builder_or_system_agent and not _has_subagents:
             _graph_config["recursion_limit"] = max(settings.agent_max_steps * 3, 24)
         # Agents that delegate to sys_coder may build framework projects (npm install,
@@ -2267,6 +2270,8 @@ async def run_agent(
             _timeout = settings.agent_timeout_seconds * 8
         elif _is_builder_or_system_agent:
             _timeout = min(settings.agent_timeout_seconds * 4, 540)
+        elif _is_coding_or_deploy_agent:
+            _timeout = max(settings.agent_timeout_seconds, settings.coding_agent_timeout_seconds)
         else:
             _timeout = settings.agent_timeout_seconds
         try:

@@ -118,6 +118,10 @@ class Settings(BaseSettings):
     default_subagent_max_tokens: int = 8192
     media_doc_max_chars: int = 12000
     llm_max_tokens: int = 1024
+    # Sandbox/deploy agents need enough output to write real source files in a
+    # single tool call. Keep the normal conversational default conservative.
+    coding_agent_max_tokens: int = 8192
+    coding_agent_timeout_seconds: int = 900
     message_max_length: int = 10_000       # max chars per user message
     media_max_length: int = 10_000_000     # max chars for base64 media payload
     max_concurrent_sandboxes: int = 6      # bounded semaphore; requests queue instead of failing
