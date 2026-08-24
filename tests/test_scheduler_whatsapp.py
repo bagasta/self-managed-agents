@@ -10,6 +10,7 @@ from app.core.engine.agent_tool_setup import _should_self_heal_whatsapp_schedule
 from app.core.tools.scheduler_tool import build_scheduler_tools
 from app.core.workers.scheduler_service import (
     _SCHEDULER_HEARTBEAT_KEY,
+    _run_heartbeat_job,
     _scheduled_channel_config,
     _send_scheduled_channel_message,
     _tick_with_lock,
@@ -47,6 +48,51 @@ async def test_scheduler_heartbeat_proves_external_worker_liveness(monkeypatch) 
     assert await publish_scheduler_heartbeat() is True
     assert _SCHEDULER_HEARTBEAT_KEY in redis.values
     assert await get_external_scheduler_health() == "ok"
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_charges_the_final_aggregated_run_usage_once(monkeypatch) -> None:
+    class _Result:
+        def __init__(self, value):
+            self.value = value
+
+        def scalar_one_or_none(self):
+            return self.value
+
+    class _DB:
+        async def execute(self, _statement):
+            return _Result(SimpleNamespace(id=uuid.uuid4(), channel_type=None))
+
+    memory_calls = 0
+
+    async def fake_get_memory(*_args, **_kwargs):
+        nonlocal memory_calls
+        memory_calls += 1
+        if memory_calls == 1:
+            return SimpleNamespace(value_data='{"quiet_start":"00:00","quiet_end":"00:01"}')
+        return None
+
+    async def fake_run_agent(**_kwargs):
+        return {"reply": "HEARTBEAT_OK", "tokens_used": 1234}
+
+    charges = []
+
+    async def fake_record(agent, tokens_used, db):
+        charges.append((agent, tokens_used, db))
+
+    monkeypatch.setattr("app.core.domain.memory_service.get_memory", fake_get_memory)
+    monkeypatch.setattr("app.core.engine.agent_runner.run_agent", fake_run_agent)
+    monkeypatch.setattr(
+        "app.core.domain.agent_quota_service.record_agent_token_usage", fake_record,
+    )
+
+    agent = SimpleNamespace(id="agent-1")
+    job = SimpleNamespace(id="job-1", agent_id="agent-1", label="heartbeat:_global")
+    db = _DB()
+
+    await _run_heartbeat_job(job, agent, db)
+
+    assert charges == [(agent, 1234, db)]
 
 
 @pytest.mark.asyncio

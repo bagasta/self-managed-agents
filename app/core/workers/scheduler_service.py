@@ -180,6 +180,7 @@ async def _run_job_guarded(job_id) -> None:
 async def _run_heartbeat_job(job, agent_model, db) -> None:
     """Jalankan heartbeat job: find last active session, run checklist, kirim jika perlu."""
     from app.core.engine.agent_runner import run_agent
+    from app.core.domain.agent_quota_service import record_agent_token_usage
     from app.core.domain.memory_service import get_memory
     from app.models.session import Session
     import json as _json
@@ -244,6 +245,12 @@ async def _run_heartbeat_job(job, agent_model, db) -> None:
         user_message=f"[HEARTBEAT] Jalankan checklist berikut:\n{checklist}",
         db=db,
     )
+    # run_agent already aggregates parent and sub-agent calls; charge that final
+    # amount exactly once for scheduler executions as well.
+    tokens_used = int(result.get("tokens_used", 0) or 0)
+    if tokens_used > 0:
+        await record_agent_token_usage(agent_model, tokens_used, db)
+        log.info("heartbeat.token_usage_recorded", tokens_used=tokens_used)
     reply = (result.get("reply") or "").strip()
 
     # HEARTBEAT_OK → diam

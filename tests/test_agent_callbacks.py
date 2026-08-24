@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 
 from app.core.engine.agent_callbacks import AgentStepLogger
+from app.core.engine.subagent_builder import _bind_usage_callbacks
 
 
 def _run(coro):
@@ -57,6 +58,26 @@ def test_step_counter_increments_across_tools():
 
     steps = [e["step"] for e in log._events("agent_step.tool_start")]
     assert steps == [1, 2]
+
+
+def test_compiled_subagent_binds_parent_usage_collector_with_auditable_metadata():
+    collector = AgentStepLogger(_FakeLog())
+
+    class Runnable:
+        def __init__(self) -> None:
+            self.config = None
+
+        def with_config(self, config):
+            self.config = config
+            return self
+
+    runnable = Runnable()
+    assert _bind_usage_callbacks(runnable, [collector], subagent_name="sys_coder") is runnable
+    assert runnable.config["callbacks"] == [collector]
+    assert runnable.config["metadata"] == {
+        "agent_role": "subagent",
+        "agent_name": "sys_coder",
+    }
 
 
 def test_debug_full_payload_emitted_for_complete_mode():

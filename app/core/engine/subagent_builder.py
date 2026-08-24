@@ -110,6 +110,23 @@ def _user_requested_file_delivery(user_message: str) -> bool:
 settings = get_settings()
 
 
+def _bind_usage_callbacks(
+    runnable: Any,
+    callbacks: list[Any] | None,
+    *,
+    subagent_name: str,
+) -> Any:
+    """Bind the parent run collector to a compiled Deep Agents sub-agent."""
+    if not callbacks:
+        return runnable
+    return runnable.with_config(
+        {
+            "callbacks": callbacks,
+            "metadata": {"agent_role": "subagent", "agent_name": subagent_name},
+        }
+    )
+
+
 # ---------------------------------------------------------------------------
 # Built-in system sub-agents
 # ---------------------------------------------------------------------------
@@ -387,6 +404,7 @@ def _build_system_subagent(
     wa_device_id: str = "",
     wa_target: str = "",
     expose_wa_media_tools: bool = False,
+    callbacks: list[Any] | None = None,
 ) -> tuple[dict, DockerSandbox | None]:
     """
     Build a SubAgent (or CompiledSubAgent) dict and optional DockerSandbox from a system sub-agent spec.
@@ -443,6 +461,9 @@ def _build_system_subagent(
                 system_prompt=spec["system_prompt"],
                 backend=sub_backend,
             )
+            runnable = _bind_usage_callbacks(
+                runnable, callbacks, subagent_name=spec["name"]
+            )
             return {
                 "name": spec["name"],
                 "description": spec["description"],
@@ -482,6 +503,7 @@ async def build_subagents(
     user_message: str = "",
     expose_wa_media_tools_override: bool | None = None,
     memory_scope: str | None = None,
+    callbacks: list[Any] | None = None,
 ) -> tuple[list, list[DockerSandbox]]:
     """
     Build SubAgent / CompiledSubAgent list untuk Deep Agents SDK.
@@ -542,6 +564,7 @@ async def build_subagents(
                 wa_device_id,
                 wa_target,
                 expose_wa_media_tools=expose_wa_media_tools,
+                callbacks=callbacks,
             )
             if sa is None:
                 continue  # compile failed; skip this subagent, keep the rest
@@ -624,6 +647,9 @@ async def build_subagents(
                     tools=extra_tools,
                     system_prompt=agent_row.instructions or "You are a helpful assistant.",
                     backend=sub_backend,
+                )
+                runnable = _bind_usage_callbacks(
+                    runnable, callbacks, subagent_name=agent_row.name
                 )
                 sa: dict = {
                     "name": agent_row.name,

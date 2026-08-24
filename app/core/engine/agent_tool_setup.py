@@ -102,6 +102,7 @@ async def build_agent_tool_setup(
     sender_name: str | None,
     user_message: str,
     operating_manual: dict[str, Any] | None = None,
+    callbacks: list[Any] | None = None,
 ) -> AgentToolSetup:
     settings = get_settings()
     if not getattr(settings, "sandbox_subagents_enabled", True):
@@ -305,6 +306,7 @@ async def build_agent_tool_setup(
             user_message=user_message,
             expose_wa_media_tools_override=False,
             memory_scope=memory_scope,
+            callbacks=callbacks,
         )
         if subagent_list:
             active_groups.append(f"subagents({len(subagent_list)})")

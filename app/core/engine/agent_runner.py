@@ -1067,6 +1067,10 @@ async def run_agent(
         fallback_tools_config=tools_config,
     )
 
+    # This collector is shared with compiled sub-agents, so construct it before
+    # tool setup creates their runnable graphs.
+    _agent_logger = AgentStepLogger(log)
+
     # Tool setup lives in agent_tool_setup.py; it still gates builder tools via
     # capabilities and build_builder_tools.
     tool_setup = await build_agent_tool_setup(
@@ -1080,6 +1084,7 @@ async def run_agent(
         sender_name=sender_name,
         user_message=user_message,
         operating_manual=_early_operating_manual,
+        callbacks=[_agent_logger],
     )
     tools = tool_setup.tools
     # Keep the complete builder tool inventory. Progressive discovery scoping is
@@ -1846,8 +1851,6 @@ async def run_agent(
             ),
         )
         step_counter = step_base + 1
-
-        _agent_logger = AgentStepLogger(log)
 
         def _usage_summary() -> dict[str, Any]:
             return {
