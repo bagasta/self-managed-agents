@@ -5,6 +5,7 @@ import pytest
 
 from arthur_v2.google_oauth import start_google_oauth
 from arthur_v2.plugin import (
+    ARTHUR_V2_CODING_DEPLOY_MAX_TOKENS,
     _build_target_tool_usage,
     _capability_context_for_memory,
     _google_spreadsheet_id_from_url,
@@ -107,6 +108,8 @@ def test_arthur_v2_setup_contract_uses_pairing_and_persists_scheduler_context() 
     assert "Never wrap it in Markdown, parentheses, angle brackets, quotes, or trailing" in prompt
     assert "never offer, generate, or send a WhatsApp QR" in prompt
     assert "returned link to the owner verbatim" in prompt
+    assert "explicit 8192-token output budget" in prompt
+    assert ARTHUR_V2_CODING_DEPLOY_MAX_TOKENS == 8192
 
 
 def test_target_google_sheets_contract_defines_safe_tool_sequence() -> None:

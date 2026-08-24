@@ -33,6 +33,7 @@ from .google_oauth import google_mcp_url, start_google_oauth
 
 ARTHUR_V2_PLUGIN = "arthur_v2"
 ARTHUR_V2_ASSISTANT_MODEL = "deepseek/deepseek-v4-flash"
+ARTHUR_V2_CODING_DEPLOY_MAX_TOKENS = 8192
 
 _BUSINESS_ASSISTANT_KINDS = {"business", "internal", "sales", "registration", "customer"}
 _GOOGLE_WORKSPACE_SERVICES = {
@@ -368,6 +369,9 @@ For a website or web-app request, create the assistant with enable_deploy=true
 in the same confirmed create_assistant call. That also enables its sandbox. The
 target website assistant must build from the approved brief, use deploy_app,
 verify the deployment status, and return the actual public URL to the user.
+Website/deploy assistants receive an explicit 8192-token output budget so they
+can write complete source files; do not create them with an implicit low
+conversational token limit.
 Never claim a website or public link exists until that assistant's deployment
 tool has returned a URL. Arthur configures this capability; it does not invent
 or pre-announce a deployment result from the builder chat.
@@ -613,6 +617,7 @@ def build_arthur_v2_tools(
                 description=purpose.strip(),
                 instructions=target_instructions,
                 model=ARTHUR_V2_ASSISTANT_MODEL,
+                max_tokens=ARTHUR_V2_CODING_DEPLOY_MAX_TOKENS if enable_deploy else None,
                 channel_type="whatsapp",
                 owner_external_id=owner_phone,
                 operator_ids=[owner_phone] if owner_phone else [],
@@ -675,7 +680,12 @@ def build_arthur_v2_tools(
             "ok": True,
             "agent_id": str(agent.id),
             "assistant": _summary(agent),
-            "runtime": {"sandbox": bool(enable_deploy), "deploy": bool(enable_deploy), "scheduler": scheduler_enabled},
+            "runtime": {
+                "sandbox": bool(enable_deploy),
+                "deploy": bool(enable_deploy),
+                "scheduler": scheduler_enabled,
+                "max_tokens": ARTHUR_V2_CODING_DEPLOY_MAX_TOKENS if enable_deploy else None,
+            },
             "configured_tools": {
                 "google_workspace": {
                     "services": google_services,
