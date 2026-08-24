@@ -351,7 +351,7 @@ def test_send_to_number_blocks_media_delivery_claim_text():
 
 
 def test_task_guard_does_not_override_arthur_planning_after_document_upload():
-    from app.core.engine.agent_runner import _task_result_guard_reply
+    from app.core.engine.agent_reply_guards import _task_result_guard_reply
 
     reply = "Saya sudah paham kebutuhan dan data produk kamu. Saya akan buat rencana agent CS WhatsApp dulu."
     steps = [
@@ -363,23 +363,6 @@ def test_task_guard_does_not_override_arthur_planning_after_document_upload():
     ]
 
     assert _task_result_guard_reply(reply, steps, "[Dokumen diterima: produk.pdf]\nnih") == reply
-
-
-def test_task_guard_still_blocks_unfinished_deploy_promises():
-    from app.core.engine.agent_runner import _task_result_guard_reply
-
-    reply = "Website sedang saya deploy, nanti saya kirim linknya."
-    steps = [
-        {
-            "tool": "task",
-            "args": {"task": "Buat website toko dan deploy ke public URL."},
-            "result": "File sudah dibuat, tapi deployment belum berhasil dan URL belum tersedia.",
-        }
-    ]
-
-    guarded = _task_result_guard_reply(reply, steps, "buat website toko dan kasih link")
-
-    assert guarded.startswith("Belum selesai.")
 
 
 def test_parent_delivery_followup_needed_for_subagent_shared_pdf():
@@ -408,10 +391,8 @@ def test_parent_delivery_followup_needed_for_subagent_shared_pdf():
 
 
 def test_parent_delivery_followup_not_needed_after_parent_document_send():
-    from app.core.engine.agent_runner import (
-        _needs_whatsapp_file_delivery_followup,
-        _task_result_guard_reply,
-    )
+    from app.core.engine.agent_reply_guards import _task_result_guard_reply
+    from app.core.engine.agent_runner import _needs_whatsapp_file_delivery_followup
 
     steps = [
         {

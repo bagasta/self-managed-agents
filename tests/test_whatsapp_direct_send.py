@@ -8,7 +8,6 @@ from langchain_core.messages import ToolMessage
 from app.core.engine.agent_runner import (
     _build_human_content_for_model,
     _current_image_attachment_delivery_request,
-    _direct_whatsapp_send_guard_reply,
     _extract_direct_whatsapp_confirmation_payload,
     _filter_whatsapp_unsafe_mcp_tools,
     _is_direct_whatsapp_meta_request,
@@ -16,15 +15,18 @@ from app.core.engine.agent_runner import (
     _is_google_chat_intent,
     _is_operator_envelope,
     _model_supports_image_input,
-    _operator_escalation_reply_guard,
     _prioritize_direct_whatsapp_text_send_tools,
 )
+from app.core.engine.agent_whatsapp_guards import _direct_whatsapp_send_guard_reply
 from app.core.engine.wa_outbound_guard import (
     check_wa_outbound_direct_window,
     clear_wa_outbound_direct_memory,
     looks_like_outbound_wa_spam_request,
 )
-from app.core.engine.agent_reply_guards import _owner_identity_reply_guard
+from app.core.engine.agent_reply_guards import (
+    _operator_escalation_reply_guard,
+    _owner_identity_reply_guard,
+)
 from app.core.engine.prompt_builder import build_system_prompt
 from app.core.tools.escalation_tool import build_escalation_tools
 from app.api.channels import (

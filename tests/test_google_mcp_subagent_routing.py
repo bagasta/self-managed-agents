@@ -7,20 +7,17 @@ from langchain_core.messages import ToolMessage
 from app.core.engine import agent_tool_setup
 from app.core.engine.agent_runner import (
     BlockTaskToolMiddleware,
-    ExternalServiceFallbackGuardMiddleware,
     _google_workspace_server_has_auth,
     _remove_google_workspace_mcp_server,
 )
 from app.core.engine.agent_policy import (
     build_agent_runtime_policy,
-    should_block_external_service_fallback_tool,
     should_use_google_workspace_parent_only,
 )
 from app.core.engine.agent_tool_setup import build_agent_tool_setup
 from app.core.engine.google_mcp_support import (
     filter_google_mcp_tools_by_services,
     build_google_mcp_usage_notice,
-    _is_google_mcp_intent,
     is_google_workspace_mcp_configured,
 )
 
@@ -93,14 +90,14 @@ def test_operational_agent_does_not_use_legacy_parent_only_by_default() -> None:
     )
 
 
-def test_operational_agent_can_enable_legacy_parent_only_policy() -> None:
+def test_operational_agent_parent_only_policy_is_capability_based() -> None:
     policy = build_agent_runtime_policy(_agent(), _tools_config())
     cfg = _tools_config()
     cfg["mcp"]["google_workspace_parent_only"] = True
 
     assert should_use_google_workspace_parent_only(
         policy=policy,
-        user_message="buatkan presentasi google slide dengan mcp",
+        user_message="panel slide-in dari kanan",
         tools_config=cfg,
     )
 
@@ -116,44 +113,6 @@ def test_builder_agent_does_not_use_google_workspace_parent_only_policy() -> Non
     )
 
 
-def test_external_service_fallback_policy_blocks_operational_task_payload() -> None:
-    policy = build_agent_runtime_policy(_agent(), _tools_config())
-
-    assert should_block_external_service_fallback_tool(
-        policy=policy,
-        tool_name="task",
-        tool_payload={"task": "buat Google Slides presentasi sales deck"},
-        user_message="",
-        google_workspace_mcp_available=True,
-    )
-    assert not should_block_external_service_fallback_tool(
-        policy=policy,
-        tool_name="task",
-        tool_payload={"task": "buat landing page HTML dan deploy"},
-        user_message="",
-        google_workspace_mcp_available=True,
-    )
-    assert should_block_external_service_fallback_tool(
-        policy=policy,
-        tool_name="task",
-        tool_payload={"task": "buatkan deck 4 halaman"},
-        user_message="tolong buatkan Google Slides tentang bahaya rokok",
-        google_workspace_mcp_available=True,
-    )
-
-
-def test_external_service_fallback_policy_does_not_block_builder() -> None:
-    policy = build_agent_runtime_policy(_builder_agent(), _tools_config())
-
-    assert not should_block_external_service_fallback_tool(
-        policy=policy,
-        tool_name="task",
-        tool_payload={"task": "buat Google Slides presentasi sales deck"},
-        user_message="",
-        google_workspace_mcp_available=True,
-    )
-
-
 def test_google_mcp_usage_notice_marks_workspace_parent_only() -> None:
     notice = build_google_mcp_usage_notice("buat google slide")
 
@@ -161,11 +120,6 @@ def test_google_mcp_usage_notice_marks_workspace_parent_only() -> None:
     assert "main agent WAJIB memanggil tool Google Workspace langsung" in notice
     assert "JANGAN delegasikan aksi Google Workspace ke subagent/task()" in notice
     assert "GOOGLE WORKSPACE MCP" not in notice
-
-
-def test_google_mcp_intent_detects_indonesian_calendar_terms() -> None:
-    assert _is_google_mcp_intent("tolong buat jadwal meeting di kalender besok")
-    assert _is_google_mcp_intent("buatkan dokumen google untuk proposal")
 
 
 def test_parent_only_middleware_blocks_task_tool_only() -> None:
@@ -196,40 +150,6 @@ def test_parent_only_middleware_blocks_task_tool_only() -> None:
     assert isinstance(allowed, ToolMessage)
     assert allowed.content == "ok"
     assert allowed.tool_call_id == "tc_mcp"
-
-
-def test_external_service_fallback_middleware_blocks_google_task_only() -> None:
-    policy = build_agent_runtime_policy(_agent(), _tools_config())
-    middleware = ExternalServiceFallbackGuardMiddleware(
-        policy=policy,
-        google_workspace_mcp_available=True,
-        user_message="",
-    )
-    task_request = SimpleNamespace(
-        tool=SimpleNamespace(name="task"),
-        tool_call={"id": "tc_task", "args": {"task": "buat Google Slides deck"}},
-    )
-    blocked = middleware.wrap_tool_call(
-        task_request,
-        lambda request: ToolMessage(content="should not run", tool_call_id="tc_task"),
-    )
-
-    assert isinstance(blocked, ToolMessage)
-    assert blocked.tool_call_id == "tc_task"
-    assert blocked.status == "error"
-    assert "Google Workspace" in blocked.content
-
-    coding_request = SimpleNamespace(
-        tool=SimpleNamespace(name="task"),
-        tool_call={"id": "tc_code", "args": {"task": "buat landing page HTML"}},
-    )
-    allowed = middleware.wrap_tool_call(
-        coding_request,
-        lambda request: ToolMessage(content="ok", tool_call_id=request.tool_call["id"]),
-    )
-
-    assert isinstance(allowed, ToolMessage)
-    assert allowed.content == "ok"
 
 
 def test_google_workspace_mcp_removed_until_per_user_bearer_exists() -> None:
@@ -405,11 +325,6 @@ async def test_builder_policy_is_not_redirected_by_google_mcp_intent(monkeypatch
         agent_tool_setup,
         "build_sandbox_binary_tool",
         lambda sandbox: [SimpleNamespace(name="sandbox_write_binary_file")],
-    )
-    monkeypatch.setattr(
-        agent_tool_setup,
-        "build_builder_tools",
-        lambda **kwargs: [SimpleNamespace(name="create_agent")],
     )
     monkeypatch.setattr(agent_tool_setup, "build_subagents", fake_build_subagents)
 

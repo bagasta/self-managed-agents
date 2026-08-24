@@ -97,7 +97,6 @@ from app.core.engine.agent_tool_setup import build_agent_tool_setup
 from app.core.engine.agent_policy import (
     AgentRuntimePolicy,
     build_agent_runtime_policy,
-    should_block_external_service_fallback_tool,
     should_use_google_workspace_parent_only,
 )
 from app.core.engine.model_capabilities import model_supports_image_input
@@ -139,7 +138,6 @@ from app.core.engine.google_mcp_support import (
     _is_google_auth_or_scope_error,
     _is_google_resource_not_found_error,
     _is_google_forms_authoring_intent,
-    _is_google_mcp_intent,
     _is_google_sheets_authoring_intent,
     _is_google_slides_relayout_intent,
     has_verified_google_pdf_artifact,
@@ -148,7 +146,6 @@ from app.core.engine.google_mcp_support import (
     resolve_google_spreadsheet_pdf_report_intent,
     google_spreadsheet_pdf_report_directive,
     scope_google_pdf_report_tools,
-    _looks_like_progress_claim,
     _needs_google_forms_followup,
     _needs_google_sheets_followup,
     _needs_google_slides_followup,
@@ -160,9 +157,7 @@ from app.core.engine.google_mcp_support import (
     google_forms_request_kind_retry_directive,
     google_sheets_followup_directive,
     google_spreadsheet_bootstrap_directive,
-    find_last_google_workspace_user_request,
     filter_google_mcp_tools_by_services,
-    is_google_auth_recovery_followup,
     is_google_workspace_mcp_configured,
     needs_google_spreadsheet_bootstrap,
     prepare_google_mcp_runtime,
@@ -176,12 +171,6 @@ logger = structlog.get_logger(__name__)
 settings = get_settings()
 
 
-from app.core.engine.agent_reply_guards import (
-    _owner_identity_reply_guard,
-    _operator_escalation_reply_guard,
-    _task_result_guard_reply,
-    _whatsapp_media_delivery_guard_reply,
-)
 from app.core.engine.agent_followups import (
     _builder_create_completion_directive,
     _builder_plan_completion_directive,
@@ -193,7 +182,6 @@ from app.core.engine.agent_followups import (
     _deploy_followup_message,
     _extract_shared_workspace_file_from_steps,
     _has_code_creation_evidence,
-    _has_external_service_fallback_blocked_step,
     _has_public_url_in_steps,
     _has_public_url_in_text,
     _is_website_or_app_request,
@@ -237,7 +225,6 @@ async def _graph_result_from_output(
 
 
 from app.core.engine.agent_whatsapp_guards import (
-    _direct_whatsapp_send_guard_reply,
     _extract_direct_whatsapp_confirmation_payload,
     _filter_whatsapp_unsafe_mcp_tools,
     _has_prior_reply_to_user_evidence,
@@ -386,7 +373,6 @@ def _current_image_attachment_delivery_request(
 # Re-exported from agent_middleware (moved there to keep agent_runner as facade)
 from app.core.engine.agent_middleware import (  # noqa: E402
     BlockTaskToolMiddleware,
-    ExternalServiceFallbackGuardMiddleware,
     ToolErrorRecoveryMiddleware,
 )
 
@@ -1254,16 +1240,11 @@ async def run_agent(
     )
     history_rows = await load_history(session.id, db, max_turns=_history_turns)
     prior_messages = db_messages_to_lc(history_rows)
-    google_auth_recovery_followup = is_google_auth_recovery_followup(
-        user_message,
-        history_rows,
-    )
-    google_auth_recovery_request = (
-        find_last_google_workspace_user_request(history_rows)
-        if google_auth_recovery_followup
-        else None
-    )
-    execution_user_message = google_auth_recovery_request or user_message
+    # Follow-up routing is intentionally not inferred from message wording.
+    # A future auth continuation must arrive as explicit structured state.
+    google_auth_recovery_followup = False
+    google_auth_recovery_request = None
+    execution_user_message = user_message
     _direct_google_pdf_report_intent = is_google_spreadsheet_pdf_report_intent(
         execution_user_message
     )
@@ -1516,46 +1497,6 @@ async def run_agent(
             sender=_session_sender_phone(session),
             reason="google_workspace_mcp_requires_owner_or_operator",
         )
-        if _is_google_mcp_intent(execution_user_message) or google_auth_recovery_followup:
-            final_reply = _google_workspace_mcp_unauthorized_reply()
-            run_record.status = "completed"
-            run_record.completed_at = datetime.now(timezone.utc)
-            run_record.error_message = "google_workspace_mcp_denied_for_non_operator"
-            run_record.tokens_used = 0
-            run_record.prompt_tokens = 0
-            run_record.completion_tokens = 0
-            run_record.reasoning_tokens = 0
-            run_record.cached_tokens = 0
-            run_record.openrouter_cost_usd = Decimal("0")
-            run_record.usage_details = None
-            db.add(Message(
-                session_id=session.id,
-                role="assistant",
-                content=final_reply,
-                step_index=step_base + 1,
-                run_id=run_id,
-            ))
-            await db.flush()
-            await _stop_wa_run_typing()
-            if sandbox:
-                await sandbox.aclose()
-            for _ssb in sub_sandboxes:
-                await _ssb.aclose()
-            return AgentRunResult(
-                reply=final_reply,
-                steps=[],
-                run_id=run_id,
-                tokens_used=0,
-                usage={
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "reasoning_tokens": 0,
-                    "cached_tokens": 0,
-                    "total_tokens": 0,
-                    "openrouter_cost_usd": 0,
-                    "details": None,
-                },
-            )
     _google_fallback_external_user_id = getattr(agent_model, "owner_external_id", None)
     if not _google_fallback_external_user_id:
         _operator_ids = getattr(agent_model, "operator_ids", None)
@@ -1720,85 +1661,6 @@ async def run_agent(
                 system_prompt=system_prompt,
                 log=log,
             )
-            google_mcp_err = str(mcp_errors.get("google_workspace") or "")
-            should_block_google_before_graph = (
-                bool(google_mcp_err)
-                and not mcp_tools
-                and (
-                    google_mcp_parent_only
-                    or _is_google_mcp_intent(user_message)
-                    or google_auth_recovery_followup
-                )
-            )
-            if should_block_google_before_graph:
-                if _is_google_auth_or_scope_error(google_mcp_err):
-                    if not _google_mcp_auth_url:
-                        _google_mcp_auth_url = await _fetch_google_auth_link(
-                            integration_url=google_mcp.integration_url,
-                            api_key=settings.api_key,
-                            agent_id=agent_id,
-                            candidate_user_ids=google_mcp.candidate_user_ids,
-                        )
-                    final_reply = await _build_google_mcp_auth_failure_reply(
-                        llm=llm_raw,
-                        user_message=execution_user_message,
-                        error_text=google_mcp_err,
-                        auth_url=_google_mcp_auth_url,
-                    )
-                else:
-                    final_reply = _build_google_mcp_unavailable_reply(google_mcp_err)
-                final_reply = await _route_google_workspace_blocker_to_owner_if_customer(
-                    reply=final_reply,
-                    session=session,
-                    agent_model=agent_model,
-                    user_message=execution_user_message,
-                    error_text=google_mcp_err,
-                    auth_url=_google_mcp_auth_url,
-                    log=log,
-                )
-                log.warning(
-                    "agent_run.google_mcp_blocked_before_graph",
-                    error=google_mcp_err[:200],
-                    auth_url_present=bool(_google_mcp_auth_url),
-                )
-                run_record.status = "completed"
-                run_record.completed_at = datetime.now(timezone.utc)
-                run_record.error_message = google_mcp_err[:2000]
-                run_record.tokens_used = 0
-                run_record.prompt_tokens = 0
-                run_record.completion_tokens = 0
-                run_record.reasoning_tokens = 0
-                run_record.cached_tokens = 0
-                run_record.openrouter_cost_usd = Decimal("0")
-                run_record.usage_details = None
-                db.add(Message(
-                    session_id=session.id,
-                    role="assistant",
-                    content=final_reply,
-                    step_index=step_base + 1,
-                    run_id=run_id,
-                ))
-                await db.flush()
-                await _stop_wa_run_typing()
-                if sandbox:
-                    await sandbox.aclose()
-                for _ssb in sub_sandboxes:
-                    await _ssb.aclose()
-                return AgentRunResult(
-                    reply=final_reply,
-                    steps=[],
-                    run_id=run_id,
-                    tokens_used=0,
-                    usage={
-                        "prompt_tokens": 0,
-                        "completion_tokens": 0,
-                        "reasoning_tokens": 0,
-                        "cached_tokens": 0,
-                        "total_tokens": 0,
-                        "openrouter_cost_usd": 0,
-                        "details": None,
-                    },
-                )
 
         backend = None
         _checkpointer = None
@@ -1908,18 +1770,6 @@ async def run_agent(
                             agent_id=str(agent.id),
                             run_id=str(run.id),
                         )
-                if (
-                    runtime_policy.policy_class == "operational"
-                    and google_mcp.enabled
-                    and google_mcp.workspace_server
-                ):
-                    _middleware.append(
-                        ExternalServiceFallbackGuardMiddleware(
-                            policy=runtime_policy,
-                            google_workspace_mcp_available=True,
-                            user_message=execution_user_message,
-                        )
-                    )
                 if google_mcp_parent_only:
                     _middleware.append(BlockTaskToolMiddleware())
                     log.info(
@@ -2771,23 +2621,9 @@ async def run_agent(
             google_pdf_report_intent
             and not has_verified_google_pdf_artifact(steps)
         )
-        if (
-            mcp_tools
-            and (
-                _google_pdf_retry_required
-                or (
-                    _is_google_mcp_intent(execution_user_message)
-                    and not _has_google_mcp_step(steps)
-                    and _has_external_service_fallback_blocked_step(steps)
-                )
-            )
-        ):
+        if mcp_tools and _google_pdf_retry_required:
             log.warning(
-                (
-                    "agent_run.google_pdf_report_retry_after_incomplete_workflow"
-                    if _google_pdf_retry_required
-                    else "agent_run.google_mcp_retry_after_blocked_fallback"
-                ),
+                "agent_run.google_pdf_report_retry_after_incomplete_workflow",
                 mcp_tools=len(mcp_tools),
             )
             try:
@@ -3660,33 +3496,6 @@ async def run_agent(
             auth_url=None,
             log=log,
         )
-    guarded_reply = _owner_identity_reply_guard(
-        final_reply,
-        execution_user_message,
-        session,
-        agent_model,
-    )
-    if guarded_reply != final_reply:
-        log.info("agent_run.final_reply_overridden_by_owner_identity_guard")
-        final_reply = guarded_reply
-    guarded_reply = _task_result_guard_reply(final_reply, steps, execution_user_message)
-    if guarded_reply != final_reply:
-        log.warning("agent_run.final_reply_overridden_by_task_guard")
-        final_reply = guarded_reply
-    guarded_reply = _direct_whatsapp_send_guard_reply(final_reply, steps, execution_user_message, input_messages)
-    if guarded_reply != final_reply:
-        log.warning("agent_run.final_reply_overridden_by_direct_wa_send_guard")
-        final_reply = guarded_reply
-    guarded_reply = _operator_escalation_reply_guard(final_reply, steps, execution_user_message, escalation_user_jid)
-    if guarded_reply != final_reply:
-        log.warning("agent_run.final_reply_overridden_by_operator_escalation_guard")
-        final_reply = guarded_reply
-    if not runtime_policy.is_builder:
-        guarded_reply = _whatsapp_media_delivery_guard_reply(final_reply, steps)
-        if guarded_reply != final_reply:
-            log.warning("agent_run.final_reply_overridden_by_wa_media_delivery_guard")
-            final_reply = guarded_reply
-
     _reply_before_non_empty_guard = final_reply
     _reply_guard_trace: dict[str, str] = {}
     final_reply = ensure_non_empty_reply(

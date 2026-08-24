@@ -21,18 +21,13 @@ from app.core.engine.google_mcp_support import (
     _has_google_mcp_step,
     _extract_google_mcp_resource_error,
     _is_google_resource_not_found_error,
-    _is_google_mcp_intent,
     build_google_workspace_resource_notice,
     extract_created_spreadsheet_resource,
     google_missing_spreadsheet_recovery_directive,
     remember_created_google_spreadsheet,
     should_retry_missing_spreadsheet_resource,
-    _sanitize_user_facing_google_terms,
-    _looks_like_google_auth_recovery_reply,
     apply_google_mcp_reply_overrides,
     build_google_mcp_runtime_state_notice,
-    find_last_google_workspace_user_request,
-    is_google_auth_recovery_followup,
     prepare_google_mcp_runtime,
 )
 
@@ -116,17 +111,6 @@ def test_customer_survey_tool_schema_never_exposes_google_resource_arguments() -
     assert "range_name" not in tools[0].args
     assert tools[0].args["satisfaction_score"]["minimum"] == 1
     assert tools[0].args["satisfaction_score"]["maximum"] == 10
-
-
-def test_google_term_sanitizer_preserves_mcp_auth_url_hostname() -> None:
-    auth_url = "https://google-workspace-mcp.chiefaiofficer.id/v1/integrations/google/start?t=abc123"
-    reply = f"Klik link ini untuk reconnect Google lewat MCP:\n{auth_url}"
-
-    sanitized = _sanitize_user_facing_google_terms(reply)
-
-    assert auth_url in sanitized
-    assert "google-workspace-integrasi Google" not in sanitized
-    assert "lewat integrasi Google" in sanitized
 
 
 def test_google_workspace_mcp_authorization_restricts_whatsapp_to_owner_or_operator() -> None:
@@ -561,90 +545,6 @@ def test_google_auth_error_markers_include_preflight_not_connected_message() -> 
     assert _is_google_auth_or_scope_error(err) is True
 
 
-def test_google_mcp_intent_detects_google_auth_requests() -> None:
-    assert _is_google_mcp_intent("sambungkan akun Google saya ke MCP")
-    assert _is_google_mcp_intent("tolong login google dulu")
-
-
-def test_google_form_link_reference_is_not_google_workspace_intent() -> None:
-    assert not _is_google_mcp_intent(
-        "cara order: pelanggan isi google form ini https://forms.gle/pe5C1XncFhu56E7M9"
-    )
-    assert not _is_google_mcp_intent(
-        "cara order pelanggan isi google form yang udah aku buat ini linknya https://forms.gle/pe5C1XncFhu56E7M9"
-    )
-    assert not _is_google_mcp_intent(
-        "https://forms.gle/pe5C1XncFhu56E7M9 ini link yang pelanggan isi kalau mau order"
-    )
-    assert _is_google_mcp_intent("tolong bikin google form survei dan kirim link")
-
-
-def test_google_auth_recovery_reply_is_not_success_claim() -> None:
-    assert _looks_like_google_auth_recovery_reply(
-        "Karena saat ini saya belum terhubung dengan akun Gmail kamu melalui MCP, "
-        "saya tidak bisa langsung cek email terbaru."
-    )
-
-
-def test_google_auth_recovery_followup_detects_short_done_reply() -> None:
-    rows = [
-        type("Msg", (), {"role": "user", "content": "buatkan Google Slides tentang bahaya rokok"})(),
-        type(
-            "Msg",
-            (),
-            {
-                "role": "assistant",
-                "content": (
-                    "Google Workspace belum terhubung atau tokennya sudah expired.\n"
-                    "Klik link ini untuk reconnect Google: https://example.test/start?t=abc"
-                ),
-            },
-        )(),
-    ]
-
-    assert is_google_auth_recovery_followup("ok sudah", rows) is True
-
-
-def test_google_auth_recovery_followup_ignores_unrelated_done_reply() -> None:
-    rows = [
-        type("Msg", (), {"role": "user", "content": "buat file txt"})(),
-        type("Msg", (), {"role": "assistant", "content": "File sudah dibuat."})(),
-    ]
-
-    assert is_google_auth_recovery_followup("sudah", rows) is False
-
-
-def test_google_auth_recovery_followup_accepts_agent_role_history() -> None:
-    rows = [
-        type(
-            "Msg",
-            (),
-            {
-                "role": "agent",
-                "content": (
-                    "Layanan Google Workspace sedang tidak terhubung. "
-                    "Silakan klik tautan berikut untuk melakukan autentikasi ulang."
-                ),
-            },
-        )(),
-    ]
-
-    assert is_google_auth_recovery_followup("sudah", rows) is True
-
-
-def test_find_last_google_workspace_user_request_skips_auth_confirmation() -> None:
-    rows = [
-        type("Msg", (), {"role": "user", "content": "buatkan Google Slides 5 halaman tentang bahaya rokok"})(),
-        type("Msg", (), {"role": "assistant", "content": "Google Workspace belum terhubung. Klik link reconnect."})(),
-        type("Msg", (), {"role": "user", "content": "sudah"})(),
-    ]
-
-    assert (
-        find_last_google_workspace_user_request(rows)
-        == "buatkan Google Slides 5 halaman tentang bahaya rokok"
-    )
-
-
 def test_google_integration_runtime_url_prefers_local_for_devtunnel_when_enabled(monkeypatch) -> None:
     class FakeSettings:
         workspace_mcp_prefer_local = "true"
@@ -1028,7 +928,7 @@ def test_unavailable_reply_for_timeout_does_not_claim_progress() -> None:
 
 
 @pytest.mark.asyncio
-async def test_google_mcp_success_claim_without_google_tool_is_overridden() -> None:
+async def test_completed_reply_is_never_overridden_by_message_words() -> None:
     runtime = GoogleMcpRuntime(
         enabled=True,
         workspace_server={},
@@ -1040,27 +940,27 @@ async def test_google_mcp_success_claim_without_google_tool_is_overridden() -> N
         system_prompt="",
     )
 
+    final_reply = "Website selesai: https://dimsum-palace.example"
+    execution_steps = [
+        {"tool": "deploy_app", "result": "https://dimsum-palace.example"}
+    ]
     reply, steps, _ = await apply_google_mcp_reply_overrides(
-        final_reply=(
-            "Presentasi Google Slides tentang bahaya merokok dekat anak kecil "
-            "sudah saya buat menggunakan MCP tool. Link presentasi sudah saya siapkan."
-        ),
-        steps=[{"tool": "task", "result": "done"}],
-        mcp_errors={},
+        final_reply=final_reply,
+        steps=execution_steps,
+        mcp_errors={"google_workspace": "connection unavailable"},
         runtime=runtime,
         auth_url=None,
         llm_raw=None,
-        user_message="tolong buatkan slide dengan mcp google slide",
+        user_message=(
+            "Buat website dengan panel slide-in dari kanan lalu deploy dan berikan link URL"
+        ),
         agent_id="00000000-0000-0000-0000-000000000000",
         api_key="test",
         log=type("Log", (), {"warning": lambda *args, **kwargs: None})(),
     )
 
-    lowered = reply.lower()
-    assert "belum berhasil" in lowered or "belum ada" in lowered
-    assert "tidak memanggil tool google" in lowered
-    assert "mcp" not in lowered
-    assert steps == [{"tool": "task", "result": "done"}]
+    assert reply == final_reply
+    assert steps == execution_steps
 
 
 @pytest.mark.asyncio
@@ -1137,7 +1037,7 @@ async def test_google_form_order_link_reply_is_not_overridden_without_google_ste
 
 
 @pytest.mark.asyncio
-async def test_google_auth_recovery_reply_is_preserved_and_gets_link() -> None:
+async def test_google_auth_recovery_reply_is_preserved_without_text_rewriting() -> None:
     runtime = GoogleMcpRuntime(
         enabled=True,
         workspace_server={},
@@ -1167,10 +1067,7 @@ async def test_google_auth_recovery_reply_is_preserved_and_gets_link() -> None:
         log=type("Log", (), {"warning": lambda *args, **kwargs: None})(),
     )
 
-    assert "Run ini tidak memanggil tool Google MCP" not in reply
-    assert "MCP" not in reply
-    assert "melalui integrasi Google" in reply
-    assert "https://devtunnel.example/v1/integrations/google/start?t=abc" in reply
+    assert reply == original
     assert steps == []
     assert auth_url == runtime.auth_url
 
