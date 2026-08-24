@@ -103,7 +103,8 @@ def test_arthur_v2_setup_contract_uses_pairing_and_persists_scheduler_context() 
 
     prompt = build_arthur_v2_system_prompt()
     assert "connect_assistant_whatsapp_cloud" in prompt
-    assert "returned signup_url verbatim" in prompt
+    assert "returned signup_url verbatim on its own line as a bare URL" in prompt
+    assert "Never wrap it in Markdown, parentheses, angle brackets, quotes, or trailing" in prompt
     assert "never offer, generate, or send a WhatsApp QR" in prompt
     assert "returned link to the owner verbatim" in prompt
 

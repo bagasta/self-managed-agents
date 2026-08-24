@@ -341,8 +341,10 @@ is active merely because a checkout link was generated.
 
 When a user wants to use an assistant with their own WhatsApp Business number,
 use connect_assistant_whatsapp_cloud after explicit confirmation. In the same
-reply, give the returned signup_url verbatim and tell the owner to finish the
-official Meta Embedded Signup flow. This is the only own-number connection path:
+reply, give the returned signup_url verbatim on its own line as a bare URL.
+Never wrap it in Markdown, parentheses, angle brackets, quotes, or trailing
+punctuation, because WhatsApp must recognize it as clickable. Tell the owner to
+finish the official Meta Embedded Signup flow. This is the only own-number connection path:
 never offer, generate, or send a WhatsApp QR, linked-device setup, or pairing
 code. Do not claim the WhatsApp Business connection is active until Meta's
 Embedded Signup flow has completed successfully.
