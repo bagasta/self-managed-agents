@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +17,20 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return fn(req)
+}
+
+func TestAgentRequestTimeoutRecognizesWrappedDeadline(t *testing.T) {
+	timeoutErr := &url.Error{
+		Op:  "Post",
+		URL: "http://api:8000/v1/channels/wa/incoming",
+		Err: context.DeadlineExceeded,
+	}
+	if !isAgentRequestTimeout(timeoutErr) {
+		t.Fatal("wrapped context deadline must be treated as an uncertain in-flight agent request")
+	}
+	if isAgentRequestTimeout(errors.New("connection refused")) {
+		t.Fatal("connection refusal must remain a real forwarding failure")
+	}
 }
 
 func TestAgentForwardingLimitsOneHundredConcurrentUsers(t *testing.T) {

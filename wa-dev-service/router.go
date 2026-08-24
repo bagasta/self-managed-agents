@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -65,6 +67,13 @@ func agentMaxInFlight() int {
 		return fallback
 	}
 	return value
+}
+
+// isAgentRequestTimeout identifies a client-side wait expiry after the request
+// may already have reached Python. The Python API owns final WhatsApp delivery,
+// so treating this as a failed agent run would produce a false error message.
+func isAgentRequestTimeout(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || os.IsTimeout(err)
 }
 
 func (r *Router) Close() {
@@ -389,6 +398,10 @@ func (r *Router) forwardToAgent(agentID string, msg IncomingMessage) {
 
 	resp, err := r.agentClient.Do(req)
 	if err != nil {
+		if isAgentRequestTimeout(err) {
+			log.Printf("[dev-router] agent forward timed out; Python may still complete and deliver the final reply: %v", err)
+			return
+		}
 		log.Printf("[dev-router] forward to python err: %v", err)
 		_, _ = r.wa.SendText(msg.ChatID, "❌ Terjadi error saat menghubungi agent. Coba lagi nanti.")
 		return
