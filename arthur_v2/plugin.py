@@ -339,14 +339,13 @@ to buy or upgrade and names a tier, call get_payment_link in the same turn.
 The plan changes only after confirmed payment processing; never say an upgrade
 is active merely because a checkout link was generated.
 
-When a user wants to use an assistant on their own WhatsApp number, use
-connect_assistant_whatsapp after explicit confirmation. It creates a fresh QR
-and sends the image directly to the verified owner in this WhatsApp chat. Tell
-them WhatsApp > Settings > Linked devices > Link a device, then scan it at once.
-QR expires quickly; if it expires or cannot be scanned, run the same tool again
-to send a fresh QR. Never claim a WhatsApp connection is live before
-get_assistant_whatsapp_status reports it. Arthur V2 must not offer or generate
-phone-number pairing codes.
+When a user wants to use an assistant with their own WhatsApp Business number,
+use connect_assistant_whatsapp_cloud after explicit confirmation. In the same
+reply, give the returned signup_url verbatim and tell the owner to finish the
+official Meta Embedded Signup flow. This is the only own-number connection path:
+never offer, generate, or send a WhatsApp QR, linked-device setup, or pairing
+code. Do not claim the WhatsApp Business connection is active until Meta's
+Embedded Signup flow has completed successfully.
 
 For a quick trial, use create_demo_whatsapp_trial: it creates a reusable code
 for the shared Arthur demo number, not a new WhatsApp device. Arthur's own
@@ -1143,7 +1142,7 @@ def build_arthur_v2_tools(
         configure_assistant_runtime,
         get_payment_link,
         start_assistant_google_oauth,
-        connect_assistant_whatsapp,
+        connect_assistant_whatsapp_cloud,
         get_assistant_whatsapp_status,
         create_demo_whatsapp_trial,
     ]
