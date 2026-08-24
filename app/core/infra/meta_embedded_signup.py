@@ -5,6 +5,7 @@ import base64
 import hashlib
 import hmac
 import json
+import struct
 import time
 import uuid
 
@@ -24,27 +25,49 @@ def _require_meta_configuration() -> None:
 
 
 def build_signup_state(agent_id: uuid.UUID | str) -> str:
-    """Create a short-lived, signed bearer state for a caller-owned agent."""
+    """Create a compact, short-lived signed bearer state for an agent.
+
+    WhatsApp clients often make long links awkward to tap, so this intentionally
+    encodes only a version byte, expiry, and UUID.  The truncated HMAC is still
+    96 bits, which is ample forgery resistance for a short-lived checkout link.
+    """
     _require_meta_configuration()
     settings = _settings()
-    payload = {"agent_id": str(agent_id), "exp": int(time.time()) + settings.meta_signup_state_ttl_seconds, "nonce": uuid.uuid4().hex}
-    encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode().rstrip("=")
-    signature = hmac.new(settings.meta_app_secret.encode(), encoded.encode(), hashlib.sha256).hexdigest()
+    expires_at = int(time.time()) + settings.meta_signup_state_ttl_seconds
+    payload = b"\x01" + struct.pack("!I", expires_at) + uuid.UUID(str(agent_id)).bytes
+    encoded = base64.urlsafe_b64encode(payload).decode().rstrip("=")
+    tag = hmac.new(settings.meta_app_secret.encode(), encoded.encode(), hashlib.sha256).digest()[:12]
+    signature = base64.urlsafe_b64encode(tag).decode().rstrip("=")
     return f"{encoded}.{signature}"
 
 
 def verify_signup_state(state: str) -> uuid.UUID:
     try:
         encoded, supplied = state.rsplit(".", 1)
+        padded = encoded + "=" * (-len(encoded) % 4)
+        raw_payload = base64.urlsafe_b64decode(padded)
+
+        if len(raw_payload) == 21 and raw_payload[0] == 1:
+            expected = base64.urlsafe_b64encode(
+                hmac.new(_settings().meta_app_secret.encode(), encoded.encode(), hashlib.sha256).digest()[:12]
+            ).decode().rstrip("=")
+            if not hmac.compare_digest(supplied, expected):
+                raise ValueError("signature")
+            expires_at = struct.unpack("!I", raw_payload[1:5])[0]
+            if expires_at < time.time():
+                raise ValueError("expired")
+            return uuid.UUID(bytes=raw_payload[5:])
+
+        # Keep checkout links created before compact states were deployed valid
+        # until their normal expiry, rather than breaking an in-progress signup.
         expected = hmac.new(_settings().meta_app_secret.encode(), encoded.encode(), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(supplied, expected):
             raise ValueError("signature")
-        padded = encoded + "=" * (-len(encoded) % 4)
-        payload = json.loads(base64.urlsafe_b64decode(padded).decode())
+        payload = json.loads(raw_payload.decode())
         if int(payload["exp"]) < time.time():
             raise ValueError("expired")
         return uuid.UUID(str(payload["agent_id"]))
-    except (ValueError, KeyError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+    except (ValueError, KeyError, json.JSONDecodeError, UnicodeDecodeError, struct.error) as exc:
         raise ValueError("Invalid or expired signup state") from exc
 
 
