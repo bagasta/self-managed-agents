@@ -11,8 +11,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.core.infra import meta_embedded_signup as signup
 from app.api import meta_signup
+from app.core.infra import meta_embedded_signup as signup
 
 
 @pytest.fixture(autouse=True)
@@ -77,7 +77,11 @@ def test_signup_launch_persists_fragments_per_signed_state_and_completes_in_any_
     page_template = inspect.getsource(meta_signup.launch)
 
     assert "const storageKey=`meta-embedded-signup:${{state}}`;" in page_template
+    assert "const fragmentTtlMs=" in page_template
     assert "sessionStorage.setItem(storageKey" in page_template
+    assert "localStorage.setItem(storageKey" in page_template
+    assert "localStorage.removeItem(storageKey)" in page_template
+    assert "expires_at=Date.now()+fragmentTtlMs" in page_template
     assert "function receiveCode(value)" in page_template
     assert "function receiveSignupMessage(data)" in page_template
     assert "setFragment('waba_id'" in page_template
@@ -92,6 +96,13 @@ def test_signup_launch_resumes_after_mobile_return_without_false_cancel():
     assert "document.addEventListener('visibilitychange'" in page_template
     assert "Menunggu konfirmasi Meta." in page_template
     assert "Login Meta dibatalkan atau belum selesai." not in page_template
+    assert "window.FB||typeof FB.login!=='function'" in page_template
+
+
+def test_signup_state_default_allows_mobile_registration_to_finish():
+    from app.config import Settings
+
+    assert Settings().meta_signup_state_ttl_seconds == 3600
 
 
 @pytest.mark.asyncio

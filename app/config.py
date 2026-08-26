@@ -79,7 +79,10 @@ class Settings(BaseSettings):
     meta_webhook_verify_token: str = ""
     meta_graph_api_version: str = "v26.0"
     meta_embedded_signup_config_id: str = ""
-    meta_signup_state_ttl_seconds: int = 600
+    # A Meta phone-number registration can require an SMS/call and a context
+    # switch on mobile.  Keep the signed launch state valid long enough for
+    # that flow, while still making it short-lived.
+    meta_signup_state_ttl_seconds: int = 3600
 
     # Google Workspace MCP runtime routing
     workspace_mcp_url: str = ""
