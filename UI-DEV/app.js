@@ -34,11 +34,16 @@ function renderMd(text) {
 
 // ── State ──────────────────────────────────────────────────────────
 const savedBaseUrl = localStorage.getItem('baseUrl') || '';
+const isLocalDashboard = ['127.0.0.1', 'localhost'].includes(window.location.hostname);
 const isStaleLocalDefault = /^(https?:\/\/)?(localhost|127\.0\.0\.1):8000$/.test(savedBaseUrl) && savedBaseUrl !== window.location.origin;
+// A dashboard hosted on production must talk to the same origin.  Keeping an
+// old Base URL from localStorage makes fetch fail before the API receives the
+// request, which is especially confusing on the Arthur management page.
+const isStaleProductionBaseUrl = !isLocalDashboard && savedBaseUrl !== window.location.origin;
 const S = {
   // Keep the dashboard usable when the API is started on a non-default local
   // port; an explicitly saved Base URL still takes precedence.
-  baseUrl: (!savedBaseUrl || isStaleLocalDefault) ? window.location.origin : savedBaseUrl,
+  baseUrl: (!savedBaseUrl || isStaleLocalDefault || isStaleProductionBaseUrl) ? window.location.origin : savedBaseUrl,
   apiKey: localStorage.getItem('apiKey') || '',
   waServiceUrl: localStorage.getItem('waServiceUrl') || 'http://localhost:8080',
   agents: [],
@@ -70,6 +75,7 @@ if (['127.0.0.1', 'localhost'].includes(window.location.hostname)) {
 
 // ── Init ───────────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
+  if (isStaleProductionBaseUrl) localStorage.setItem('baseUrl', window.location.origin);
   document.getElementById('cfg-url').value = S.baseUrl;
   document.getElementById('cfg-key').value = S.apiKey;
   setAgentFormDefaults();

@@ -7,6 +7,8 @@ def test_dashboard_exposes_scoped_meta_embedded_signup_action():
 
     assert "window.location.origin" in script
     assert "isStaleLocalDefault" in script
+    assert "isStaleProductionBaseUrl" in script
+    assert "localStorage.setItem('baseUrl', window.location.origin)" in script
     assert "Connect via Meta Embedded Signup" in script
     assert "connectMetaEmbeddedSignup" in script
     assert "/v1/meta/signup/links/${agentId}" in script
