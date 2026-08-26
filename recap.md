@@ -1,5 +1,71 @@
 # Recap Perbaikan Arthur V2 dan Agent Bisnis
 
+## Update Meta Embedded Signup & WhatsApp Cloud API — 26 Agustus 2026
+
+### Hasil yang Sudah Diterapkan
+
+- Meta Embedded Signup sekarang membuat tautan per-agent dengan signed state
+  berumur satu jam. Hasil onboarding sementara dipulihkan lintas-tab untuk
+  menangani perpindahan konteks browser mobile, lalu dihapus setelah completion
+  berhasil atau kedaluwarsa.
+- Completion memvalidasi bahwa WABA dan Phone Number ID yang dipilih memang
+  dapat diakses oleh token hasil signup, menyimpan token hanya dalam bentuk
+  terenkripsi, dan tidak pernah membuat `wa_device_id` palsu.
+- Status WhatsApp mendukung Cloud API tanpa `wa_device_id`. Agent Cloud API
+  dilaporkan terhubung melalui `connection_type=cloud_api`; agent QR legacy
+  mempertahankan perilaku sebelumnya.
+- Dashboard Arthur dan dashboard agent umum tidak lagi mem-poll QR/wa-service
+  untuk Cloud API dan menampilkan detail koneksi Cloud API yang aman.
+- Disconnect Cloud API menghapus binding lokal nomor, WABA, dan token
+  terenkripsi tanpa menghapus nomor dari Meta. Sesudah disconnect, agent dapat
+  menjalankan Embedded Signup untuk nomor lain.
+- Untuk nomor yang masih `Pending`, dashboard menyediakan aksi registrasi
+  Cloud API. Operator memasukkan PIN two-step WhatsApp enam digit; PIN hanya
+  diteruskan sekali ke Meta, tidak disimpan di browser, database, log, atau
+  respons API.
+- UI production mengabaikan Base URL lama dari `localStorage` agar tombol
+  Arthur selalu memanggil origin dashboard yang sedang dibuka.
+- Webhook Cloud API kini menyelesaikan alur inbound penuh: menerima pesan,
+  menjalankan agent, lalu mengirim reply memakai konfigurasi Cloud API sesi.
+  Sesi Cloud API tidak lagi mencoba typing indicator dari `wa-service` legacy.
+
+### Bukti Diagnostik dan Perbaikan
+
+- Sebelum perbaikan terakhir, log membuktikan webhook Meta diterima dan Arthur
+  menghasilkan reply, tetapi `meta_webhooks` tidak meneruskan reply itu ke
+  pengirim Cloud API. Warning typing legacy juga muncul karena ID virtual Meta
+  dikirim ke wa-service.
+- Perbaikan mengirim balasan melalui `channel_service` dengan Phone Number ID
+  dan token terenkripsi pada `session.channel_config`. Pengiriman kemudian
+  dirutekan langsung ke Meta Cloud API.
+- Tidak ada secret, access token, PIN, atau isi environment dicatat di dokumen
+  ini maupun log aplikasi yang ditambahkan.
+
+### Commit dan Deployment
+
+- `d1128a3` — status Cloud API tanpa ketergantungan device QR.
+- `d3a45f2` — dashboard Arthur mengenali koneksi Cloud API.
+- `059f746` dan `ff924fa` — pemulihan onboarding Meta di mobile serta TTL
+  state yang cukup untuk verifikasi nomor.
+- `6e064d9` — pemulihan Base URL production pada dashboard.
+- `16645ed` — disconnect Cloud API untuk ganti nomor.
+- `3bed65a` — registrasi nomor Cloud API yang masih Pending melalui Meta.
+- `5fe59df` — pengiriman reply webhook Cloud API dan bypass typing legacy.
+
+Setiap perubahan di atas dideploy dengan rebuild/recreate service `api` saja
+(`--no-deps`); service lain tidak di-restart. Test terkait terakhir: 20 lulus,
+dan container API healthy setelah deployment.
+
+### Operasional Singkat
+
+1. Hubungkan setiap agent ke nomor yang berbeda melalui Meta Embedded Signup.
+2. Jika Meta menampilkan `Pending`, lakukan verifikasi nomor Meta lalu gunakan
+   aksi aktivasi dengan PIN two-step enam digit yang operator buat/simpan.
+3. Setelah nomor `Active`, kirim pesan baru untuk memverifikasi jejak:
+   webhook masuk → agent selesai → pengiriman Cloud API keluar.
+4. Untuk mengganti nomor, lakukan Disconnect Cloud API di dashboard, lalu
+   ulangi signup untuk nomor baru. Nomor lama tidak dihapus dari Meta.
+
 Tanggal: 4 Agustus 2026
 
 Dokumen ini merangkum perubahan yang dilakukan untuk kasus agent toko sembako dan fondasi SaaS yang dipakai oleh agent-agent buatan Arthur V2.
