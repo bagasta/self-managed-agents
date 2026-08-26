@@ -7,6 +7,7 @@ import inspect
 import json
 import time
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -70,3 +71,67 @@ def test_webhook_signature_requires_app_secret():
     assert signup.verify_webhook_signature(body, f"sha256={digest}")
     assert not signup.verify_webhook_signature(body, "sha256=bad")
     assert not signup.verify_webhook_signature(body, None)
+
+
+def test_signup_launch_persists_fragments_per_signed_state_and_completes_in_any_order():
+    page_template = inspect.getsource(meta_signup.launch)
+
+    assert "const storageKey=`meta-embedded-signup:${{state}}`;" in page_template
+    assert "sessionStorage.setItem(storageKey" in page_template
+    assert "function receiveCode(value)" in page_template
+    assert "function receiveSignupMessage(data)" in page_template
+    assert "setFragment('waba_id'" in page_template
+    assert "setFragment('phone_number_id'" in page_template
+    assert "fragments.completion_requested||completionPromise" in page_template
+
+
+def test_signup_launch_resumes_after_mobile_return_without_false_cancel():
+    page_template = inspect.getsource(meta_signup.launch)
+
+    assert "window.addEventListener('pageshow',resumePending);" in page_template
+    assert "document.addEventListener('visibilitychange'" in page_template
+    assert "Menunggu konfirmasi Meta." in page_template
+    assert "Login Meta dibatalkan atau belum selesai." not in page_template
+
+
+@pytest.mark.asyncio
+async def test_signup_completion_keeps_cloud_api_credential_persistence(monkeypatch):
+    agent_id = __import__("uuid").uuid4()
+    agent = SimpleNamespace(
+        id=agent_id,
+        wa_phone_number_id=None,
+        wa_waba_id=None,
+        wa_access_token_encrypted=None,
+        wa_display_phone=None,
+        wa_business_name=None,
+        wa_connection_type=None,
+        channel_type=None,
+        version=1,
+    )
+    selected = {"id": "phone-id", "display_phone_number": "+62 812", "verified_name": "Arthur"}
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=[
+        MagicMock(scalar_one_or_none=lambda: agent),
+        MagicMock(scalar_one_or_none=lambda: None),
+    ])
+    db.commit = AsyncMock()
+    monkeypatch.setattr(meta_signup, "_agent_for_state", lambda _state: agent_id)
+    monkeypatch.setattr(meta_signup, "exchange_code_for_token", AsyncMock(return_value="short-lived-code-exchange"))
+    monkeypatch.setattr(meta_signup, "get_waba_phone_numbers", AsyncMock(return_value=[selected]))
+    monkeypatch.setattr(meta_signup, "subscribe_waba_to_webhooks", AsyncMock())
+    monkeypatch.setattr(meta_signup, "encrypt_value", lambda _value: "enc:stored-credential")
+
+    response = await meta_signup.complete(
+        meta_signup.EmbeddedSignupCompleteRequest(
+            state="x" * 32, code="code", waba_id="waba-id", phone_number_id="phone-id"
+        ),
+        db,
+    )
+
+    assert response["ok"] is True
+    assert agent.wa_connection_type == "cloud_api"
+    assert agent.channel_type == "whatsapp"
+    assert agent.wa_phone_number_id == "phone-id"
+    assert agent.wa_waba_id == "waba-id"
+    assert agent.wa_access_token_encrypted == "enc:stored-credential"
+    db.commit.assert_awaited_once()
