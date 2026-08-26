@@ -36,6 +36,21 @@ def _validate_tools_config(tools_config: dict[str, Any] | None) -> None:
         raise HTTPException(status_code=422, detail=exc.errors()) from exc
 
 
+def _has_cloud_api_credentials(agent: Agent) -> bool:
+    """Return whether a completed Embedded Signup has usable stored credentials.
+
+    Cloud API agents intentionally do not receive a legacy wa-service device id.
+    The encrypted token prefix is produced by ``encrypt_value`` during signup and
+    prevents a partial or plaintext record from being reported as connected.
+    """
+    return (
+        agent.wa_connection_type == "cloud_api"
+        and bool(agent.wa_phone_number_id)
+        and bool(agent.wa_waba_id)
+        and str(agent.wa_access_token_encrypted or "").startswith("enc:")
+    )
+
+
 @router.post("", response_model=AgentResponse, status_code=status.HTTP_201_CREATED)
 async def create_agent(
     payload: AgentCreate,
@@ -238,6 +253,18 @@ async def get_whatsapp_status(
 ) -> AgentWhatsAppStatusResponse:
     """Get WhatsApp connection status for an agent."""
     agent = await _get_active_agent(agent_id, db)
+    if agent.wa_connection_type == "cloud_api":
+        if not _has_cloud_api_credentials(agent):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Agent does not have a valid WhatsApp Cloud API channel configured",
+            )
+        return AgentWhatsAppStatusResponse(
+            status="connected",
+            phone_number=agent.wa_display_phone or "",
+            connection_type="cloud_api",
+            business_name=agent.wa_business_name,
+        )
     if not agent.wa_device_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -253,6 +280,7 @@ async def get_whatsapp_status(
         device_id=agent.wa_device_id,
         status=result.get("status", "unknown"),
         phone_number=result.get("phone_number", ""),
+        connection_type="legacy_qr",
     )
 
 

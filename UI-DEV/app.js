@@ -1051,7 +1051,18 @@ async function loadWAAgent() {
   const agent = S.agents.find(a => a.id === agentId);
   if (!agent) return;
 
+  const isCloudAPI = agent.wa_connection_type === 'cloud_api';
+
   const infoEl = document.getElementById('wa-agent-info');
+  if (isCloudAPI) {
+    const phone = agent.wa_display_phone || '';
+    const business = agent.wa_business_name || '';
+    document.getElementById('wa-connect-panel').style.display = 'none';
+    infoEl.innerHTML = `<span class="badge badge-green">☁️ Terhubung via Meta Cloud API${phone ? ' · ' + escHtml(phone) : ''}</span>` +
+      (business ? `<span class="text-muted" style="margin-left:8px">${escHtml(business)}</span>` : '') +
+      `<div class="text-muted" style="margin-top:8px;font-size:11px">Nomor ini menggunakan WhatsApp Cloud API dan tidak memerlukan QR atau wa-service legacy.</div>`;
+    return;
+  }
   infoEl.innerHTML =
     `<span class="badge ${agent.channel_type === 'whatsapp' ? 'badge-green' : 'badge-red'}">
       ${agent.channel_type === 'whatsapp' ? '📱 channel: whatsapp' : '⚠ channel_type bukan whatsapp'}

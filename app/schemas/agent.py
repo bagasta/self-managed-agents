@@ -125,6 +125,12 @@ class AgentResponse(BaseModel):
     # whatsapp channel
     wa_device_id: str | None
     channel_type: str | None
+    # Cloud API metadata is safe to expose to the dashboard; the access token
+    # deliberately remains server-only.
+    wa_phone_number_id: str | None = None
+    wa_display_phone: str | None = None
+    wa_business_name: str | None = None
+    wa_connection_type: str | None = None
 
     created_at: datetime
     updated_at: datetime
@@ -147,9 +153,11 @@ class AgentWhatsAppQRResponse(BaseModel):
 
 
 class AgentWhatsAppStatusResponse(BaseModel):
-    device_id: str
+    device_id: str | None = None
     status: str
-    phone_number: str
+    phone_number: str = ""
+    connection_type: str | None = None
+    business_name: str | None = None
 
 
 class AgentRenewResponse(BaseModel):
