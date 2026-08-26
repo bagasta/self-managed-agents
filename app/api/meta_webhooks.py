@@ -3,7 +3,16 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    status,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,6 +21,19 @@ from app.database import AsyncSessionLocal, get_db
 from app.models.agent import Agent
 
 router = APIRouter(prefix="/v1/webhooks", tags=["meta-webhooks"])
+
+
+async def _send_cloud_reply(session, reply: str) -> None:
+    """Deliver an agent reply through the Cloud API config on the session."""
+    if not reply or session.ai_disabled:
+        return
+    from app.core.infra.channel_service import send_message
+
+    await send_message(
+        channel_type="whatsapp",
+        channel_config=dict(session.channel_config or {}),
+        text=reply,
+    )
 
 
 @router.get("/meta")
@@ -46,7 +68,8 @@ async def _process(agent_id: str, phone_number_id: str, message: dict, sender_na
             await mark_message_read(phone_number_id, str(message.get("id") or ""), token)
         except Exception:
             pass
-        await run_agent(agent_model=agent, session=session, user_message=text, db=db, sender_name=sender_name)
+        result = await run_agent(agent_model=agent, session=session, user_message=text, db=db, sender_name=sender_name)
+        await _send_cloud_reply(session, str(result.get("reply") or ""))
         await db.commit()
 
 

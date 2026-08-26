@@ -1461,7 +1461,14 @@ async def run_agent(
     _ch_cfg: dict = session.channel_config if isinstance(session.channel_config, dict) else {}
     _wa_device_id: str = _ch_cfg.get("device_id", "")
     _wa_target: str = _ch_cfg.get("user_phone", "")
-    _is_wa_session: bool = getattr(session, "channel_type", None) == "whatsapp" and bool(_wa_device_id and _wa_target)
+    # Cloud API has no wa-service device.  It cannot use the legacy typing
+    # endpoint, but its final reply is sent through channel_service instead.
+    _is_cloud_api_session: bool = bool(_ch_cfg.get("meta_phone_number_id") and _ch_cfg.get("meta_access_token"))
+    _is_wa_session: bool = (
+        getattr(session, "channel_type", None) == "whatsapp"
+        and bool(_wa_device_id and _wa_target)
+        and not _is_cloud_api_session
+    )
     _wa_typing_started: bool = False
 
     async def _start_wa_run_typing() -> None:
