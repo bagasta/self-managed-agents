@@ -290,8 +290,24 @@ async def disconnect_whatsapp(
     db: AsyncSession = Depends(get_db),
     _: str = Depends(verify_api_key),
 ) -> None:
-    """Logout WhatsApp and clear the device from the agent."""
+    """Disconnect an agent from its active WhatsApp transport.
+
+    Cloud API bindings have no wa-service device.  Disconnecting one means
+    removing only the local encrypted credential and selected Meta assets, so
+    the operator can run Embedded Signup again for a different number.
+    """
     agent = await _get_active_agent(agent_id, db)
+    if agent.wa_connection_type == "cloud_api":
+        agent.wa_phone_number_id = None
+        agent.wa_waba_id = None
+        agent.wa_access_token_encrypted = None
+        agent.wa_display_phone = None
+        agent.wa_business_name = None
+        agent.wa_connection_type = "legacy_qr" if agent.wa_device_id else None
+        agent.channel_type = "whatsapp" if agent.wa_device_id else None
+        agent.version += 1
+        await db.flush()
+        return
     if not agent.wa_device_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -305,6 +321,8 @@ async def disconnect_whatsapp(
 
     agent.wa_device_id = None
     agent.channel_type = None
+    agent.wa_connection_type = None
+    agent.version += 1
     await db.flush()
 
 
@@ -320,6 +338,12 @@ async def connect_whatsapp(
     Useful when agent was created while wa-service was down.
     """
     agent = await _get_active_agent(agent_id, db)
+
+    if agent.wa_connection_type == "cloud_api":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Disconnect the WhatsApp Cloud API channel before starting a legacy QR connection",
+        )
 
     # Generate device_id if not present
     if not agent.wa_device_id:

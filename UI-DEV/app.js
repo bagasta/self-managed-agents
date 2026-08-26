@@ -1628,11 +1628,17 @@ async function arthurCheckWAStatus() {
 
 async function arthurDisconnectWA() {
   if (!Arthur.id) { alert('Load Arthur dulu'); return; }
-  if (!confirm('Disconnect WhatsApp Arthur?')) return;
+  const cloudApi = Arthur.connectionType === 'cloud_api';
+  const confirmation = cloudApi
+    ? 'Putuskan koneksi Meta Cloud API dari Arthur? Nomor tidak dihapus dari Meta; setelah ini Anda bisa menjalankan Embedded Signup untuk nomor lain.'
+    : 'Disconnect WhatsApp Arthur?';
+  if (!confirm(confirmation)) return;
   const r = await api('DELETE', `/v1/agents/${Arthur.id}/whatsapp`);
   arthurStopQRPoller();
   document.getElementById('arthur-wa-qr').innerHTML = '';
-  document.getElementById('arthur-wa-status').innerHTML = r.ok ? `<span class="badge badge-yellow">⛔ Disconnected</span>` : `<div class="badge badge-red">Error</div>`;
+  document.getElementById('arthur-wa-status').innerHTML = r.ok
+    ? `<span class="badge badge-yellow">⛔ Disconnected${cloudApi ? ' · siap hubungkan nomor Meta lain' : ''}</span>`
+    : `<div class="badge badge-red">Error: ${escHtml(r.data?.detail || JSON.stringify(r.data))}</div>`;
   if (r.ok) arthurLoad();
 }
 
