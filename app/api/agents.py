@@ -4,12 +4,13 @@ from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config_schema import ToolsConfig
 from app.core.domain.agent_ownership import owner_filter
+from app.core.infra.channel_service import decrypt_value
 from app.database import get_db
 from app.deps import verify_api_key
 from app.models.agent import Agent
@@ -25,6 +26,10 @@ from app.schemas.agent import (
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/v1/agents", tags=["agents"])
+
+
+class CloudApiRegistrationRequest(BaseModel):
+    pin: str = Field(..., pattern=r"^\d{6}$")
 
 
 def _validate_tools_config(tools_config: dict[str, Any] | None) -> None:
@@ -324,6 +329,47 @@ async def disconnect_whatsapp(
     agent.wa_connection_type = None
     agent.version += 1
     await db.flush()
+
+
+@router.post("/{agent_id}/whatsapp/cloud-api/register")
+async def register_cloud_api_phone_number(
+    agent_id: uuid.UUID,
+    payload: CloudApiRegistrationRequest,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(verify_api_key),
+) -> dict:
+    """Ask Meta to activate the selected Cloud API number.
+
+    The supplied two-step PIN is forwarded only to Meta and is not written to
+    the database, logs, or API response.
+    """
+    agent = await _get_active_agent(agent_id, db)
+    if not _has_cloud_api_credentials(agent):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Agent does not have a valid WhatsApp Cloud API channel configured",
+        )
+    try:
+        access_token = decrypt_value(agent.wa_access_token_encrypted)
+        from app.core.infra.wa_cloud_client import register_phone_number
+
+        await register_phone_number(agent.wa_phone_number_id, access_token, payload.pin)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "cloud_api.registration_failed",
+            agent_id=str(agent.id),
+            error_type=type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                "Meta rejected Cloud API registration. Verify the six-digit WhatsApp two-step "
+                "verification PIN and complete any pending phone verification in Meta."
+            ),
+        ) from exc
+    return {"ok": True, "registration": "requested"}
 
 
 @router.post("/{agent_id}/whatsapp/connect", response_model=AgentWhatsAppQRResponse)

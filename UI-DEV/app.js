@@ -1085,7 +1085,8 @@ async function loadWAAgent() {
     document.getElementById('wa-connect-panel').style.display = 'none';
     infoEl.innerHTML = `<span class="badge badge-green">☁️ Terhubung via Meta Cloud API${phone ? ' · ' + escHtml(phone) : ''}</span>` +
       (business ? `<span class="text-muted" style="margin-left:8px">${escHtml(business)}</span>` : '') +
-      `<div class="text-muted" style="margin-top:8px;font-size:11px">Nomor ini menggunakan WhatsApp Cloud API dan tidak memerlukan QR atau wa-service legacy.</div>`;
+      `<div class="text-muted" style="margin-top:8px;font-size:11px">Nomor ini menggunakan WhatsApp Cloud API dan tidak memerlukan QR atau wa-service legacy.</div>` +
+      `<div style="margin-top:10px"><label style="font-size:11px">Jika Meta menampilkan Pending, masukkan PIN verifikasi dua langkah WhatsApp (6 digit)</label><div class="btn-group" style="margin-top:5px"><input id="cloud-api-pin-${agentId}" type="password" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" placeholder="PIN 6 digit" style="max-width:130px"><button class="btn btn-primary btn-sm" onclick="registerCloudApiPhone('${agentId}','cloud-api-pin-${agentId}','cloud-api-registration-result')">Aktifkan nomor di Meta</button></div><div id="cloud-api-registration-result" class="text-muted" style="margin-top:6px;font-size:11px"></div></div>`;
     return;
   }
   infoEl.innerHTML =
@@ -1131,6 +1132,24 @@ async function connectMetaEmbeddedSignup(agentId) {
   }
   const url = r.data.signup_url;
   if (result) result.innerHTML = `<a class="btn btn-success btn-sm" href="${escHtml(url)}" target="_blank" rel="noopener">Buka Meta Embedded Signup</a><div class="text-muted" style="margin-top:6px;font-size:11px">Link berlaku ${r.data.expires_in_seconds} detik dan hanya untuk agent ini.</div>`;
+}
+
+async function registerCloudApiPhone(agentId, pinInputId, resultId) {
+  const pinInput = document.getElementById(pinInputId);
+  const result = document.getElementById(resultId);
+  const pin = pinInput?.value.trim() || '';
+  if (!/^\d{6}$/.test(pin)) {
+    if (result) result.innerHTML = '<span class="badge badge-yellow">Masukkan PIN verifikasi dua langkah WhatsApp 6 digit.</span>';
+    return;
+  }
+  if (result) result.innerHTML = '<span class="spinner"></span> Mengaktifkan nomor di Meta…';
+  const response = await api('POST', `/v1/agents/${agentId}/whatsapp/cloud-api/register`, { pin });
+  pinInput.value = '';
+  if (response.ok) {
+    if (result) result.innerHTML = '<span class="badge badge-green">Permintaan registrasi dikirim ke Meta. Periksa kembali sampai nomor berstatus Active.</span>';
+  } else if (result) {
+    result.innerHTML = `<span class="badge badge-red">${escHtml(response.data?.detail || JSON.stringify(response.data))}</span>`;
+  }
 }
 
 async function connectWADevice(agentId) {
@@ -1536,6 +1555,8 @@ async function arthurLoad() {
     (waStatus === 'Belum terhubung' ? 'badge-yellow' : 'badge-blue');
   const legacyQrControls = document.getElementById('arthur-legacy-qr-controls');
   if (legacyQrControls) legacyQrControls.style.display = isCloudAPI ? 'none' : '';
+  const cloudRegistrationControls = document.getElementById('arthur-cloud-api-registration');
+  if (cloudRegistrationControls) cloudRegistrationControls.style.display = isCloudAPI ? '' : 'none';
   if (isCloudAPI) {
     arthurStopQRPoller();
     document.getElementById('arthur-wa-qr').innerHTML = '';
@@ -1611,6 +1632,11 @@ async function arthurConnectMeta() {
     return;
   }
   result.innerHTML = `<a class="btn btn-success btn-sm" href="${escHtml(r.data.signup_url)}" target="_blank" rel="noopener">Buka Meta Embedded Signup</a><div class="text-muted" style="margin-top:6px;font-size:11px">Link berlaku ${r.data.expires_in_seconds} detik dan hanya untuk Arthur ini.</div>`;
+}
+
+async function arthurRegisterCloudApiPhone() {
+  if (!Arthur.id) { alert('Load Arthur dulu'); return; }
+  await registerCloudApiPhone(Arthur.id, 'arthur-cloud-api-pin', 'arthur-cloud-api-registration-result');
 }
 
 async function arthurRefreshQR() {

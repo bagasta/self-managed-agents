@@ -79,6 +79,29 @@ async def test_cloud_api_agent_without_device_can_disconnect_for_a_new_number(mo
     db.flush.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_cloud_api_registration_forwards_ephemeral_pin_to_meta(monkeypatch):
+    cloud_agent = SimpleNamespace(
+        id=uuid4(),
+        wa_connection_type="cloud_api",
+        wa_device_id=None,
+        wa_phone_number_id="phone-number-id",
+        wa_waba_id="waba-id",
+        wa_access_token_encrypted="enc:encrypted-token",
+    )
+    register = AsyncMock()
+    monkeypatch.setattr(agents, "_get_active_agent", AsyncMock(return_value=cloud_agent))
+    monkeypatch.setattr(agents, "decrypt_value", lambda _value: "decrypted-token")
+    monkeypatch.setattr("app.core.infra.wa_cloud_client.register_phone_number", register)
+
+    response = await agents.register_cloud_api_phone_number(
+        uuid4(), agents.CloudApiRegistrationRequest(pin="123456"), db=object(), _="test"
+    )
+
+    assert response == {"ok": True, "registration": "requested"}
+    register.assert_awaited_once_with("phone-number-id", "decrypted-token", "123456")
+
+
 def test_dashboard_does_not_start_qr_flow_for_cloud_api_agents():
     from pathlib import Path
 
@@ -112,3 +135,16 @@ def test_arthur_dashboard_explains_cloud_api_disconnect_before_number_change():
 
     assert "Nomor tidak dihapus dari Meta" in script
     assert "siap hubungkan nomor Meta lain" in script
+
+
+def test_dashboard_has_ephemeral_cloud_api_registration_action():
+    from pathlib import Path
+
+    script = Path("UI-DEV/app.js").read_text()
+    index = Path("UI-DEV/index.html").read_text()
+
+    assert "async function registerCloudApiPhone" in script
+    assert "/whatsapp/cloud-api/register" in script
+    assert "pinInput.value = ''" in script
+    assert "arthurRegisterCloudApiPhone" in script
+    assert "arthur-cloud-api-registration" in index

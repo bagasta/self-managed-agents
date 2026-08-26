@@ -622,6 +622,14 @@
                 <button class="btn btn-danger btn-sm" onclick="arthurDisconnectWA()">⛔ Disconnect WA</button>
               </div>
               <div id="arthur-meta-signup-result" style="margin-top:10px"></div>
+              <div id="arthur-cloud-api-registration" style="display:none;margin-top:10px">
+                <label class="text-muted" style="font-size:11px">Jika Meta menampilkan Pending, masukkan PIN verifikasi dua langkah WhatsApp (6 digit)</label>
+                <div class="btn-group" style="margin-top:5px">
+                  <input id="arthur-cloud-api-pin" type="password" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" placeholder="PIN 6 digit" style="max-width:130px">
+                  <button class="btn btn-primary btn-sm" onclick="arthurRegisterCloudApiPhone()">Aktifkan nomor di Meta</button>
+                </div>
+                <div id="arthur-cloud-api-registration-result" class="text-muted" style="margin-top:6px;font-size:11px"></div>
+              </div>
               <details id="arthur-legacy-qr-controls" style="margin-top:12px">
                 <summary class="text-muted" style="font-size:11px;cursor:pointer">QR legacy (butuh wa-service lokal)</summary>
                 <div class="btn-group" style="margin-top:8px"><button class="btn btn-ghost btn-sm" onclick="arthurConnectWA()">🔗 Generate QR legacy</button></div>
