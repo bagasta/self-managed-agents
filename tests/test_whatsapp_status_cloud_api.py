@@ -62,3 +62,15 @@ def test_dashboard_does_not_start_qr_flow_for_cloud_api_agents():
     assert "wa-connect-panel').style.display = 'none'" in cloud_branch
     assert "refreshWAStatus" not in cloud_branch
     assert "refreshWAQR" not in cloud_branch
+
+
+def test_arthur_dashboard_uses_cloud_api_status_without_a_legacy_device():
+    from pathlib import Path
+
+    script = Path("UI-DEV/app.js").read_text()
+    arthur_branch = script.split("const isCloudAPI = Arthur.connectionType === 'cloud_api';", 1)[1].split("panel.innerHTML =", 1)[0]
+
+    assert "(isCloudAPI || arthur.wa_device_id)" in arthur_branch
+    assert "Terhubung via Meta Cloud API" in arthur_branch
+    assert "arthurStopQRPoller()" in arthur_branch
+    assert "arthur-legacy-qr-controls" in arthur_branch

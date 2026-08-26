@@ -187,7 +187,9 @@ async function api(method, path, body = null, isFormData = false) {
   const url = `${S.baseUrl}${path}`;
   const headers = { 'X-API-Key': S.apiKey };
   if (body && !isFormData) headers['Content-Type'] = 'application/json';
-  const opts = { method, headers };
+  // Dashboard data is operational state. Do not let a browser reuse a stale
+  // authenticated GET response after an agent has been created or updated.
+  const opts = { method, headers, ...(method === 'GET' ? { cache: 'no-store' } : {}) };
   if (body) opts.body = isFormData ? body : JSON.stringify(body);
   logRequest(method, url, body);
   let data, status;
@@ -312,11 +314,28 @@ function setAgentFormDefaults() {
 function onAgentChannelTypeChange() { }
 
 async function loadAgents() {
-  const r = await api('GET', '/v1/agents?limit=100');
+  const r = await listAllAgents();
   if (!r.ok) { renderAgentsTable([]); return; }
   S.agents = (r.data.items || []).filter(a => !(a.capabilities && a.capabilities.includes('subagent')));
   renderAgentsTable(S.agents);
   populateAgentSelects();
+}
+
+async function listAllAgents() {
+  const limit = 100;
+  const first = await api('GET', `/v1/agents?limit=${limit}&offset=0`);
+  if (!first.ok) return first;
+
+  const items = [...(first.data.items || [])];
+  const total = Number(first.data.total) || items.length;
+  for (let offset = items.length; offset < total; offset += limit) {
+    const page = await api('GET', `/v1/agents?limit=${limit}&offset=${offset}`);
+    if (!page.ok) return page;
+    const pageItems = page.data.items || [];
+    items.push(...pageItems);
+    if (!pageItems.length) break;
+  }
+  return { ...first, data: { ...first.data, items } };
 }
 
 function _toolBadges(tc) {
@@ -1472,7 +1491,7 @@ async function getRun() {
 /* ═══════════════════════════════════════════════════════════════════
    ARTHUR BUILDER
    ═══════════════════════════════════════════════════════════════════ */
-const Arthur = { id: null, apiKey: null, sessionId: null, deviceId: null, qrPoller: null };
+const Arthur = { id: null, apiKey: null, sessionId: null, deviceId: null, connectionType: null, qrPoller: null };
 
 async function arthurLoad() {
   const panel = document.getElementById('arthur-status-panel');
@@ -1481,7 +1500,7 @@ async function arthurLoad() {
     return;
   }
   panel.innerHTML = `<div class="text-muted">🔍 Mencari Arthur...</div>`;
-  const r = await api('GET', '/v1/agents?limit=100');
+  const r = await listAllAgents();
   if (!r.ok) { panel.innerHTML = `<div class="badge badge-red">Error: ${escHtml(JSON.stringify(r.data))}</div>`; return; }
   const agents = r.data.items || [];
   const arthur = agents.find(a => a.tools_config?.system_plugin === 'arthur_v2' && !a.is_deleted);
@@ -1495,12 +1514,34 @@ async function arthurLoad() {
   Arthur.id = arthur.id;
   Arthur.apiKey = arthur.api_key;
   Arthur.deviceId = arthur.wa_device_id || null;
+  Arthur.connectionType = arthur.wa_connection_type || null;
+  const isCloudAPI = Arthur.connectionType === 'cloud_api';
+  const waStatusResponse = (isCloudAPI || arthur.wa_device_id)
+    ? await api('GET', `/v1/agents/${Arthur.id}/whatsapp/status`)
+    : null;
+  const waStatus = waStatusResponse?.ok
+    ? waStatusResponse.data.status
+    : (arthur.wa_device_id ? 'Tidak dapat diperiksa' : 'Belum terhubung');
+  const statusConnectionType = waStatusResponse?.data?.connection_type || Arthur.connectionType;
+  const waLabel = statusConnectionType === 'cloud_api' && waStatus === 'connected'
+    ? `☁️ Terhubung via Meta Cloud API${arthur.wa_display_phone ? ' · ' + arthur.wa_display_phone : ''}`
+    : `📱 ${waStatus}`;
+  const waBadge = waStatus === 'connected' ? 'badge-green' :
+    (waStatus === 'Belum terhubung' ? 'badge-yellow' : 'badge-blue');
+  const legacyQrControls = document.getElementById('arthur-legacy-qr-controls');
+  if (legacyQrControls) legacyQrControls.style.display = isCloudAPI ? 'none' : '';
+  if (isCloudAPI) {
+    arthurStopQRPoller();
+    document.getElementById('arthur-wa-qr').innerHTML = '';
+    document.getElementById('arthur-wa-status').innerHTML = `<span class="badge badge-green">${escHtml(waLabel)}</span>`;
+  }
   panel.innerHTML = `
     <div class="info-rows">
+      <div class="info-row"><span class="info-label">Status</span><span class="badge badge-green">✅ Aktif</span></div>
       <div class="info-row"><span class="info-label">ID</span><span class="td-mono" style="font-size:11px">${escHtml(arthur.id)}</span></div>
       <div class="info-row"><span class="info-label">Name</span><strong>${escHtml(arthur.name)}</strong></div>
       <div class="info-row"><span class="info-label">Model</span>${escHtml(arthur.model)}</div>
-      <div class="info-row"><span class="info-label">WhatsApp</span>${arthur.wa_device_id ? `<span class="badge badge-blue">📱 ${escHtml(arthur.wa_device_id)}</span>` : `<span class="badge badge-yellow">⚠️ Belum connect WA</span>`}</div>
+      <div class="info-row"><span class="info-label">WhatsApp</span><span class="badge ${waBadge}">${escHtml(waLabel)}</span></div>
       <div class="info-row"><span class="info-label">API Key</span><span class="td-mono" style="font-size:10px">${escHtml(arthur.api_key)}</span></div>
     </div>`;
   document.getElementById('arthur-model').value = arthur.model || '';
@@ -1531,6 +1572,10 @@ async function ensureArthurV2() {
 
 async function arthurConnectWA() {
   if (!Arthur.id) { alert('Load Arthur dulu'); return; }
+  if (Arthur.connectionType === 'cloud_api') {
+    document.getElementById('arthur-wa-status').innerHTML = '<span class="badge badge-green">☁️ Terhubung via Meta Cloud API</span>';
+    return;
+  }
   const qrDiv = document.getElementById('arthur-wa-qr');
   qrDiv.innerHTML = `<div class="text-muted">⏳ Generating QR...</div>`;
   const r = await api('POST', `/v1/agents/${Arthur.id}/whatsapp/connect`);
@@ -1563,7 +1608,7 @@ async function arthurConnectMeta() {
 }
 
 async function arthurRefreshQR() {
-  if (!Arthur.id) return;
+  if (!Arthur.id || Arthur.connectionType === 'cloud_api') return;
   const r = await api('GET', `/v1/agents/${Arthur.id}/whatsapp/qr`);
   if (r.ok) _arthurRenderQR(r.data.qr_image || r.data.qr_base64, r.data.status);
 }
