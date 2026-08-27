@@ -1,14 +1,15 @@
 """Secure Meta Embedded Signup endpoint for a caller-owned assistant."""
 from __future__ import annotations
 
-import html
 import hashlib
+import html
 import json
 import uuid
+from typing import Literal
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -91,6 +92,22 @@ class EmbeddedSignupHandoffCompleteRequest(BaseModel):
     phone_number_id: str = Field(..., min_length=1, max_length=64)
 
 
+class EmbeddedSignupTelemetryRequest(BaseModel):
+    """Non-sensitive browser lifecycle marker for diagnosing Meta SDK launches."""
+
+    state: str = Field(..., min_length=32)
+    event: Literal[
+        "page_loaded",
+        "sdk_ready",
+        "launch_clicked",
+        "sdk_launch_requested",
+        "sdk_callback_with_code",
+        "sdk_callback_without_code",
+        "session_event_received",
+    ]
+    mobile: bool = False
+
+
 def _agent_for_state(state_value: str) -> uuid.UUID:
     try:
         return verify_signup_state(state_value)
@@ -167,6 +184,14 @@ async def handoff_status(state: str = Query(..., min_length=32)) -> dict:
     return {"ready": bool(handoff), "candidates": (handoff or {}).get("candidates", [])}
 
 
+@router.post("/telemetry", status_code=status.HTTP_204_NO_CONTENT)
+async def signup_telemetry(payload: EmbeddedSignupTelemetryRequest) -> Response:
+    """Record only lifecycle markers; never codes, tokens, IDs, or browser URLs."""
+    _agent_for_state(payload.state)
+    logger.info("meta_signup.client_event", event=payload.event, mobile=payload.mobile)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.get("/launch", response_class=HTMLResponse)
 async def launch(state: str = Query(..., min_length=32), db: AsyncSession = Depends(get_db)) -> str:
     agent_id = _agent_for_state(state)
@@ -220,6 +245,8 @@ const handoffSelect=document.getElementById('handoff-select');
 const handoffButton=document.getElementById('handoff-complete');
 let completionPromise=null;
 let fragments=readFragments();
+const mobileContext=Boolean(window.matchMedia&&window.matchMedia('(max-width: 768px)').matches);
+function report(event){{fetch('/v1/meta/signup/telemetry',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{state:state,event:event,mobile:mobileContext}}),keepalive:true}}).catch(()=>{{}});}}
 function readStore(store){{try{{const stored=JSON.parse(store.getItem(storageKey)||'{{}}');if(!stored||typeof stored!=='object')return {{}};if(stored.expires_at&&stored.expires_at<Date.now()){{store.removeItem(storageKey);return {{}};}}return stored;}}catch(_err){{return {{}};}}}}
 function readFragments(){{return Object.assign({{}},readStore(localStorage),readStore(sessionStorage));}}
 function saveFragments(){{fragments.expires_at=Date.now()+fragmentTtlMs;const encoded=JSON.stringify(fragments);sessionStorage.setItem(storageKey,encoded);localStorage.setItem(storageKey,encoded);}}
@@ -235,12 +262,13 @@ async function completeHandoff(candidate){{setStatus('Menyimpan pilihan nomor Wh
 async function loadServerHandoff(){{if(fragments.activation_required||fragments.activation_completed)return;try{{const response=await fetch('/v1/meta/signup/handoff/status?state='+encodeURIComponent(state));const data=await response.json();if(!response.ok||!data.ready)return;const candidates=data.candidates||[];if(candidates.length===1){{await completeHandoff(candidates[0]);return;}}handoffSelect.innerHTML='';candidates.forEach((candidate,index)=>{{const option=document.createElement('option');option.value=String(index);option.textContent=candidate.display_phone||candidate.business_name||'Nomor WhatsApp';handoffSelect.appendChild(option);}});handoffButton.onclick=()=>completeHandoff(candidates[Number(handoffSelect.value)]).catch(error=>setStatus(error.message,'error'));handoffEl.style.display='block';connectButton.disabled=true;setStatus('Meta selesai. Pilih nomor untuk dilanjutkan.');}}catch(_error){{/* A normal desktop flow has no server handoff. */}}}}
 function resumePending(){{showPending();attemptCompletion();loadServerHandoff();}}
 function receiveCode(value){{setFragment('code',value);resumePending();}}
-function receiveSignupMessage(data){{if(!data||data.type!=='WA_EMBEDDED_SIGNUP')return;setFragment('waba_id',data.data?.waba_id);setFragment('phone_number_id',data.data?.phone_number_id);resumePending();}}
+function receiveSignupMessage(data){{if(!data||data.type!=='WA_EMBEDDED_SIGNUP')return;report('session_event_received');setFragment('waba_id',data.data?.waba_id);setFragment('phone_number_id',data.data?.phone_number_id);resumePending();}}
 window.addEventListener('message',event=>{{if(event.origin!=='https://www.facebook.com'&&event.origin!=='https://web.facebook.com')return;let data=event.data;try{{if(typeof data==='string')data=JSON.parse(data);}}catch(_err){{return;}}receiveSignupMessage(data);}});
 window.addEventListener('pageshow',resumePending);
 document.addEventListener('visibilitychange',()=>{{if(document.visibilityState==='visible')resumePending();}});
-window.fbAsyncInit=()=>FB.init({{appId:{settings.meta_app_id!r},cookie:true,xfbml:true,version:{settings.meta_graph_api_version!r}}});
-connectButton.onclick=()=>{{if(fragments.completed)return;if(ready()){{attemptCompletion();return;}}if(!window.FB||typeof FB.login!=='function'){{setStatus('Komponen Meta masih dimuat. Tunggu sebentar lalu coba lagi.','error');return;}}connectButton.disabled=true;setStatus('Membuka Meta…');FB.login(response=>{{const returnedCode=response&&response.authResponse&&response.authResponse.code;if(returnedCode)receiveCode(returnedCode);else{{connectButton.disabled=false;setStatus('Menunggu konfirmasi Meta. Kembali ke halaman ini setelah setup selesai.');resumePending();}}}},{{config_id:{settings.meta_embedded_signup_config_id!r},response_type:'code',override_default_response_type:true,extras:{{setup:{{}}}}}});}};
+window.fbAsyncInit=()=>{{FB.init({{appId:{settings.meta_app_id!r},cookie:true,xfbml:true,version:{settings.meta_graph_api_version!r}}});report('sdk_ready');}};
+connectButton.onclick=()=>{{report('launch_clicked');if(fragments.completed)return;if(ready()){{attemptCompletion();return;}}if(!window.FB||typeof FB.login!=='function'){{setStatus('Komponen Meta masih dimuat. Tunggu sebentar lalu coba lagi.','error');return;}}connectButton.disabled=true;setStatus('Membuka Meta…');report('sdk_launch_requested');FB.login(response=>{{const returnedCode=response&&response.authResponse&&response.authResponse.code;if(returnedCode){{report('sdk_callback_with_code');receiveCode(returnedCode);}}else{{report('sdk_callback_without_code');connectButton.disabled=false;setStatus('Menunggu konfirmasi Meta. Kembali ke halaman ini setelah setup selesai.');resumePending();}}}},{{config_id:{settings.meta_embedded_signup_config_id!r},response_type:'code',override_default_response_type:true,extras:{{}}}});}};
+report('page_loaded');
 resumePending();
 </script><script async defer crossorigin="anonymous" src="https://connect.facebook.net/en_US/sdk.js"></script></body></html>'''
 
