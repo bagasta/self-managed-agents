@@ -81,7 +81,7 @@ def test_webhook_signature_requires_app_secret():
     assert not signup.verify_webhook_signature(body, None)
 
 
-def test_signup_launch_persists_fragments_per_signed_state_and_completes_in_any_order():
+def test_signup_launch_persists_activation_state_and_resumes_server_handoff():
     page_template = inspect.getsource(meta_signup.launch)
 
     assert "const storageKey=`meta-embedded-signup:${{state}}`;" in page_template
@@ -90,11 +90,9 @@ def test_signup_launch_persists_fragments_per_signed_state_and_completes_in_any_
     assert "localStorage.setItem(storageKey" in page_template
     assert "localStorage.removeItem(storageKey)" in page_template
     assert "expires_at=Date.now()+fragmentTtlMs" in page_template
-    assert "function receiveCode(value)" in page_template
-    assert "function receiveSignupMessage(data)" in page_template
-    assert "setFragment('waba_id'" in page_template
-    assert "setFragment('phone_number_id'" in page_template
-    assert "fragments.completion_requested||completionPromise" in page_template
+    assert "async function loadServerHandoff()" in page_template
+    assert "/v1/meta/signup/handoff/status?state=" in page_template
+    assert "async function completeHandoff(candidate)" in page_template
 
 
 def test_signup_launch_resumes_after_mobile_return_without_false_cancel():
@@ -102,9 +100,8 @@ def test_signup_launch_resumes_after_mobile_return_without_false_cancel():
 
     assert "window.addEventListener('pageshow',resumePending);" in page_template
     assert "document.addEventListener('visibilitychange'" in page_template
-    assert "Menunggu konfirmasi Meta." in page_template
     assert "Login Meta dibatalkan atau belum selesai." not in page_template
-    assert "window.FB||typeof FB.login!=='function'" in page_template
+    assert "/v1/meta/signup/identity/start?state=" in page_template
 
 
 def test_signup_launch_requires_explicit_pin_activation_after_completion():
@@ -114,32 +111,24 @@ def test_signup_launch_requires_explicit_pin_activation_after_completion():
     assert "/v1/meta/signup/activate" in page_template
     assert "PIN tidak disimpan" in page_template
     assert "activation_required:true" in page_template
-    assert "FB.login" in page_template
+    assert "FB.login" not in page_template
     assert "display:mobile" not in page_template
-    assert "redirect_uri:signupCallbackUrl" in page_template
 
 
-def test_signup_launch_uses_v4_sdk_options_and_safe_lifecycle_telemetry():
+def test_signup_launch_uses_hosted_flow_and_safe_lifecycle_telemetry():
     page_template = inspect.getsource(meta_signup.launch)
+    hosted_url_source = inspect.getsource(meta_signup._hosted_signup_url)
 
-    assert "extras:{{sessionInfoVersion:'3',version:'v4'}}" in page_template
-    assert "extras:{{setup:{{}}}}" not in page_template
+    assert '"sessionInfoVersion": "3"' in hosted_url_source
+    assert '"version": "v4"' in hosted_url_source
+    assert "business.facebook.com/messaging/whatsapp/onboard/" in hosted_url_source
     assert "/v1/meta/signup/telemetry" in page_template
-    assert "sdk_launch_requested" in page_template
-    assert "sdk_callback_with_code" in page_template
-    assert "session_event_received" in page_template
     assert "report('page_loaded')" in page_template
-    assert "report('sdk_ready')" in page_template
-    assert "const signupCallbackUrl=" in page_template
-    assert "redirect_uri:signupCallbackUrl" in page_template
-    assert "autoLogAppEvents:true" in page_template
-    assert "function isTrustedFacebookOrigin(origin)" in page_template
-    assert "host.endsWith('.facebook.com')" in page_template
     assert '"meta_signup_state"' in page_template
     assert "httponly=True" in page_template
     assert 'samesite="lax"' in page_template
-    assert "if(mobileContext)" in page_template
     assert "/v1/meta/signup/identity/start?state=" in page_template
+    assert "FB.login(response" not in page_template
 
 
 def test_hosted_signup_uses_server_bound_business_identity_not_browser_asset_ids():

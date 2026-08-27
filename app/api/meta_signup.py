@@ -386,8 +386,7 @@ async def launch(
         path="/",
     )
     name = html.escape(agent.name)
-    # The code comes from FB.login; WABA and phone-number IDs arrive via the
-    # official WA_EMBEDDED_SIGNUP postMessage event in either order.
+    # Mobile and desktop use the same server-bound Hosted Embedded Signup path.
     return rf'''<!doctype html><html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Hubungkan WhatsApp · {name}</title><style>
 :root {{ color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
 * {{ box-sizing: border-box; }}
@@ -416,7 +415,6 @@ h1 {{ max-width:430px; margin:18px 0 12px; color:#fff; font-size:clamp(29px,6vw,
 <body><main class="signup-shell"><div class="brand"><span class="brand-mark">✦</span><span>Chief AI Officer</span></div><section class="signup-card" aria-labelledby="page-title"><div class="card-main"><span class="eyebrow">◉ Meta Embedded Signup</span><h1 id="page-title">Hubungkan WhatsApp Business</h1><p class="lead">Sambungkan nomor WhatsApp Business resmi untuk <span class="agent">{name}</span> lewat proses aman dari Meta.</p><div class="steps" aria-label="Langkah koneksi"><div class="step"><span class="step-number">1</span><span>Lanjutkan ke akun Facebook/Meta yang mengelola WhatsApp Business Anda.</span></div><div class="step"><span class="step-number">2</span><span>Pilih atau daftarkan nomor yang ingin digunakan oleh {name}.</span></div><div class="step"><span class="step-number">3</span><span>Selesaikan verifikasi Meta; koneksi akan disimpan otomatis.</span></div></div><button id="connect" type="button">Lanjutkan dengan Meta <span aria-hidden="true">→</span></button><p id="status" role="status" aria-live="polite"></p><section id="handoff" aria-label="Pilih nomor WhatsApp"><p>Pilih nomor WhatsApp yang baru dikonfirmasi Meta.</p><select id="handoff-select" aria-label="Nomor WhatsApp"></select><button id="handoff-complete" type="button">Lanjutkan ke aktivasi</button></section><section id="activation" aria-label="Aktivasi nomor WhatsApp"><p>Nomor telah dipilih. Untuk mengaktifkannya di WhatsApp Cloud API, buat atau masukkan PIN verifikasi dua langkah WhatsApp 6 digit. PIN tidak disimpan.</p><div id="activation-row"><input id="activation-pin" type="password" inputmode="numeric" pattern="[0-9]{{6}}" maxlength="6" autocomplete="one-time-code" placeholder="PIN 6 digit" aria-label="PIN WhatsApp 6 digit"><button id="activate" type="button">Aktifkan nomor</button></div></section></div><div class="security"><span class="security-icon">●</span><span>Anda akan melanjutkan ke flow resmi Meta. Kami tidak pernah meminta password Facebook atau kode verifikasi Anda di halaman ini.</span></div></section></main>
 <script>
 const state={state!r};
-const signupCallbackUrl={_callback_url()!r};
 const storageKey=`meta-embedded-signup:${{state}}`;
 const fragmentTtlMs={settings.meta_signup_state_ttl_seconds * 1000!r};
 const statusEl=document.getElementById('status');
@@ -445,17 +443,12 @@ activateButton.onclick=async()=>{{const pin=activationPin.value.trim();if(!/^\d{
 async function completeHandoff(candidate){{setStatus('Menyimpan pilihan nomor WhatsApp…');const response=await fetch('/v1/meta/signup/handoff/complete',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{state:state,waba_id:candidate.waba_id,phone_number_id:candidate.phone_number_id}})}});const data=await response.json();if(!response.ok)throw new Error(data.detail||'Koneksi belum berhasil.');fragments={{activation_required:true,expires_at:Date.now()+fragmentTtlMs}};saveFragments();handoffEl.style.display='none';showActivation();}}
 async function loadServerHandoff(){{if(fragments.activation_required||fragments.activation_completed)return;try{{const response=await fetch('/v1/meta/signup/handoff/status?state='+encodeURIComponent(state));const data=await response.json();if(!response.ok||!data.ready)return;const candidates=data.candidates||[];if(candidates.length===1){{await completeHandoff(candidates[0]);return;}}handoffSelect.innerHTML='';candidates.forEach((candidate,index)=>{{const option=document.createElement('option');option.value=String(index);option.textContent=candidate.display_phone||candidate.business_name||'Nomor WhatsApp';handoffSelect.appendChild(option);}});handoffButton.onclick=()=>completeHandoff(candidates[Number(handoffSelect.value)]).catch(error=>setStatus(error.message,'error'));handoffEl.style.display='block';connectButton.disabled=true;setStatus('Meta selesai. Pilih nomor untuk dilanjutkan.');}}catch(_error){{/* A normal desktop flow has no server handoff. */}}}}
 function resumePending(){{showPending();attemptCompletion();loadServerHandoff();}}
-function receiveCode(value){{setFragment('code',value);resumePending();}}
-function receiveSignupMessage(data){{if(!data||data.type!=='WA_EMBEDDED_SIGNUP')return;report('session_event_received');setFragment('waba_id',data.data?.waba_id);setFragment('phone_number_id',data.data?.phone_number_id);resumePending();}}
-function isTrustedFacebookOrigin(origin){{try{{const host=new URL(origin).hostname;return host==='facebook.com'||host.endsWith('.facebook.com');}}catch(_err){{return false;}}}}
-window.addEventListener('message',event=>{{if(!isTrustedFacebookOrigin(event.origin))return;let data=event.data;try{{if(typeof data==='string')data=JSON.parse(data);}}catch(_err){{return;}}receiveSignupMessage(data);}});
 window.addEventListener('pageshow',resumePending);
 document.addEventListener('visibilitychange',()=>{{if(document.visibilityState==='visible')resumePending();}});
-window.fbAsyncInit=()=>{{FB.init({{appId:{settings.meta_app_id!r},cookie:true,autoLogAppEvents:true,xfbml:true,version:{settings.meta_graph_api_version!r}}});report('sdk_ready');}};
-connectButton.onclick=()=>{{report('launch_clicked');if(fragments.completed)return;if(ready()){{attemptCompletion();return;}}if(mobileContext){{connectButton.disabled=true;setStatus('Membuka Meta…');window.location.assign('/v1/meta/signup/identity/start?state='+encodeURIComponent(state));return;}}if(!window.FB||typeof FB.login!=='function'){{setStatus('Komponen Meta masih dimuat. Tunggu sebentar lalu coba lagi.','error');return;}}connectButton.disabled=true;setStatus('Membuka Meta…');report('sdk_launch_requested');FB.login(response=>{{const returnedCode=response&&response.authResponse&&response.authResponse.code;if(returnedCode){{report('sdk_callback_with_code');receiveCode(returnedCode);}}else{{report('sdk_callback_without_code');connectButton.disabled=false;setStatus('Menunggu konfirmasi Meta. Kembali ke halaman ini setelah setup selesai.');resumePending();}}}},{{config_id:{settings.meta_embedded_signup_config_id!r},redirect_uri:signupCallbackUrl,response_type:'code',override_default_response_type:true,extras:{{sessionInfoVersion:'3',version:'v4'}}}});}};
+connectButton.onclick=()=>{{report('launch_clicked');if(fragments.completed)return;if(ready()){{attemptCompletion();return;}}connectButton.disabled=true;setStatus('Membuka Meta…');window.location.assign('/v1/meta/signup/identity/start?state='+encodeURIComponent(state));}};
 report('page_loaded');
 resumePending();
-</script><script async defer crossorigin="anonymous" src="https://connect.facebook.net/en_US/sdk.js"></script></body></html>'''
+</script></body></html>'''
 
 
 @router.get("/l/{state}", response_class=HTMLResponse)
