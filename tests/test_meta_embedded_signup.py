@@ -119,7 +119,7 @@ def test_signup_launch_requires_explicit_pin_activation_after_completion():
 def test_signup_launch_uses_v4_sdk_options_and_safe_lifecycle_telemetry():
     page_template = inspect.getsource(meta_signup.launch)
 
-    assert "extras:{{version:'v4'}}" in page_template
+    assert "extras:{{sessionInfoVersion:'3',version:'v4'}}" in page_template
     assert "extras:{{setup:{{}}}}" not in page_template
     assert "/v1/meta/signup/telemetry" in page_template
     assert "sdk_launch_requested" in page_template
@@ -128,6 +128,9 @@ def test_signup_launch_uses_v4_sdk_options_and_safe_lifecycle_telemetry():
     assert "report('page_loaded')" in page_template
     assert "report('sdk_ready')" in page_template
     assert "redirect_uri:signupCallbackUrl" not in page_template
+    assert "autoLogAppEvents:true" in page_template
+    assert "function isTrustedFacebookOrigin(origin)" in page_template
+    assert "host.endsWith('.facebook.com')" in page_template
     assert '"meta_signup_state"' in page_template
     assert "httponly=True" in page_template
     assert 'samesite="lax"' in page_template
