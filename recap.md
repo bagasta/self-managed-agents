@@ -313,3 +313,39 @@ yang sama.
   Tahap PIN `/activate` tetap menjadi tahap berikutnya.
 - Desktop tetap memakai JS SDK flow yang sebelumnya tervalidasi. API sehat dan
   UI publik merespons HTTP 200 setelah deployment.
+
+### Pembaruan Embed Signup v4 & Coexistence — 27 Agustus 2026
+
+- Config ID Embedded Signup production diganti menjadi `27582783004675542`
+  pada environment lokal dan `deploy/.env.prod`; container API yang dideploy
+  telah diverifikasi menggunakan Config ID tersebut.
+- Implementasi desktop memakai pola resmi Meta: `FB.login` dengan
+  `config_id`, `response_type: 'code'`, `override_default_response_type`, dan
+  `extras.setup`. Jalur Coexistence mengirim
+  `featureType: 'whatsapp_business_app_onboarding'` serta
+  `sessionInfoVersion: '3'`.
+- Origin event Meta yang diterima mencakup `www.facebook.com`,
+  `web.facebook.com`, dan `business.facebook.com` agar Login for Business
+  tidak berhenti setelah pengguna menekan Continue.
+- Ditambahkan fallback untuk kasus browser—terutama mobile—yang menerima
+  exchangeable `code` tetapi tidak meneruskan `WA_EMBEDDED_SIGNUP postMessage`.
+  Setelah 1,5 detik halaman meminta server menyelesaikan discovery; server
+  menukar code sebelum TTL 30 detik habis, mengambil WABA/nomor yang dibagikan
+  Meta, menyimpan token terenkripsi di handoff sementara, lalu meminta
+  operator memilih nomor. Tidak ada token browser yang dipersist.
+- Coexistence tetap melewati registrasi/PIN nomor karena nomor WhatsApp
+  Business sudah terdaftar; nomor tetap dapat digunakan pada WhatsApp
+  Business di HP dan pesan 1:1 dicerminkan dengan Cloud API. Nomor baru Cloud
+  API tetap memerlukan aktivasi PIN enam digit lewat `/activate`.
+- Validasi: `PYTHONPATH=. /tmp/meta-signup-test-venv/bin/pytest -q
+  tests/test_meta_embedded_signup.py` menghasilkan **22 passed**. API-only
+  deploy berhasil dan container `deploy-api-1` berstatus healthy.
+- Commit yang dipush: `7efb9dd fix: recover Meta signup when session event is absent`.
+
+### Konfigurasi Meta yang masih wajib diverifikasi manual
+
+Pada **Facebook Login for Business > Settings**, domain halaman signup harus
+terdaftar pada **Allowed domains** dan **Valid OAuth redirect URIs**. Aktifkan
+Client OAuth Login, Web OAuth Login, Enforce HTTPS, Embedded Browser OAuth
+Login, Strict Mode, dan Login with the JavaScript SDK. Ini adalah prasyarat
+resmi Meta agar browser dapat mengembalikan code dan asset ID signup.
