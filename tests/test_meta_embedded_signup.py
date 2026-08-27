@@ -110,8 +110,8 @@ def test_signup_launch_requires_explicit_pin_activation_after_completion():
     assert "/v1/meta/signup/activate" in page_template
     assert "PIN tidak disimpan" in page_template
     assert "activation_required:true" in page_template
-    assert "display:mobile?'touch':'popup'" in page_template
     assert "FB.login" in page_template
+    assert "display:mobile" not in page_template
 
 
 def test_signup_state_default_allows_mobile_registration_to_finish():
