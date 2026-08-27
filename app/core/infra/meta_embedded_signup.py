@@ -79,19 +79,54 @@ def verify_webhook_signature(body: bytes, signature: str | None) -> bool:
     return hmac.compare_digest(signature[7:], expected)
 
 
-async def exchange_code_for_token(code: str) -> str:
+async def exchange_code_for_token(code: str, *, redirect_uri: str | None = None) -> str:
     _require_meta_configuration()
     settings = _settings()
     async with httpx.AsyncClient(timeout=15) as client:
+        params = {
+            "client_id": settings.meta_app_id,
+            "client_secret": settings.meta_app_secret,
+            "code": code,
+        }
+        if redirect_uri:
+            params["redirect_uri"] = redirect_uri
         response = await client.get(
             f"https://graph.facebook.com/{settings.meta_graph_api_version}/oauth/access_token",
-            params={"client_id": settings.meta_app_id, "client_secret": settings.meta_app_secret, "code": code},
+            params=params,
         )
     response.raise_for_status()
     token = response.json().get("access_token")
     if not token:
         raise ValueError("Meta did not return an access token")
     return str(token)
+
+
+async def get_shared_waba_ids(access_token: str) -> list[str]:
+    """Return WABAs explicitly shared by the Embedded Signup token.
+
+    Meta provides these through granular scope target IDs.  We deliberately do
+    not pick a WABA or phone number by position: the caller must select it.
+    """
+    _require_meta_configuration()
+    settings = _settings()
+    app_access_token = f"{settings.meta_app_id}|{settings.meta_app_secret}"
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.get(
+            f"https://graph.facebook.com/{settings.meta_graph_api_version}/debug_token",
+            params={"input_token": access_token},
+            headers={"Authorization": f"Bearer {app_access_token}"},
+        )
+    response.raise_for_status()
+    scopes = (response.json().get("data") or {}).get("granular_scopes") or []
+    ids: list[str] = []
+    for scope in scopes:
+        if scope.get("permission") not in {"whatsapp_business_management", "whatsapp_business_messaging"}:
+            continue
+        for target_id in scope.get("target_ids") or []:
+            target = str(target_id)
+            if target not in ids:
+                ids.append(target)
+    return ids
 
 
 async def subscribe_waba_to_webhooks(waba_id: str, access_token: str) -> None:
