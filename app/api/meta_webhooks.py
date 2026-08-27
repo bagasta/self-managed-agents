@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 
+import structlog
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -21,6 +22,30 @@ from app.database import AsyncSessionLocal, get_db
 from app.models.agent import Agent
 
 router = APIRouter(prefix="/v1/webhooks", tags=["meta-webhooks"])
+logger = structlog.get_logger(__name__)
+
+
+def _account_update_summary(change: dict) -> dict | None:
+    """Return a non-sensitive summary of a Hosted Embedded Signup event.
+
+    The `PARTNER_ADDED` event is Meta's server-side signal that a Hosted
+    Embedded Signup shared a customer's WABA with this partner.  IDs are
+    deliberately excluded from the log: they are customer assets, and the
+    webhook itself is not yet enough to associate an event with a particular
+    signed agent launch.
+    """
+    if change.get("field") != "account_update":
+        return None
+    value = change.get("value") or {}
+    event_name = str(value.get("event") or "")
+    if not event_name:
+        return None
+    waba_info = value.get("waba_info") or {}
+    return {
+        "account_event": event_name,
+        "has_waba": bool(waba_info.get("waba_id")),
+        "has_business_portfolio": bool(waba_info.get("owner_business_id")),
+    }
 
 
 async def _send_cloud_reply(session, reply: str) -> None:
@@ -47,7 +72,7 @@ async def verify_meta_webhook(hub_mode: str | None = Query(None, alias="hub.mode
 async def _process(agent_id: str, phone_number_id: str, message: dict, sender_name: str) -> None:
     from app.api.wa_helpers import find_or_create_wa_session
     from app.core.engine.agent_runner import run_agent
-    from app.core.infra.channel_service import decrypt_value, encrypt_value
+    from app.core.infra.channel_service import decrypt_value
     from app.core.infra.wa_cloud_client import mark_message_read
     from app.models.agent import Agent
     async with AsyncSessionLocal() as db:
@@ -86,6 +111,10 @@ async def receive_meta_webhook(request: Request, background_tasks: BackgroundTas
         return {"ok": True, "ignored": True}
     for entry in payload.get("entry") or []:
         for change in entry.get("changes") or []:
+            account_update = _account_update_summary(change)
+            if account_update is not None:
+                logger.info("meta_webhook.account_update", **account_update)
+                continue
             value = change.get("value") or {}
             metadata = value.get("metadata") or {}
             phone_number_id = str(metadata.get("phone_number_id") or "")

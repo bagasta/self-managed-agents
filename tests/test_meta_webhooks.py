@@ -49,3 +49,22 @@ def test_agent_runner_skips_legacy_typing_for_cloud_api_sessions():
 
     assert "_is_cloud_api_session" in source
     assert "and not _is_cloud_api_session" in source
+
+def test_hosted_signup_account_update_is_recognized_without_logging_customer_ids():
+    summary = meta_webhooks._account_update_summary(
+        {
+            "field": "account_update",
+            "value": {
+                "event": "PARTNER_ADDED",
+                "waba_info": {"waba_id": "customer-waba", "owner_business_id": "customer-business"},
+            },
+        }
+    )
+
+    assert summary == {
+        "account_event": "PARTNER_ADDED",
+        "has_waba": True,
+        "has_business_portfolio": True,
+    }
+    assert "customer-waba" not in repr(summary)
+    assert meta_webhooks._account_update_summary({"field": "messages", "value": {}}) is None
