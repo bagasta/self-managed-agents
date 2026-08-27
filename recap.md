@@ -266,3 +266,33 @@ yang sama.
 5. Pastikan notifikasi Owner memuat `ID Kasus` dan `Nomor customer/user`.
 6. Owner me-reply notifikasi tersebut. Pastikan agent menampilkan draft balasan customer dan tidak meminta nomor customer atau mencari nomor itu di Sheet.
 7. Owner mengetik `kirim`; pastikan pesan dikirim ke customer pada case yang sama.
+
+## Update Meta Embedded Signup — 2026-08-27
+
+### Aktivasi nomor Cloud API
+
+- Root cause nomor Meta berstatus **Pending**: `POST /v1/meta/signup/complete`
+  hanya menyimpan kredensial Cloud API dan subscribe webhook. Endpoint Meta
+  `/{phone_number_id}/register` belum dipanggil dari link signup.
+- Ditambahkan `POST /v1/meta/signup/activate`, dilindungi signed state yang
+  sama dengan link signup. Endpoint ini hanya menerima PIN verifikasi dua
+  langkah WhatsApp 6 digit untuk request saat itu; PIN tidak disimpan, tidak
+  dikembalikan, dan tidak dilog.
+- Setelah completion, halaman signup menampilkan tahap aktivasi nomor, bukan
+  mengklaim nomor sudah Active. Desktop telah tervalidasi runtime: request
+  `/complete` lalu `/activate` keduanya sukses.
+- Commit dan deployment API-only: `a9b1f0d fix: activate cloud api number after embedded signup`.
+
+### Temuan mobile yang belum selesai
+
+- Percobaan mobile membuka link signup, tetapi tidak mengirim request
+  `/complete` maupun `/activate`. Karena PIN hanya ditampilkan setelah
+  completion, halaman mobile tidak pernah mencapai tahap aktivasi.
+- Penyebab teknis: implementasi masih mengandalkan callback `FB.login` dan
+  event `WA_EMBEDDED_SIGNUP` yang harus kembali ke JavaScript context asal.
+  Pada perpindahan tab/context browser mobile, kedua fragmen dapat tidak
+  sampai ke halaman asal. `pageshow` dan `visibilitychange` hanya dapat
+  melanjutkan fragmen yang sudah diterima; keduanya tidak dapat memulihkan
+  code atau pilihan nomor yang tidak pernah diterima.
+- Perbaikan berikutnya harus memakai callback server-side dan state sementara
+  di server, kemudian halaman mengambil status dari server setelah return.
