@@ -149,3 +149,41 @@ async def get_waba_phone_numbers(waba_id: str, access_token: str) -> list[dict]:
         )
     response.raise_for_status()
     return list(response.json().get("data") or [])
+
+
+async def get_user_businesses(access_token: str) -> list[dict[str, str]]:
+    """List businesses visible to a short-lived User-token login."""
+    settings = _settings()
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.get(
+            f"https://graph.facebook.com/{settings.meta_graph_api_version}/me/businesses",
+            params={"fields": "id,name"},
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+    response.raise_for_status()
+    return [
+        {"id": str(item.get("id") or ""), "name": str(item.get("name") or "Business")}
+        for item in response.json().get("data") or []
+        if item.get("id")
+    ]
+
+
+async def get_business_token(business_id: str) -> str:
+    """Fetch the customer business token after a Hosted Signup webhook."""
+    settings = _settings()
+    if not settings.meta_system_access_token:
+        raise RuntimeError("META_SYSTEM_ACCESS_TOKEN is required for Hosted Embedded Signup")
+    proof = hmac.new(
+        settings.meta_app_secret.encode(), settings.meta_system_access_token.encode(), hashlib.sha256
+    ).hexdigest()
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.post(
+            f"https://graph.facebook.com/{settings.meta_graph_api_version}/{business_id}/system_user_access_tokens",
+            data={"appsecret_proof": proof, "fetch_only": "true"},
+            headers={"Authorization": f"Bearer {settings.meta_system_access_token}"},
+        )
+    response.raise_for_status()
+    token = response.json().get("access_token")
+    if not token:
+        raise ValueError("Meta did not return a business token")
+    return str(token)

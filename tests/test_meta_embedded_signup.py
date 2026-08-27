@@ -56,6 +56,9 @@ def test_short_launch_path_is_registered_for_whatsapp_friendly_links():
     assert "/v1/meta/signup/handoff/status" in paths
     assert "/v1/meta/signup/handoff/complete" in paths
     assert "/v1/meta/signup/telemetry" in paths
+    assert "/v1/meta/signup/identity/start" in paths
+    assert "/v1/meta/signup/identity/callback" in paths
+    assert "/v1/meta/signup/identity/select" in paths
 
 
 def test_signup_launch_page_has_a_branded_onboarding_layout():
@@ -135,6 +138,18 @@ def test_signup_launch_uses_v4_sdk_options_and_safe_lifecycle_telemetry():
     assert '"meta_signup_state"' in page_template
     assert "httponly=True" in page_template
     assert 'samesite="lax"' in page_template
+    assert "if(mobileContext)" in page_template
+    assert "/v1/meta/signup/identity/start?state=" in page_template
+
+
+def test_hosted_signup_uses_server_bound_business_identity_not_browser_asset_ids():
+    source = inspect.getsource(meta_signup.record_hosted_signup_handoff)
+    callback_source = inspect.getsource(meta_signup.identity_callback)
+
+    assert "get_business_token(business_id)" in source
+    assert "_hosted_business_key(business_id)" in source
+    assert "get_user_businesses(user_token)" in callback_source
+    assert "business_id" not in callback_source.split("return HTMLResponse", 1)[1]
 
 
 def test_oauth_callback_resumes_the_original_signed_launch_in_popup_or_mobile_tab():

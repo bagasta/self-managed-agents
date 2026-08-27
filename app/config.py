@@ -79,6 +79,10 @@ class Settings(BaseSettings):
     meta_webhook_verify_token: str = ""
     meta_graph_api_version: str = "v26.0"
     meta_embedded_signup_config_id: str = ""
+    # Short-lived User-token configuration used only to identify the business
+    # selected by a mobile customer before Hosted Embedded Signup starts.
+    meta_business_identity_config_id: str = ""
+    meta_system_access_token: str = ""
     # A Meta phone-number registration can require an SMS/call and a context
     # switch on mobile.  Keep the signed launch state valid long enough for
     # that flow, while still making it short-lived.

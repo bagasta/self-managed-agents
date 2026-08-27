@@ -6,6 +6,7 @@ import html
 import json
 import uuid
 from typing import Literal
+from urllib.parse import urlencode
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -18,7 +19,9 @@ from app.core.infra.channel_service import decrypt_value, encrypt_value
 from app.core.infra.meta_embedded_signup import (
     build_signup_state,
     exchange_code_for_token,
+    get_business_token,
     get_shared_waba_ids,
+    get_user_businesses,
     get_waba_phone_numbers,
     subscribe_waba_to_webhooks,
     verify_signup_state,
@@ -42,6 +45,46 @@ def _callback_url() -> str:
 
 def _handoff_key(state_value: str) -> str:
     return "meta-signup-handoff:" + hashlib.sha256(state_value.encode()).hexdigest()
+
+
+def _identity_key(nonce: str) -> str:
+    return "meta-signup-identity:" + hashlib.sha256(nonce.encode()).hexdigest()
+
+
+def _identity_businesses_key(state_value: str) -> str:
+    return "meta-signup-identity-businesses:" + hashlib.sha256(state_value.encode()).hexdigest()
+
+
+def _hosted_business_key(business_id: str) -> str:
+    return "meta-signup-hosted-business:" + hashlib.sha256(business_id.encode()).hexdigest()
+
+
+def _identity_callback_url() -> str:
+    from app.config import get_settings
+    settings = get_settings()
+    return f"{settings.app_public_url.rstrip('/')}/v1/meta/signup/identity/callback"
+
+
+async def _bind_hosted_business(state_value: str, business_id: str) -> None:
+    from app.config import get_settings
+    from app.core.infra.redis_client import get_redis
+    redis = await get_redis()
+    if redis is None:
+        raise HTTPException(status_code=503, detail="Temporary signup storage is unavailable")
+    reserved = await redis.set(_hosted_business_key(business_id), state_value, ex=get_settings().meta_signup_state_ttl_seconds, nx=True)
+    if not reserved:
+        raise HTTPException(status_code=409, detail="This Meta business already has a signup in progress")
+
+
+def _hosted_signup_url() -> str:
+    from app.config import get_settings
+    settings = get_settings()
+    extras = json.dumps({"sessionInfoVersion": "3", "version": "v4"}, separators=(",", ":"))
+    return "https://business.facebook.com/messaging/whatsapp/onboard/?" + urlencode({
+        "app_id": settings.meta_app_id,
+        "config_id": settings.meta_embedded_signup_config_id,
+        "extras": extras,
+    })
 
 
 def _callback_state(state_value: str | None, cookie_state: str | None) -> str:
@@ -81,6 +124,43 @@ async def _clear_handoff(state_value: str) -> None:
     redis = await get_redis()
     if redis is not None:
         await redis.delete(_handoff_key(state_value))
+
+
+async def record_hosted_signup_handoff(waba_id: str, business_id: str) -> bool:
+    """Match a signed mobile launch to Meta's PARTNER_ADDED webhook.
+
+    The customer never sees the business ID.  It was selected through the
+    short-lived User-token flow and is only used as the server-side join key.
+    """
+    from app.core.infra.redis_client import get_redis
+    redis = await get_redis()
+    if redis is None:
+        return False
+    state_value = await redis.getdel(_hosted_business_key(business_id))
+    if not state_value:
+        return False
+    try:
+        _agent_for_state(state_value)
+        token = await get_business_token(business_id)
+        encrypted = encrypt_value(token)
+        if not encrypted.startswith("enc:"):
+            raise RuntimeError("Credential storage is not configured")
+        candidates = []
+        for number in await get_waba_phone_numbers(waba_id, token):
+            if number.get("id"):
+                candidates.append({
+                    "waba_id": waba_id,
+                    "phone_number_id": str(number["id"]),
+                    "display_phone": str(number.get("display_phone_number") or ""),
+                    "business_name": str(number.get("verified_name") or ""),
+                })
+        if not candidates:
+            raise ValueError("No phone number returned by Meta")
+        await _save_handoff(state_value, {"token": encrypted, "candidates": candidates})
+        return True
+    except Exception as exc:
+        logger.warning("meta_signup.hosted_handoff_failed", error_type=type(exc).__name__)
+        return False
 
 
 class EmbeddedSignupCompleteRequest(BaseModel):
@@ -200,6 +280,73 @@ async def oauth_callback(
     )
 
 
+@router.get("/identity/start")
+async def identity_start(request: Request, state: str = Query(..., min_length=32)) -> RedirectResponse:
+    """Use a mobile-safe full-page Login for Business redirect before Hosted ES."""
+    _agent_for_state(state)
+    from app.config import get_settings
+    from app.core.infra.redis_client import get_redis
+    settings = get_settings()
+    if not settings.meta_business_identity_config_id:
+        raise HTTPException(status_code=503, detail="Mobile Meta business identification is not configured")
+    redis = await get_redis()
+    if redis is None:
+        raise HTTPException(status_code=503, detail="Temporary signup storage is unavailable")
+    nonce = uuid.uuid4().hex
+    await redis.set(_identity_key(nonce), state, ex=settings.meta_signup_state_ttl_seconds)
+    target = "https://www.facebook.com/" + settings.meta_graph_api_version + "/dialog/oauth?" + urlencode({
+        "client_id": settings.meta_app_id,
+        "redirect_uri": _identity_callback_url(),
+        "state": nonce,
+        "config_id": settings.meta_business_identity_config_id,
+        "response_type": "code",
+        "override_default_response_type": "true",
+    })
+    response = RedirectResponse(target, status_code=status.HTTP_303_SEE_OTHER)
+    response.set_cookie("meta_signup_state", state, max_age=settings.meta_signup_state_ttl_seconds, secure=True, httponly=True, samesite="lax", path="/")
+    return response
+
+
+@router.get("/identity/callback", response_class=HTMLResponse)
+async def identity_callback(request: Request, state: str = Query(..., min_length=16), code: str | None = Query(None, min_length=3)) -> HTMLResponse:
+    from app.core.infra.redis_client import get_redis
+    redis = await get_redis()
+    if redis is None or not code:
+        raise HTTPException(status_code=400, detail="Meta business identification was not completed")
+    signed_state = await redis.getdel(_identity_key(state))
+    if not signed_state or signed_state != request.cookies.get("meta_signup_state"):
+        raise HTTPException(status_code=403, detail="Meta business identification expired or is invalid")
+    _agent_for_state(signed_state)
+    try:
+        user_token = await exchange_code_for_token(code, redirect_uri=_identity_callback_url())
+        businesses = await get_user_businesses(user_token)
+    except Exception as exc:
+        logger.warning("meta_signup.identity_failed", error_type=type(exc).__name__)
+        raise HTTPException(status_code=502, detail="Unable to identify the Meta business") from exc
+    if not businesses:
+        raise HTTPException(status_code=400, detail="No Meta business was available for this Facebook account")
+    await redis.set(_identity_businesses_key(signed_state), json.dumps(businesses), ex=3600)
+    options = "".join(f'<button name="choice" value="{index}" type="submit">{html.escape(item["name"])}</button>' for index, item in enumerate(businesses))
+    return HTMLResponse('<!doctype html><title>Pilih bisnis Meta</title><form method="get" action="/v1/meta/signup/identity/select"><h1>Pilih bisnis Meta</h1><p>Pilih bisnis yang akan dihubungkan ke WhatsApp. Kami tidak menampilkan atau meminta ID bisnis.</p>' + options + '</form>')
+
+
+@router.get("/identity/select")
+async def identity_select(request: Request, choice: int = Query(..., ge=0, le=100)) -> RedirectResponse:
+    from app.core.infra.redis_client import get_redis
+    state = request.cookies.get("meta_signup_state")
+    if not state:
+        raise HTTPException(status_code=403, detail="Signup session expired")
+    _agent_for_state(state)
+    redis = await get_redis()
+    raw = await redis.get(_identity_businesses_key(state)) if redis else None
+    businesses = json.loads(raw) if raw else []
+    if choice >= len(businesses):
+        raise HTTPException(status_code=400, detail="Invalid Meta business selection")
+    await _bind_hosted_business(state, businesses[choice]["id"])
+    await redis.delete(_identity_businesses_key(state))
+    return RedirectResponse(_hosted_signup_url(), status_code=status.HTTP_303_SEE_OTHER)
+
+
 @router.get("/handoff/status")
 async def handoff_status(state: str = Query(..., min_length=32)) -> dict:
     _agent_for_state(state)
@@ -305,7 +452,7 @@ window.addEventListener('message',event=>{{if(!isTrustedFacebookOrigin(event.ori
 window.addEventListener('pageshow',resumePending);
 document.addEventListener('visibilitychange',()=>{{if(document.visibilityState==='visible')resumePending();}});
 window.fbAsyncInit=()=>{{FB.init({{appId:{settings.meta_app_id!r},cookie:true,autoLogAppEvents:true,xfbml:true,version:{settings.meta_graph_api_version!r}}});report('sdk_ready');}};
-connectButton.onclick=()=>{{report('launch_clicked');if(fragments.completed)return;if(ready()){{attemptCompletion();return;}}if(!window.FB||typeof FB.login!=='function'){{setStatus('Komponen Meta masih dimuat. Tunggu sebentar lalu coba lagi.','error');return;}}connectButton.disabled=true;setStatus('Membuka Meta…');report('sdk_launch_requested');FB.login(response=>{{const returnedCode=response&&response.authResponse&&response.authResponse.code;if(returnedCode){{report('sdk_callback_with_code');receiveCode(returnedCode);}}else{{report('sdk_callback_without_code');connectButton.disabled=false;setStatus('Menunggu konfirmasi Meta. Kembali ke halaman ini setelah setup selesai.');resumePending();}}}},{{config_id:{settings.meta_embedded_signup_config_id!r},redirect_uri:signupCallbackUrl,response_type:'code',override_default_response_type:true,extras:{{sessionInfoVersion:'3',version:'v4'}}}});}};
+connectButton.onclick=()=>{{report('launch_clicked');if(fragments.completed)return;if(ready()){{attemptCompletion();return;}}if(mobileContext){{connectButton.disabled=true;setStatus('Membuka Meta…');window.location.assign('/v1/meta/signup/identity/start?state='+encodeURIComponent(state));return;}}if(!window.FB||typeof FB.login!=='function'){{setStatus('Komponen Meta masih dimuat. Tunggu sebentar lalu coba lagi.','error');return;}}connectButton.disabled=true;setStatus('Membuka Meta…');report('sdk_launch_requested');FB.login(response=>{{const returnedCode=response&&response.authResponse&&response.authResponse.code;if(returnedCode){{report('sdk_callback_with_code');receiveCode(returnedCode);}}else{{report('sdk_callback_without_code');connectButton.disabled=false;setStatus('Menunggu konfirmasi Meta. Kembali ke halaman ini setelah setup selesai.');resumePending();}}}},{{config_id:{settings.meta_embedded_signup_config_id!r},redirect_uri:signupCallbackUrl,response_type:'code',override_default_response_type:true,extras:{{sessionInfoVersion:'3',version:'v4'}}}});}};
 report('page_loaded');
 resumePending();
 </script><script async defer crossorigin="anonymous" src="https://connect.facebook.net/en_US/sdk.js"></script></body></html>'''

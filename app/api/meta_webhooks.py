@@ -114,6 +114,12 @@ async def receive_meta_webhook(request: Request, background_tasks: BackgroundTas
             account_update = _account_update_summary(change)
             if account_update is not None:
                 logger.info("meta_webhook.account_update", **account_update)
+                value = change.get("value") or {}
+                info = value.get("waba_info") or {}
+                if value.get("event") == "PARTNER_ADDED" and info.get("waba_id") and info.get("owner_business_id"):
+                    from app.api.meta_signup import record_hosted_signup_handoff
+                    matched = await record_hosted_signup_handoff(str(info["waba_id"]), str(info["owner_business_id"]))
+                    logger.info("meta_webhook.hosted_signup_handoff", matched=matched)
                 continue
             value = change.get("value") or {}
             metadata = value.get("metadata") or {}
