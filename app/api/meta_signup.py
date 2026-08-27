@@ -157,7 +157,7 @@ async def oauth_callback(
     state: str | None = Query(None, max_length=512),
     code: str | None = Query(None, min_length=3),
     error: str | None = Query(None),
-) -> RedirectResponse:
+) -> HTMLResponse:
     """Receive mobile OAuth return and retain only encrypted server-side data."""
     state = _callback_state(state, request.cookies.get("meta_signup_state"))
     if error or not code:
@@ -186,7 +186,18 @@ async def oauth_callback(
     except Exception as exc:
         logger.warning("cloud_api.mobile_handoff_failed", error_type=type(exc).__name__)
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Unable to prepare the Meta signup result") from exc
-    return RedirectResponse(url=f"/v1/meta/signup/l/{state}", status_code=status.HTTP_303_SEE_OTHER)
+    # With a popup, Facebook returns to this same-origin page in the popup.
+    # Tell its opener to resume the signed launch rather than leaving the
+    # customer on a blank callback page.  On mobile there is normally no
+    # opener, so the current top-level tab simply resumes the launch page.
+    launch_url = f"/v1/meta/signup/l/{state}"
+    encoded_url = json.dumps(launch_url)
+    return HTMLResponse(
+        "<!doctype html><title>Melanjutkan koneksi WhatsApp…</title>"
+        "<script>const next=" + encoded_url + ";"
+        "if(window.opener&&!window.opener.closed){window.opener.location.replace(next);window.close();}"
+        "else{window.location.replace(next);}</script>"
+    )
 
 
 @router.get("/handoff/status")
@@ -258,6 +269,7 @@ h1 {{ max-width:430px; margin:18px 0 12px; color:#fff; font-size:clamp(29px,6vw,
 <body><main class="signup-shell"><div class="brand"><span class="brand-mark">✦</span><span>Chief AI Officer</span></div><section class="signup-card" aria-labelledby="page-title"><div class="card-main"><span class="eyebrow">◉ Meta Embedded Signup</span><h1 id="page-title">Hubungkan WhatsApp Business</h1><p class="lead">Sambungkan nomor WhatsApp Business resmi untuk <span class="agent">{name}</span> lewat proses aman dari Meta.</p><div class="steps" aria-label="Langkah koneksi"><div class="step"><span class="step-number">1</span><span>Lanjutkan ke akun Facebook/Meta yang mengelola WhatsApp Business Anda.</span></div><div class="step"><span class="step-number">2</span><span>Pilih atau daftarkan nomor yang ingin digunakan oleh {name}.</span></div><div class="step"><span class="step-number">3</span><span>Selesaikan verifikasi Meta; koneksi akan disimpan otomatis.</span></div></div><button id="connect" type="button">Lanjutkan dengan Meta <span aria-hidden="true">→</span></button><p id="status" role="status" aria-live="polite"></p><section id="handoff" aria-label="Pilih nomor WhatsApp"><p>Pilih nomor WhatsApp yang baru dikonfirmasi Meta.</p><select id="handoff-select" aria-label="Nomor WhatsApp"></select><button id="handoff-complete" type="button">Lanjutkan ke aktivasi</button></section><section id="activation" aria-label="Aktivasi nomor WhatsApp"><p>Nomor telah dipilih. Untuk mengaktifkannya di WhatsApp Cloud API, buat atau masukkan PIN verifikasi dua langkah WhatsApp 6 digit. PIN tidak disimpan.</p><div id="activation-row"><input id="activation-pin" type="password" inputmode="numeric" pattern="[0-9]{{6}}" maxlength="6" autocomplete="one-time-code" placeholder="PIN 6 digit" aria-label="PIN WhatsApp 6 digit"><button id="activate" type="button">Aktifkan nomor</button></div></section></div><div class="security"><span class="security-icon">●</span><span>Anda akan melanjutkan ke flow resmi Meta. Kami tidak pernah meminta password Facebook atau kode verifikasi Anda di halaman ini.</span></div></section></main>
 <script>
 const state={state!r};
+const signupCallbackUrl={_callback_url()!r};
 const storageKey=`meta-embedded-signup:${{state}}`;
 const fragmentTtlMs={settings.meta_signup_state_ttl_seconds * 1000!r};
 const statusEl=document.getElementById('status');
@@ -293,7 +305,7 @@ window.addEventListener('message',event=>{{if(!isTrustedFacebookOrigin(event.ori
 window.addEventListener('pageshow',resumePending);
 document.addEventListener('visibilitychange',()=>{{if(document.visibilityState==='visible')resumePending();}});
 window.fbAsyncInit=()=>{{FB.init({{appId:{settings.meta_app_id!r},cookie:true,autoLogAppEvents:true,xfbml:true,version:{settings.meta_graph_api_version!r}}});report('sdk_ready');}};
-connectButton.onclick=()=>{{report('launch_clicked');if(fragments.completed)return;if(ready()){{attemptCompletion();return;}}if(!window.FB||typeof FB.login!=='function'){{setStatus('Komponen Meta masih dimuat. Tunggu sebentar lalu coba lagi.','error');return;}}connectButton.disabled=true;setStatus('Membuka Meta…');report('sdk_launch_requested');FB.login(response=>{{const returnedCode=response&&response.authResponse&&response.authResponse.code;if(returnedCode){{report('sdk_callback_with_code');receiveCode(returnedCode);}}else{{report('sdk_callback_without_code');connectButton.disabled=false;setStatus('Menunggu konfirmasi Meta. Kembali ke halaman ini setelah setup selesai.');resumePending();}}}},{{config_id:{settings.meta_embedded_signup_config_id!r},response_type:'code',override_default_response_type:true,extras:{{sessionInfoVersion:'3',version:'v4'}}}});}};
+connectButton.onclick=()=>{{report('launch_clicked');if(fragments.completed)return;if(ready()){{attemptCompletion();return;}}if(!window.FB||typeof FB.login!=='function'){{setStatus('Komponen Meta masih dimuat. Tunggu sebentar lalu coba lagi.','error');return;}}connectButton.disabled=true;setStatus('Membuka Meta…');report('sdk_launch_requested');FB.login(response=>{{const returnedCode=response&&response.authResponse&&response.authResponse.code;if(returnedCode){{report('sdk_callback_with_code');receiveCode(returnedCode);}}else{{report('sdk_callback_without_code');connectButton.disabled=false;setStatus('Menunggu konfirmasi Meta. Kembali ke halaman ini setelah setup selesai.');resumePending();}}}},{{config_id:{settings.meta_embedded_signup_config_id!r},redirect_uri:signupCallbackUrl,response_type:'code',override_default_response_type:true,extras:{{sessionInfoVersion:'3',version:'v4'}}}});}};
 report('page_loaded');
 resumePending();
 </script><script async defer crossorigin="anonymous" src="https://connect.facebook.net/en_US/sdk.js"></script></body></html>'''
