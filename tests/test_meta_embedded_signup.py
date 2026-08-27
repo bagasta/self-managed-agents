@@ -143,6 +143,14 @@ def test_signup_launch_completes_coexistence_with_multiple_phone_numbers():
     assert "connection_mode:fragments.connection_mode||'cloud_api_new'" in page_template
 
 
+def test_signup_launch_accepts_all_official_meta_login_origins():
+    page_template = inspect.getsource(meta_signup._render_standard_signup_page)
+
+    assert "https://www.facebook.com" in page_template
+    assert "https://web.facebook.com" in page_template
+    assert "https://business.facebook.com" in page_template
+
+
 def test_hosted_signup_uses_server_bound_business_identity_not_browser_asset_ids():
     source = inspect.getsource(meta_signup.record_hosted_signup_handoff)
     callback_source = inspect.getsource(meta_signup.identity_callback)
