@@ -127,6 +127,22 @@ def test_signup_launch_uses_v4_sdk_options_and_safe_lifecycle_telemetry():
     assert "session_event_received" in page_template
     assert "report('page_loaded')" in page_template
     assert "report('sdk_ready')" in page_template
+    assert "const signupCallbackUrl=" in page_template
+    assert "redirect_uri:signupCallbackUrl" in page_template
+    assert '"meta_signup_state"' in page_template
+    assert "httponly=True" in page_template
+    assert 'samesite="lax"' in page_template
+
+
+def test_callback_state_prefers_the_http_only_browser_binding(monkeypatch):
+    verified = []
+    monkeypatch.setattr(meta_signup, "_agent_for_state", lambda value: verified.append(value))
+
+    assert meta_signup._callback_state(None, "signed-cookie") == "signed-cookie"
+    assert verified == ["signed-cookie"]
+    assert meta_signup._callback_state("sdk-managed-state", "signed-cookie") == "signed-cookie"
+    with pytest.raises(meta_signup.HTTPException, match="missing or expired"):
+        meta_signup._callback_state(None, None)
 
 
 @pytest.mark.asyncio
