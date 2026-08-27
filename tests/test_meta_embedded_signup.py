@@ -106,6 +106,8 @@ def test_signup_launch_requires_explicit_pin_activation_after_completion():
     assert "cloud_api_new" in page_template
     assert "PIN enam digit" in page_template
     assert "FB.login" in page_template
+    assert "const extras=mode==='coexistence'" in page_template
+    assert "version:'v4'" not in page_template
 
 
 def test_signup_launch_uses_hosted_flow_and_safe_lifecycle_telemetry():
