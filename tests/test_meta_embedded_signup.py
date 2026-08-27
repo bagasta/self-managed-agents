@@ -112,8 +112,7 @@ def test_signup_launch_requires_explicit_pin_activation_after_completion():
     assert "activation_required:true" in page_template
     assert "FB.login" in page_template
     assert "display:mobile" not in page_template
-    assert "if(mobile)loginOptions.redirect_uri=mobileRedirectUri" in page_template
-    assert "const mobileRedirectUri=" in page_template
+    assert "redirect_uri=mobileRedirectUri" not in page_template
 
 
 def test_signup_state_default_allows_mobile_registration_to_finish():
