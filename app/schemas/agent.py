@@ -158,6 +158,7 @@ class AgentWhatsAppStatusResponse(BaseModel):
     status: str
     phone_number: str = ""
     connection_type: str | None = None
+    cloud_api_mode: str | None = None
     business_name: str | None = None
 
 

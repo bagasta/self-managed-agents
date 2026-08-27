@@ -267,7 +267,8 @@ async def get_whatsapp_status(
         return AgentWhatsAppStatusResponse(
             status="connected",
             phone_number=agent.wa_display_phone or "",
-            connection_type="coexistence" if getattr(agent, "wa_cloud_api_mode", None) == "coexistence" else "cloud_api",
+            connection_type="cloud_api",
+            cloud_api_mode=getattr(agent, "wa_cloud_api_mode", None),
             business_name=agent.wa_business_name,
         )
     if not agent.wa_device_id:
