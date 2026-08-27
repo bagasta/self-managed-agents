@@ -188,7 +188,7 @@ async def handoff_status(state: str = Query(..., min_length=32)) -> dict:
 async def signup_telemetry(payload: EmbeddedSignupTelemetryRequest) -> Response:
     """Record only lifecycle markers; never codes, tokens, IDs, or browser URLs."""
     _agent_for_state(payload.state)
-    logger.info("meta_signup.client_event", event=payload.event, mobile=payload.mobile)
+    logger.info("meta_signup.client_event", client_event=payload.event, mobile=payload.mobile)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

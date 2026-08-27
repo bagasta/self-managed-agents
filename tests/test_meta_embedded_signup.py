@@ -129,6 +129,20 @@ def test_signup_launch_uses_v4_sdk_options_and_safe_lifecycle_telemetry():
     assert "report('sdk_ready')" in page_template
 
 
+@pytest.mark.asyncio
+async def test_signup_telemetry_logs_only_a_non_sensitive_client_event(monkeypatch):
+    logged = MagicMock()
+    monkeypatch.setattr(meta_signup, "_agent_for_state", lambda _state: __import__("uuid").uuid4())
+    monkeypatch.setattr(meta_signup, "logger", SimpleNamespace(info=logged))
+
+    response = await meta_signup.signup_telemetry(
+        meta_signup.EmbeddedSignupTelemetryRequest(state="x" * 32, event="sdk_launch_requested", mobile=True)
+    )
+
+    assert response.status_code == 204
+    logged.assert_called_once_with("meta_signup.client_event", client_event="sdk_launch_requested", mobile=True)
+
+
 def test_signup_state_default_allows_mobile_registration_to_finish():
     from app.config import Settings
 
