@@ -131,6 +131,7 @@ class AgentResponse(BaseModel):
     wa_display_phone: str | None = None
     wa_business_name: str | None = None
     wa_connection_type: str | None = None
+    wa_cloud_api_mode: str | None = None
 
     created_at: datetime
     updated_at: datetime

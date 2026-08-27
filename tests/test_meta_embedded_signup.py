@@ -62,11 +62,11 @@ def test_short_launch_path_is_registered_for_whatsapp_friendly_links():
 
 
 def test_signup_launch_page_has_a_branded_onboarding_layout():
-    page_template = inspect.getsource(meta_signup.launch)
+    page_template = inspect.getsource(meta_signup._render_standard_signup_page)
 
-    assert "Meta Embedded Signup" in page_template
+    assert "META EMBEDDED SIGNUP" in page_template
     assert "Hubungkan WhatsApp Business" in page_template
-    assert "Kami tidak pernah meminta password Facebook" in page_template
+    assert "Browser bawaan aplikasi" in page_template
 
 
 def test_webhook_signature_requires_app_secret():
@@ -82,55 +82,45 @@ def test_webhook_signature_requires_app_secret():
 
 
 def test_signup_launch_persists_activation_state_and_resumes_server_handoff():
-    page_template = inspect.getsource(meta_signup.launch)
+    page_template = inspect.getsource(meta_signup._render_standard_signup_page)
 
-    assert "const storageKey=`meta-embedded-signup:${{state}}`;" in page_template
-    assert "const fragmentTtlMs=" in page_template
-    assert "sessionStorage.setItem(storageKey" in page_template
-    assert "localStorage.setItem(storageKey" in page_template
-    assert "localStorage.removeItem(storageKey)" in page_template
-    assert "expires_at=Date.now()+fragmentTtlMs" in page_template
-    assert "async function loadServerHandoff()" in page_template
-    assert "/v1/meta/signup/handoff/status?state=" in page_template
-    assert "async function completeHandoff(candidate)" in page_template
+    assert "sessionStorage.setItem(key" in page_template
+    assert "localStorage" not in page_template
+    assert "expires_at=Date.now()+ttlMs" in page_template
+    assert "function finish()" in page_template
 
 
 def test_signup_launch_resumes_after_mobile_return_without_false_cancel():
-    page_template = inspect.getsource(meta_signup.launch)
+    page_template = inspect.getsource(meta_signup._render_standard_signup_page)
 
-    assert "window.addEventListener('pageshow',event=>" in page_template
-    assert "if(event.persisted)" in page_template
+    assert "window.addEventListener('pageshow',()=>finish())" in page_template
     assert "document.addEventListener('visibilitychange'" in page_template
     assert "Login Meta dibatalkan atau belum selesai." not in page_template
-    assert "/v1/meta/signup/identity/start?state=" in page_template
+    assert "FB.login" in page_template
 
 
 def test_signup_launch_requires_explicit_pin_activation_after_completion():
-    page_template = inspect.getsource(meta_signup.launch)
+    page_template = inspect.getsource(meta_signup._render_standard_signup_page)
 
-    assert 'id="activation-pin"' in page_template
-    assert "/v1/meta/signup/activate" in page_template
-    assert "PIN tidak disimpan" in page_template
-    assert "activation_required:true" in page_template
-    assert "FB.login" not in page_template
-    assert "display:mobile" not in page_template
+    assert "activation_required" in page_template
+    assert "cloud_api_new" in page_template
+    assert "PIN enam digit" in page_template
+    assert "FB.login" in page_template
 
 
 def test_signup_launch_uses_hosted_flow_and_safe_lifecycle_telemetry():
-    page_template = inspect.getsource(meta_signup.launch)
-    hosted_url_source = inspect.getsource(meta_signup._hosted_signup_url)
+    page_template = inspect.getsource(meta_signup._render_standard_signup_page)
 
-    assert '"sessionInfoVersion": "3"' in hosted_url_source
-    assert '"version": "v4"' in hosted_url_source
-    assert "business.facebook.com/messaging/whatsapp/onboard/" in hosted_url_source
+    assert "featureType:'whatsapp_business_app_onboarding'" in page_template
+    assert "sessionInfoVersion:'3'" in page_template
     assert "/v1/meta/signup/telemetry" in page_template
-    assert "report('page_loaded')" in page_template
-    assert '"meta_signup_state"' in page_template
-    assert "httponly=True" in page_template
-    assert 'samesite="lax"' in page_template
-    assert 'response.headers["Cache-Control"] = "no-store, max-age=0"' in page_template
-    assert "/v1/meta/signup/identity/start?state=" in page_template
-    assert "FB.login(response" not in page_template
+    assert "telemetry('page_loaded')" in page_template
+    assert '"meta_signup_state"' in inspect.getsource(meta_signup.launch)
+    launch_source = inspect.getsource(meta_signup.launch)
+    assert "httponly=True" in launch_source
+    assert 'samesite="lax"' in launch_source
+    assert 'response.headers["Cache-Control"] = "no-store, max-age=0"' in launch_source
+    assert "FB.login(response" in page_template
 
 
 def test_hosted_signup_uses_server_bound_business_identity_not_browser_asset_ids():
@@ -249,3 +239,52 @@ async def test_signup_activation_uses_signed_state_and_never_persists_pin(monkey
     assert response == {"ok": True, "registration": "requested"}
     register.assert_awaited_once_with("phone-id", "decrypted-token", "123456")
     assert not hasattr(agent, "pin")
+
+
+@pytest.mark.asyncio
+async def test_coexistence_completion_skips_pin_registration_and_persists_cloud_credentials(monkeypatch):
+    agent_id = __import__("uuid").uuid4()
+    agent = SimpleNamespace(
+        id=agent_id, wa_phone_number_id=None, wa_waba_id=None,
+        wa_access_token_encrypted=None, wa_display_phone=None,
+        wa_business_name=None, wa_connection_type=None, channel_type=None, version=1,
+    )
+    selected = {
+        "id": "phone-id", "display_phone_number": "+62 812", "verified_name": "Arthur",
+        "is_on_biz_app": True, "platform_type": "CLOUD_API",
+    }
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=[MagicMock(scalar_one_or_none=lambda: agent), MagicMock(scalar_one_or_none=lambda: None)])
+    db.commit = AsyncMock()
+    monkeypatch.setattr(meta_signup, "_agent_for_state", lambda _state: agent_id)
+    monkeypatch.setattr(meta_signup, "exchange_code_for_token", AsyncMock(return_value="provider-token"))
+    monkeypatch.setattr(meta_signup, "get_waba_phone_numbers", AsyncMock(return_value=[selected]))
+    monkeypatch.setattr(meta_signup, "subscribe_waba_to_webhooks", AsyncMock())
+    monkeypatch.setattr(meta_signup, "encrypt_value", lambda _value: "enc:stored-credential")
+
+    response = await meta_signup.complete(
+        meta_signup.EmbeddedSignupCompleteRequest(
+            state="x" * 32, code="code", waba_id="waba-id", connection_mode="coexistence"
+        ), db,
+    )
+
+    assert response["activation_required"] is False
+    assert agent.wa_connection_type == "cloud_api"
+    assert agent.wa_cloud_api_mode == "coexistence"
+    assert agent.wa_phone_number_id == "phone-id"
+
+
+@pytest.mark.asyncio
+async def test_coexistence_activation_is_rejected_without_calling_meta(monkeypatch):
+    agent_id = __import__("uuid").uuid4()
+    agent = SimpleNamespace(
+        id=agent_id, wa_connection_type="cloud_api", wa_cloud_api_mode="coexistence",
+        wa_phone_number_id="phone-id", wa_waba_id="waba-id", wa_access_token_encrypted="enc:credential",
+    )
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: agent))
+    monkeypatch.setattr(meta_signup, "_agent_for_state", lambda _state: agent_id)
+    with pytest.raises(meta_signup.HTTPException, match="no PIN activation"):
+        await meta_signup.activate_phone_number(
+            meta_signup.EmbeddedSignupActivationRequest(state="x" * 32, pin="123456"), db
+        )

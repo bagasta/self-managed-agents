@@ -56,6 +56,9 @@ class Agent(Base):
     wa_display_phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
     wa_business_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     wa_connection_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # `coexistence` means the same number remains active in WhatsApp Business
+    # App and must never be passed to the Cloud API registration endpoint.
+    wa_cloud_api_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     # --- operator access ---
     operator_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)

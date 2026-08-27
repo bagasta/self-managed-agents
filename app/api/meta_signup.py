@@ -167,7 +167,8 @@ class EmbeddedSignupCompleteRequest(BaseModel):
     state: str = Field(..., min_length=32)
     code: str = Field(..., min_length=3)
     waba_id: str = Field(..., min_length=1, max_length=64)
-    phone_number_id: str = Field(..., min_length=1, max_length=64)
+    phone_number_id: str | None = Field(None, min_length=1, max_length=64)
+    connection_mode: Literal["cloud_api_new", "coexistence"] = "cloud_api_new"
 
 
 class EmbeddedSignupActivationRequest(BaseModel):
@@ -362,6 +363,32 @@ async def signup_telemetry(payload: EmbeddedSignupTelemetryRequest) -> Response:
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+def _render_standard_signup_page(*, state: str, name: str, app_id: str, config_id: str, ttl_ms: int) -> str:
+    """Render the documented Facebook JS SDK launch, including Coexistence.
+
+    Only the short-lived code and non-secret asset IDs are retained in
+    sessionStorage.  The signed state remains the server-side authority.
+    """
+    return rf'''<!doctype html><html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Hubungkan WhatsApp · {name}</title><style>
+:root{{color-scheme:dark;font-family:system-ui,sans-serif}}body{{margin:0;min-height:100vh;background:#08111f;color:#edf3ff}}main{{max-width:560px;margin:auto;padding:32px 20px}}section{{padding:28px;border:1px solid #29466e;border-radius:20px;background:#0f1b30}}h1{{font-size:32px;margin:12px 0}}p,li{{color:#c6d3e6;line-height:1.5}}button{{width:100%;margin-top:12px;padding:15px;border:0;border-radius:12px;background:#1877f2;color:#fff;font:700 16px inherit;cursor:pointer}}button.secondary{{background:#243956;border:1px solid #4c6485}}button:disabled{{opacity:.6;cursor:wait}}#status{{min-height:24px;text-align:center}}#status[data-state=error]{{color:#ff9ca6}}#status[data-state=success]{{color:#68e3ac}}#in-app{{display:none;padding:12px;margin-top:16px;border-radius:10px;background:#3b2b12;color:#ffe0a4;font-size:14px}}</style></head><body><main><section><small>◉ META EMBEDDED SIGNUP</small><h1>Hubungkan WhatsApp Business</h1><p>Sambungkan nomor resmi untuk <strong>{name}</strong>.</p><p><strong>Pakai WhatsApp Business yang sudah ada</strong> memungkinkan Anda tetap membuka dan membalas chat dari aplikasi WhatsApp Business di HP.</p><button id="coexist" type="button">Pakai WhatsApp Business yang sudah ada</button><button id="new-number" class="secondary" type="button">Gunakan nomor baru khusus Cloud API</button><div id="in-app">Browser bawaan aplikasi dapat menghalangi login Meta. Buka tautan ini di Chrome (Android) atau Safari (iPhone), lalu lanjutkan dari sana.</div><p id="status" role="status" aria-live="polite"></p></section></main><script>
+const state={state!r},appId={app_id!r},configId={config_id!r},ttlMs={ttl_ms!r};
+const key=`meta-es:${{state}}`,statusEl=document.querySelector('#status'),coexist=document.querySelector('#coexist'),newNumber=document.querySelector('#new-number');let sdkReady=false,submitting=false,fragments=read();
+function read(){{try{{const x=JSON.parse(sessionStorage.getItem(key)||'{{}}');return x&&x.expires_at>Date.now()?x:{{}}}}catch(_e){{return {{}}}}}}
+function save(){{fragments.expires_at=Date.now()+ttlMs;sessionStorage.setItem(key,JSON.stringify(fragments));}}
+function clear(){{sessionStorage.removeItem(key)}}
+function status(message,type=''){{statusEl.textContent=message;statusEl.dataset.state=type}}
+function telemetry(event){{fetch('/v1/meta/signup/telemetry',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{state,event,mobile:matchMedia('(max-width:768px)').matches}}),keepalive:true}}).catch(()=>{{}})}}
+function isMetaOrigin(origin){{try{{const h=new URL(origin).hostname;return h==='facebook.com'||h.endsWith('.facebook.com')}}catch(_e){{return false}}}}
+function applySession(value){{let data=value;try{{if(typeof value==='string')data=JSON.parse(value)}}catch(_e){{return}}if(!data||data.type!=='WA_EMBEDDED_SIGNUP')return;const d=data.data||{{}};if(d.waba_id)fragments.waba_id=String(d.waba_id);if(d.phone_number_id)fragments.phone_number_id=String(d.phone_number_id);if(data.event==='FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING')fragments.connection_mode='coexistence';save();telemetry('session_event_received');finish();}}
+window.addEventListener('message',event=>{{if(isMetaOrigin(event.origin))applySession(event.data)}});
+function finish(){{const coex=fragments.connection_mode==='coexistence';if(submitting||!fragments.code||!fragments.waba_id||(!coex&&!fragments.phone_number_id)){{if(fragments.code||fragments.waba_id)status('Menunggu konfirmasi Meta melengkapi koneksi…');return}}submitting=true;coexist.disabled=true;newNumber.disabled=true;status('Menyimpan koneksi WhatsApp…');fetch('/v1/meta/signup/complete',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{state,code:fragments.code,waba_id:fragments.waba_id,phone_number_id:fragments.phone_number_id,connection_mode:fragments.connection_mode||'cloud_api_new'}})}}).then(async r=>{{const d=await r.json();if(!r.ok)throw Error(d.detail||'Koneksi belum berhasil.');clear();status(d.activation_required?'Koneksi tersimpan. Selesaikan PIN enam digit untuk mengaktifkan nomor baru di Meta.':'Terhubung via Meta Cloud API dan WhatsApp Business App.','success')}}).catch(e=>{{submitting=false;coexist.disabled=false;newNumber.disabled=false;status(e.message,'error')}})}}
+function login(mode){{if(!sdkReady){{status('Meta masih dimuat. Coba lagi sebentar.','error');return}}fragments={{connection_mode:mode,expires_at:Date.now()+ttlMs}};save();telemetry('sdk_launch_requested');status('Membuka Meta…');/* Must stay directly in the trusted user click; do not await before FB.login. */FB.login(response=>{{if(response&&response.authResponse&&response.authResponse.code){{fragments.code=response.authResponse.code;save();telemetry('sdk_callback_with_code');finish()}}else{{telemetry('sdk_callback_without_code');status('Lanjutkan setup di Meta. Halaman ini akan menyimpan koneksi setelah Meta selesai.')}}}},{{config_id:configId,response_type:'code',override_default_response_type:true,extras:mode==='coexistence'?{{setup:{{}},featureType:'whatsapp_business_app_onboarding',sessionInfoVersion:'3'}}:{{setup:{{}},sessionInfoVersion:'3',version:'v4'}}}})}}
+coexist.addEventListener('click',()=>login('coexistence'));newNumber.addEventListener('click',()=>login('cloud_api_new'));
+window.fbAsyncInit=()=>{{FB.init({{appId,cookie:true,xfbml:false,version:'v26.0'}});sdkReady=true;telemetry('sdk_ready')}};(function(d,s,id){{const js=d.createElement(s);js.id=id;js.src='https://connect.facebook.net/en_US/sdk.js';d.head.appendChild(js)}})(document,'script','facebook-jssdk');
+const inApp=/FBAN|FBAV|Instagram|WhatsApp/i.test(navigator.userAgent);if(inApp)document.querySelector('#in-app').style.display='block';window.addEventListener('pageshow',()=>finish());document.addEventListener('visibilitychange',()=>{{if(document.visibilityState==='visible')finish()}});telemetry('page_loaded');finish();
+</script></body></html>'''
+
+
 @router.get("/launch", response_class=HTMLResponse)
 async def launch(
     response: Response,
@@ -390,7 +417,16 @@ async def launch(
     response.headers["Cache-Control"] = "no-store, max-age=0"
     response.headers["Pragma"] = "no-cache"
     name = html.escape(agent.name)
-    # Mobile and desktop use the same server-bound Hosted Embedded Signup path.
+    return _render_standard_signup_page(
+        state=state,
+        name=name,
+        app_id=settings.meta_app_id,
+        config_id=settings.meta_embedded_signup_config_id,
+        ttl_ms=settings.meta_signup_state_ttl_seconds * 1000,
+    )
+
+    # Kept temporarily below only to make old, already-open pages harmless;
+    # new launches always use the official JS SDK path above.
     return rf'''<!doctype html><html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Hubungkan WhatsApp · {name}</title><style>
 :root {{ color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
 * {{ box-sizing: border-box; }}
@@ -470,27 +506,52 @@ async def complete(payload: EmbeddedSignupCompleteRequest, db: AsyncSession = De
     agent = (await db.execute(select(Agent).where(Agent.id == agent_id, Agent.is_deleted.is_(False)))).scalar_one_or_none()
     if agent is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assistant not found")
-    existing = (await db.execute(select(Agent.id).where(Agent.wa_phone_number_id == payload.phone_number_id, Agent.id != agent.id, Agent.is_deleted.is_(False)))).scalar_one_or_none()
-    if existing:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This WhatsApp number is already connected to another assistant")
     try:
         token = await exchange_code_for_token(payload.code)
         numbers = await get_waba_phone_numbers(payload.waba_id, token)
-        selected = next((item for item in numbers if str(item.get("id")) == payload.phone_number_id), None)
+        selected = next((item for item in numbers if str(item.get("id")) == payload.phone_number_id), None) if payload.phone_number_id else None
+        if payload.connection_mode == "coexistence" and selected is None and len(numbers) == 1:
+            selected = numbers[0]
         if selected is None:
-            raise ValueError("Selected phone number does not belong to the shared WABA")
+            if payload.connection_mode != "coexistence":
+                raise ValueError("Selected phone number does not belong to the shared WABA")
+            encrypted = encrypt_value(token)
+            if not encrypted.startswith("enc:"):
+                raise RuntimeError("CHANNEL_SECRET_KEY must be configured before Cloud API credentials can be stored")
+            candidates = [
+                {
+                    "waba_id": payload.waba_id,
+                    "phone_number_id": str(item["id"]),
+                    "display_phone": str(item.get("display_phone_number") or ""),
+                    "business_name": str(item.get("verified_name") or ""),
+                }
+                for item in numbers if item.get("id")
+            ]
+            if not candidates:
+                raise ValueError("Meta did not return a WhatsApp Business App number")
+            await _save_handoff(payload.state, {"token": encrypted, "candidates": candidates, "connection_mode": "coexistence"})
+            return {"ok": True, "selection_required": True, "candidates": candidates}
+        if payload.connection_mode == "coexistence" and not (
+            selected.get("is_on_biz_app") is True and str(selected.get("platform_type") or "").upper() == "CLOUD_API"
+        ):
+            raise ValueError("Meta has not completed WhatsApp Business App Coexistence for this number")
         encrypted = encrypt_value(token)
         if not encrypted.startswith("enc:"):
             raise RuntimeError("CHANNEL_SECRET_KEY must be configured before Cloud API credentials can be stored")
         await subscribe_waba_to_webhooks(payload.waba_id, token)
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    agent.wa_phone_number_id = payload.phone_number_id
+    phone_number_id = str(selected["id"])
+    existing = (await db.execute(select(Agent.id).where(Agent.wa_phone_number_id == phone_number_id, Agent.id != agent.id, Agent.is_deleted.is_(False)))).scalar_one_or_none()
+    if existing:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This WhatsApp number is already connected to another assistant")
+    agent.wa_phone_number_id = phone_number_id
     agent.wa_waba_id = payload.waba_id
     agent.wa_access_token_encrypted = encrypted
     agent.wa_display_phone = str(selected.get("display_phone_number") or "") or None
     agent.wa_business_name = str(selected.get("verified_name") or "") or None
     agent.wa_connection_type = "cloud_api"
+    agent.wa_cloud_api_mode = "coexistence" if payload.connection_mode == "coexistence" else "cloud_api_new"
     agent.channel_type = "whatsapp"
     agent.version += 1
     await db.commit()
@@ -499,7 +560,8 @@ async def complete(payload: EmbeddedSignupCompleteRequest, db: AsyncSession = De
         "agent_id": str(agent.id),
         "connection_type": "cloud_api",
         "display_phone": agent.wa_display_phone,
-        "activation_required": True,
+        "activation_required": payload.connection_mode != "coexistence",
+        "cloud_api_mode": agent.wa_cloud_api_mode,
     }
 
 
@@ -534,12 +596,13 @@ async def complete_server_handoff(
     agent.wa_display_phone = selected.get("display_phone") or None
     agent.wa_business_name = selected.get("business_name") or None
     agent.wa_connection_type = "cloud_api"
+    agent.wa_cloud_api_mode = handoff.get("connection_mode") or "cloud_api_new"
     agent.channel_type = "whatsapp"
     agent.version += 1
     await subscribe_waba_to_webhooks(payload.waba_id, decrypt_value(handoff["token"]))
     await db.commit()
     await _clear_handoff(payload.state)
-    return {"ok": True, "connection_type": "cloud_api", "activation_required": True}
+    return {"ok": True, "connection_type": "cloud_api", "activation_required": agent.wa_cloud_api_mode != "coexistence"}
 
 
 @router.post("/activate")
@@ -568,6 +631,11 @@ async def activate_phone_number(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Complete Meta Embedded Signup before activating this phone number",
+        )
+    if getattr(agent, "wa_cloud_api_mode", None) == "coexistence":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This number is already registered through WhatsApp Business App Coexistence; no PIN activation is required",
         )
     try:
         from app.core.infra.wa_cloud_client import register_phone_number

@@ -267,7 +267,7 @@ async def get_whatsapp_status(
         return AgentWhatsAppStatusResponse(
             status="connected",
             phone_number=agent.wa_display_phone or "",
-            connection_type="cloud_api",
+            connection_type="coexistence" if getattr(agent, "wa_cloud_api_mode", None) == "coexistence" else "cloud_api",
             business_name=agent.wa_business_name,
         )
     if not agent.wa_device_id:
@@ -309,6 +309,7 @@ async def disconnect_whatsapp(
         agent.wa_display_phone = None
         agent.wa_business_name = None
         agent.wa_connection_type = "legacy_qr" if agent.wa_device_id else None
+        agent.wa_cloud_api_mode = None
         agent.channel_type = "whatsapp" if agent.wa_device_id else None
         agent.version += 1
         await db.flush()
@@ -348,6 +349,11 @@ async def register_cloud_api_phone_number(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Agent does not have a valid WhatsApp Cloud API channel configured",
+        )
+    if getattr(agent, "wa_cloud_api_mode", None) == "coexistence":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This number is connected through WhatsApp Business App Coexistence and does not need a PIN",
         )
     try:
         access_token = decrypt_value(agent.wa_access_token_encrypted)

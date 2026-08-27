@@ -144,11 +144,24 @@ async def get_waba_phone_numbers(waba_id: str, access_token: str) -> list[dict]:
     async with httpx.AsyncClient(timeout=15) as client:
         response = await client.get(
             f"https://graph.facebook.com/{settings.meta_graph_api_version}/{waba_id}/phone_numbers",
-            params={"fields": "id,display_phone_number,verified_name"},
+            params={"fields": "id,display_phone_number,verified_name,is_on_biz_app,platform_type"},
             headers={"Authorization": f"Bearer {access_token}"},
         )
     response.raise_for_status()
     return list(response.json().get("data") or [])
+
+
+async def get_phone_number_connection(phone_number_id: str, access_token: str) -> dict:
+    """Return the provider state needed to verify a Coexistence connection."""
+    settings = _settings()
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.get(
+            f"https://graph.facebook.com/{settings.meta_graph_api_version}/{phone_number_id}",
+            params={"fields": "is_on_biz_app,platform_type"},
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+    response.raise_for_status()
+    return dict(response.json() or {})
 
 
 async def get_user_businesses(access_token: str) -> list[dict[str, str]]:
