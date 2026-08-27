@@ -87,7 +87,8 @@ def test_signup_launch_persists_activation_state_and_resumes_server_handoff():
     assert "sessionStorage.setItem(key" in page_template
     assert "localStorage" not in page_template
     assert "expires_at=Date.now()+ttlMs" in page_template
-    assert "function finish()" in page_template
+    assert "function finish(allowServerDiscovery=false)" in page_template
+    assert "fallbackTimer=window.setTimeout(()=>finish(true),1500)" in page_template
 
 
 def test_signup_launch_resumes_after_mobile_return_without_false_cancel():
@@ -243,6 +244,32 @@ async def test_signup_completion_keeps_cloud_api_credential_persistence(monkeypa
     assert agent.wa_waba_id == "waba-id"
     assert agent.wa_access_token_encrypted == "enc:stored-credential"
     db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_signup_completion_recovers_when_meta_session_event_is_missing(monkeypatch):
+    """A valid SDK code can be used even if mobile drops postMessage assets."""
+    agent_id = __import__("uuid").uuid4()
+    agent = SimpleNamespace(id=agent_id)
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: agent))
+    save_handoff = AsyncMock()
+    monkeypatch.setattr(meta_signup, "_agent_for_state", lambda _state: agent_id)
+    monkeypatch.setattr(meta_signup, "exchange_code_for_token", AsyncMock(return_value="provider-token"))
+    monkeypatch.setattr(meta_signup, "get_shared_waba_ids", AsyncMock(return_value=["waba-id"]))
+    monkeypatch.setattr(meta_signup, "get_waba_phone_numbers", AsyncMock(return_value=[{
+        "id": "phone-id", "display_phone_number": "+62 812", "verified_name": "Arthur",
+    }]))
+    monkeypatch.setattr(meta_signup, "encrypt_value", lambda _value: "enc:stored-credential")
+    monkeypatch.setattr(meta_signup, "_save_handoff", save_handoff)
+
+    response = await meta_signup.complete(
+        meta_signup.EmbeddedSignupCompleteRequest(state="x" * 32, code="code"), db,
+    )
+
+    assert response["selection_required"] is True
+    assert response["candidates"][0]["phone_number_id"] == "phone-id"
+    assert save_handoff.await_args.args[1]["connection_mode"] == "cloud_api_new"
 
 
 @pytest.mark.asyncio
