@@ -98,7 +98,8 @@ def test_signup_launch_persists_activation_state_and_resumes_server_handoff():
 def test_signup_launch_resumes_after_mobile_return_without_false_cancel():
     page_template = inspect.getsource(meta_signup.launch)
 
-    assert "window.addEventListener('pageshow',resumePending);" in page_template
+    assert "window.addEventListener('pageshow',event=>" in page_template
+    assert "if(event.persisted)" in page_template
     assert "document.addEventListener('visibilitychange'" in page_template
     assert "Login Meta dibatalkan atau belum selesai." not in page_template
     assert "/v1/meta/signup/identity/start?state=" in page_template
@@ -127,6 +128,7 @@ def test_signup_launch_uses_hosted_flow_and_safe_lifecycle_telemetry():
     assert '"meta_signup_state"' in page_template
     assert "httponly=True" in page_template
     assert 'samesite="lax"' in page_template
+    assert 'response.headers["Cache-Control"] = "no-store, max-age=0"' in page_template
     assert "/v1/meta/signup/identity/start?state=" in page_template
     assert "FB.login(response" not in page_template
 

@@ -385,6 +385,10 @@ async def launch(
         samesite="lax",
         path="/",
     )
+    # A signed, short-lived onboarding page must never be served from a mobile
+    # browser's history/cache after the deployment has changed its flow.
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    response.headers["Pragma"] = "no-cache"
     name = html.escape(agent.name)
     # Mobile and desktop use the same server-bound Hosted Embedded Signup path.
     return rf'''<!doctype html><html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Hubungkan WhatsApp · {name}</title><style>
@@ -443,7 +447,7 @@ activateButton.onclick=async()=>{{const pin=activationPin.value.trim();if(!/^\d{
 async function completeHandoff(candidate){{setStatus('Menyimpan pilihan nomor WhatsApp…');const response=await fetch('/v1/meta/signup/handoff/complete',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{state:state,waba_id:candidate.waba_id,phone_number_id:candidate.phone_number_id}})}});const data=await response.json();if(!response.ok)throw new Error(data.detail||'Koneksi belum berhasil.');fragments={{activation_required:true,expires_at:Date.now()+fragmentTtlMs}};saveFragments();handoffEl.style.display='none';showActivation();}}
 async function loadServerHandoff(){{if(fragments.activation_required||fragments.activation_completed)return;try{{const response=await fetch('/v1/meta/signup/handoff/status?state='+encodeURIComponent(state));const data=await response.json();if(!response.ok||!data.ready)return;const candidates=data.candidates||[];if(candidates.length===1){{await completeHandoff(candidates[0]);return;}}handoffSelect.innerHTML='';candidates.forEach((candidate,index)=>{{const option=document.createElement('option');option.value=String(index);option.textContent=candidate.display_phone||candidate.business_name||'Nomor WhatsApp';handoffSelect.appendChild(option);}});handoffButton.onclick=()=>completeHandoff(candidates[Number(handoffSelect.value)]).catch(error=>setStatus(error.message,'error'));handoffEl.style.display='block';connectButton.disabled=true;setStatus('Meta selesai. Pilih nomor untuk dilanjutkan.');}}catch(_error){{/* A normal desktop flow has no server handoff. */}}}}
 function resumePending(){{showPending();attemptCompletion();loadServerHandoff();}}
-window.addEventListener('pageshow',resumePending);
+window.addEventListener('pageshow',event=>{{if(event.persisted){{window.location.reload();return;}}resumePending();}});
 document.addEventListener('visibilitychange',()=>{{if(document.visibilityState==='visible')resumePending();}});
 connectButton.onclick=()=>{{report('launch_clicked');if(fragments.completed)return;if(ready()){{attemptCompletion();return;}}connectButton.disabled=true;setStatus('Membuka Meta…');window.location.assign('/v1/meta/signup/identity/start?state='+encodeURIComponent(state));}};
 report('page_loaded');
@@ -455,7 +459,9 @@ resumePending();
 async def launch_short(state: str) -> RedirectResponse:
     """Compact, WhatsApp-friendly alias for the Embedded Signup launch URL."""
     _agent_for_state(state)
-    return RedirectResponse(url=f"/v1/meta/signup/launch?state={state}", status_code=status.HTTP_303_SEE_OTHER)
+    response = RedirectResponse(url=f"/v1/meta/signup/launch?state={state}", status_code=status.HTTP_303_SEE_OTHER)
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    return response
 
 
 @router.post("/complete")
