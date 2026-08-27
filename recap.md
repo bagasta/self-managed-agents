@@ -296,3 +296,20 @@ yang sama.
   code atau pilihan nomor yang tidak pernah diterima.
 - Perbaikan berikutnya harus memakai callback server-side dan state sementara
   di server, kemudian halaman mengambil status dari server setelah return.
+
+### Perbaikan mobile callback — deployed
+
+- Implementasi callback server-side telah dideploy pada commit `35bc2b5`.
+  Browser mobile membuka dialog OAuth Meta dengan signed state dan callback
+  `/v1/meta/signup/callback`.
+- Callback menukar code di server, mengambil hanya WABA/nomor yang dibagikan
+  oleh token Meta, lalu menyimpan token terenkripsi dan kandidat nomor di
+  Redis dengan TTL. Browser tidak menerima token.
+- Setelah redirect kembali, halaman membaca `/handoff/status`; satu kandidat
+  dilanjutkan otomatis, sedangkan beberapa kandidat harus dipilih operator.
+  Tidak ada pemilihan "nomor pertama".
+- `/handoff/complete` memvalidasi kandidat terhadap handoff signed state,
+  menyimpan koneksi, subscribe webhook, dan menghapus handoff satu kali.
+  Tahap PIN `/activate` tetap menjadi tahap berikutnya.
+- Desktop tetap memakai JS SDK flow yang sebelumnya tervalidasi. API sehat dan
+  UI publik merespons HTTP 200 setelah deployment.

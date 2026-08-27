@@ -52,6 +52,9 @@ def test_short_launch_path_is_registered_for_whatsapp_friendly_links():
 
     assert "/v1/meta/signup/l/{state}" in paths
     assert "/v1/meta/signup/activate" in paths
+    assert "/v1/meta/signup/callback" in paths
+    assert "/v1/meta/signup/handoff/status" in paths
+    assert "/v1/meta/signup/handoff/complete" in paths
 
 
 def test_signup_launch_page_has_a_branded_onboarding_layout():
@@ -107,6 +110,9 @@ def test_signup_launch_requires_explicit_pin_activation_after_completion():
     assert "/v1/meta/signup/activate" in page_template
     assert "PIN tidak disimpan" in page_template
     assert "activation_required:true" in page_template
+    assert "mobileOAuthUrl" in page_template
+    assert "/v1/meta/signup/handoff/status" in page_template
+    assert "/v1/meta/signup/handoff/complete" in page_template
 
 
 def test_signup_state_default_allows_mobile_registration_to_finish():
