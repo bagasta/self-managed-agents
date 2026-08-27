@@ -123,6 +123,26 @@ def test_signup_launch_uses_hosted_flow_and_safe_lifecycle_telemetry():
     assert "FB.login(response" in page_template
 
 
+def test_signup_launch_offers_official_coexistence_and_new_number_paths_on_mobile():
+    page_template = inspect.getsource(meta_signup._render_standard_signup_page)
+
+    assert "Pakai WhatsApp Business yang sudah ada" in page_template
+    assert "Gunakan nomor baru khusus Cloud API" in page_template
+    assert "featureType:'whatsapp_business_app_onboarding'" in page_template
+    assert "Buka di Chrome / Safari" in page_template
+    assert "launchUrl=`/v1/meta/signup/l/" in page_template
+    assert "sdk_load_failed" in page_template
+
+
+def test_signup_launch_completes_coexistence_with_multiple_phone_numbers():
+    page_template = inspect.getsource(meta_signup._render_standard_signup_page)
+
+    assert "if(d.selection_required)" in page_template
+    assert "function chooseNumber(candidates)" in page_template
+    assert "/v1/meta/signup/handoff/complete" in page_template
+    assert "connection_mode:fragments.connection_mode||'cloud_api_new'" in page_template
+
+
 def test_hosted_signup_uses_server_bound_business_identity_not_browser_asset_ids():
     source = inspect.getsource(meta_signup.record_hosted_signup_handoff)
     callback_source = inspect.getsource(meta_signup.identity_callback)
