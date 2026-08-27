@@ -51,6 +51,7 @@ def test_short_launch_path_is_registered_for_whatsapp_friendly_links():
     paths = {route.path for route in meta_signup.router.routes}
 
     assert "/v1/meta/signup/l/{state}" in paths
+    assert "/v1/meta/signup/activate" in paths
 
 
 def test_signup_launch_page_has_a_branded_onboarding_layout():
@@ -99,6 +100,15 @@ def test_signup_launch_resumes_after_mobile_return_without_false_cancel():
     assert "window.FB||typeof FB.login!=='function'" in page_template
 
 
+def test_signup_launch_requires_explicit_pin_activation_after_completion():
+    page_template = inspect.getsource(meta_signup.launch)
+
+    assert 'id="activation-pin"' in page_template
+    assert "/v1/meta/signup/activate" in page_template
+    assert "PIN tidak disimpan" in page_template
+    assert "activation_required:true" in page_template
+
+
 def test_signup_state_default_allows_mobile_registration_to_finish():
     from app.config import Settings
 
@@ -140,9 +150,36 @@ async def test_signup_completion_keeps_cloud_api_credential_persistence(monkeypa
     )
 
     assert response["ok"] is True
+    assert response["activation_required"] is True
     assert agent.wa_connection_type == "cloud_api"
     assert agent.channel_type == "whatsapp"
     assert agent.wa_phone_number_id == "phone-id"
     assert agent.wa_waba_id == "waba-id"
     assert agent.wa_access_token_encrypted == "enc:stored-credential"
     db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_signup_activation_uses_signed_state_and_never_persists_pin(monkeypatch):
+    agent_id = __import__("uuid").uuid4()
+    agent = SimpleNamespace(
+        id=agent_id,
+        wa_connection_type="cloud_api",
+        wa_phone_number_id="phone-id",
+        wa_waba_id="waba-id",
+        wa_access_token_encrypted="enc:stored-credential",
+    )
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: agent))
+    register = AsyncMock()
+    monkeypatch.setattr(meta_signup, "_agent_for_state", lambda _state: agent_id)
+    monkeypatch.setattr(meta_signup, "decrypt_value", lambda _value: "decrypted-token")
+    monkeypatch.setattr("app.core.infra.wa_cloud_client.register_phone_number", register)
+
+    response = await meta_signup.activate_phone_number(
+        meta_signup.EmbeddedSignupActivationRequest(state="x" * 32, pin="123456"), db
+    )
+
+    assert response == {"ok": True, "registration": "requested"}
+    register.assert_awaited_once_with("phone-id", "decrypted-token", "123456")
+    assert not hasattr(agent, "pin")
