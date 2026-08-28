@@ -366,3 +366,21 @@ resmi Meta agar browser dapat mengembalikan code dan asset ID signup.
   Dashboard, kemudian nilai baru harus diperbarui di environment production
   (`META_APP_SECRET`) sebelum percobaan onboarding berikutnya.
 - Validasi: suite `tests/test_meta_embedded_signup.py` lulus **23 passed**.
+
+### Integrasi mobile signup server-side — 28 Agustus 2026
+
+- Perbaikan mobile dari branch `faiz-embed-signup` diintegrasikan secara
+  selektif. Perubahan webhook, Docker, Makefile, dan logging yang tidak
+  berkaitan tidak ikut dibawa.
+- Di browser mobile, tombol Cloud API maupun Coexistence kini melakukan
+  redirect top-level ke `/identity/start`, bukan membuka popup `FB.login`.
+  State dan mode koneksi dipersist server-side di Redis untuk bertahan ketika
+  pengguna berpindah ke aplikasi WhatsApp Business.
+- Redirect `dialog/oauth` memakai Config ID Embedded Signup yang sama,
+  `redirect_uri` callback yang sama saat code ditukar, serta `extras` v4.
+  Mode Coexistence menambahkan `featureType:
+  whatsapp_business_app_onboarding` dan `sessionInfoVersion: 3`.
+- Discovery WABA sekarang mendukung key Meta saat ini (`granular_scopes.scope`)
+  dan fallback WABA owned/client dari bisnis yang terlihat oleh token bila
+  `target_ids` tidak dikembalikan pada pengujian bisnis sendiri.
+- Validasi setelah integrasi: compile Python sukses; suite signup **24 passed**.

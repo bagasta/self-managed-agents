@@ -128,6 +128,7 @@ def test_signup_launch_uses_hosted_flow_and_safe_lifecycle_telemetry():
 
 def test_signup_launch_offers_official_coexistence_and_new_number_paths_on_mobile():
     page_template = inspect.getsource(meta_signup._render_standard_signup_page)
+    identity_source = inspect.getsource(meta_signup.identity_start)
 
     assert "Pakai WhatsApp Business yang sudah ada" in page_template
     assert "Gunakan nomor baru khusus Cloud API" in page_template
@@ -135,6 +136,18 @@ def test_signup_launch_offers_official_coexistence_and_new_number_paths_on_mobil
     assert "Buka di Chrome / Safari" in page_template
     assert "launchUrl=`/v1/meta/signup/l/" in page_template
     assert "sdk_load_failed" in page_template
+    assert "function startMobileLogin(mode)" in page_template
+    assert "/v1/meta/signup/identity/start?state=" in page_template
+    assert "settings.meta_embedded_signup_config_id" in identity_source
+    assert 'extras_data["featureType"] = "whatsapp_business_app_onboarding"' in identity_source
+
+
+def test_shared_waba_discovery_accepts_current_meta_scope_key_and_owned_business_fallback():
+    source = inspect.getsource(meta_signup.get_shared_waba_ids)
+
+    assert 'scope.get("scope")' in source
+    assert "owned_whatsapp_business_accounts" in source
+    assert "client_whatsapp_business_accounts" in source
 
 
 def test_signup_launch_completes_coexistence_with_multiple_phone_numbers():

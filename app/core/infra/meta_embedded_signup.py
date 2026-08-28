@@ -131,12 +131,42 @@ async def get_shared_waba_ids(access_token: str) -> list[str]:
     scopes = (response.json().get("data") or {}).get("granular_scopes") or []
     ids: list[str] = []
     for scope in scopes:
-        if scope.get("permission") not in {"whatsapp_business_management", "whatsapp_business_messaging"}:
+        # Meta uses ``scope`` in granular_scopes. Keep ``permission`` for
+        # compatibility with older responses.
+        if (
+            scope.get("scope") not in {"whatsapp_business_management", "whatsapp_business_messaging"}
+            and scope.get("permission") not in {"whatsapp_business_management", "whatsapp_business_messaging"}
+        ):
             continue
         for target_id in scope.get("target_ids") or []:
             target = str(target_id)
             if target not in ids:
                 ids.append(target)
+    # Self-owned businesses used for testing can omit target_ids entirely.
+    # Discover only WABAs visible to the same Meta-issued token; no selection
+    # is made automatically by this helper.
+    if not ids:
+        async with httpx.AsyncClient(timeout=15) as client:
+            businesses_response = await client.get(
+                f"https://graph.facebook.com/{settings.meta_graph_api_version}/me/businesses",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if not businesses_response.is_error:
+                for business in businesses_response.json().get("data") or []:
+                    business_id = str(business.get("id") or "")
+                    if not business_id:
+                        continue
+                    for edge in ("owned_whatsapp_business_accounts", "client_whatsapp_business_accounts"):
+                        waba_response = await client.get(
+                            f"https://graph.facebook.com/{settings.meta_graph_api_version}/{business_id}/{edge}",
+                            headers={"Authorization": f"Bearer {access_token}"},
+                        )
+                        if waba_response.is_error:
+                            continue
+                        for waba in waba_response.json().get("data") or []:
+                            waba_id = str(waba.get("id") or "")
+                            if waba_id and waba_id not in ids:
+                                ids.append(waba_id)
     return ids
 
 

@@ -76,10 +76,13 @@ async def _bind_hosted_business(state_value: str, business_id: str) -> None:
         raise HTTPException(status_code=409, detail="This Meta business already has a signup in progress")
 
 
-def _hosted_signup_url() -> str:
+def _hosted_signup_url(mode: str | None = None) -> str:
     from app.config import get_settings
     settings = get_settings()
-    extras = json.dumps({"sessionInfoVersion": "3", "version": "v4"}, separators=(",", ":"))
+    extras_data = {"setup": {}, "sessionInfoVersion": "3", "version": "v4"}
+    if mode == "coexistence":
+        extras_data["featureType"] = "whatsapp_business_app_onboarding"
+    extras = json.dumps(extras_data, separators=(",", ":"))
     return "https://business.facebook.com/messaging/whatsapp/onboard/?" + urlencode({
         "app_id": settings.meta_app_id,
         "config_id": settings.meta_embedded_signup_config_id,
@@ -286,26 +289,38 @@ async def oauth_callback(
 
 
 @router.get("/identity/start")
-async def identity_start(request: Request, state: str = Query(..., min_length=32)) -> RedirectResponse:
+async def identity_start(
+    request: Request,
+    state: str = Query(..., min_length=32),
+    mode: Literal["cloud_api_new", "coexistence"] = Query("cloud_api_new"),
+) -> RedirectResponse:
     """Use a mobile-safe full-page Login for Business redirect before Hosted ES."""
     _agent_for_state(state)
     from app.config import get_settings
     from app.core.infra.redis_client import get_redis
     settings = get_settings()
-    if not settings.meta_business_identity_config_id:
-        raise HTTPException(status_code=503, detail="Mobile Meta business identification is not configured")
+    if not settings.meta_embedded_signup_config_id:
+        raise HTTPException(status_code=503, detail="Mobile Meta Embedded Signup is not configured")
     redis = await get_redis()
     if redis is None:
         raise HTTPException(status_code=503, detail="Temporary signup storage is unavailable")
     nonce = uuid.uuid4().hex
-    await redis.set(_identity_key(nonce), state, ex=settings.meta_signup_state_ttl_seconds)
+    await redis.set(
+        _identity_key(nonce),
+        json.dumps({"state": state, "mode": mode}),
+        ex=settings.meta_signup_state_ttl_seconds,
+    )
+    extras_data = {"setup": {}, "sessionInfoVersion": "3", "version": "v4"}
+    if mode == "coexistence":
+        extras_data["featureType"] = "whatsapp_business_app_onboarding"
     target = "https://www.facebook.com/" + settings.meta_graph_api_version + "/dialog/oauth?" + urlencode({
         "client_id": settings.meta_app_id,
         "redirect_uri": _identity_callback_url(),
         "state": nonce,
-        "config_id": settings.meta_business_identity_config_id,
+        "config_id": settings.meta_embedded_signup_config_id,
         "response_type": "code",
         "override_default_response_type": "true",
+        "extras": json.dumps(extras_data, separators=(",", ":")),
     })
     response = RedirectResponse(target, status_code=status.HTTP_303_SEE_OTHER)
     response.set_cookie("meta_signup_state", state, max_age=settings.meta_signup_state_ttl_seconds, secure=True, httponly=True, samesite="lax", path="/")
@@ -318,8 +333,17 @@ async def identity_callback(request: Request, state: str = Query(..., min_length
     redis = await get_redis()
     if redis is None or not code:
         raise HTTPException(status_code=400, detail="Meta business identification was not completed")
-    signed_state = await redis.getdel(_identity_key(state))
-    if not signed_state or signed_state != request.cookies.get("meta_signup_state"):
+    raw_payload = await redis.getdel(_identity_key(state))
+    if not raw_payload:
+        raise HTTPException(status_code=403, detail="Meta business identification expired or is invalid")
+    try:
+        identity = json.loads(raw_payload)
+        signed_state = str(identity["state"])
+        mode = identity.get("mode")
+    except (TypeError, ValueError, KeyError):
+        # Support redirects already issued before mode persistence was added.
+        signed_state, mode = str(raw_payload), "cloud_api_new"
+    if signed_state != request.cookies.get("meta_signup_state"):
         raise HTTPException(status_code=403, detail="Meta business identification expired or is invalid")
     _agent_for_state(signed_state)
     try:
@@ -332,11 +356,15 @@ async def identity_callback(request: Request, state: str = Query(..., min_length
         raise HTTPException(status_code=400, detail="No Meta business was available for this Facebook account")
     await redis.set(_identity_businesses_key(signed_state), json.dumps(businesses), ex=3600)
     options = "".join(f'<button name="choice" value="{index}" type="submit">{html.escape(item["name"])}</button>' for index, item in enumerate(businesses))
-    return HTMLResponse('<!doctype html><title>Pilih bisnis Meta</title><form method="get" action="/v1/meta/signup/identity/select"><h1>Pilih bisnis Meta</h1><p>Pilih bisnis yang akan dihubungkan ke WhatsApp. Kami tidak menampilkan atau meminta ID bisnis.</p>' + options + '</form>')
+    return HTMLResponse('<!doctype html><title>Pilih bisnis Meta</title><form method="get" action="/v1/meta/signup/identity/select"><input type="hidden" name="mode" value="' + html.escape(str(mode or "cloud_api_new"), quote=True) + '"><h1>Pilih bisnis Meta</h1><p>Pilih bisnis yang akan dihubungkan ke WhatsApp. Kami tidak menampilkan atau meminta ID bisnis.</p>' + options + '</form>')
 
 
 @router.get("/identity/select")
-async def identity_select(request: Request, choice: int = Query(..., ge=0, le=100)) -> RedirectResponse:
+async def identity_select(
+    request: Request,
+    choice: int = Query(..., ge=0, le=100),
+    mode: Literal["cloud_api_new", "coexistence"] = Query("cloud_api_new"),
+) -> RedirectResponse:
     from app.core.infra.redis_client import get_redis
     state = request.cookies.get("meta_signup_state")
     if not state:
@@ -349,7 +377,7 @@ async def identity_select(request: Request, choice: int = Query(..., ge=0, le=10
         raise HTTPException(status_code=400, detail="Invalid Meta business selection")
     await _bind_hosted_business(state, businesses[choice]["id"])
     await redis.delete(_identity_businesses_key(state))
-    return RedirectResponse(_hosted_signup_url(), status_code=status.HTTP_303_SEE_OTHER)
+    return RedirectResponse(_hosted_signup_url(mode), status_code=status.HTTP_303_SEE_OTHER)
 
 
 @router.get("/handoff/status")
@@ -391,7 +419,9 @@ async function selectNumber(candidate){{setButtons(true);status('Menyimpan nomor
 function chooseNumber(candidates){{selectionOptions.replaceChildren();candidates.forEach(candidate=>{{const button=document.createElement('button');button.type='button';button.textContent=candidate.display_phone||candidate.business_name||'Nomor WhatsApp';button.onclick=()=>selectNumber(candidate);selectionOptions.appendChild(button)}});selection.style.display='block';status('Meta selesai. Pilih nomor WhatsApp untuk dilanjutkan.')}}
 function finish(allowServerDiscovery=false){{if(submitting||!fragments.code||(!fragments.waba_id&&!allowServerDiscovery)){{if(fragments.code||fragments.waba_id)status('Menunggu konfirmasi Meta melengkapi koneksi…');return}}submitting=true;setButtons(true);status('Menyimpan koneksi WhatsApp…');fetch('/v1/meta/signup/complete',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{state,code:fragments.code,waba_id:fragments.waba_id||null,phone_number_id:fragments.phone_number_id,connection_mode:fragments.connection_mode||'cloud_api_new'}})}}).then(async r=>{{const d=await r.json();if(!r.ok)throw Error(d.detail||'Koneksi belum berhasil.');if(d.selection_required){{submitting=false;chooseNumber(d.candidates||[]);return}}clear();status(d.activation_required?'Koneksi tersimpan. Selesaikan PIN enam digit untuk mengaktifkan nomor baru di Meta.':'Terhubung via Meta Cloud API dan WhatsApp Business App.','success')}}).catch(e=>{{submitting=false;setButtons(false);status(e.message,'error')}})}}
 function login(mode){{if(!sdkReady){{status('Halaman Login for Business Meta belum siap. Coba lagi atau buka di Chrome / Safari.','error');return}}if(fallbackTimer)clearTimeout(fallbackTimer);fragments={{connection_mode:mode,expires_at:Date.now()+ttlMs}};save();telemetry('sdk_launch_requested');setButtons(true);status('Membuka Login for Business Meta…');const extras=mode==='coexistence'?{{setup:{{}},featureType:'whatsapp_business_app_onboarding',sessionInfoVersion:'3'}}:{{setup:{{}}}};/* Must stay directly in the trusted user click; do not await before FB.login. The v4 configuration in Meta Builder owns Cloud API version and permissions. */FB.login(response=>{{setButtons(false);if(response&&response.authResponse&&response.authResponse.code){{fragments.code=response.authResponse.code;save();telemetry('sdk_callback_with_code');finish();fallbackTimer=window.setTimeout(()=>finish(true),1500)}}else{{telemetry('sdk_callback_without_code');status('Login Meta belum selesai atau diblokir. Buka tautan ini di Chrome / Safari lalu coba lagi.','error')}}}},{{config_id:configId,response_type:'code',override_default_response_type:true,extras}})}}
-coexist.addEventListener('click',()=>login('coexistence'));newNumber.addEventListener('click',()=>login('cloud_api_new'));
+function startMobileLogin(mode){{fragments={{connection_mode:mode,expires_at:Date.now()+ttlMs}};save();telemetry('sdk_launch_requested');setButtons(true);status('Membuka Login for Business Meta…');window.location.assign('/v1/meta/signup/identity/start?state='+encodeURIComponent(state)+'&mode='+encodeURIComponent(mode));}}
+function launch(mode){{const mobile=Boolean(window.matchMedia&&window.matchMedia('(max-width:768px)').matches)||/Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);if(mobile)startMobileLogin(mode);else login(mode)}}
+coexist.addEventListener('click',()=>launch('coexistence'));newNumber.addEventListener('click',()=>launch('cloud_api_new'));
 window.fbAsyncInit=()=>{{FB.init({{appId,cookie:true,xfbml:false,version:'v26.0'}});sdkReady=true;telemetry('sdk_ready')}};(function(d,s,id){{const js=d.createElement(s);js.id=id;js.src='https://connect.facebook.net/en_US/sdk.js';js.onerror=()=>{{telemetry('sdk_load_failed');status('Halaman Login for Business Meta gagal dimuat. Periksa koneksi atau buka di Chrome / Safari.','error')}};d.head.appendChild(js)}})(document,'script','facebook-jssdk');
 const inApp=/FBAN|FBAV|Instagram|WhatsApp/i.test(navigator.userAgent);if(inApp){{document.querySelector('#in-app').style.display='block';telemetry('external_browser_requested')}}window.addEventListener('pageshow',()=>finish());document.addEventListener('visibilitychange',()=>{{if(document.visibilityState==='visible')finish()}});telemetry('page_loaded');finish();
 </script></body></html>'''
