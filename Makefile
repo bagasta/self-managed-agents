@@ -50,8 +50,14 @@ test-arthur:
 		tests/test_agent_builder_phase4.py \
 		tests/test_skill_service.py
 
+ifeq ($(OS),Windows_NT)
+    UVICORN = .venv\Scripts\uvicorn.exe
+else
+    UVICORN = .venv/bin/uvicorn
+endif
+
 dev:
-	.venv/bin/uvicorn app.main:app --host $(HOST) --port $(PORT) --reload --reload-dir app --reload-dir arthur_v2 --reload-dir UI-DEV --reload-include '*.py' --reload-include '*.html' --reload-include '*.js' --reload-include '*.css'
+	$(UVICORN) app.main:app --host $(HOST) --port $(PORT) --reload --reload-dir app --reload-dir arthur_v2 --reload-dir UI-DEV --reload-include '*.py' --reload-include '*.html' --reload-include '*.js' --reload-include '*.css'
 
 wa: wa-build
 	cd wa-service && PYTHON_WEBHOOK_URL=http://localhost:8000/v1/channels/wa/incoming ./wa-service

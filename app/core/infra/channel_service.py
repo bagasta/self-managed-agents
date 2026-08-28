@@ -33,7 +33,8 @@ logger = structlog.get_logger(__name__)
 
 def _get_fernet():
     """Return a Fernet instance if CHANNEL_SECRET_KEY is set, else None."""
-    key = os.getenv("CHANNEL_SECRET_KEY", "")
+    from app.config import get_settings
+    key = get_settings().channel_secret_key
     if not key:
         return None
     try:

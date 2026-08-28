@@ -95,6 +95,7 @@ class Settings(BaseSettings):
     workspace_mcp_prefer_local: str = "false"
     workspace_mcp_token: str = ""
     google_integration_service_url: str = ""
+    channel_secret_key: str = ""
 
     # Logging
     log_level: str = "INFO"

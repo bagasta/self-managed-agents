@@ -131,12 +131,69 @@ async def get_shared_waba_ids(access_token: str) -> list[str]:
     scopes = (response.json().get("data") or {}).get("granular_scopes") or []
     ids: list[str] = []
     for scope in scopes:
-        if scope.get("permission") not in {"whatsapp_business_management", "whatsapp_business_messaging"}:
+        # Meta's debug_token endpoint returns 'scope' as the key for granular_scopes
+        if scope.get("scope") not in {"whatsapp_business_management", "whatsapp_business_messaging"} and scope.get("permission") not in {"whatsapp_business_management", "whatsapp_business_messaging"}:
             continue
         for target_id in scope.get("target_ids") or []:
             target = str(target_id)
             if target not in ids:
                 ids.append(target)
+    
+    if not ids:
+        import structlog
+        logger = structlog.get_logger(__name__)
+        logger.warning("meta_signup.granular_scopes_empty", scopes=scopes)
+        # Fallback for self-owned businesses (developers testing their own app)
+        # where granular scopes don't have target_ids.
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                biz_resp = await client.get(
+                    f"https://graph.facebook.com/{settings.meta_graph_api_version}/me/businesses",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                )
+            if not biz_resp.is_error:
+                biz_data = biz_resp.json().get("data") or []
+                logger.warning("meta_signup.fallback_businesses", businesses=biz_data)
+                for biz in biz_data:
+                    biz_id = biz.get("id")
+                    if not biz_id:
+                        continue
+                    async with httpx.AsyncClient(timeout=15) as client:
+                        waba_resp = await client.get(
+                            f"https://graph.facebook.com/{settings.meta_graph_api_version}/{biz_id}/owned_whatsapp_business_accounts",
+                            headers={"Authorization": f"Bearer {access_token}"},
+                        )
+                    if not waba_resp.is_error:
+                        waba_data = waba_resp.json().get("data") or []
+                        logger.warning("meta_signup.fallback_wabas", biz_id=biz_id, wabas=waba_data)
+                        for waba in waba_data:
+                            waba_id = waba.get("id")
+                            if waba_id and str(waba_id) not in ids:
+                                ids.append(str(waba_id))
+                    else:
+                        logger.warning("meta_signup.fallback_wabas_error", biz_id=biz_id, status=waba_resp.status_code, error=waba_resp.text)
+                    
+                    # Also try client_whatsapp_business_accounts
+                    async with httpx.AsyncClient(timeout=15) as client:
+                        client_waba_resp = await client.get(
+                            f"https://graph.facebook.com/{settings.meta_graph_api_version}/{biz_id}/client_whatsapp_business_accounts",
+                            headers={"Authorization": f"Bearer {access_token}"},
+                        )
+                    if not client_waba_resp.is_error:
+                        client_waba_data = client_waba_resp.json().get("data") or []
+                        logger.warning("meta_signup.fallback_client_wabas", biz_id=biz_id, wabas=client_waba_data)
+                        for waba in client_waba_data:
+                            waba_id = waba.get("id")
+                            if waba_id and str(waba_id) not in ids:
+                                ids.append(str(waba_id))
+                    else:
+                        logger.warning("meta_signup.fallback_client_wabas_error", biz_id=biz_id, status=client_waba_resp.status_code, error=client_waba_resp.text)
+
+            else:
+                logger.warning("meta_signup.fallback_businesses_error", status=biz_resp.status_code, error=biz_resp.text)
+        except Exception as exc:
+            logger.warning("meta_signup.fallback_exception", error=str(exc))
+
     return ids
 
 

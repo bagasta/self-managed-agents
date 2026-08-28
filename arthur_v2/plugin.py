@@ -1062,6 +1062,17 @@ def build_arthur_v2_tools(
         agent = await _owned(agent_id)
         if agent is None:
             return {"ok": False, "error": "Assistant tidak ditemukan atau bukan milik pengguna ini."}
+        
+        if agent.wa_connection_type == "cloud_api" and agent.wa_phone_number_id:
+            return {
+                "ok": True,
+                "connection_type": "cloud_api",
+                "phone_number_id": agent.wa_phone_number_id,
+                "display_phone": agent.wa_display_phone,
+                "business_name": agent.wa_business_name,
+                "status": "connected" if agent.wa_access_token_encrypted else "pending",
+            }
+
         if not agent.wa_device_id:
             return {"ok": False, "error": "Assistant belum memiliki perangkat WhatsApp. Gunakan connect_assistant_whatsapp terlebih dahulu."}
         try:
