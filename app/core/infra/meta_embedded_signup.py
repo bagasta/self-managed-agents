@@ -94,7 +94,18 @@ async def exchange_code_for_token(code: str, *, redirect_uri: str | None = None)
             f"https://graph.facebook.com/{settings.meta_graph_api_version}/oauth/access_token",
             params=params,
         )
-    response.raise_for_status()
+    if response.is_error:
+        # Do not call raise_for_status here: httpx includes the full request
+        # URL in its exception, which contains the app secret and one-time
+        # authorization code. Meta returns a structured, safe error instead.
+        try:
+            error = response.json().get("error") or {}
+        except (ValueError, TypeError):
+            error = {}
+        message = str(error.get("message") or "Meta rejected the signup authorization code")
+        code_value = error.get("code")
+        suffix = f" (Meta error {code_value})" if code_value is not None else ""
+        raise ValueError(message + suffix)
     token = response.json().get("access_token")
     if not token:
         raise ValueError("Meta did not return an access token")

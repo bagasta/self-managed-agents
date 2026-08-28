@@ -349,3 +349,20 @@ terdaftar pada **Allowed domains** dan **Valid OAuth redirect URIs**. Aktifkan
 Client OAuth Login, Web OAuth Login, Enforce HTTPS, Embedded Browser OAuth
 Login, Strict Mode, dan Login with the JavaScript SDK. Ini adalah prasyarat
 resmi Meta agar browser dapat mengembalikan code dan asset ID signup.
+
+### Perbaikan token exchange Coexistence — 28 Agustus 2026
+
+- Analisis log menunjukkan kegagalan terjadi pada pertukaran authorization
+  `code` ke `oauth/access_token` Meta (HTTP 400), sebelum lookup WABA atau
+  nomor dijalankan. Code Meta hanya berlaku 30 detik dan hanya dapat dipakai
+  sekali; code dari percobaan gagal tidak dapat digunakan ulang.
+- Adapter token exchange tidak lagi memakai `httpx.raise_for_status()` untuk
+  response Meta yang gagal. Method tersebut menulis URL lengkap pada traceback,
+  yang sebelumnya memasukkan `client_secret` dan code satu kali ke log.
+- Response error Meta sekarang diparse menjadi `ValueError` aman. Endpoint
+  `/v1/meta/signup/complete` mengembalikan HTTP 400 dengan pesan Meta, bukan
+  HTTP 500 dan traceback.
+- Security: App Secret yang ada pada log error harus di-rotate di Meta App
+  Dashboard, kemudian nilai baru harus diperbarui di environment production
+  (`META_APP_SECRET`) sebelum percobaan onboarding berikutnya.
+- Validasi: suite `tests/test_meta_embedded_signup.py` lulus **23 passed**.

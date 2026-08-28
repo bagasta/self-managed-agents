@@ -273,6 +273,27 @@ async def test_signup_completion_recovers_when_meta_session_event_is_missing(mon
 
 
 @pytest.mark.asyncio
+async def test_signup_completion_returns_meta_code_exchange_failure_without_500(monkeypatch):
+    agent_id = __import__("uuid").uuid4()
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: SimpleNamespace(id=agent_id)))
+    monkeypatch.setattr(meta_signup, "_agent_for_state", lambda _state: agent_id)
+    monkeypatch.setattr(
+        meta_signup,
+        "exchange_code_for_token",
+        AsyncMock(side_effect=ValueError("Meta rejected the signup authorization code (Meta error 100)")),
+    )
+
+    with pytest.raises(meta_signup.HTTPException) as error:
+        await meta_signup.complete(
+            meta_signup.EmbeddedSignupCompleteRequest(state="x" * 32, code="code", waba_id="waba-id"), db,
+        )
+
+    assert error.value.status_code == 400
+    assert "Meta rejected" in error.value.detail
+
+
+@pytest.mark.asyncio
 async def test_signup_activation_uses_signed_state_and_never_persists_pin(monkeypatch):
     agent_id = __import__("uuid").uuid4()
     agent = SimpleNamespace(
