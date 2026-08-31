@@ -1,6 +1,7 @@
 """Verified inbound WhatsApp Cloud API webhooks."""
 from __future__ import annotations
 
+import base64
 import json
 
 import structlog
@@ -73,15 +74,17 @@ async def _process(agent_id: str, phone_number_id: str, message: dict, sender_na
     from app.api.wa_helpers import find_or_create_wa_session
     from app.core.engine.agent_runner import run_agent
     from app.core.infra.channel_service import decrypt_value
-    from app.core.infra.wa_cloud_client import mark_message_read
+    from app.core.infra.wa_cloud_client import download_media, mark_message_read
     from app.models.agent import Agent
     async with AsyncSessionLocal() as db:
         agent = await db.get(Agent, agent_id)
         if agent is None or not agent.wa_access_token_encrypted:
             return
         sender = str(message.get("from") or "")
+        message_type = str(message.get("type") or "")
         text = str((message.get("text") or {}).get("body") or "").strip()
-        if not sender or not text:
+        media = message.get(message_type) or {}
+        if not sender or message_type not in {"text", "image", "document"}:
             return
         session, _ = await find_or_create_wa_session(agent=agent, lookup_user_id=sender, effective_reply_target=sender, device_id=f"meta:{phone_number_id}", db=db, is_operator=False, phone_number=sender, sender_name=sender_name)
         config = dict(session.channel_config or {})
@@ -93,7 +96,48 @@ async def _process(agent_id: str, phone_number_id: str, message: dict, sender_na
             await mark_message_read(phone_number_id, str(message.get("id") or ""), token)
         except Exception:
             pass
-        result = await run_agent(agent_model=agent, session=session, user_message=text, db=db, sender_name=sender_name)
+        media_image_b64: str | None = None
+        media_image_mime: str | None = None
+        current_attachment_name: str | None = None
+        if message_type in {"image", "document"}:
+            media_id = str(media.get("id") or "")
+            if not media_id:
+                logger.warning("meta_webhook.media_missing_id", media_type=message_type)
+                return
+            try:
+                raw, mime_type = await download_media(media_id, token)
+                filename = str(media.get("filename") or "").strip() or None
+                if not filename:
+                    extension = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}.get(mime_type, ".bin")
+                    filename = f"incoming_{message_type}{extension}"
+                from app.api.wa_helpers import process_wa_media
+                media_context, media_image_b64, media_image_mime, media_meta = await process_wa_media(
+                    media_type=message_type,
+                    media_data=base64.b64encode(raw).decode("ascii"),
+                    media_filename=filename,
+                    session_id=session.id,
+                    logger=logger,
+                    arthur_model_routing=bool(getattr(agent, "is_arthur", False)),
+                )
+                current_attachment_name = (media_meta or {}).get("filename") or filename
+                caption = str(media.get("caption") or "").strip()
+                text = (caption or f"Pengguna mengirim {message_type}.") + media_context
+            except Exception as exc:
+                logger.warning("meta_webhook.media_download_failed", media_type=message_type, error_type=type(exc).__name__)
+                text = (
+                    f"[Lampiran {message_type} diterima tetapi tidak dapat diunduh dari WhatsApp. "
+                    "Minta pengguna mengirim ulang lampiran tersebut.]"
+                )
+        result = await run_agent(
+            agent_model=agent,
+            session=session,
+            user_message=text,
+            db=db,
+            sender_name=sender_name,
+            media_image_b64=media_image_b64,
+            media_image_mime=media_image_mime,
+            current_attachment_name=current_attachment_name,
+        )
         await _send_cloud_reply(session, str(result.get("reply") or ""))
         await db.commit()
 
@@ -131,6 +175,6 @@ async def receive_meta_webhook(request: Request, background_tasks: BackgroundTas
                 continue
             contact_names = {str(item.get("wa_id") or ""): str(item.get("profile", {}).get("name") or "") for item in value.get("contacts") or []}
             for message in value.get("messages") or []:
-                if message.get("type") == "text":
+                if message.get("type") in {"text", "image", "document"}:
                     background_tasks.add_task(_process, str(agent_id), phone_number_id, message, contact_names.get(str(message.get("from") or ""), ""))
     return {"ok": True}

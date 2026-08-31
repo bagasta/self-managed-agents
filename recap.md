@@ -384,3 +384,19 @@ resmi Meta agar browser dapat mengembalikan code dan asset ID signup.
   dan fallback WABA owned/client dari bisnis yang terlihat oleh token bila
   `target_ids` tidak dikembalikan pada pengujian bisnis sendiri.
 - Validasi setelah integrasi: compile Python sukses; suite signup **24 passed**.
+
+### Dukungan media inbound WhatsApp Cloud API — 31 Agustus 2026
+
+- Webhook Cloud API sebelumnya hanya menjadwalkan pesan `text`; event `image`
+  dan `document` diabaikan sehingga Arthur tidak pernah menerima lampiran.
+- Ditambahkan downloader media Meta dua tahap (metadata ID → URL download)
+  menggunakan token agent. Ukuran dibatasi 16 MiB dan URL sementara tidak
+  dipersist.
+- Gambar dan dokumen kini diteruskan ke pipeline media yang sudah ada:
+  penyimpanan workspace, ekstraksi dokumen, serta input vision untuk gambar.
+  Caption tetap dipakai sebagai konteks pesan.
+- Jika unduh media gagal atau ukurannya terlalu besar, Arthur menerima konteks
+  aman untuk meminta pelanggan mengirim ulang, alih-alih webhook diam.
+- Validasi: **28 passed, 1 deselected** pada suite webhook/signup; satu tes
+  legacy yang tidak dijalankan membutuhkan `langchain` yang tidak tersedia di
+  virtualenv test sementara.

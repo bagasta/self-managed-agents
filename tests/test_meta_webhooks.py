@@ -68,3 +68,14 @@ def test_hosted_signup_account_update_is_recognized_without_logging_customer_ids
     }
     assert "customer-waba" not in repr(summary)
     assert meta_webhooks._account_update_summary({"field": "messages", "value": {}}) is None
+
+
+def test_cloud_webhook_routes_images_and_documents_through_the_existing_media_pipeline():
+    source = inspect.getsource(meta_webhooks.receive_meta_webhook)
+    processor = inspect.getsource(meta_webhooks._process)
+
+    assert 'message.get("type") in {"text", "image", "document"}' in source
+    assert "download_media(media_id, token)" in processor
+    assert "process_wa_media(" in processor
+    assert "media_image_b64=media_image_b64" in processor
+    assert "current_attachment_name=current_attachment_name" in processor
