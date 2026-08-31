@@ -1098,8 +1098,12 @@ async function loadWAAgent() {
       : '<span class="text-muted" style="margin-left:8px">belum ada device</span>'}`;
 
   const metaAction = `<div style="margin-top:12px">
-    <button class="btn btn-primary" onclick="connectMetaEmbeddedSignup('${agentId}')">🌐 Connect via Meta Embedded Signup</button>
-    <div class="text-muted" style="margin-top:6px;font-size:11px">Official WhatsApp Cloud API. Requires APP_PUBLIC_URL and Meta credentials on the server.</div>
+    <div style="font-size:12px;font-weight:600;margin-bottom:6px">Hubungkan WhatsApp resmi lewat Meta</div>
+    <div class="btn-group" style="flex-wrap:wrap;gap:6px">
+      <button class="btn btn-primary btn-sm" onclick="connectMetaEmbeddedSignup('${agentId}','cloud_api_new')">☁️ Nomor baru · Cloud API</button>
+      <button class="btn btn-ghost btn-sm" onclick="connectMetaEmbeddedSignup('${agentId}','coexistence')">📱 Nomor existing · Coexistence</button>
+    </div>
+    <div class="text-muted" style="margin-top:6px;font-size:11px">Cloud API untuk nomor baru. Coexistence mempertahankan WhatsApp Business App di ponsel untuk nomor yang sudah ada.</div>
     <div id="meta-signup-result" style="margin-top:8px"></div>
   </div>`;
 
@@ -1122,16 +1126,17 @@ async function loadWAAgent() {
   await refreshWAQR();
 }
 
-async function connectMetaEmbeddedSignup(agentId) {
+async function connectMetaEmbeddedSignup(agentId, mode = 'cloud_api_new') {
   const result = document.getElementById('meta-signup-result');
-  if (result) result.innerHTML = '<span class="spinner"></span> Membuat link Meta…';
+  const modeLabel = mode === 'coexistence' ? 'nomor existing (Coexistence)' : 'nomor baru (Cloud API)';
+  if (result) result.innerHTML = `<span class="spinner"></span> Membuat link Meta untuk ${modeLabel}…`;
   const r = await api('POST', `/v1/meta/signup/links/${agentId}`);
   if (!r.ok) {
     if (result) result.innerHTML = `<span class="badge badge-red">❌ ${escHtml(r.data?.detail || 'Gagal membuat link Meta')}</span>`;
     return;
   }
   const url = r.data.signup_url;
-  if (result) result.innerHTML = `<a class="btn btn-success btn-sm" href="${escHtml(url)}" target="_blank" rel="noopener">Buka Meta Embedded Signup</a><div class="text-muted" style="margin-top:6px;font-size:11px">Link berlaku ${r.data.expires_in_seconds} detik dan hanya untuk agent ini.</div>`;
+  if (result) result.innerHTML = `<a class="btn btn-success btn-sm" href="${escHtml(url)}" target="_blank" rel="noopener">Lanjutkan ${escHtml(modeLabel)} di Meta</a><div class="text-muted" style="margin-top:6px;font-size:11px">Link berlaku ${r.data.expires_in_seconds} detik dan hanya untuk agent ini. Pilih mode yang sama di halaman Meta berikutnya.</div>`;
 }
 
 async function registerCloudApiPhone(agentId, pinInputId, resultId) {
@@ -1621,17 +1626,18 @@ async function arthurConnectWA() {
   _arthurPollStatus();
 }
 
-async function arthurConnectMeta() {
+async function arthurConnectMeta(mode = 'cloud_api_new') {
   if (!Arthur.id) await arthurLoad();
   if (!Arthur.id) { alert('Load Arthur dulu'); return; }
   const result = document.getElementById('arthur-meta-signup-result');
-  result.innerHTML = '<span class="spinner"></span> Membuat link Meta…';
+  const modeLabel = mode === 'coexistence' ? 'nomor existing (Coexistence)' : 'nomor baru (Cloud API)';
+  result.innerHTML = `<span class="spinner"></span> Membuat link Meta untuk ${modeLabel}…`;
   const r = await api('POST', `/v1/meta/signup/links/${Arthur.id}`);
   if (!r.ok) {
     result.innerHTML = `<span class="badge badge-red">❌ ${escHtml(r.data?.detail || JSON.stringify(r.data))}</span>`;
     return;
   }
-  result.innerHTML = `<a class="btn btn-success btn-sm" href="${escHtml(r.data.signup_url)}" target="_blank" rel="noopener">Buka Meta Embedded Signup</a><div class="text-muted" style="margin-top:6px;font-size:11px">Link berlaku ${r.data.expires_in_seconds} detik dan hanya untuk Arthur ini.</div>`;
+  result.innerHTML = `<a class="btn btn-success btn-sm" href="${escHtml(r.data.signup_url)}" target="_blank" rel="noopener">Lanjutkan ${escHtml(modeLabel)} di Meta</a><div class="text-muted" style="margin-top:6px;font-size:11px">Link berlaku ${r.data.expires_in_seconds} detik dan hanya untuk Arthur ini. Pilih mode yang sama di halaman Meta berikutnya.</div>`;
 }
 
 async function arthurRegisterCloudApiPhone() {

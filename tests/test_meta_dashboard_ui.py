@@ -9,15 +9,20 @@ def test_dashboard_exposes_scoped_meta_embedded_signup_action():
     assert "isStaleLocalDefault" in script
     assert "isStaleProductionBaseUrl" in script
     assert "localStorage.setItem('baseUrl', window.location.origin)" in script
-    assert "Connect via Meta Embedded Signup" in script
+    assert "Nomor baru · Cloud API" in script
+    assert "Nomor existing · Coexistence" in script
     assert "connectMetaEmbeddedSignup" in script
+    assert "mode = 'cloud_api_new'" in script
+    assert "mode === 'coexistence'" in script
     assert "/v1/meta/signup/links/${agentId}" in script
     assert "arthurConnectMeta" in script
     assert "wa-service legacy di port 8080 tidak aktif" in script
     assert "dashboardWasUnavailable" in script
     assert "cache: 'no-store'" in script
     assert "Isi API Key di bagian atas" in script
-    assert 'app.js?v=arthur-v2-pagination-1' in index
+    assert "arthurConnectMeta('cloud_api_new')" in index
+    assert "arthurConnectMeta('coexistence')" in index
+    assert 'app.js?v=meta-signup-modes-1' in index
 
 
 def test_dashboard_loads_all_agent_pages_before_finding_arthur():
