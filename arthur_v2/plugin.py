@@ -218,6 +218,36 @@ def _without_google_workspace_mcp(tools_config: dict[str, Any] | None) -> dict[s
     return config
 
 
+def _cloud_assistant_whatsapp_status(agent: Agent) -> dict[str, Any] | None:
+    """Return the Cloud API status shape used by the public agent status API.
+
+    Embedded Signup intentionally has no legacy ``wa_device_id``.  Keeping
+    this branch before the QR fallback prevents Arthur from reporting a fully
+    connected Cloud/Coexistence number as disconnected.
+    """
+    if getattr(agent, "wa_connection_type", None) != "cloud_api":
+        return None
+    valid = (
+        bool(getattr(agent, "wa_phone_number_id", None))
+        and bool(getattr(agent, "wa_waba_id", None))
+        and str(getattr(agent, "wa_access_token_encrypted", "") or "").startswith("enc:")
+    )
+    if not valid:
+        return {
+            "ok": False,
+            "connection_type": "cloud_api",
+            "error": "Konfigurasi WhatsApp Cloud API belum lengkap. Selesaikan Meta Embedded Signup terlebih dahulu.",
+        }
+    return {
+        "ok": True,
+        "status": "connected",
+        "connection_type": "cloud_api",
+        "cloud_api_mode": getattr(agent, "wa_cloud_api_mode", None),
+        "phone_number": getattr(agent, "wa_display_phone", None) or "",
+        "business_name": getattr(agent, "wa_business_name", None),
+    }
+
+
 def _normalize_google_workspace_services(services: list[str] | None) -> list[str]:
     """Validate the product allowlist exposed to a target agent's Google MCP."""
     normalized = list(dict.fromkeys(str(service).strip().casefold() for service in (services or []) if str(service).strip()))
@@ -1127,10 +1157,13 @@ def build_arthur_v2_tools(
 
     @tool
     async def get_assistant_whatsapp_status(agent_id: str) -> dict[str, Any]:
-        """Check whether a caller-owned assistant's WhatsApp device is waiting for QR or connected."""
+        """Check a caller-owned assistant's WhatsApp status for Cloud API, Coexistence, or legacy QR."""
         agent = await _owned(agent_id)
         if agent is None:
             return {"ok": False, "error": "Assistant tidak ditemukan atau bukan milik pengguna ini."}
+        cloud_status = _cloud_assistant_whatsapp_status(agent)
+        if cloud_status is not None:
+            return cloud_status
         if not agent.wa_device_id:
             return {"ok": False, "error": "Assistant belum memiliki perangkat WhatsApp. Gunakan connect_assistant_whatsapp terlebih dahulu."}
         try:

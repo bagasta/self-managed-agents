@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -8,6 +9,7 @@ from arthur_v2.plugin import (
     ARTHUR_V2_CODING_DEPLOY_MAX_TOKENS,
     _build_target_tool_usage,
     _capability_context_for_memory,
+    _cloud_assistant_whatsapp_status,
     _google_spreadsheet_id_from_url,
     _needs_scheduler,
     _without_google_workspace_mcp,
@@ -157,3 +159,27 @@ def test_arthur_prompt_requires_runtime_configuration_before_existing_agent_oaut
     assert "configure_assistant_runtime" in prompt
     assert "Editing instructions never" in prompt
     assert "installs a connector" in prompt
+
+
+def test_arthur_status_recognizes_embedded_signup_coexistence_without_legacy_device() -> None:
+    status = _cloud_assistant_whatsapp_status(
+        SimpleNamespace(
+            wa_connection_type="cloud_api",
+            wa_phone_number_id="phone-id",
+            wa_waba_id="waba-id",
+            wa_access_token_encrypted="enc:credential",
+            wa_cloud_api_mode="coexistence",
+            wa_display_phone="+62 823-1790-6045",
+            wa_business_name="Coding Boo",
+            wa_device_id=None,
+        )
+    )
+
+    assert status == {
+        "ok": True,
+        "status": "connected",
+        "connection_type": "cloud_api",
+        "cloud_api_mode": "coexistence",
+        "phone_number": "+62 823-1790-6045",
+        "business_name": "Coding Boo",
+    }
