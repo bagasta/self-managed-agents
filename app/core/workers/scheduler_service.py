@@ -91,9 +91,24 @@ def _scheduled_channel_config(session: Any, agent_model: Any) -> dict[str, Any]:
     if getattr(session, "channel_type", None) != "whatsapp":
         return cfg
 
+    # Embedded Signup uses the Meta Cloud API and intentionally has no
+    # wa_device_id. Restore its credentials for proactive/scheduled sends
+    # instead of falling through to the legacy wa-dev device below.
+    if (
+        getattr(agent_model, "wa_connection_type", None) == "cloud_api"
+        and getattr(agent_model, "wa_phone_number_id", None)
+        and getattr(agent_model, "wa_access_token_encrypted", None)
+    ):
+        cfg["meta_phone_number_id"] = str(agent_model.wa_phone_number_id)
+        cfg["meta_access_token"] = str(agent_model.wa_access_token_encrypted)
+        cfg.pop("device_id", None)
+
     if not cfg.get("device_id"):
-        agent_device_id = str(getattr(agent_model, "wa_device_id", "") or "").strip()
-        cfg["device_id"] = agent_device_id or f"wadev_{getattr(agent_model, 'id', getattr(session, 'agent_id', ''))}"
+        # A Cloud API config is complete and must never receive a synthetic
+        # legacy device id.
+        if not cfg.get("meta_phone_number_id") or not cfg.get("meta_access_token"):
+            agent_device_id = str(getattr(agent_model, "wa_device_id", "") or "").strip()
+            cfg["device_id"] = agent_device_id or f"wadev_{getattr(agent_model, 'id', getattr(session, 'agent_id', ''))}"
 
     if not cfg.get("user_phone"):
         cfg["user_phone"] = str(getattr(session, "external_user_id", "") or "")

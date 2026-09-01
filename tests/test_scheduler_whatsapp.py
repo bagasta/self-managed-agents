@@ -195,6 +195,29 @@ def test_scheduled_whatsapp_config_falls_back_to_wadev_device() -> None:
     assert cfg["user_phone"] == "628111"
 
 
+def test_scheduled_whatsapp_config_uses_cloud_api_for_embedded_signup() -> None:
+    session = SimpleNamespace(
+        channel_type="whatsapp",
+        channel_config={"device_id": "wadev_stale"},
+        external_user_id="628111",
+        agent_id="agent-1",
+    )
+    agent = SimpleNamespace(
+        id="agent-1",
+        wa_device_id=None,
+        wa_connection_type="cloud_api",
+        wa_phone_number_id="123456",
+        wa_access_token_encrypted="enc:cloud-token",
+    )
+
+    cfg = _scheduled_channel_config(session, agent)
+
+    assert cfg["meta_phone_number_id"] == "123456"
+    assert cfg["meta_access_token"] == "enc:cloud-token"
+    assert cfg["user_phone"] == "628111"
+    assert "device_id" not in cfg
+
+
 def test_failed_reminder_delivery_is_rescheduled_without_datetime_shadowing() -> None:
     now = datetime(2026, 7, 28, 13, 6, 52, tzinfo=timezone.utc)
     job = SimpleNamespace(status="running", next_run_at=None, cron_expr=None)
