@@ -10,6 +10,7 @@ from arthur_v2.plugin import (
     _capability_context_for_memory,
     _google_spreadsheet_id_from_url,
     _needs_scheduler,
+    _without_google_workspace_mcp,
     _with_google_workspace_mcp,
     build_arthur_v2_system_prompt,
     build_arthur_v2_tools,
@@ -128,3 +129,31 @@ def test_google_spreadsheet_url_requires_concrete_google_sheet() -> None:
     ) == "1c55zOY_R6fq3dHxV2m-jLGni4hl6kunA57mAETCAoIA"
     with pytest.raises(ValueError):
         _google_spreadsheet_id_from_url("https://example.com/not-a-sheet")
+
+
+def test_google_mcp_removal_preserves_other_runtime_configuration() -> None:
+    config = _without_google_workspace_mcp(
+        {
+            "mcp": {
+                "enabled": True,
+                "servers": {
+                    "google_workspace": {"url": "http://google-workspace-mcp:8000/mcp"},
+                    "other": {"url": "https://other.example/mcp"},
+                },
+            },
+            "integration_status": {"google_workspace": "auth_pending", "slack": "connected"},
+            "deploy": True,
+        }
+    )
+
+    assert config["mcp"] == {"enabled": True, "servers": {"other": {"url": "https://other.example/mcp"}}}
+    assert config["integration_status"] == {"slack": "connected"}
+    assert config["deploy"] is True
+
+
+def test_arthur_prompt_requires_runtime_configuration_before_existing_agent_oauth() -> None:
+    prompt = build_arthur_v2_system_prompt()
+
+    assert "configure_assistant_runtime" in prompt
+    assert "Editing instructions never" in prompt
+    assert "installs a connector" in prompt

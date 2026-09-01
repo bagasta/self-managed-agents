@@ -190,6 +190,34 @@ def _with_google_workspace_mcp(
     return config
 
 
+def _without_google_workspace_mcp(tools_config: dict[str, Any] | None) -> dict[str, Any]:
+    """Remove only the managed Google connector, preserving other runtime settings."""
+    config = dict(tools_config or {})
+    raw_mcp = config.get("mcp")
+    mcp = dict(raw_mcp) if isinstance(raw_mcp, dict) else {}
+    if "servers" in mcp or "enabled" in mcp:
+        servers = dict(mcp.get("servers") or {})
+    else:
+        servers = {
+            name: dict(server)
+            for name, server in mcp.items()
+            if isinstance(server, dict) and ("url" in server or "command" in server)
+        }
+    servers.pop("google_workspace", None)
+    if servers:
+        config["mcp"] = {"enabled": bool(mcp.get("enabled", True)), "servers": servers}
+    else:
+        config.pop("mcp", None)
+
+    statuses = dict(config.get("integration_status") or {})
+    statuses.pop("google_workspace", None)
+    if statuses:
+        config["integration_status"] = statuses
+    else:
+        config.pop("integration_status", None)
+    return config
+
+
 def _normalize_google_workspace_services(services: list[str] | None) -> list[str]:
     """Validate the product allowlist exposed to a target agent's Google MCP."""
     normalized = list(dict.fromkeys(str(service).strip().casefold() for service in (services or []) if str(service).strip()))
@@ -317,9 +345,13 @@ together with ['sheets']; this configures the target resource but does not
 verify access or read its contents in Arthur's chat.
 
 When the user asks to connect Google for an assistant that already exists,
-first inspect that owned assistant and then call start_assistant_google_oauth
-in the same turn. Give its returned link verbatim. Never redirect the owner to
-the target assistant and never require WhatsApp to be connected for Google OAuth.
+first inspect that owned assistant. Then call `configure_assistant_runtime`
+with the exact least-privilege `google_workspace_services` requested (even if
+you also update its instructions), and only after that call
+`start_assistant_google_oauth` in the same turn. Editing instructions never
+installs a connector. Give the returned OAuth link verbatim. Never redirect
+the owner to the target assistant and never require WhatsApp to be connected
+for Google OAuth.
 
 For every external action in a target assistant's workflow, specify the
 required capability and its decision rule in the instructions: what data must
@@ -882,14 +914,16 @@ def build_arthur_v2_tools(
         enable_sandbox: bool | None = None,
         enable_deploy: bool | None = None,
         subagent_ids: list[str] | None = None,
+        google_workspace_services: list[str] | None = None,
         mcp_servers: dict[str, str] | None = None,
         confirmed: bool = False,
     ) -> dict[str, Any]:
-        """Configure sandbox, public deployment, and owned subagents after explicit confirmation.
+        """Configure runtime capabilities for an owned assistant after explicit confirmation.
 
         Third-party MCP URLs are deliberately not accepted here.  Platform
-        connectors must be installed through their typed, supported setup flow
-        so Arthur cannot turn an arbitrary URL into a user-facing capability.
+        connectors use typed setup. Pass ``google_workspace_services`` with
+        the exact products needed (for example ``['calendar']``); pass ``[]``
+        to remove Google Workspace from an existing assistant.
         """
         if not confirmed:
             return {"ok": False, "needs_confirmation": True, "error": "Minta konfirmasi eksplisit sebelum mengaktifkan sandbox, deploy, subagent, atau MCP."}
@@ -901,9 +935,17 @@ def build_arthur_v2_tools(
                 "ok": False,
                 "error": (
                     "MCP server kustom belum didukung. Saat ini connector yang tersedia "
-                    "hanya Google Workspace dan dipasang saat agent dibuat."
+                    "hanya Google Workspace dan dipasang melalui konfigurasi runtime."
                 ),
             }
+        try:
+            requested_google_services = (
+                _normalize_google_workspace_services(google_workspace_services)
+                if google_workspace_services is not None
+                else None
+            )
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
         # Validate only a newly supplied custom list.  An omitted list preserves
         # the existing configuration, while [] explicitly selects system agents.
         if subagent_ids is not None:
@@ -920,6 +962,18 @@ def build_arthur_v2_tools(
                 enable_deploy=enable_deploy,
                 subagent_ids=subagent_ids,
             )
+            if requested_google_services is not None:
+                if requested_google_services:
+                    try:
+                        config = _with_google_workspace_mcp(
+                            config,
+                            mcp_url=google_mcp_url(),
+                            integration_status="auth_pending",
+                        )
+                    except RuntimeError as exc:
+                        return {"ok": False, "error": str(exc)}
+                else:
+                    config = _without_google_workspace_mcp(config)
             managed.tools_config = config
             managed.version += 1
             await db.commit()
@@ -932,7 +986,16 @@ def build_arthur_v2_tools(
                 "deploy": deploy_enabled,
                 "subagent_count": len(requested_subagents),
                 "mcp_servers": sorted(((config.get("mcp") or {}).get("servers") or {})),
+                "google_workspace_services": requested_google_services,
+                "google_workspace_status": (
+                    "auth_pending" if requested_google_services else "disabled"
+                ) if requested_google_services is not None else None,
             },
+            "next_step": (
+                "Mulai OAuth Google untuk owner dengan start_assistant_google_oauth."
+                if requested_google_services
+                else None
+            ),
         }
 
     @tool
@@ -967,7 +1030,13 @@ def build_arthur_v2_tools(
         mcp = config.get("mcp") if isinstance(config.get("mcp"), dict) else {}
         servers = mcp.get("servers") if isinstance(mcp.get("servers"), dict) else mcp
         if not isinstance(servers, dict) or not isinstance(servers.get("google_workspace"), dict):
-            return {"ok": False, "error": "Assistant ini belum dikonfigurasi untuk Google Workspace."}
+            return {
+                "ok": False,
+                "error": (
+                    "Assistant ini belum dikonfigurasi untuk Google Workspace. "
+                    "Konfigurasikan google_workspace_services melalui configure_assistant_runtime terlebih dahulu."
+                ),
+            }
         try:
             oauth_start = await start_google_oauth(
                 external_user_id=owner_phone,
