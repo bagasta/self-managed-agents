@@ -22,19 +22,10 @@ def test_dashboard_exposes_scoped_meta_embedded_signup_action():
     assert "Isi API Key di bagian atas" in script
     assert "arthurConnectMeta('cloud_api_new')" in index
     assert "arthurConnectMeta('coexistence')" in index
-    assert "Webhook AI Agent n8n" in script
-    assert "AI Agent n8n" in script
-    assert "/whatsapp/routing" in script
-    assert "nav('agent-n8n')" in index
-    assert 'id="sec-agent-n8n"' in index
-    assert "Buat Agent n8n" in index
-    assert "connectN8nCoexistence" in script
-    assert "loadN8nWebhookDraft" in script
-    assert "saveN8nWebhookDraft" in script
-    assert "Webhook tersimpan sebagai draft" in script
-    assert "business.facebook.com/business-support-home" in script
-    assert "created_by_type: 'dashboard_n8n'" in script
-    assert 'app.js?v=n8n-agent-draft-webhook-1' in index
+    assert "nav('agent-n8n')" not in index
+    assert 'id="sec-agent-n8n"' not in index
+    assert "createN8nAgent" not in script
+    assert 'app.js?v=ai-staff-dashboard-1' in index
 
     whatsapp_loader = script.split("async function loadWAAgent()", 1)[1].split(
         "async function connectMetaEmbeddedSignup", 1

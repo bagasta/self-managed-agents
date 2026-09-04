@@ -65,7 +65,6 @@
     <div class="nav-group">
       <div class="nav-group-label">Channel</div>
       <div class="nav-item" onclick="nav('whatsapp')"><span class="icon">📱</span> WhatsApp</div>
-      <div class="nav-item" onclick="nav('agent-n8n')"><span class="icon">🔀</span> Agent n8n</div>
       <div class="nav-item" onclick="nav('escalation')"><span class="icon">🚨</span> Escalation Test</div>
       <div class="nav-item" onclick="nav('channels')"><span class="icon">📡</span> Incoming Msg</div>
       <div class="nav-item" onclick="nav('runs')"><span class="icon">🔍</span> Runs</div>
@@ -483,37 +482,6 @@
         </div>
       </div>
 
-      <!-- ═══════════════════════════ AGENT N8N ═══════════════════════════ -->
-      <div class="section" id="sec-agent-n8n">
-        <div class="section-title">🔀 Agent n8n</div>
-        <p class="text-muted" style="margin-bottom:16px">
-          Kelola agent WhatsApp yang AI dan workflow-nya berjalan khusus di n8n. Setiap nomor hanya dimiliki satu agent dan tidak diproses paralel oleh AI Staff.
-        </p>
-
-        <div class="card">
-          <div class="card-title">➕ Buat Agent n8n</div>
-          <p class="text-muted" style="font-size:11px;margin-bottom:10px">Buat identitas agent terlebih dahulu, lalu hubungkan nomor WhatsApp Business melalui Coexistence.</p>
-          <div class="flex">
-            <input id="n8n-new-agent-name" type="text" placeholder="Contoh: Sales Specialist n8n" style="flex:1">
-            <button id="n8n-create-btn" class="btn btn-success" onclick="createN8nAgent()">Buat Agent n8n</button>
-          </div>
-          <div id="n8n-create-result" class="mt-8"></div>
-        </div>
-
-        <div class="card">
-          <div class="card-title">⚙️ Koneksi Agent n8n</div>
-          <div class="flex">
-            <select id="n8n-agent-sel" style="flex:1" onchange="loadN8nAgent()">
-              <option value="">— pilih agent —</option>
-            </select>
-            <button class="btn btn-ghost btn-sm" onclick="refreshN8nAgent()">↻ Refresh</button>
-          </div>
-          <div id="n8n-agent-panel" class="mt-12">
-            <div class="empty-state text-muted">Pilih atau buat agent n8n</div>
-          </div>
-        </div>
-      </div>
-
       <!-- ═══════════════════════════ ESCALATION TEST ═══════════════════════════ -->
       <div class="section" id="sec-escalation">
         <div class="section-title">🚨 Escalation Simulator</div>
@@ -837,6 +805,6 @@
 
 </div><!-- /layout -->
 
-  <script src="app.js?v=n8n-agent-draft-webhook-1"></script>
+  <script src="app.js?v=ai-staff-dashboard-1"></script>
 </body>
 </html>
