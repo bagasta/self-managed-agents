@@ -22,7 +22,10 @@ def test_dashboard_exposes_scoped_meta_embedded_signup_action():
     assert "Isi API Key di bagian atas" in script
     assert "arthurConnectMeta('cloud_api_new')" in index
     assert "arthurConnectMeta('coexistence')" in index
-    assert 'app.js?v=meta-signup-modes-1' in index
+    assert "Routing pesan masuk" in script
+    assert "AI Agent n8n" in script
+    assert "/whatsapp/routing" in script
+    assert 'app.js?v=n8n-whatsapp-routing-1' in index
 
 
 def test_dashboard_loads_all_agent_pages_before_finding_arthur():

@@ -248,6 +248,19 @@ POST /v1/agents
 | `GET` | `/v1/agents/{id}/wa/qr` | Ambil QR code untuk scan device |
 | `GET` | `/v1/agents/{id}/wa/status` | Status koneksi WA device |
 | `POST` | `/v1/channels/wa/incoming` | Webhook dari Go wa-service (internal) |
+| `GET` | `/v1/agents/{id}/whatsapp/routing` | Lihat pemilik inbound: AI Staff atau n8n |
+| `PUT` | `/v1/agents/{id}/whatsapp/routing` | Atur routing eksklusif dan webhook n8n |
+
+Nomor Cloud API/Coexistence dapat diarahkan secara eksklusif ke AI Staff atau
+ke satu Production Webhook n8n melalui dashboard. Agent existing selalu default
+ke `ai_staff`. Untuk membalas melalui nomor yang sama, workflow n8n mengembalikan:
+
+```json
+{"reply": "Balasan dari AI Agent n8n"}
+```
+
+Access token Meta tidak dikirim ke n8n. Jika webhook n8n gagal, pesan tidak
+di-fallback ke AI Staff agar tidak diproses oleh agent yang salah.
 
 ### Lainnya
 

@@ -1,16 +1,17 @@
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import AnyHttpUrl, BaseModel, Field, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config_schema import ToolsConfig
 from app.core.domain.agent_ownership import owner_filter
-from app.core.infra.channel_service import decrypt_value
+from app.core.infra.channel_service import decrypt_value, encrypt_value
 from app.database import get_db
 from app.deps import verify_api_key
 from app.models.agent import Agent
@@ -30,6 +31,18 @@ router = APIRouter(prefix="/v1/agents", tags=["agents"])
 
 class CloudApiRegistrationRequest(BaseModel):
     pin: str = Field(..., pattern=r"^\d{6}$")
+
+
+class WhatsAppRoutingUpdate(BaseModel):
+    target: Literal["ai_staff", "n8n"]
+    n8n_webhook_url: AnyHttpUrl | None = None
+    n8n_webhook_secret: str | None = Field(None, max_length=512)
+
+
+class WhatsAppRoutingResponse(BaseModel):
+    target: Literal["ai_staff", "n8n"]
+    n8n_configured: bool
+    n8n_webhook_host: str | None = None
 
 
 def _validate_tools_config(tools_config: dict[str, Any] | None) -> None:
@@ -53,6 +66,24 @@ def _has_cloud_api_credentials(agent: Agent) -> bool:
         and bool(agent.wa_phone_number_id)
         and bool(agent.wa_waba_id)
         and str(agent.wa_access_token_encrypted or "").startswith("enc:")
+    )
+
+
+def _routing_response(agent: Agent) -> WhatsAppRoutingResponse:
+    encrypted_url = str(agent.wa_n8n_webhook_url_encrypted or "")
+    webhook_host: str | None = None
+    if encrypted_url:
+        try:
+            webhook_host = urlsplit(decrypt_value(encrypted_url)).hostname
+        except Exception:
+            webhook_host = None
+    target = str(agent.wa_inbound_route or "ai_staff")
+    if target not in {"ai_staff", "n8n"}:
+        target = "ai_staff"
+    return WhatsAppRoutingResponse(
+        target=target,
+        n8n_configured=bool(encrypted_url),
+        n8n_webhook_host=webhook_host,
     )
 
 
@@ -180,6 +211,45 @@ async def update_agent(
     await db.flush()
     await db.refresh(agent)
     return AgentResponse.model_validate(agent)
+
+
+@router.get("/{agent_id}/whatsapp/routing", response_model=WhatsAppRoutingResponse)
+async def get_whatsapp_routing(
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(verify_api_key),
+) -> WhatsAppRoutingResponse:
+    agent = await _get_active_agent(agent_id, db)
+    return _routing_response(agent)
+
+
+@router.put("/{agent_id}/whatsapp/routing", response_model=WhatsAppRoutingResponse)
+async def update_whatsapp_routing(
+    agent_id: uuid.UUID,
+    payload: WhatsAppRoutingUpdate,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(verify_api_key),
+) -> WhatsAppRoutingResponse:
+    agent = await _get_active_agent(agent_id, db)
+    if payload.target == "n8n" and not _has_cloud_api_credentials(agent):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Selesaikan Meta Embedded Signup sebelum mengaktifkan routing n8n",
+        )
+    if payload.n8n_webhook_url is not None:
+        agent.wa_n8n_webhook_url_encrypted = encrypt_value(str(payload.n8n_webhook_url))
+    if payload.n8n_webhook_secret:
+        agent.wa_n8n_webhook_secret_encrypted = encrypt_value(payload.n8n_webhook_secret)
+    if payload.target == "n8n" and not agent.wa_n8n_webhook_url_encrypted:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Webhook URL n8n wajib diisi untuk routing n8n",
+        )
+    agent.wa_inbound_route = payload.target
+    agent.version += 1
+    await db.flush()
+    await db.refresh(agent)
+    return _routing_response(agent)
 
 
 @router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)

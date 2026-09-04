@@ -1082,11 +1082,14 @@ async function loadWAAgent() {
   if (isCloudAPI) {
     const phone = agent.wa_display_phone || '';
     const business = agent.wa_business_name || '';
+    const inboundOwner = (agent.wa_inbound_route || 'ai_staff') === 'n8n' ? 'n8n' : 'AI Staff';
     document.getElementById('wa-connect-panel').style.display = 'none';
     infoEl.innerHTML = `<span class="badge badge-green">☁️ Terhubung via Meta Cloud API${phone ? ' · ' + escHtml(phone) : ''}</span>` +
       (business ? `<span class="text-muted" style="margin-left:8px">${escHtml(business)}</span>` : '') +
-      `<div class="text-muted" style="margin-top:8px;font-size:11px">Nomor ini menggunakan WhatsApp Cloud API dan tidak memerlukan QR atau wa-service legacy.</div>` +
-      `<div style="margin-top:10px"><label style="font-size:11px">Jika Meta menampilkan Pending, masukkan PIN verifikasi dua langkah WhatsApp (6 digit)</label><div class="btn-group" style="margin-top:5px"><input id="cloud-api-pin-${agentId}" type="password" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" placeholder="PIN 6 digit" style="max-width:130px"><button class="btn btn-primary btn-sm" onclick="registerCloudApiPhone('${agentId}','cloud-api-pin-${agentId}','cloud-api-registration-result')">Aktifkan nomor di Meta</button></div><div id="cloud-api-registration-result" class="text-muted" style="margin-top:6px;font-size:11px"></div></div>`;
+      `<div class="text-muted" style="margin-top:8px;font-size:11px">Nomor ini menggunakan WhatsApp Cloud API dan tidak memerlukan QR atau wa-service legacy. Pemilik pesan masuk: <strong>${inboundOwner}</strong>.</div>` +
+      `<div style="margin-top:10px"><label style="font-size:11px">Jika Meta menampilkan Pending, masukkan PIN verifikasi dua langkah WhatsApp (6 digit)</label><div class="btn-group" style="margin-top:5px"><input id="cloud-api-pin-${agentId}" type="password" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" placeholder="PIN 6 digit" style="max-width:130px"><button class="btn btn-primary btn-sm" onclick="registerCloudApiPhone('${agentId}','cloud-api-pin-${agentId}','cloud-api-registration-result')">Aktifkan nomor di Meta</button></div><div id="cloud-api-registration-result" class="text-muted" style="margin-top:6px;font-size:11px"></div></div>` +
+      `<div id="n8n-routing-panel-${agentId}" style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)"><span class="spinner"></span> Memuat routing pesan…</div>`;
+    void loadWhatsAppRouting(agentId);
     return;
   }
   infoEl.innerHTML =
@@ -1137,6 +1140,76 @@ async function connectMetaEmbeddedSignup(agentId, mode = 'cloud_api_new') {
   }
   const url = r.data.signup_url;
   if (result) result.innerHTML = `<a class="btn btn-success btn-sm" href="${escHtml(url)}" target="_blank" rel="noopener">Lanjutkan ${escHtml(modeLabel)} di Meta</a><div class="text-muted" style="margin-top:6px;font-size:11px">Link berlaku ${r.data.expires_in_seconds} detik dan hanya untuk agent ini. Pilih mode yang sama di halaman Meta berikutnya.</div>`;
+}
+
+async function loadWhatsAppRouting(agentId) {
+  const panel = document.getElementById(`n8n-routing-panel-${agentId}`);
+  if (!panel) return;
+  const response = await api('GET', `/v1/agents/${agentId}/whatsapp/routing`);
+  if (!response.ok) {
+    panel.innerHTML = `<span class="badge badge-red">Gagal memuat routing: ${escHtml(response.data?.detail || 'Unknown error')}</span>`;
+    return;
+  }
+  const route = response.data;
+  const agent = S.agents.find(a => a.id === agentId);
+  if (agent) agent.wa_inbound_route = route.target;
+  const configuredHint = route.n8n_configured
+    ? `Webhook tersimpan${route.n8n_webhook_host ? ` untuk <strong>${escHtml(route.n8n_webhook_host)}</strong>` : ''}. Kosongkan URL jika tidak ingin menggantinya.`
+    : 'Belum ada webhook n8n tersimpan.';
+  panel.dataset.n8nConfigured = route.n8n_configured ? 'true' : 'false';
+  panel.innerHTML = `
+    <div style="font-size:12px;font-weight:700;margin-bottom:8px">Routing pesan masuk</div>
+    <div class="card-grid" style="gap:10px">
+      <div class="form-group">
+        <label>Pemilik nomor</label>
+        <select id="wa-route-target-${agentId}" onchange="toggleN8nRoutingFields('${agentId}')">
+          <option value="ai_staff" ${route.target === 'ai_staff' ? 'selected' : ''}>AI Staff internal</option>
+          <option value="n8n" ${route.target === 'n8n' ? 'selected' : ''}>AI Agent n8n</option>
+        </select>
+      </div>
+      <div id="n8n-routing-fields-${agentId}" class="form-group full" style="${route.target === 'n8n' ? '' : 'display:none'}">
+        <label>Production Webhook URL n8n</label>
+        <input id="n8n-webhook-url-${agentId}" type="url" placeholder="https://n8n.example.com/webhook/agent-id">
+        <div class="text-muted" style="font-size:10px;margin-top:4px">${configuredHint}</div>
+        <label style="margin-top:8px">Bearer secret (opsional)</label>
+        <input id="n8n-webhook-secret-${agentId}" type="password" autocomplete="new-password" placeholder="Kosongkan untuk mempertahankan secret tersimpan">
+      </div>
+    </div>
+    <div class="text-muted" style="font-size:10px;line-height:1.5;margin:8px 0">Mode n8n bersifat eksklusif: pesan tidak akan dijalankan oleh AI Staff. Workflow n8n dapat membalas dengan response JSON <code>{"reply":"..."}</code>.</div>
+    <button class="btn btn-primary btn-sm" onclick="saveWhatsAppRouting('${agentId}')">💾 Simpan routing</button>
+    <span id="n8n-routing-result-${agentId}" style="margin-left:8px"></span>`;
+}
+
+function toggleN8nRoutingFields(agentId) {
+  const target = document.getElementById(`wa-route-target-${agentId}`)?.value;
+  const fields = document.getElementById(`n8n-routing-fields-${agentId}`);
+  if (fields) fields.style.display = target === 'n8n' ? '' : 'none';
+}
+
+async function saveWhatsAppRouting(agentId) {
+  const panel = document.getElementById(`n8n-routing-panel-${agentId}`);
+  const result = document.getElementById(`n8n-routing-result-${agentId}`);
+  const target = document.getElementById(`wa-route-target-${agentId}`)?.value || 'ai_staff';
+  const webhookUrl = document.getElementById(`n8n-webhook-url-${agentId}`)?.value.trim() || '';
+  const webhookSecret = document.getElementById(`n8n-webhook-secret-${agentId}`)?.value || '';
+  if (target === 'n8n' && !webhookUrl && panel?.dataset.n8nConfigured !== 'true') {
+    result.innerHTML = '<span class="badge badge-yellow">Isi Production Webhook URL n8n.</span>';
+    return;
+  }
+  const body = { target };
+  if (webhookUrl) body.n8n_webhook_url = webhookUrl;
+  if (webhookSecret) body.n8n_webhook_secret = webhookSecret;
+  result.innerHTML = '<span class="spinner"></span> Menyimpan…';
+  const response = await api('PUT', `/v1/agents/${agentId}/whatsapp/routing`, body);
+  if (!response.ok) {
+    result.innerHTML = `<span class="badge badge-red">${escHtml(response.data?.detail || 'Gagal menyimpan routing')}</span>`;
+    return;
+  }
+  const agent = S.agents.find(a => a.id === agentId);
+  if (agent) agent.wa_inbound_route = response.data.target;
+  await loadWhatsAppRouting(agentId);
+  const refreshedResult = document.getElementById(`n8n-routing-result-${agentId}`);
+  if (refreshedResult) refreshedResult.innerHTML = '<span class="badge badge-green">Routing tersimpan</span>';
 }
 
 async function registerCloudApiPhone(agentId, pinInputId, resultId) {

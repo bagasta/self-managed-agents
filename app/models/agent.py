@@ -59,6 +59,15 @@ class Agent(Base):
     # `coexistence` means the same number remains active in WhatsApp Business
     # App and must never be passed to the Cloud API registration endpoint.
     wa_cloud_api_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Inbound ownership is exclusive per phone_number_id. Existing agents keep
+    # the internal AI Staff path unless an operator explicitly selects n8n.
+    wa_inbound_route: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="ai_staff", server_default="ai_staff"
+    )
+    # n8n webhook URLs commonly contain unguessable credentials in their path,
+    # so both the URL and optional bearer secret remain encrypted server-side.
+    wa_n8n_webhook_url_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    wa_n8n_webhook_secret_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # --- operator access ---
     operator_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)

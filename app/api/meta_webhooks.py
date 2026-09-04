@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import json
 
+import httpx
 import structlog
 from fastapi import (
     APIRouter,
@@ -24,6 +25,49 @@ from app.models.agent import Agent
 
 router = APIRouter(prefix="/v1/webhooks", tags=["meta-webhooks"])
 logger = structlog.get_logger(__name__)
+
+
+def _n8n_event_payload(agent: Agent, phone_number_id: str, message: dict, sender_name: str) -> dict:
+    message_type = str(message.get("type") or "")
+    typed_content = message.get(message_type) or {}
+    text = str((message.get("text") or {}).get("body") or typed_content.get("caption") or "").strip()
+    return {
+        "schema_version": "1",
+        "event": "whatsapp.message.received",
+        "agent": {"id": str(agent.id), "name": str(agent.name)},
+        "whatsapp": {
+            "phone_number_id": phone_number_id,
+            "display_phone": str(agent.wa_display_phone or ""),
+            "cloud_api_mode": str(agent.wa_cloud_api_mode or ""),
+        },
+        "contact": {
+            "phone": str(message.get("from") or ""),
+            "name": sender_name,
+        },
+        "message": {
+            "id": str(message.get("id") or ""),
+            "timestamp": str(message.get("timestamp") or ""),
+            "type": message_type,
+            "text": text,
+            "content": typed_content,
+        },
+        "response_contract": {
+            "description": "Return JSON with a non-empty reply field to send a WhatsApp response",
+            "example": {"reply": "Jawaban dari AI Agent n8n"},
+        },
+    }
+
+
+def _n8n_reply(data: object) -> str:
+    if isinstance(data, list) and data:
+        data = data[0]
+    if not isinstance(data, dict):
+        return ""
+    for key in ("reply", "output", "text"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
 
 
 def _account_update_summary(change: dict) -> dict | None:
@@ -60,6 +104,69 @@ async def _send_cloud_reply(session, reply: str) -> None:
         channel_config=dict(session.channel_config or {}),
         text=reply,
     )
+
+
+async def _process_n8n(agent_id: str, phone_number_id: str, message: dict, sender_name: str) -> None:
+    """Deliver one number-owned inbound message exclusively to its n8n workflow."""
+    from app.core.infra.channel_service import decrypt_value
+    from app.core.infra.wa_cloud_client import mark_message_read, send_text_message
+
+    async with AsyncSessionLocal() as db:
+        agent = await db.get(Agent, agent_id)
+        if agent is None or str(agent.wa_inbound_route or "ai_staff") != "n8n":
+            return
+        encrypted_url = str(agent.wa_n8n_webhook_url_encrypted or "")
+        encrypted_token = str(agent.wa_access_token_encrypted or "")
+        if not encrypted_url or not encrypted_token:
+            logger.error("meta_webhook.n8n_route_incomplete", agent_id=agent_id)
+            return
+
+        sender = str(message.get("from") or "")
+        if not sender:
+            return
+        token = decrypt_value(encrypted_token)
+        try:
+            await mark_message_read(phone_number_id, str(message.get("id") or ""), token)
+        except Exception:
+            pass
+
+        headers: dict[str, str] = {
+            "X-Managed-Agent-Event": "whatsapp.message.received",
+            "X-Managed-Agent-Delivery-Id": str(message.get("id") or ""),
+        }
+        encrypted_secret = str(agent.wa_n8n_webhook_secret_encrypted or "")
+        if encrypted_secret:
+            headers["Authorization"] = f"Bearer {decrypt_value(encrypted_secret)}"
+
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=10)) as client:
+                response = await client.post(
+                    decrypt_value(encrypted_url),
+                    json=_n8n_event_payload(agent, phone_number_id, message, sender_name),
+                    headers=headers,
+                )
+            response.raise_for_status()
+            try:
+                reply = _n8n_reply(response.json())
+            except (ValueError, json.JSONDecodeError):
+                reply = ""
+            if reply:
+                await send_text_message(phone_number_id, sender, reply, token)
+            else:
+                logger.info(
+                    "meta_webhook.n8n_completed_without_reply",
+                    agent_id=agent_id,
+                    message_id=str(message.get("id") or ""),
+                )
+        except Exception as exc:
+            # Deliberately do not fall back to AI Staff: the phone number has an
+            # exclusive n8n owner and cross-routing would produce a wrong agent.
+            logger.error(
+                "meta_webhook.n8n_delivery_failed",
+                agent_id=agent_id,
+                message_id=str(message.get("id") or ""),
+                error_type=type(exc).__name__,
+            )
 
 
 @router.get("/meta")
@@ -170,11 +277,12 @@ async def receive_meta_webhook(request: Request, background_tasks: BackgroundTas
             phone_number_id = str(metadata.get("phone_number_id") or "")
             if change.get("field") != "messages" or not phone_number_id:
                 continue
-            agent_id = (await db.execute(select(Agent.id).where(Agent.wa_phone_number_id == phone_number_id, Agent.is_deleted.is_(False)))).scalar_one_or_none()
-            if agent_id is None:
+            agent = (await db.execute(select(Agent).where(Agent.wa_phone_number_id == phone_number_id, Agent.is_deleted.is_(False)))).scalar_one_or_none()
+            if agent is None:
                 continue
             contact_names = {str(item.get("wa_id") or ""): str(item.get("profile", {}).get("name") or "") for item in value.get("contacts") or []}
             for message in value.get("messages") or []:
                 if message.get("type") in {"text", "image", "document"}:
-                    background_tasks.add_task(_process, str(agent_id), phone_number_id, message, contact_names.get(str(message.get("from") or ""), ""))
+                    processor = _process_n8n if str(agent.wa_inbound_route or "ai_staff") == "n8n" else _process
+                    background_tasks.add_task(processor, str(agent.id), phone_number_id, message, contact_names.get(str(message.get("from") or ""), ""))
     return {"ok": True}

@@ -132,6 +132,7 @@ class AgentResponse(BaseModel):
     wa_business_name: str | None = None
     wa_connection_type: str | None = None
     wa_cloud_api_mode: str | None = None
+    wa_inbound_route: str = "ai_staff"
 
     created_at: datetime
     updated_at: datetime
