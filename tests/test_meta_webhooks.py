@@ -126,6 +126,13 @@ def test_n8n_route_is_exclusive_and_never_falls_back_to_ai_staff():
     assert "do not fall back to AI Staff" in processor
 
 
+def test_internal_ai_staff_forward_cannot_reprocess_an_n8n_number():
+    receiver = inspect.getsource(meta_webhooks.receive_meta_webhook)
+
+    assert 'forced_route == "ai_staff"' in receiver
+    assert '!= "ai_staff"' in receiver
+
+
 @pytest.mark.asyncio
 async def test_n8n_processor_sends_workflow_reply_without_exposing_meta_token(monkeypatch):
     agent = SimpleNamespace(

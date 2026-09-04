@@ -20,6 +20,48 @@ x-app-runtime: &app-runtime
   MAX_CONCURRENT_AGENT_RUNS: "${MAX_CONCURRENT_AGENT_RUNS:-24}"
 
 services:
+  meta-ingress:
+    <<: [*app-image, *app-build]
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        exec uvicorn app.meta_ingress:app --host 0.0.0.0 --port 8010 --workers 2
+        --log-level info --access-log --limit-concurrency 256 --backlog 2048
+        --timeout-keep-alive 5 --timeout-graceful-shutdown 25
+    env_file:
+      - .env.prod
+    environment:
+      <<: *app-runtime
+      DB_POOL_SIZE: "4"
+      DB_MAX_OVERFLOW: "4"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - internal
+      - root_default
+    depends_on:
+      pgbouncer:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8010/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.managed-meta-ingress.rule=Host(`managed-agent.chiefaiofficer.id`) && Path(`/v1/webhooks/meta`)"
+      - "traefik.http.routers.managed-meta-ingress.priority=200"
+      - "traefik.http.routers.managed-meta-ingress.entrypoints=web,websecure"
+      - "traefik.http.routers.managed-meta-ingress.tls=true"
+      - "traefik.http.routers.managed-meta-ingress.tls.certresolver=mytlschallenge"
+      - "traefik.http.services.managed-meta-ingress.loadbalancer.server.port=8010"
+      - "traefik.docker.network=root_default"
+
   api:
     <<: [*app-image, *app-build]
     init: true

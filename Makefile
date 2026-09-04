@@ -1,4 +1,4 @@
-.PHONY: help install install-dev test-arthur dev db-up migrate upgrade downgrade lint format wa wa-build dev-all wa-dev-build wa-dev sandbox-build sandbox-check seed-agents deploy-api-fast deploy-app deploy-all mcp-smoke-live mcp-smoke-live-strict mcp-smoke-live-reauth mcp-smoke-live-onboard
+.PHONY: help install install-dev test-arthur dev db-up migrate upgrade downgrade lint format wa wa-build dev-all wa-dev-build wa-dev sandbox-build sandbox-check seed-agents deploy-api-fast deploy-meta-ingress deploy-app deploy-all mcp-smoke-live mcp-smoke-live-strict mcp-smoke-live-reauth mcp-smoke-live-onboard
 
 HOST ?= 0.0.0.0
 PORT ?= 8000
@@ -19,6 +19,7 @@ help:
 	@echo "  make sandbox-build          Build Docker sandbox image for file/subagent tools"
 	@echo "  make sandbox-check          Verify Docker sandbox image exists locally"
 	@echo "  make deploy-api-fast        Rebuild/restart only the API"
+	@echo "  make deploy-meta-ingress    Rebuild/restart standalone Meta ingress"
 	@echo "  make deploy-app             Build shared app image; restart API + scheduler"
 	@echo "  make deploy-all             Rebuild/restart the full production stack"
 	@echo "  make dev-all                Run API + wa-service (2 terminals needed)"
@@ -104,6 +105,10 @@ seed-agents:
 deploy-api-fast:
 	$(PROD_COMPOSE) build api
 	$(PROD_COMPOSE) up -d --no-deps api
+
+deploy-meta-ingress:
+	$(PROD_COMPOSE) build meta-ingress
+	$(PROD_COMPOSE) up -d --no-deps meta-ingress
 
 deploy-app:
 	$(PROD_COMPOSE) build api

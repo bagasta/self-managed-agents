@@ -260,6 +260,7 @@ async def receive_meta_webhook(request: Request, background_tasks: BackgroundTas
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON") from exc
     if payload.get("object") != "whatsapp_business_account":
         return {"ok": True, "ignored": True}
+    forced_route = str(request.headers.get("X-Managed-Meta-Route") or "").strip()
     for entry in payload.get("entry") or []:
         for change in entry.get("changes") or []:
             account_update = _account_update_summary(change)
@@ -279,6 +280,8 @@ async def receive_meta_webhook(request: Request, background_tasks: BackgroundTas
                 continue
             agent = (await db.execute(select(Agent).where(Agent.wa_phone_number_id == phone_number_id, Agent.is_deleted.is_(False)))).scalar_one_or_none()
             if agent is None:
+                continue
+            if forced_route == "ai_staff" and str(agent.wa_inbound_route or "ai_staff") != "ai_staff":
                 continue
             contact_names = {str(item.get("wa_id") or ""): str(item.get("profile", {}).get("name") or "") for item in value.get("contacts") or []}
             for message in value.get("messages") or []:
