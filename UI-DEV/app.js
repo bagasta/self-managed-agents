@@ -1166,11 +1166,13 @@ function populateN8nAgentSelect() {
 async function createN8nAgent() {
   const nameInput = document.getElementById('n8n-new-agent-name');
   const result = document.getElementById('n8n-create-result');
+  const button = document.getElementById('n8n-create-btn');
   const name = nameInput?.value.trim() || '';
   if (!name) {
     result.innerHTML = '<span class="badge badge-yellow">Isi nama agent n8n.</span>';
     return;
   }
+  button.disabled = true;
   result.innerHTML = '<span class="spinner"></span> Membuat agent…';
   const response = await api('POST', '/v1/agents', {
     name,
@@ -1178,6 +1180,7 @@ async function createN8nAgent() {
     instructions: 'Pesan WhatsApp agent ini diproses oleh workflow n8n eksternal.',
     created_by_type: 'dashboard_n8n'
   });
+  button.disabled = false;
   if (!response.ok) {
     result.innerHTML = `<span class="badge badge-red">${escHtml(response.data?.detail || 'Gagal membuat agent')}</span>`;
     return;
@@ -1212,9 +1215,13 @@ async function loadN8nAgent() {
   if (agent.wa_connection_type !== 'cloud_api') {
     panel.innerHTML = `
       <div class="badge badge-yellow">WhatsApp Coexistence belum terhubung</div>
+      <p class="text-muted" style="font-size:11px;margin:10px 0">Simpan Production Webhook n8n sekarang. Routing baru dapat diaktifkan setelah nomor WhatsApp Business berhasil terhubung.</p>
+      <div id="n8n-webhook-draft-${agentId}" style="padding:12px;border:1px solid var(--border);border-radius:8px;margin-bottom:14px"><span class="spinner"></span> Memuat webhook…</div>
       <p class="text-muted" style="font-size:11px;margin:10px 0">Hubungkan nomor WhatsApp Business existing khusus untuk <strong>${escHtml(agent.name)}</strong>. Setelah proses Meta selesai, kembali ke halaman ini dan klik Refresh.</p>
       <button class="btn btn-primary" onclick="connectN8nCoexistence('${agentId}')">📱 Hubungkan WhatsApp Coexistence</button>
-      <div id="n8n-meta-signup-result" class="mt-8"></div>`;
+      <div id="n8n-meta-signup-result" class="mt-8"></div>
+      <div class="text-muted" style="font-size:10px;line-height:1.5;margin-top:10px">Jika Meta menyatakan WhatsApp Business Account restricted, jangan retry berulang. Selesaikan pemeriksaan di <a href="https://business.facebook.com/business-support-home/" target="_blank" rel="noopener">Meta Business Support Home</a> terlebih dahulu.</div>`;
+    await loadN8nWebhookDraft(agentId);
     return;
   }
   const phone = agent.wa_display_phone || 'nomor terhubung';
@@ -1224,6 +1231,55 @@ async function loadN8nAgent() {
     ${coexistence ? '' : '<div class="badge badge-yellow" style="margin-left:6px">Bukan mode Coexistence</div>'}
     <div id="n8n-routing-panel-${agentId}" style="margin-top:14px"><span class="spinner"></span> Memuat konfigurasi webhook…</div>`;
   await loadWhatsAppRouting(agentId);
+}
+
+async function loadN8nWebhookDraft(agentId) {
+  const container = document.getElementById(`n8n-webhook-draft-${agentId}`);
+  if (!container) return;
+  const response = await api('GET', `/v1/agents/${agentId}/whatsapp/routing`);
+  if (!response.ok) {
+    container.innerHTML = `<span class="badge badge-red">Gagal memuat webhook: ${escHtml(response.data?.detail || 'Unknown error')}</span>`;
+    return;
+  }
+  const route = response.data;
+  container.dataset.n8nConfigured = route.n8n_configured ? 'true' : 'false';
+  const hint = route.n8n_configured
+    ? `Tersimpan${route.n8n_webhook_host ? ` untuk <strong>${escHtml(route.n8n_webhook_host)}</strong>` : ''}. Kosongkan URL jika tidak ingin menggantinya.`
+    : 'Belum ada webhook tersimpan.';
+  container.innerHTML = `
+    <div style="font-size:12px;font-weight:700;margin-bottom:8px">Production Webhook n8n</div>
+    <div class="form-group">
+      <label>Webhook URL</label>
+      <input id="n8n-draft-url-${agentId}" type="url" placeholder="https://n8n.example.com/webhook/agent-id">
+      <div class="text-muted" style="font-size:10px;margin-top:4px">${hint}</div>
+      <label style="margin-top:8px">Bearer secret (opsional)</label>
+      <input id="n8n-draft-secret-${agentId}" type="password" autocomplete="new-password" placeholder="Kosongkan untuk mempertahankan secret tersimpan">
+    </div>
+    <button class="btn btn-primary btn-sm" onclick="saveN8nWebhookDraft('${agentId}')">💾 Simpan webhook</button>
+    <span id="n8n-draft-result-${agentId}" style="margin-left:8px"></span>`;
+}
+
+async function saveN8nWebhookDraft(agentId) {
+  const container = document.getElementById(`n8n-webhook-draft-${agentId}`);
+  const result = document.getElementById(`n8n-draft-result-${agentId}`);
+  const webhookUrl = document.getElementById(`n8n-draft-url-${agentId}`)?.value.trim() || '';
+  const webhookSecret = document.getElementById(`n8n-draft-secret-${agentId}`)?.value || '';
+  if (!webhookUrl && container?.dataset.n8nConfigured !== 'true') {
+    result.innerHTML = '<span class="badge badge-yellow">Isi Production Webhook URL n8n.</span>';
+    return;
+  }
+  const body = { target: 'ai_staff' };
+  if (webhookUrl) body.n8n_webhook_url = webhookUrl;
+  if (webhookSecret) body.n8n_webhook_secret = webhookSecret;
+  result.innerHTML = '<span class="spinner"></span> Menyimpan…';
+  const response = await api('PUT', `/v1/agents/${agentId}/whatsapp/routing`, body);
+  if (!response.ok) {
+    result.innerHTML = `<span class="badge badge-red">${escHtml(response.data?.detail || 'Gagal menyimpan webhook')}</span>`;
+    return;
+  }
+  await loadN8nWebhookDraft(agentId);
+  const refreshedResult = document.getElementById(`n8n-draft-result-${agentId}`);
+  if (refreshedResult) refreshedResult.innerHTML = '<span class="badge badge-green">Webhook tersimpan sebagai draft</span>';
 }
 
 async function connectN8nCoexistence(agentId) {

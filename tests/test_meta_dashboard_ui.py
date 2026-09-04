@@ -29,8 +29,12 @@ def test_dashboard_exposes_scoped_meta_embedded_signup_action():
     assert 'id="sec-agent-n8n"' in index
     assert "Buat Agent n8n" in index
     assert "connectN8nCoexistence" in script
+    assert "loadN8nWebhookDraft" in script
+    assert "saveN8nWebhookDraft" in script
+    assert "Webhook tersimpan sebagai draft" in script
+    assert "business.facebook.com/business-support-home" in script
     assert "created_by_type: 'dashboard_n8n'" in script
-    assert 'app.js?v=n8n-agent-page-1' in index
+    assert 'app.js?v=n8n-agent-draft-webhook-1' in index
 
     whatsapp_loader = script.split("async function loadWAAgent()", 1)[1].split(
         "async function connectMetaEmbeddedSignup", 1
