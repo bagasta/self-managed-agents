@@ -22,10 +22,20 @@ def test_dashboard_exposes_scoped_meta_embedded_signup_action():
     assert "Isi API Key di bagian atas" in script
     assert "arthurConnectMeta('cloud_api_new')" in index
     assert "arthurConnectMeta('coexistence')" in index
-    assert "Routing pesan masuk" in script
+    assert "Webhook AI Agent n8n" in script
     assert "AI Agent n8n" in script
     assert "/whatsapp/routing" in script
-    assert 'app.js?v=n8n-whatsapp-routing-1' in index
+    assert "nav('agent-n8n')" in index
+    assert 'id="sec-agent-n8n"' in index
+    assert "Buat Agent n8n" in index
+    assert "connectN8nCoexistence" in script
+    assert "created_by_type: 'dashboard_n8n'" in script
+    assert 'app.js?v=n8n-agent-page-1' in index
+
+    whatsapp_loader = script.split("async function loadWAAgent()", 1)[1].split(
+        "async function connectMetaEmbeddedSignup", 1
+    )[0]
+    assert "n8n-routing-panel" not in whatsapp_loader
 
 
 def test_dashboard_loads_all_agent_pages_before_finding_arthur():

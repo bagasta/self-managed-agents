@@ -124,6 +124,7 @@ function nav(id) {
     populateAgentSelects();
   }
   if (id === 'whatsapp') populateWAAgentSelect();
+  if (id === 'agent-n8n') populateN8nAgentSelect();
   if (id !== 'chat') disconnectSSE();
   if (id !== 'whatsapp') stopWAPolling();
   if (id === 'arthur') arthurLoad();
@@ -1055,7 +1056,9 @@ function populateWAAgentSelect() {
   if (!sel) return;
   const val = sel.value;
   sel.innerHTML = '<option value="">— pilih agent —</option>';
-  S.agents.forEach(a => {
+  S.agents
+    .filter(a => a.created_by_type !== 'dashboard_n8n' && a.wa_inbound_route !== 'n8n')
+    .forEach(a => {
     const opt = document.createElement('option');
     opt.value = a.id;
     opt.textContent = (a.channel_type === 'whatsapp' ? '📱 ' : '') + a.name;
@@ -1082,14 +1085,11 @@ async function loadWAAgent() {
   if (isCloudAPI) {
     const phone = agent.wa_display_phone || '';
     const business = agent.wa_business_name || '';
-    const inboundOwner = (agent.wa_inbound_route || 'ai_staff') === 'n8n' ? 'n8n' : 'AI Staff';
     document.getElementById('wa-connect-panel').style.display = 'none';
     infoEl.innerHTML = `<span class="badge badge-green">☁️ Terhubung via Meta Cloud API${phone ? ' · ' + escHtml(phone) : ''}</span>` +
       (business ? `<span class="text-muted" style="margin-left:8px">${escHtml(business)}</span>` : '') +
-      `<div class="text-muted" style="margin-top:8px;font-size:11px">Nomor ini menggunakan WhatsApp Cloud API dan tidak memerlukan QR atau wa-service legacy. Pemilik pesan masuk: <strong>${inboundOwner}</strong>.</div>` +
-      `<div style="margin-top:10px"><label style="font-size:11px">Jika Meta menampilkan Pending, masukkan PIN verifikasi dua langkah WhatsApp (6 digit)</label><div class="btn-group" style="margin-top:5px"><input id="cloud-api-pin-${agentId}" type="password" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" placeholder="PIN 6 digit" style="max-width:130px"><button class="btn btn-primary btn-sm" onclick="registerCloudApiPhone('${agentId}','cloud-api-pin-${agentId}','cloud-api-registration-result')">Aktifkan nomor di Meta</button></div><div id="cloud-api-registration-result" class="text-muted" style="margin-top:6px;font-size:11px"></div></div>` +
-      `<div id="n8n-routing-panel-${agentId}" style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)"><span class="spinner"></span> Memuat routing pesan…</div>`;
-    void loadWhatsAppRouting(agentId);
+      `<div class="text-muted" style="margin-top:8px;font-size:11px">Nomor ini menggunakan WhatsApp Cloud API dan tidak memerlukan QR atau wa-service legacy.</div>` +
+      `<div style="margin-top:10px"><label style="font-size:11px">Jika Meta menampilkan Pending, masukkan PIN verifikasi dua langkah WhatsApp (6 digit)</label><div class="btn-group" style="margin-top:5px"><input id="cloud-api-pin-${agentId}" type="password" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" placeholder="PIN 6 digit" style="max-width:130px"><button class="btn btn-primary btn-sm" onclick="registerCloudApiPhone('${agentId}','cloud-api-pin-${agentId}','cloud-api-registration-result')">Aktifkan nomor di Meta</button></div><div id="cloud-api-registration-result" class="text-muted" style="margin-top:6px;font-size:11px"></div></div>`;
     return;
   }
   infoEl.innerHTML =
@@ -1142,6 +1142,101 @@ async function connectMetaEmbeddedSignup(agentId, mode = 'cloud_api_new') {
   if (result) result.innerHTML = `<a class="btn btn-success btn-sm" href="${escHtml(url)}" target="_blank" rel="noopener">Lanjutkan ${escHtml(modeLabel)} di Meta</a><div class="text-muted" style="margin-top:6px;font-size:11px">Link berlaku ${r.data.expires_in_seconds} detik dan hanya untuk agent ini. Pilih mode yang sama di halaman Meta berikutnya.</div>`;
 }
 
+function populateN8nAgentSelect() {
+  const select = document.getElementById('n8n-agent-sel');
+  if (!select) return;
+  const current = select.value;
+  const ordered = S.agents
+    .filter(agent => agent.created_by_type === 'dashboard_n8n' || agent.wa_inbound_route === 'n8n')
+    .sort((a, b) => {
+    const aPriority = a.wa_inbound_route === 'n8n' ? 0 : a.created_by_type === 'dashboard_n8n' ? 1 : 2;
+    const bPriority = b.wa_inbound_route === 'n8n' ? 0 : b.created_by_type === 'dashboard_n8n' ? 1 : 2;
+    return aPriority - bPriority || a.name.localeCompare(b.name);
+    });
+  select.innerHTML = '<option value="">— pilih agent —</option>' + ordered.map(agent => {
+    const route = agent.wa_inbound_route === 'n8n' ? ' · n8n aktif' : '';
+    const connection = agent.wa_connection_type === 'cloud_api'
+      ? ` · ${agent.wa_cloud_api_mode === 'coexistence' ? 'Coexistence' : 'Cloud API'}`
+      : ' · belum konek WA';
+    return `<option value="${agent.id}">${escHtml(agent.name + route + connection)}</option>`;
+  }).join('');
+  if (ordered.some(agent => agent.id === current)) select.value = current;
+}
+
+async function createN8nAgent() {
+  const nameInput = document.getElementById('n8n-new-agent-name');
+  const result = document.getElementById('n8n-create-result');
+  const name = nameInput?.value.trim() || '';
+  if (!name) {
+    result.innerHTML = '<span class="badge badge-yellow">Isi nama agent n8n.</span>';
+    return;
+  }
+  result.innerHTML = '<span class="spinner"></span> Membuat agent…';
+  const response = await api('POST', '/v1/agents', {
+    name,
+    description: 'External AI Agent routed exclusively to n8n',
+    instructions: 'Pesan WhatsApp agent ini diproses oleh workflow n8n eksternal.',
+    created_by_type: 'dashboard_n8n'
+  });
+  if (!response.ok) {
+    result.innerHTML = `<span class="badge badge-red">${escHtml(response.data?.detail || 'Gagal membuat agent')}</span>`;
+    return;
+  }
+  nameInput.value = '';
+  await loadAgents();
+  populateN8nAgentSelect();
+  document.getElementById('n8n-agent-sel').value = response.data.id;
+  await loadN8nAgent();
+  result.innerHTML = '<span class="badge badge-green">Agent n8n dibuat. Lanjutkan koneksi Coexistence.</span>';
+}
+
+async function refreshN8nAgent() {
+  const selected = document.getElementById('n8n-agent-sel')?.value || '';
+  await loadAgents();
+  populateN8nAgentSelect();
+  if (selected && S.agents.some(agent => agent.id === selected)) {
+    document.getElementById('n8n-agent-sel').value = selected;
+    await loadN8nAgent();
+  }
+}
+
+async function loadN8nAgent() {
+  const agentId = document.getElementById('n8n-agent-sel')?.value || '';
+  const panel = document.getElementById('n8n-agent-panel');
+  if (!agentId) {
+    panel.innerHTML = '<div class="empty-state text-muted">Pilih atau buat agent n8n</div>';
+    return;
+  }
+  const agent = S.agents.find(item => item.id === agentId);
+  if (!agent) return;
+  if (agent.wa_connection_type !== 'cloud_api') {
+    panel.innerHTML = `
+      <div class="badge badge-yellow">WhatsApp Coexistence belum terhubung</div>
+      <p class="text-muted" style="font-size:11px;margin:10px 0">Hubungkan nomor WhatsApp Business existing khusus untuk <strong>${escHtml(agent.name)}</strong>. Setelah proses Meta selesai, kembali ke halaman ini dan klik Refresh.</p>
+      <button class="btn btn-primary" onclick="connectN8nCoexistence('${agentId}')">📱 Hubungkan WhatsApp Coexistence</button>
+      <div id="n8n-meta-signup-result" class="mt-8"></div>`;
+    return;
+  }
+  const phone = agent.wa_display_phone || 'nomor terhubung';
+  const coexistence = agent.wa_cloud_api_mode === 'coexistence';
+  panel.innerHTML = `
+    <div class="badge badge-green">${coexistence ? '📱 Coexistence' : '☁️ Cloud API'} · ${escHtml(phone)}</div>
+    ${coexistence ? '' : '<div class="badge badge-yellow" style="margin-left:6px">Bukan mode Coexistence</div>'}
+    <div id="n8n-routing-panel-${agentId}" style="margin-top:14px"><span class="spinner"></span> Memuat konfigurasi webhook…</div>`;
+  await loadWhatsAppRouting(agentId);
+}
+
+async function connectN8nCoexistence(agentId) {
+  const result = document.getElementById('n8n-meta-signup-result');
+  result.innerHTML = '<span class="spinner"></span> Membuat link Coexistence…';
+  const response = await api('POST', `/v1/meta/signup/links/${agentId}`);
+  if (!response.ok) {
+    result.innerHTML = `<span class="badge badge-red">${escHtml(response.data?.detail || 'Gagal membuat link Meta')}</span>`;
+    return;
+  }
+  result.innerHTML = `<a class="btn btn-success btn-sm" href="${escHtml(response.data.signup_url)}" target="_blank" rel="noopener">Lanjutkan Coexistence di Meta</a><div class="text-muted" style="font-size:10px;margin-top:6px">Di halaman berikutnya pilih <strong>nomor existing / Coexistence</strong>. Setelah selesai, kembali dan klik Refresh.</div>`;
+}
+
 async function loadWhatsAppRouting(agentId) {
   const panel = document.getElementById(`n8n-routing-panel-${agentId}`);
   if (!panel) return;
@@ -1158,13 +1253,13 @@ async function loadWhatsAppRouting(agentId) {
     : 'Belum ada webhook n8n tersimpan.';
   panel.dataset.n8nConfigured = route.n8n_configured ? 'true' : 'false';
   panel.innerHTML = `
-    <div style="font-size:12px;font-weight:700;margin-bottom:8px">Routing pesan masuk</div>
+    <div style="font-size:12px;font-weight:700;margin-bottom:8px">Webhook AI Agent n8n</div>
     <div class="card-grid" style="gap:10px">
       <div class="form-group">
         <label>Pemilik nomor</label>
         <select id="wa-route-target-${agentId}" onchange="toggleN8nRoutingFields('${agentId}')">
-          <option value="ai_staff" ${route.target === 'ai_staff' ? 'selected' : ''}>AI Staff internal</option>
-          <option value="n8n" ${route.target === 'n8n' ? 'selected' : ''}>AI Agent n8n</option>
+          <option value="n8n" ${route.target === 'n8n' ? 'selected' : ''}>Aktif · AI Agent n8n</option>
+          <option value="ai_staff" ${route.target === 'ai_staff' ? 'selected' : ''}>Nonaktif · kembalikan ke AI Staff</option>
         </select>
       </div>
       <div id="n8n-routing-fields-${agentId}" class="form-group full" style="${route.target === 'n8n' ? '' : 'display:none'}">
