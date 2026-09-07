@@ -69,7 +69,7 @@ async def run_meta_token_health_check() -> dict[str, int]:
     async with httpx.AsyncClient(timeout=20) as client:
         for agent in agents:
             event = {
-                "event": "meta.token_health",
+                "alert_type": "meta.token_health",
                 "source": "managed-agent",
                 "agent_id": str(agent.id),
                 "agent_name": agent.name,
