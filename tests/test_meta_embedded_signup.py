@@ -115,7 +115,7 @@ def test_signup_launch_uses_hosted_flow_and_safe_lifecycle_telemetry():
     page_template = inspect.getsource(meta_signup._render_standard_signup_page)
 
     assert "featureType:'whatsapp_business_app_onboarding'" in page_template
-    assert "sessionInfoVersion" not in page_template
+    assert "sessionInfoVersion:'3'" in page_template
     assert "/v1/meta/signup/telemetry" in page_template
     assert "telemetry('page_loaded')" in page_template
     assert '"meta_signup_state"' in inspect.getsource(meta_signup.launch)
@@ -129,6 +129,7 @@ def test_signup_launch_uses_hosted_flow_and_safe_lifecycle_telemetry():
 def test_signup_launch_offers_official_coexistence_and_new_number_paths_on_mobile():
     page_template = inspect.getsource(meta_signup._render_standard_signup_page)
     identity_source = inspect.getsource(meta_signup.identity_start)
+    hosted_source = inspect.getsource(meta_signup._hosted_signup_url)
 
     assert "Pakai WhatsApp Business yang sudah ada" in page_template
     assert "Gunakan nomor baru khusus Cloud API" in page_template
@@ -140,6 +141,8 @@ def test_signup_launch_offers_official_coexistence_and_new_number_paths_on_mobil
     assert "/v1/meta/signup/identity/start?state=" in page_template
     assert "settings.meta_embedded_signup_config_id" in identity_source
     assert 'extras_data["featureType"] = "whatsapp_business_app_onboarding"' in identity_source
+    assert 'extras_data["sessionInfoVersion"] = "3"' in identity_source
+    assert 'extras_data["sessionInfoVersion"] = "3"' in hosted_source
 
 
 def test_shared_waba_discovery_accepts_current_meta_scope_key_and_owned_business_fallback():
