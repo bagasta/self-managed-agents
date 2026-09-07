@@ -83,6 +83,10 @@ class Settings(BaseSettings):
     # selected by a mobile customer before Hosted Embedded Signup starts.
     meta_business_identity_config_id: str = ""
     meta_system_access_token: str = ""
+    # Daily credential probe for already-connected Cloud API / Coexistence numbers.
+    # Alerts contain only safe metadata and are sent to an operator-controlled n8n webhook.
+    meta_token_health_alert_webhook_url: str = ""
+    meta_token_health_check_interval_seconds: int = 86400
     # A Meta phone-number registration can require an SMS/call and a context
     # switch on mobile.  Keep the signed launch state valid long enough for
     # that flow, while still making it short-lived.

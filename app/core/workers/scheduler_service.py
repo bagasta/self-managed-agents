@@ -444,6 +444,17 @@ def start_scheduler() -> None:
         coalesce=True,
         max_instances=1,
     )
+    from app.config import get_settings
+    from app.core.workers.meta_token_health import run_meta_token_health_check
+    _scheduler.add_job(
+        run_meta_token_health_check,
+        "interval",
+        seconds=max(3600, get_settings().meta_token_health_check_interval_seconds),
+        id="meta_token_health",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
     _scheduler.start()
     logger.info("scheduler_service.started")
 
@@ -493,12 +504,19 @@ async def run_scheduler_loop() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _handle_signal)
 
+    from app.config import get_settings
+    from app.core.workers.meta_token_health import run_meta_token_health_check
+    next_token_check = datetime.now(timezone.utc)
+    interval = max(3600, get_settings().meta_token_health_check_interval_seconds)
     logger.info("scheduler_worker.started")
 
     while not stop_event.is_set():
         try:
             await publish_scheduler_heartbeat()
             await _tick_with_lock()
+            if datetime.now(timezone.utc) >= next_token_check:
+                await run_meta_token_health_check()
+                next_token_check = datetime.now(timezone.utc) + timedelta(seconds=interval)
         except Exception as exc:
             logger.error("scheduler_worker.tick_error", error=str(exc))
         try:
