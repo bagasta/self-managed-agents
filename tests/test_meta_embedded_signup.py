@@ -141,8 +141,8 @@ def test_signup_launch_offers_official_coexistence_and_new_number_paths_on_mobil
     assert "/v1/meta/signup/identity/start?state=" in page_template
     assert "settings.meta_embedded_signup_config_id" in identity_source
     assert 'extras_data["featureType"] = "whatsapp_business_app_onboarding"' in identity_source
-    assert 'extras_data["sessionInfoVersion"] = "3"' in identity_source
-    assert 'extras_data["sessionInfoVersion"] = "3"' in hosted_source
+    assert '"sessionInfoVersion": "3", "version": "v4"' in identity_source
+    assert '"sessionInfoVersion": "3", "version": "v4"' in hosted_source
 
 
 def test_shared_waba_discovery_accepts_current_meta_scope_key_and_owned_business_fallback():

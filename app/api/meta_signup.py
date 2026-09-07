@@ -79,10 +79,9 @@ async def _bind_hosted_business(state_value: str, business_id: str) -> None:
 def _hosted_signup_url(mode: str | None = None) -> str:
     from app.config import get_settings
     settings = get_settings()
-    extras_data = {"setup": {}}
+    extras_data = {"setup": {}, "sessionInfoVersion": "3", "version": "v4"}
     if mode == "coexistence":
         extras_data["featureType"] = "whatsapp_business_app_onboarding"
-        extras_data["sessionInfoVersion"] = "3"
     extras = json.dumps(extras_data, separators=(",", ":"))
     return "https://business.facebook.com/messaging/whatsapp/onboard/?" + urlencode({
         "app_id": settings.meta_app_id,
@@ -311,10 +310,9 @@ async def identity_start(
         json.dumps({"state": state, "mode": mode}),
         ex=settings.meta_signup_state_ttl_seconds,
     )
-    extras_data = {"setup": {}}
+    extras_data = {"setup": {}, "sessionInfoVersion": "3", "version": "v4"}
     if mode == "coexistence":
         extras_data["featureType"] = "whatsapp_business_app_onboarding"
-        extras_data["sessionInfoVersion"] = "3"
     target = "https://www.facebook.com/" + settings.meta_graph_api_version + "/dialog/oauth?" + urlencode({
         "client_id": settings.meta_app_id,
         "redirect_uri": _identity_callback_url(),
