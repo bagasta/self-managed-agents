@@ -115,7 +115,7 @@ def test_signup_launch_uses_hosted_flow_and_safe_lifecycle_telemetry():
     page_template = inspect.getsource(meta_signup._render_standard_signup_page)
 
     assert "featureType:'whatsapp_business_app_onboarding'" in page_template
-    assert "sessionInfoVersion:'3'" in page_template
+    assert "sessionInfoVersion" not in page_template
     assert "/v1/meta/signup/telemetry" in page_template
     assert "telemetry('page_loaded')" in page_template
     assert '"meta_signup_state"' in inspect.getsource(meta_signup.launch)
