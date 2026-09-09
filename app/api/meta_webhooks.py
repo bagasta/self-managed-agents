@@ -25,6 +25,7 @@ from app.models.agent import Agent
 
 router = APIRouter(prefix="/v1/webhooks", tags=["meta-webhooks"])
 logger = structlog.get_logger(__name__)
+N8N_INLINE_AUDIO_MAX_BYTES = 11 * 1024 * 1024
 
 
 def _n8n_event_payload(agent: Agent, phone_number_id: str, message: dict, sender_name: str) -> dict:
@@ -106,10 +107,47 @@ async def _send_cloud_reply(session, reply: str) -> None:
     )
 
 
+async def _prepare_n8n_audio(message: dict, token: str) -> dict:
+    """Add Cloud API audio bytes to the n8n event without exposing its token."""
+    if str(message.get("type") or "") != "audio":
+        return message
+
+    from app.core.infra.wa_cloud_client import download_media
+
+    prepared = dict(message)
+    audio = dict(message.get("audio") or {})
+    prepared["audio"] = audio
+    media_id = str(audio.get("id") or "")
+    if not media_id:
+        audio.update({"download_status": "failed", "error_type": "MediaConfigurationError"})
+        return prepared
+    try:
+        raw, mime_type = await download_media(
+            media_id,
+            token,
+            max_bytes=N8N_INLINE_AUDIO_MAX_BYTES,
+        )
+        audio.update({
+            "mime_type": mime_type,
+            "file_size": len(raw),
+            "encoding": "base64",
+            "data_base64": base64.b64encode(raw).decode("ascii"),
+            "download_status": "succeeded",
+        })
+    except (httpx.HTTPError, ValueError) as exc:
+        audio.update({"download_status": "failed", "error_type": type(exc).__name__})
+        logger.warning(
+            "meta_webhook.n8n_audio_download_failed",
+            message_id=str(message.get("id") or ""),
+            error_type=type(exc).__name__,
+        )
+    return prepared
+
+
 async def _process_n8n(agent_id: str, phone_number_id: str, message: dict, sender_name: str) -> None:
     """Deliver one number-owned inbound message exclusively to its n8n workflow."""
     from app.core.infra.channel_service import decrypt_value
-    from app.core.infra.wa_cloud_client import mark_message_read, send_text_message
+    from app.core.infra.wa_cloud_client import send_text_message, send_typing_indicator
 
     async with AsyncSessionLocal() as db:
         agent = await db.get(Agent, agent_id)
@@ -126,9 +164,14 @@ async def _process_n8n(agent_id: str, phone_number_id: str, message: dict, sende
             return
         token = decrypt_value(encrypted_token)
         try:
-            await mark_message_read(phone_number_id, str(message.get("id") or ""), token)
-        except Exception:
-            pass
+            await send_typing_indicator(phone_number_id, str(message.get("id") or ""), token)
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "meta_webhook.n8n_typing_failed",
+                message_id=str(message.get("id") or ""),
+                error_type=type(exc).__name__,
+            )
+        prepared_message = await _prepare_n8n_audio(message, token)
 
         headers: dict[str, str] = {
             "X-Managed-Agent-Event": "whatsapp.message.received",
@@ -142,7 +185,7 @@ async def _process_n8n(agent_id: str, phone_number_id: str, message: dict, sende
             async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=10)) as client:
                 response = await client.post(
                     decrypt_value(encrypted_url),
-                    json=_n8n_event_payload(agent, phone_number_id, message, sender_name),
+                    json=_n8n_event_payload(agent, phone_number_id, prepared_message, sender_name),
                     headers=headers,
                 )
             response.raise_for_status()
@@ -181,7 +224,7 @@ async def _process(agent_id: str, phone_number_id: str, message: dict, sender_na
     from app.api.wa_helpers import find_or_create_wa_session
     from app.core.engine.agent_runner import run_agent
     from app.core.infra.channel_service import decrypt_value
-    from app.core.infra.wa_cloud_client import download_media, mark_message_read
+    from app.core.infra.wa_cloud_client import download_media, send_typing_indicator
     from app.models.agent import Agent
     async with AsyncSessionLocal() as db:
         agent = await db.get(Agent, agent_id)
@@ -191,7 +234,7 @@ async def _process(agent_id: str, phone_number_id: str, message: dict, sender_na
         message_type = str(message.get("type") or "")
         text = str((message.get("text") or {}).get("body") or "").strip()
         media = message.get(message_type) or {}
-        if not sender or message_type not in {"text", "image", "document"}:
+        if not sender or message_type not in {"text", "image", "document", "audio"}:
             return
         session, _ = await find_or_create_wa_session(agent=agent, lookup_user_id=sender, effective_reply_target=sender, device_id=f"meta:{phone_number_id}", db=db, is_operator=False, phone_number=sender, sender_name=sender_name)
         config = dict(session.channel_config or {})
@@ -200,13 +243,17 @@ async def _process(agent_id: str, phone_number_id: str, message: dict, sender_na
         session.channel_config = config
         token = decrypt_value(agent.wa_access_token_encrypted)
         try:
-            await mark_message_read(phone_number_id, str(message.get("id") or ""), token)
-        except Exception:
-            pass
+            await send_typing_indicator(phone_number_id, str(message.get("id") or ""), token)
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "meta_webhook.ai_staff_typing_failed",
+                message_id=str(message.get("id") or ""),
+                error_type=type(exc).__name__,
+            )
         media_image_b64: str | None = None
         media_image_mime: str | None = None
         current_attachment_name: str | None = None
-        if message_type in {"image", "document"}:
+        if message_type in {"image", "document", "audio"}:
             media_id = str(media.get("id") or "")
             if not media_id:
                 logger.warning("meta_webhook.media_missing_id", media_type=message_type)
@@ -215,11 +262,21 @@ async def _process(agent_id: str, phone_number_id: str, message: dict, sender_na
                 raw, mime_type = await download_media(media_id, token)
                 filename = str(media.get("filename") or "").strip() or None
                 if not filename:
-                    extension = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}.get(mime_type, ".bin")
+                    extension = {
+                        "image/jpeg": ".jpg",
+                        "image/png": ".png",
+                        "image/webp": ".webp",
+                        "audio/aac": ".aac",
+                        "audio/amr": ".amr",
+                        "audio/mpeg": ".mp3",
+                        "audio/mp4": ".m4a",
+                        "audio/ogg": ".ogg",
+                    }.get(mime_type.split(";", 1)[0].strip().lower(), ".bin")
                     filename = f"incoming_{message_type}{extension}"
                 from app.api.wa_helpers import process_wa_media
+                processing_type = "ptt" if message_type == "audio" and bool(media.get("voice")) else message_type
                 media_context, media_image_b64, media_image_mime, media_meta = await process_wa_media(
-                    media_type=message_type,
+                    media_type=processing_type,
                     media_data=base64.b64encode(raw).decode("ascii"),
                     media_filename=filename,
                     session_id=session.id,
@@ -228,7 +285,7 @@ async def _process(agent_id: str, phone_number_id: str, message: dict, sender_na
                 )
                 current_attachment_name = (media_meta or {}).get("filename") or filename
                 caption = str(media.get("caption") or "").strip()
-                text = (caption or f"Pengguna mengirim {message_type}.") + media_context
+                text = (caption or f"Pengguna mengirim {processing_type}.") + media_context
             except Exception as exc:
                 logger.warning("meta_webhook.media_download_failed", media_type=message_type, error_type=type(exc).__name__)
                 text = (
@@ -285,7 +342,7 @@ async def receive_meta_webhook(request: Request, background_tasks: BackgroundTas
                 continue
             contact_names = {str(item.get("wa_id") or ""): str(item.get("profile", {}).get("name") or "") for item in value.get("contacts") or []}
             for message in value.get("messages") or []:
-                if message.get("type") in {"text", "image", "document"}:
+                if message.get("type") in {"text", "image", "document", "audio"}:
                     processor = _process_n8n if str(agent.wa_inbound_route or "ai_staff") == "n8n" else _process
                     background_tasks.add_task(processor, str(agent.id), phone_number_id, message, contact_names.get(str(message.get("from") or ""), ""))
     return {"ok": True}

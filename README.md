@@ -262,6 +262,13 @@ ke `ai_staff`. Untuk membalas melalui nomor yang sama, workflow n8n mengembalika
 Access token Meta tidak dikirim ke n8n. Jika webhook n8n gagal, pesan tidak
 di-fallback ke AI Staff agar tidak diproses oleh agent yang salah.
 
+Pesan Cloud API menampilkan typing indicator saat diproses. Voice note diterima
+sebagai `audio`: route AI Staff memakai pipeline transkripsi yang sama dengan
+WhatsApp Web, sedangkan route n8n menerima Base64 di
+`message.content.data_base64` beserta `mime_type`, `voice`, dan `file_size`.
+Inline audio n8n dibatasi 11 MiB agar payload Base64 tetap di bawah batas JSON
+webhook n8n default 16 MiB; AI Staff tetap memakai batas media Meta 16 MB.
+
 ### Lainnya
 
 | Method | Endpoint | Deskripsi |

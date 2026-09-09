@@ -83,3 +83,21 @@ async def mark_message_read(phone_number_id: str, message_id: str, access_token:
             json={"messaging_product": "whatsapp", "status": "read", "message_id": message_id},
         )
     response.raise_for_status()
+
+
+async def send_typing_indicator(phone_number_id: str, message_id: str, access_token: str) -> None:
+    """Mark an inbound message read and show Meta's official typing indicator."""
+    from app.config import get_settings
+    settings = get_settings()
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.post(
+            f"https://graph.facebook.com/{settings.meta_graph_api_version}/{phone_number_id}/messages",
+            headers={"Authorization": f"Bearer {access_token}"},
+            json={
+                "messaging_product": "whatsapp",
+                "status": "read",
+                "message_id": message_id,
+                "typing_indicator": {"type": "text"},
+            },
+        )
+    response.raise_for_status()
