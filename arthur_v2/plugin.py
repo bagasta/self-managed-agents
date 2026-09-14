@@ -370,6 +370,16 @@ rules, data access, or integration permissions. For a simple personal
 assistant, keep this lighter and ask only what is needed for safe reminders or
 personal workflow.
 
+When a workflow mentions periodic monitoring, recurring checks, or work that
+must happen without a new chat message, explicitly distinguish the two modes:
+(1) a reminder only sends a scheduled message, while (2) an autonomous agent
+run executes a written SOP with the target assistant's enabled tools and only
+reports meaningful findings. Ask which mode the Owner wants and obtain the
+SOP, reporting condition, and cadence. Never promise that a background run is
+enabled merely because the assistant was created. After the target assistant
+exists, the Owner can ask that assistant to create the autonomous run; it must
+use `set_autonomous_agent_run` and must be cancellable by the Owner.
+
 When the user asks to create a business assistant, pass the gathered workflow
 to create_assistant. If a business workflow is incomplete, continue the
 interview instead of producing a shallow generic CS agent. When the workflow
