@@ -67,7 +67,7 @@ def ensure_non_empty_reply(
                 "Saya tidak bisa mengirim ulang link OAuth tanpa membuatnya lewat pemeriksaan resmi. "
                 "Saya akan cek status koneksi Google agent terlebih dahulu."
             )
-        login_claim = re.search(r"\b(sudah|udah|telah)\s+login\b", user_message or "", re.IGNORECASE)
+        login_claim = re.search(r"\b(sudah|udah|udh|dah|telah)\s+login\b", user_message or "", re.IGNORECASE)
         google_claim = re.search(r"\b(auth_pending|oauth|google\s+(sudah\s+)?(terhubung|belum\s+terhubung))\b", text, re.IGNORECASE)
         if login_claim and google_claim and not ({"inspect_managed_assistant", "start_assistant_google_oauth"} & tool_names):
             _record_guard_reason(decision_trace, ReplyGuardReason.PASS_THROUGH)
