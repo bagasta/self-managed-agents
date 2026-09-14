@@ -310,6 +310,8 @@ def build_builder_tools(
         get_logger=_get_builder_logger,
     )
     connector_tools = build_builder_connector_tools(
+        db_factory=db_factory,
+        owner_phone=owner_phone,
         get_settings=_get_builder_settings,
         get_logger=_get_builder_logger,
     )

@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 
 from app.config import get_settings
+from app.core.security.google_oauth_callback import issue_google_oauth_callback_token
 
 
 @dataclass(frozen=True)
@@ -38,9 +39,18 @@ async def start_google_oauth(
     base_url = str(settings.google_integration_service_url or "").rstrip("/")
     if not base_url:
         raise RuntimeError("GOOGLE_INTEGRATION_SERVICE_URL belum dikonfigurasi")
-    body: dict[str, Any] = {"external_user_id": external_user_id, "agent_id": agent_id}
-    if scopes:
-        body["scopes"] = scopes
+    normalized_scopes = list(dict.fromkeys(str(scope).strip() for scope in scopes if str(scope).strip()))
+    if not normalized_scopes:
+        raise ValueError("OAuth Google ditolak karena policy scope agent belum dikonfigurasi.")
+    body: dict[str, Any] = {
+        "external_user_id": external_user_id,
+        "agent_id": agent_id,
+        "scopes": normalized_scopes,
+        "callback_token": issue_google_oauth_callback_token(
+            external_user_id=external_user_id,
+            agent_id=agent_id,
+        ),
+    }
     async with httpx.AsyncClient(timeout=10.0) as client:
         response = await client.post(
             f"{base_url}/v1/integrations/google/connect",

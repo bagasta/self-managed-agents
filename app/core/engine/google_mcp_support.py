@@ -2162,6 +2162,7 @@ def filter_google_mcp_tools_by_services(
         for service in google_cfg.get("allowed_services") or []
         if str(service).strip()
     }
+    allowed_operations = google_cfg.get("allowed_operations") if isinstance(google_cfg, dict) else {}
     if not allowed and requirement_text:
         from arthur.tools.builder_google import infer_google_workspace_services
 
@@ -2210,7 +2211,15 @@ def filter_google_mcp_tools_by_services(
             name in explicit_service_tools.get(service, set())
             for service in allowed
         )
-        if matched_services & allowed or explicitly_allowed:
+        gmail_read_only = (
+            "gmail" in matched_services
+            and isinstance(allowed_operations, dict)
+            and set(allowed_operations.get("gmail") or []) <= {"read"}
+        )
+        gmail_write_markers = ("send", "draft", "create", "modify", "delete", "trash", "archive", "label")
+        if gmail_read_only and any(marker in name for marker in gmail_write_markers):
+            removed.append(name)
+        elif matched_services & allowed or explicitly_allowed:
             kept.append(mcp_tool)
         else:
             removed.append(name)

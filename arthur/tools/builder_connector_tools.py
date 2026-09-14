@@ -2,14 +2,19 @@
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any, Callable
 
 import httpx
 import structlog
 from langchain_core.tools import tool
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.engine.google_mcp_support import _candidate_external_user_ids
+from app.core.domain.agent_ownership import owner_filter
 from app.core.utils.wa_identity import is_probable_whatsapp_lid
+from app.models.agent import Agent
 
 logger = structlog.get_logger(__name__)
 
@@ -19,11 +24,33 @@ LoggerProvider = Callable[[], Any]
 
 def build_builder_connector_tools(
     *,
+    db_factory: async_sessionmaker,
+    owner_phone: str | None,
     get_settings: SettingsProvider,
     get_logger: LoggerProvider | None = None,
 ) -> dict[str, Any]:
     _get_settings = get_settings
     _get_logger = get_logger or (lambda: logger)
+
+    async def _agent_oauth_scopes(agent_id: str) -> list[str]:
+        """Read the persisted, server-owned scope policy; never accept scopes from the LLM."""
+        try:
+            target_id = uuid.UUID(str(agent_id))
+        except (TypeError, ValueError):
+            return []
+        async with db_factory() as db:
+            statement = select(Agent).where(Agent.id == target_id)
+            if owner_phone:
+                statement = statement.where(owner_filter(owner_phone))
+            result = await db.execute(statement)
+            agent = result.scalar_one_or_none()
+        if agent is None:
+            return []
+        config = getattr(agent, "tools_config", None)
+        mcp = config.get("mcp") if isinstance(config, dict) and isinstance(config.get("mcp"), dict) else {}
+        servers = mcp.get("servers") if isinstance(mcp.get("servers"), dict) else mcp
+        google = servers.get("google_workspace") if isinstance(servers, dict) else {}
+        return list(google.get("oauth_scopes") or []) if isinstance(google, dict) else []
 
     @tool
     async def generate_google_auth_link(
@@ -63,6 +90,14 @@ def build_builder_connector_tools(
                 "Minta user chat dari nomor WhatsApp biasa atau pastikan wa-service mengirim phone_from, bukan LID."
             )
 
+        scopes = await _agent_oauth_scopes(agent_id)
+        if not scopes:
+            return (
+                "[error] Policy OAuth Google agent belum dikonfigurasi. "
+                "Konfigurasikan ulang layanan Google agent ini sebelum membuat link; "
+                "default permission luas tidak diizinkan."
+            )
+
         last_status = ""
         last_body = ""
         try:
@@ -70,7 +105,7 @@ def build_builder_connector_tools(
                 for candidate in candidate_user_ids:
                     resp = await client.post(
                         f"{integration_url}/v1/integrations/google/connect",
-                        json={"external_user_id": candidate, "agent_id": agent_id},
+                        json={"external_user_id": candidate, "agent_id": agent_id, "scopes": scopes},
                         headers={"X-API-Key": settings.api_key},
                     )
                     last_status = str(resp.status_code)

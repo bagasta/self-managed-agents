@@ -71,8 +71,17 @@ async def test_oauth_success_prefers_builder_session_and_sends_from_its_device(m
             ]
 
     class FakeDB:
+        def __init__(self):
+            self.added = []
+
         async def execute(self, statement):
             return FakeResult()
+
+        def add(self, record):
+            self.added.append(record)
+
+        async def commit(self):
+            return None
 
     sent = []
 
@@ -82,8 +91,9 @@ async def test_oauth_success_prefers_builder_session_and_sends_from_its_device(m
 
     monkeypatch.setattr("app.core.infra.channel_service.send_message", fake_send_message)
 
+    db = FakeDB()
     payload, status_code = await _deliver_google_oauth_success_whatsapp(
-        db=FakeDB(),
+        db=db,
         event=GoogleOAuthSuccessEvent(
             external_user_id="628111",
             agent_id=str(target_agent_id),
@@ -105,6 +115,10 @@ async def test_oauth_success_prefers_builder_session_and_sends_from_its_device(m
             "to_override": "628111",
         }
     ]
+    assert len(db.added) == 1
+    assert db.added[0].role == "agent"
+    assert db.added[0].content == _google_oauth_success_message("owner@example.com")
+    assert db.added[0].tool_name == "google_oauth_success"
 
 
 @pytest.mark.asyncio

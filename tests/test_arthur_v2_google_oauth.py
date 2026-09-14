@@ -34,7 +34,11 @@ def test_start_google_oauth_accepts_existing_connection(monkeypatch: pytest.Monk
     monkeypatch.setattr("arthur_v2.google_oauth.httpx.AsyncClient", lambda **kwargs: FakeClient())
     monkeypatch.setattr("arthur_v2.google_oauth.get_settings", lambda: type("Settings", (), {"google_integration_service_url": "http://integration", "api_key": "test"})())
 
-    result = asyncio.run(start_google_oauth(external_user_id="owner", agent_id="agent", scopes=[]))
+    result = asyncio.run(start_google_oauth(
+        external_user_id="owner",
+        agent_id="agent",
+        scopes=["https://www.googleapis.com/auth/gmail.readonly"],
+    ))
 
     assert result.connected is True
     assert result.auth_url is None
@@ -56,7 +60,11 @@ def test_start_google_oauth_returns_link_for_new_connection(monkeypatch: pytest.
     monkeypatch.setattr("arthur_v2.google_oauth.httpx.AsyncClient", lambda **kwargs: FakeClient())
     monkeypatch.setattr("arthur_v2.google_oauth.get_settings", lambda: type("Settings", (), {"google_integration_service_url": "http://integration", "api_key": "test"})())
 
-    result = asyncio.run(start_google_oauth(external_user_id="owner", agent_id="agent", scopes=[]))
+    result = asyncio.run(start_google_oauth(
+        external_user_id="owner",
+        agent_id="agent",
+        scopes=["https://www.googleapis.com/auth/gmail.readonly"],
+    ))
 
     assert result.connected is False
     assert result.auth_url == "https://oauth.example/start"

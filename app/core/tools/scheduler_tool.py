@@ -121,7 +121,7 @@ def build_scheduler_tools(session_id: uuid.UUID, agent_id: uuid.UUID, db_factory
                 select(ScheduledJob).where(
                     ScheduledJob.session_id == session_id,
                     ScheduledJob.label == label,
-                    ScheduledJob.status == "active",
+                    ScheduledJob.status.in_(["active", "running"]),
                 )
             )
             existing_job = existing_result.scalar_one_or_none()
@@ -335,13 +335,17 @@ def build_scheduler_tools(session_id: uuid.UUID, agent_id: uuid.UUID, db_factory
                 select(ScheduledJob).where(
                     ScheduledJob.session_id == session_id,
                     ScheduledJob.label == label,
-                    ScheduledJob.status == "active",
+                    ScheduledJob.status.in_(["active", "running"]),
                 )
             )
             job = result.scalar_one_or_none()
             if not job:
                 return f"Tidak ada reminder aktif dengan label '{label}'."
+            # A due job can already be executing when the owner says stop.
+            # Mark it cancelled as well; the worker checks this state again
+            # before it schedules the next occurrence.
             job.status = "cancelled"
+            job.next_run_at = None
             await db.commit()
         logger.info("scheduler_tool.cancelled", label=label)
         return f"Reminder '{label}' berhasil dibatalkan."

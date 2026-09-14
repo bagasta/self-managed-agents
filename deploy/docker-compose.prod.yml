@@ -101,7 +101,7 @@ services:
       disable: true
 
   redis:
-    image: redis:7-alpine
+    image: redis:8.8.2
     init: true
     restart: unless-stopped
     command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --save 60 1
@@ -169,7 +169,7 @@ services:
       - "traefik.docker.network=root_default"
 
   pgbouncer:
-    image: edoburu/pgbouncer:latest
+    image: edoburu/pgbouncer:v1.25.2-p0
     init: true
     restart: unless-stopped
     env_file:

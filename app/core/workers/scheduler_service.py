@@ -350,6 +350,14 @@ async def _run_job(job_id) -> None:
             except Exception as exc:
                 logger.error("heartbeat.error", job_id=str(job_id), error=str(exc), exc_info=True)
             finally:
+                # A user can cancel a job while run_agent() is executing.
+                # Refresh before rescheduling so cancellation wins over the
+                # worker's stale in-memory "running" state.
+                await db.refresh(job)
+                if job.status == "cancelled":
+                    await db.commit()
+                    logger.info("heartbeat.cancelled_during_run", job_id=str(job_id))
+                    return
                 # Update next_run
                 from croniter import croniter
                 now = datetime.now(timezone.utc)
@@ -417,6 +425,14 @@ async def _run_job(job_id) -> None:
 
         finally:
             # Update job: next_run atau done
+            # Never resurrect a job that was cancelled while its message was
+            # in-flight. Without this refresh, the worker overwrote a valid
+            # cancel with status=active after delivery.
+            await db.refresh(job)
+            if job.status == "cancelled":
+                await db.commit()
+                log.info("scheduler_service.cancelled_during_run")
+                return
             now = datetime.now(timezone.utc)
             job.last_run_at = now
 

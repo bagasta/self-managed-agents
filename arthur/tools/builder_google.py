@@ -5,6 +5,10 @@ import re
 from typing import Any
 
 from app.config import get_settings
+from app.core.google_oauth_scopes import (
+    infer_google_service_operations,
+    oauth_scopes_for_google_permissions,
+)
 
 
 def google_workspace_mcp_server_config() -> dict[str, str]:
@@ -82,6 +86,9 @@ def configure_google_workspace_services(
     servers = dict(mcp_cfg.get("servers") or {})
     google_cfg = dict(servers.get("google_workspace") or {})
     google_cfg["allowed_services"] = services
+    permissions = infer_google_service_operations(requirement_text, services)
+    google_cfg["allowed_operations"] = permissions
+    google_cfg["oauth_scopes"] = oauth_scopes_for_google_permissions(permissions)
     servers["google_workspace"] = google_cfg
     mcp_cfg["servers"] = servers
     merged["mcp"] = mcp_cfg

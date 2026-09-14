@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import httpx
 import structlog
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import or_, select
@@ -18,7 +18,9 @@ from app.core.engine.agent_policy import build_agent_runtime_policy
 from app.core.utils.phone_utils import normalize_phone
 from app.database import get_db
 from app.deps import verify_api_key as require_api_key
+from app.core.security.google_oauth_callback import verify_google_oauth_callback_token
 from app.models.agent import Agent
+from app.models.message import Message
 from app.models.session import Session
 
 logger = structlog.get_logger(__name__)
@@ -152,6 +154,20 @@ async def _deliver_google_oauth_success_whatsapp(
         )
         return {"notified": False, "reason": "whatsapp_send_failed"}, 502
 
+    # This is an assistant message, not merely a transport receipt. Persist it
+    # so the next Arthur turn sees that OAuth has completed instead of replaying
+    # the stale instruction to open the same authorization link again.
+    db.add(
+        Message(
+            session_id=session.id,
+            role="agent",
+            content=_google_oauth_success_message(event.google_email),
+            tool_name="google_oauth_success",
+            step_index=0,
+        )
+    )
+    await db.commit()
+
     logger.info(
         "integrations.google.oauth_success_notified",
         session_id=str(session.id),
@@ -221,16 +237,17 @@ def _integration_service_url() -> str:
 async def get_google_auth_link(
     external_user_id: str = Query(...),
     agent_id: str = Query(...),
-    scopes: str | None = Query(None, description="Comma-separated OAuth scopes. If omitted, integration service uses its defaults."),
+    scopes: str = Query(..., min_length=1, description="Comma-separated, least-privilege OAuth scopes for the target agent."),
 ) -> JSONResponse:
     """
     Generate Google OAuth auth URL untuk user tertentu.
     Arthur memanggil endpoint ini via http_get untuk dapat link auth.
     """
     try:
-        body: dict = {"external_user_id": external_user_id, "agent_id": agent_id}
-        if scopes:
-            body["scopes"] = [s.strip() for s in scopes.split(",") if s.strip()]
+        requested_scopes = [s.strip() for s in scopes.split(",") if s.strip()]
+        if not requested_scopes:
+            return JSONResponse({"error": "OAuth scopes wajib diisi; default scope luas tidak diizinkan."}, status_code=422)
+        body: dict = {"external_user_id": external_user_id, "agent_id": agent_id, "scopes": requested_scopes}
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
                 f"{_integration_service_url()}/v1/integrations/google/connect",
@@ -269,12 +286,19 @@ async def get_google_status(
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
-@router.post("/google/oauth-success", dependencies=[Depends(require_api_key)])
+@router.post("/google/oauth-success")
 async def notify_google_oauth_success(
     event: GoogleOAuthSuccessEvent,
+    x_google_oauth_callback: str = Header(..., alias="X-Google-OAuth-Callback"),
     db: AsyncSession = Depends(get_db),
 ) -> JSONResponse:
     """Receive a post-commit OAuth event, sync the target, then notify WhatsApp."""
+    if not verify_google_oauth_callback_token(
+        x_google_oauth_callback,
+        external_user_id=event.external_user_id,
+        agent_id=event.agent_id,
+    ):
+        raise HTTPException(status_code=401, detail="Invalid or expired Google OAuth callback token")
     synced = await _mark_google_workspace_connected(db=db, event=event)
     payload, status_code = await _deliver_google_oauth_success_whatsapp(db=db, event=event)
     payload["agent_synced"] = synced
