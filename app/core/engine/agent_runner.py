@@ -105,6 +105,70 @@ from app.models.message import Message
 from app.models.run import Run
 from app.models.session import Session
 from sqlalchemy import select
+
+
+async def _arthur_google_status_preflight(
+    *,
+    agent_model: Any,
+    session: Any,
+    user_message: str,
+    db: AsyncSession,
+) -> str:
+    """Supply Arthur with the authoritative Google status before it replies.
+
+    The builder must not infer connection state from its historical prose or
+    the target's local MCP config, which can lag behind the OAuth callback.
+    """
+    config = getattr(agent_model, "tools_config", None) or {}
+    if str(config.get("system_plugin") or "") != "arthur_v2":
+        return ""
+    if not re.search(r"\b(google|gmail|oauth|auth|login)\b", user_message or "", re.IGNORECASE):
+        return ""
+    owner_id = str(getattr(session, "external_user_id", "") or "").strip()
+    if not owner_id:
+        return ""
+    agents = list((await db.execute(select(AgentModel).where(
+        AgentModel.owner_external_id == owner_id,
+        AgentModel.is_deleted.is_(False),
+    ))).scalars().all())
+    candidates: list[AgentModel] = []
+    for candidate in agents:
+        candidate_config = getattr(candidate, "tools_config", None) or {}
+        mcp = candidate_config.get("mcp") if isinstance(candidate_config.get("mcp"), dict) else {}
+        servers = mcp.get("servers") if isinstance(mcp.get("servers"), dict) else mcp
+        if isinstance(servers, dict) and isinstance(servers.get("google_workspace"), dict):
+            candidates.append(candidate)
+    if not candidates:
+        return ""
+    msg = (user_message or "").casefold()
+    name_scores = [
+        (sum(1 for token in re.findall(r"[\w]+", candidate.name.casefold()) if token in msg), candidate)
+        for candidate in candidates
+    ]
+    best_score = max((score for score, _candidate in name_scores), default=0)
+    matched = [candidate for score, candidate in name_scores if score == best_score and score > 0]
+    target = matched[0] if len(matched) == 1 else (candidates[0] if len(candidates) == 1 else None)
+    if target is None:
+        return ""
+    try:
+        from arthur_v2.google_oauth import get_google_oauth_status
+        status = await get_google_oauth_status(external_user_id=owner_id, agent_id=str(target.id))
+    except Exception as exc:
+        return (
+            "\n\n[STATUS GOOGLE TERVERIFIKASI]\n"
+            f"Status {target.name} tidak dapat diverifikasi sekarang ({type(exc).__name__}). "
+            "Jangan menyatakan terhubung/pending dan jangan mengirim link OAuth tanpa tool resmi."
+        )
+    connected = bool(status.get("connected"))
+    email = str(status.get("email") or "")
+    return (
+        "\n\n[STATUS GOOGLE TERVERIFIKASI — SUMBER GOOGLE MCP]\n"
+        f"Assistant: {target.name}\n"
+        f"Connected: {'YA' if connected else 'TIDAK'}\n"
+        + (f"Akun: {email}\n" if email else "")
+        + ("Jawab bahwa akses Google sudah aktif; jangan kirim link OAuth baru." if connected
+           else "Akses belum aktif. Buat link hanya dengan tool start_assistant_google_oauth bila Owner memintanya.")
+    )
 from app.core.engine.result_parser import (
     ParsedResult,
     sanitize_input_messages as _sanitize_input_messages,
@@ -1385,6 +1449,15 @@ async def run_agent(
         is_operator_message=is_op_msg,
         user_message=user_message,
     )
+    _arthur_google_preflight = await _arthur_google_status_preflight(
+        agent_model=agent_model,
+        session=session,
+        user_message=execution_user_message,
+        db=db,
+    )
+    if _arthur_google_preflight:
+        system_prompt += _arthur_google_preflight
+        log.info("agent_run.arthur_google_status_preflight", status_context_injected=True)
     if _arthur_skill_context is not None and _arthur_skill_context.prompt_block:
         system_prompt += "\n\n" + _arthur_skill_context.prompt_block
         _builder_preflight_contract = _builder_plan_preflight_contract(
