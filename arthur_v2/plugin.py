@@ -32,7 +32,7 @@ from app.core.google_oauth_scopes import infer_google_service_operations, oauth_
 from app.core.utils.phone_utils import normalize_phone
 
 from .payments import PLAN_CAPACITY, PLAN_LABELS, build_payment_link, resolve_payment_plan
-from .google_oauth import google_mcp_url, start_google_oauth
+from .google_oauth import get_google_oauth_status, google_mcp_url, start_google_oauth
 
 ARTHUR_V2_PLUGIN = "arthur_v2"
 ARTHUR_V2_ASSISTANT_MODEL = "deepseek/deepseek-v4-flash"
@@ -602,7 +602,31 @@ def build_arthur_v2_tools(
         agent = await _owned(agent_id)
         if agent is None:
             return {"ok": False, "error": "Assistant tidak ditemukan atau bukan milik pengguna ini."}
-        return {"ok": True, "assistant": {**_summary(agent), "instructions": agent.instructions}}
+        config = agent.tools_config if isinstance(agent.tools_config, dict) else {}
+        mcp = config.get("mcp") if isinstance(config.get("mcp"), dict) else {}
+        servers = mcp.get("servers") if isinstance(mcp.get("servers"), dict) else mcp
+        google_config = servers.get("google_workspace") if isinstance(servers, dict) else None
+        google_status: dict[str, Any] | None = None
+        if isinstance(google_config, dict):
+            try:
+                # Google MCP owns the token record.  The local runtime config is
+                # only a capability allowlist and may be stale after OAuth.
+                google_status = await get_google_oauth_status(
+                    external_user_id=owner_phone or default_target,
+                    agent_id=str(agent.id),
+                )
+            except Exception as exc:
+                google_status = {
+                    "connected": None,
+                    "status": "unknown",
+                    "error": "Status Google belum dapat diverifikasi saat ini.",
+                    "detail": f"{type(exc).__name__}: {str(exc)[:160]}",
+                }
+        return {
+            "ok": True,
+            "assistant": {**_summary(agent), "instructions": agent.instructions},
+            "google_workspace": google_status,
+        }
 
     @tool(args_schema=CreateAssistantInput)
     async def create_assistant(

@@ -50,8 +50,28 @@ def ensure_non_empty_reply(
     Compatibility parameters are intentionally retained while legacy builder
     reply rewriting has been removed.
     """
-    del tools_config, active_groups, user_message, builder_whatsapp_action, system_plugin
+    del tools_config, active_groups, builder_whatsapp_action
     text = str(reply or "").strip()
+    # A builder must never fabricate/replay an OAuth URL from chat history.
+    # The only legitimate source is the current start_assistant_google_oauth
+    # tool result, which is recorded in ``steps`` for this run.
+    if system_plugin == "arthur_v2" and text:
+        tool_names = set(_step_tool_names(steps))
+        oauth_url = re.compile(
+            r"https://google-workspace-mcp\.chiefaiofficer\.id/v1/integrations/google/start\?t=[^\s)]+",
+            re.IGNORECASE,
+        )
+        if oauth_url.search(text) and "start_assistant_google_oauth" not in tool_names:
+            _record_guard_reason(decision_trace, ReplyGuardReason.PASS_THROUGH)
+            return (
+                "Saya tidak bisa mengirim ulang link OAuth tanpa membuatnya lewat pemeriksaan resmi. "
+                "Saya akan cek status koneksi Google agent terlebih dahulu."
+            )
+        login_claim = re.search(r"\b(sudah|udah|telah)\s+login\b", user_message or "", re.IGNORECASE)
+        google_claim = re.search(r"\b(auth_pending|oauth|google\s+(sudah\s+)?(terhubung|belum\s+terhubung))\b", text, re.IGNORECASE)
+        if login_claim and google_claim and not ({"inspect_managed_assistant", "start_assistant_google_oauth"} & tool_names):
+            _record_guard_reason(decision_trace, ReplyGuardReason.PASS_THROUGH)
+            return "Saya belum bisa menyimpulkan status Google tanpa pemeriksaan resmi. Saya perlu cek status koneksi agent terlebih dahulu."
     if text:
         _record_guard_reason(decision_trace, ReplyGuardReason.PASS_THROUGH)
         return text
