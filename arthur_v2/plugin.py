@@ -16,7 +16,7 @@ from urllib.parse import quote, urlparse
 
 from langchain.tools import tool
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.domain.agent_ownership import (
@@ -26,6 +26,8 @@ from app.core.domain.agent_ownership import (
     owner_filter,
 )
 from app.models.agent import Agent
+from app.models.scheduled_job import ScheduledJob
+from app.models.session import Session
 from app.core.google_oauth_scopes import infer_google_service_operations, oauth_scopes_for_google_permissions
 from app.core.utils.phone_utils import normalize_phone
 
@@ -377,8 +379,12 @@ run executes a written SOP with the target assistant's enabled tools and only
 reports meaningful findings. Ask which mode the Owner wants and obtain the
 SOP, reporting condition, and cadence. Never promise that a background run is
 enabled merely because the assistant was created. After the target assistant
-exists, the Owner can ask that assistant to create the autonomous run; it must
-use `set_autonomous_agent_run` and must be cancellable by the Owner.
+exists, use `configure_assistant_autonomous_run` after explicit Owner
+confirmation to create the real backend job. Before claiming it is active,
+the tool result must say ok=true and include an active job. Use
+`get_assistant_automation_status` whenever the Owner asks about its status.
+Use `stop_assistant_automation` to stop it. Updating purpose/instructions is
+never a substitute for creating, checking, or stopping an automation.
 
 When the user asks to create a business assistant, pass the gathered workflow
 to create_assistant. If a business workflow is incomplete, continue the
@@ -414,6 +420,13 @@ connected. If the owner follows up after that confirmation (for example “ok,
 terus gimana lagi?”), never tell them to open the old link again. Acknowledge
 that Google is connected, state the target assistant's next configured action,
 and offer only the remaining relevant setup step, if any.
+
+Never invent, reconstruct, or repeat an OAuth URL from conversation memory.
+Only send the exact auth_url returned by start_assistant_google_oauth in the
+same tool turn. If that link expired, call the tool again after the Owner asks
+for a new link. For any claim that Google is pending or connected, inspect the
+assistant first in that turn unless the immediately preceding successful tool
+result establishes the same status.
 
 For every external action in a target assistant's workflow, specify the
 required capability and its decision rule in the instructions: what data must
@@ -807,6 +820,132 @@ def build_arthur_v2_tools(
         }
 
     @tool
+    async def get_assistant_automation_status(agent_id: str) -> dict[str, Any]:
+        """Read real scheduled-job status for one owned assistant; never infer it from instructions."""
+        agent = await _owned(agent_id)
+        if agent is None:
+            return {"ok": False, "error": "Assistant tidak ditemukan atau bukan milik pengguna ini."}
+        async with db_factory() as db:
+            jobs = list((await db.execute(
+                select(ScheduledJob)
+                .where(ScheduledJob.agent_id == agent.id)
+                .order_by(desc(ScheduledJob.created_at))
+            )).scalars().all())
+        active = [job for job in jobs if job.status in {"active", "running"}]
+        return {
+            "ok": True,
+            "assistant": _summary(agent),
+            "autonomous_active": any(job.execution_mode == "agent_run" for job in active),
+            "jobs": [
+                {
+                    "label": job.label,
+                    "kind": "autonomous_agent_run" if job.execution_mode == "agent_run" else "reminder",
+                    "status": job.status,
+                    "schedule": job.cron_expr or (job.run_once_at.isoformat() if job.run_once_at else None),
+                    "next_run_at": job.next_run_at.isoformat() if job.next_run_at else None,
+                    "last_run_at": job.last_run_at.isoformat() if job.last_run_at else None,
+                }
+                for job in jobs
+            ],
+        }
+
+    @tool
+    async def configure_assistant_autonomous_run(
+        agent_id: str,
+        label: str,
+        sop: str,
+        schedule: str,
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Create a real recurring autonomous run for an owned assistant after explicit Owner confirmation.
+
+        This executes the assistant's enabled tools from a written SOP. It is
+        not a reminder and must never be used merely to edit instructions.
+        """
+        if not confirmed:
+            return {"ok": False, "needs_confirmation": True, "error": "Minta konfirmasi eksplisit sebelum mengaktifkan pekerjaan background berulang."}
+        agent = await _owned(agent_id)
+        if agent is None:
+            return {"ok": False, "error": "Assistant tidak ditemukan atau bukan milik pengguna ini."}
+        config = agent.tools_config if isinstance(agent.tools_config, dict) else {}
+        if not config.get("scheduler"):
+            return {"ok": False, "error": "Scheduler belum aktif untuk assistant ini. Konfigurasikan workflow scheduler terlebih dahulu."}
+        clean_label, clean_sop = label.strip(), sop.strip()
+        if not clean_label or not clean_sop:
+            return {"ok": False, "error": "Label dan SOP wajib diisi."}
+        if len(clean_sop) > 6000:
+            return {"ok": False, "error": "SOP terlalu panjang (maksimum 6000 karakter)."}
+        from app.core.tools.scheduler_tool import _compute_next_run, _parse_schedule
+        try:
+            cron_expr, run_once_at = _parse_schedule(schedule)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        if not cron_expr or run_once_at is not None:
+            return {"ok": False, "error": "Autonomous run wajib memakai jadwal berulang."}
+        if cron_expr == "* * * * *":
+            return {"ok": False, "error": "Interval minimum autonomous run adalah setiap 2 menit."}
+
+        async with db_factory() as db:
+            session_query = select(Session).where(Session.agent_id == agent.id)
+            if owner_phone:
+                session_query = session_query.where(Session.external_user_id == owner_phone)
+            session = (await db.execute(session_query.order_by(desc(Session.updated_at)).limit(1))).scalar_one_or_none()
+            if session is None:
+                return {"ok": False, "error": "Belum ada sesi Owner untuk assistant ini. Minta Owner chat assistant sekali dulu."}
+            duplicate = (await db.execute(select(ScheduledJob).where(
+                ScheduledJob.session_id == session.id,
+                ScheduledJob.label == clean_label,
+                ScheduledJob.status.in_(["active", "running"]),
+            ))).scalar_one_or_none()
+            if duplicate is not None:
+                return {"ok": False, "error": f"Job aktif '{clean_label}' sudah ada.", "job_id": str(duplicate.id)}
+            job = ScheduledJob(
+                agent_id=agent.id,
+                session_id=session.id,
+                label=clean_label,
+                cron_expr=cron_expr,
+                payload=clean_sop,
+                execution_mode="agent_run",
+                status="active",
+                next_run_at=_compute_next_run(cron_expr),
+            )
+            db.add(job)
+            await db.commit()
+            await db.refresh(job)
+        return {
+            "ok": True,
+            "assistant": _summary(agent),
+            "job": {
+                "id": str(job.id), "label": job.label, "kind": "autonomous_agent_run",
+                "status": job.status, "schedule": job.cron_expr,
+                "next_run_at": job.next_run_at.isoformat() if job.next_run_at else None,
+            },
+        }
+
+    @tool
+    async def stop_assistant_automation(agent_id: str, label: str = "", confirmed: bool = False) -> dict[str, Any]:
+        """Stop one or all active autonomous runs for an owned assistant after explicit Owner confirmation."""
+        if not confirmed:
+            return {"ok": False, "needs_confirmation": True, "error": "Minta konfirmasi eksplisit sebelum menghentikan pekerjaan background."}
+        agent = await _owned(agent_id)
+        if agent is None:
+            return {"ok": False, "error": "Assistant tidak ditemukan atau bukan milik pengguna ini."}
+        async with db_factory() as db:
+            query = select(ScheduledJob).where(
+                ScheduledJob.agent_id == agent.id,
+                ScheduledJob.execution_mode == "agent_run",
+                ScheduledJob.status.in_(["active", "running"]),
+            )
+            if label.strip():
+                query = query.where(ScheduledJob.label == label.strip())
+            jobs = list((await db.execute(query)).scalars().all())
+            for job in jobs:
+                job.status = "cancelled"
+                job.next_run_at = None
+            await db.commit()
+        return {"ok": True, "stopped": [job.label for job in jobs], "remaining_active": 0 if not label.strip() else None}
+
+    @tool
     async def update_assistant(
         agent_id: str,
         purpose: str = "",
@@ -834,7 +973,19 @@ def build_arthur_v2_tools(
             managed.version += 1
             await db.commit()
             await db.refresh(managed)
-            return {"ok": True, "assistant": _summary(managed)}
+            active_autonomous = (await db.execute(select(ScheduledJob.id).where(
+                ScheduledJob.agent_id == managed.id,
+                ScheduledJob.execution_mode == "agent_run",
+                ScheduledJob.status.in_(["active", "running"]),
+            ).limit(1))).scalar_one_or_none() is not None
+            return {
+                "ok": True,
+                "assistant": _summary(managed),
+                "automation": {
+                    "autonomous_active": active_autonomous,
+                    "note": "Mengubah purpose/instructions tidak membuat atau mengaktifkan autonomous run.",
+                },
+            }
 
     @tool
     async def add_assistant_knowledge(
@@ -1298,7 +1449,10 @@ def build_arthur_v2_tools(
         list_managed_assistants,
         get_current_plan,
         inspect_managed_assistant,
+        get_assistant_automation_status,
         create_assistant,
+        configure_assistant_autonomous_run,
+        stop_assistant_automation,
         update_assistant,
         add_assistant_knowledge,
         delete_assistant,
