@@ -35,6 +35,7 @@ logger = structlog.get_logger(__name__)
 # Shorthand → cron expression
 _SHORTHAND_MAP = {
     "every 1m": "* * * * *",
+    "every 2m": "*/2 * * * *",
     "every 5m": "*/5 * * * *",
     "every 15m": "*/15 * * * *",
     "every 30m": "*/30 * * * *",
@@ -296,6 +297,70 @@ def build_scheduler_tools(session_id: uuid.UUID, agent_id: uuid.UUID, db_factory
     set_multiple_reminders = tool(_set_multiple_reminders)
     set_multiple_reminders.name = "set_multiple_reminders"  # override: langchain mengambil nama dari inner func
 
+    # --- set_autonomous_agent_run ---
+
+    @tool
+    async def set_autonomous_agent_run(label: str, sop: str, schedule: str) -> str:
+        """Buat job berulang yang menjalankan SOP melalui tools agent tanpa chat trigger.
+
+        Gunakan HANYA jika Owner secara eksplisit meminta agent bekerja otomatis di
+        background. ``sop`` harus spesifik: data apa yang dicek, tool apa yang
+        digunakan, kondisi apa yang dilaporkan, dan kapan harus diam. Job ini
+        berbeda dari reminder biasa: scheduler benar-benar memanggil runtime agent.
+
+        Args:
+            label: Nama unik job, misalnya ``monitor_gmail_error``.
+            sop: Instruksi operasional yang akan dieksekusi setiap jadwal.
+            schedule: Jadwal BERULANG, misalnya ``every 5m`` atau ``0 9 * * 1-5``.
+        """
+        clean_label = label.strip()
+        clean_sop = sop.strip()
+        if not clean_label or not clean_sop:
+            return "[error] label dan SOP wajib diisi."
+        if len(clean_sop) > 6000:
+            return "[error] SOP terlalu panjang (maksimum 6000 karakter)."
+
+        try:
+            cron_expr, run_once_at = _parse_schedule(schedule)
+        except ValueError as exc:
+            return f"[error] {exc}"
+        if not cron_expr or run_once_at is not None:
+            return "[error] autonomous_agent_run wajib memakai jadwal berulang (cron atau 'every ...'), bukan jadwal sekali jalan."
+        if cron_expr == "* * * * *":
+            return "[error] interval minimum autonomous_agent_run adalah setiap 2 menit; gunakan 'every 2m' atau lebih lambat."
+
+        async with db_factory() as own_db:
+            existing = await own_db.execute(
+                select(ScheduledJob).where(
+                    ScheduledJob.session_id == session_id,
+                    ScheduledJob.label == clean_label,
+                    ScheduledJob.status.in_(["active", "running"]),
+                )
+            )
+            if existing.scalar_one_or_none() is not None:
+                return f"[error] Job aktif dengan label '{clean_label}' sudah ada. Batalkan dahulu atau gunakan label lain."
+
+            next_run = _compute_next_run(cron_expr)
+            own_db.add(ScheduledJob(
+                agent_id=agent_id,
+                session_id=session_id,
+                label=clean_label,
+                cron_expr=cron_expr,
+                run_once_at=None,
+                payload=clean_sop,
+                execution_mode="agent_run",
+                status="active",
+                next_run_at=next_run,
+            ))
+            await own_db.commit()
+
+        logger.info("scheduler_tool.set_autonomous_agent_run", label=clean_label, cron=cron_expr)
+        return (
+            f"Autonomous agent run '{clean_label}' aktif. Jadwal: cron ({cron_expr}). "
+            "SOP akan dieksekusi melalui tools agent; agent hanya mengirim laporan bila ada temuan. "
+            f"Owner bisa menghentikannya kapan saja dengan cancel_reminder(label='{clean_label}')."
+        )
+
 
     # --- list_reminders ---
 
@@ -317,8 +382,10 @@ def build_scheduler_tools(session_id: uuid.UUID, agent_id: uuid.UUID, db_factory
         for j in jobs:
             sched = j.cron_expr or (j.run_once_at.isoformat() if j.run_once_at else "-")
             next_run = j.next_run_at.isoformat() if j.next_run_at else "-"
-            lines.append(f"- **{j.label}** | jadwal: {sched} | next: {next_run} | pesan: \"{j.payload}\"")
-        return "Reminder aktif:\n" + "\n".join(lines)
+            kind = "autonomous_agent_run" if j.execution_mode == "agent_run" else "reminder"
+            content = "SOP" if j.execution_mode == "agent_run" else "pesan"
+            lines.append(f"- **{j.label}** | jenis: {kind} | jadwal: {sched} | next: {next_run} | {content}: \"{j.payload}\"")
+        return "Job aktif:\n" + "\n".join(lines)
 
     # --- cancel_reminder ---
 
@@ -348,6 +415,6 @@ def build_scheduler_tools(session_id: uuid.UUID, agent_id: uuid.UUID, db_factory
             job.next_run_at = None
             await db.commit()
         logger.info("scheduler_tool.cancelled", label=label)
-        return f"Reminder '{label}' berhasil dibatalkan."
+        return f"Job '{label}' berhasil dibatalkan."
 
-    return [set_reminder, set_multiple_reminders, list_reminders, cancel_reminder]
+    return [set_reminder, set_multiple_reminders, set_autonomous_agent_run, list_reminders, cancel_reminder]

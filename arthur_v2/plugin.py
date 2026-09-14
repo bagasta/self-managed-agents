@@ -285,7 +285,8 @@ def _capability_context_for_memory(*, scheduler: bool, google_services: list[str
     if scheduler:
         facts.append(
             "Scheduler aktif: gunakan tool reminder yang tersedia untuk membuat, melihat, atau membatalkan "
-            "pengingat. Jangan menyatakan reminder aktif sebelum tool berhasil."
+            "pengingat. Jika Owner secara eksplisit meminta SOP berjalan mandiri di background, gunakan "
+            "set_autonomous_agent_run dengan SOP yang jelas; jangan menyatakan job aktif sebelum tool berhasil."
         )
     if google_services:
         facts.append(
@@ -295,7 +296,7 @@ def _capability_context_for_memory(*, scheduler: bool, google_services: list[str
     return "\n".join(facts)
 
 
-def _build_target_tool_usage(*, google_services: list[str]) -> str:
+def _build_target_tool_usage(*, google_services: list[str], scheduler: bool = False) -> str:
     """Generate executable tool guidance for the *user-owned* target agent.
 
     This belongs in the target agent's instructions, never in Arthur's own
@@ -335,6 +336,16 @@ def _build_target_tool_usage(*, google_services: list[str]) -> str:
             "4. Untuk perubahan stok yang spesifik, temukan baris dan nilai saat ini lebih dulu, lalu gunakan tool update yang tersedia (misalnya `modify_sheet_values`) hanya pada range/record yang tepat. "
             "Jangan mengubah range massal atau membuat tab/kolom baru tanpa instruksi Owner.\n"
             "5. Setelah write berhasil, baca kembali record bila tool memungkinkan. Jika write gagal atau hasilnya ambigu, jangan katakan transaksi/stok sudah diperbarui."
+        )
+    if scheduler:
+        blocks.append(
+            "# OTOMASI BACKGROUND\n"
+            "- Reminder biasa hanya mengirim pesan terjadwal; reminder tidak menjalankan tools agent.\n"
+            "- Bila Owner dengan jelas meminta SOP berjalan sendiri tanpa chat trigger, gunakan `set_autonomous_agent_run`. "
+            "SOP wajib menyebutkan apa yang dicek/diubah, tool atau data yang dipakai, kondisi laporan, dan kondisi diam. "
+            "Gunakan interval minimum setiap 2 menit. Jangan membuat automation hanya karena Owner meminta cek sekali.\n"
+            "- Setelah tool berhasil, jelaskan label dan jadwalnya serta bahwa Owner dapat menghentikannya kapan saja. "
+            "Untuk penghentian, selalu list dulu lalu cancel job yang relevan."
         )
     return "\n\n".join(blocks)
 
@@ -630,16 +641,19 @@ def build_arthur_v2_tools(
                 "plan": plan_snapshot,
                 "recommended_plan": "tier_2" if plan_snapshot.get("agents_limit") == 1 else "tier_3",
             }
-        target_instructions = instructions.strip()
-        tool_usage = _build_target_tool_usage(google_services=google_services)
-        if "# ATURAN PENGGUNAAN TOOLS" not in target_instructions:
-            target_instructions = f"{target_instructions}\n\n{tool_usage}"
-        workflow_data["tool_usage"] = tool_usage
-
         scheduler_enabled = _needs_scheduler(
             name, purpose, instructions, workflow_data.get("trigger", ""),
             workflow_data.get("steps", ""), workflow_data.get("outputs", ""),
         )
+        target_instructions = instructions.strip()
+        tool_usage = _build_target_tool_usage(
+            google_services=google_services,
+            scheduler=scheduler_enabled,
+        )
+        if "# ATURAN PENGGUNAAN TOOLS" not in target_instructions:
+            target_instructions = f"{target_instructions}\n\n{tool_usage}"
+        workflow_data["tool_usage"] = tool_usage
+
         tools_config: dict[str, Any] = {
             "sandbox": bool(enable_deploy),
             "deploy": bool(enable_deploy),

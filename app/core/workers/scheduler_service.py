@@ -296,6 +296,66 @@ async def _run_heartbeat_job(job, agent_model, db) -> None:
             log.warning("heartbeat.sse_failed", error=str(bus_exc))
 
 
+async def _run_autonomous_agent_job(job, agent_model, session, db, log) -> bool:
+    """Execute a persisted SOP through the agent runtime.
+
+    Returns True only when an outbound report was attempted and failed.  A quiet
+    ``AUTONOMOUS_OK`` result is a successful run, not a delivery failure.
+    """
+    from app.core.domain.agent_quota_service import record_agent_token_usage
+    from app.core.engine.agent_runner import run_agent
+    from app.core.engine.session_lock import session_run_lock
+
+    prompt = (
+        "[AUTONOMOUS_AGENT_RUN]\n"
+        "Jalankan SOP berikut sekarang menggunakan Runtime Tool Contract yang tersedia. "
+        "Ini eksekusi background, bukan pesan dari user. Jangan membuat, mengubah, atau membatalkan jadwal. "
+        "Jangan mengarang hasil: gunakan tool bila SOP meminta data/aksi. "
+        "Jika tidak ada temuan atau aksi yang perlu disampaikan ke Owner, balas tepat `AUTONOMOUS_OK`. "
+        "Jika ada temuan, berikan laporan singkat berbasis hasil tool.\n\n"
+        f"SOP:\n{job.payload}"
+    )
+    log.info("autonomous_agent_run.running", execution_mode=job.execution_mode)
+    async with session_run_lock(session.id):
+        result = await run_agent(
+            agent_model=agent_model,
+            session=session,
+            user_message=prompt,
+            db=db,
+        )
+
+    tokens_used = int(result.get("tokens_used", 0) or 0)
+    if tokens_used > 0:
+        await record_agent_token_usage(agent_model, tokens_used, db)
+        log.info("autonomous_agent_run.token_usage_recorded", tokens_used=tokens_used)
+
+    reply = (result.get("reply") or "").strip()
+    if not reply or reply.upper().startswith("AUTONOMOUS_OK"):
+        log.info("autonomous_agent_run.ok")
+        return False
+
+    try:
+        from app.core.workers import event_bus
+        await event_bus.publish(str(session.id), {
+            "_event_type": "message",
+            "type": "autonomous_agent_run",
+            "label": job.label,
+            "reply": reply,
+        })
+    except Exception as bus_exc:
+        log.warning("autonomous_agent_run.event_bus_failed", error=str(bus_exc))
+
+    if not session.channel_type:
+        return False
+    try:
+        await _send_scheduled_channel_message(session, agent_model, reply, log)
+        log.info("autonomous_agent_run.sent", channel=session.channel_type)
+        return False
+    except Exception as exc:
+        log.error("autonomous_agent_run.send_failed", error=str(exc), channel=session.channel_type)
+        return True
+
+
 def _update_job_after_delivery(job: Any, *, now: datetime, delivery_failed: bool) -> None:
     """Apply retry/cron/one-shot state without shadowing datetime imports."""
     if delivery_failed:
@@ -322,8 +382,6 @@ def _update_job_after_delivery(job: Any, *, now: datetime, delivery_failed: bool
 
 async def _run_job(job_id) -> None:
     """Jalankan satu scheduled job: inject payload ke agent, kirim reply ke channel."""
-    from app.core.engine.agent_runner import run_agent
-    from app.core.infra.channel_service import send_message
     from app.database import AsyncSessionLocal
     from app.models.agent import Agent
     from app.models.scheduled_job import ScheduledJob
@@ -390,35 +448,33 @@ async def _run_job(job_id) -> None:
         delivery_failed = False
 
         try:
-            # Kirim payload reminder langsung tanpa LLM — menghilangkan latensi 2-3 menit
-            # dari full agent run. Reminder harus tepat waktu; formatting natural nomor dua.
-            reply = job.payload
-
-            # Publish ke SSE event bus (in-app / UI real-time)
-            # Diisolasi: error event_bus tidak boleh memblokir pengiriman ke channel eksternal
-            try:
-                from app.core.workers import event_bus
-                await event_bus.publish(str(job.session_id), {
-                    "_event_type": "message",
-                    "type": "scheduled_message",
-                    "label": job.label,
-                    "reply": reply,
-                })
-                log.info("scheduler_service.event_published")
-            except Exception as bus_exc:
-                log.warning("scheduler_service.event_bus_failed", error=str(bus_exc))
-
-            # Kirim reply ke channel eksternal (WhatsApp / wa-dev / dll).
-            if session.channel_type:
+            if job.execution_mode == "agent_run":
+                delivery_failed = await _run_autonomous_agent_job(job, agent_model, session, db, log)
+            else:
+                # Reminder biasa dikirim langsung tanpa LLM agar tepat waktu.
+                reply = job.payload
                 try:
-                    await _send_scheduled_channel_message(session, agent_model, reply, log)
-                except Exception as send_exc:
-                    delivery_failed = True
-                    log.error(
-                        "scheduler_service.reply_send_failed",
-                        channel=session.channel_type,
-                        error=str(send_exc),
-                    )
+                    from app.core.workers import event_bus
+                    await event_bus.publish(str(job.session_id), {
+                        "_event_type": "message",
+                        "type": "scheduled_message",
+                        "label": job.label,
+                        "reply": reply,
+                    })
+                    log.info("scheduler_service.event_published")
+                except Exception as bus_exc:
+                    log.warning("scheduler_service.event_bus_failed", error=str(bus_exc))
+
+                if session.channel_type:
+                    try:
+                        await _send_scheduled_channel_message(session, agent_model, reply, log)
+                    except Exception as send_exc:
+                        delivery_failed = True
+                        log.error(
+                            "scheduler_service.reply_send_failed",
+                            channel=session.channel_type,
+                            error=str(send_exc),
+                        )
 
         except Exception as exc:
             log.error("scheduler_service.job_error", error=str(exc), exc_info=True)

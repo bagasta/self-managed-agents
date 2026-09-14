@@ -135,6 +135,59 @@ async def test_set_reminder_with_runtime_contract_persists_scheduled_job() -> No
         await engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_set_autonomous_agent_run_persists_agent_execution_mode() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    agent_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(ScheduledJob.__table__.create)
+
+        tools = build_scheduler_tools(session_id, agent_id, session_factory)
+        set_autonomous = next(tool for tool in tools if tool.name == "set_autonomous_agent_run")
+        result = await set_autonomous.ainvoke({
+            "label": "monitor_gmail_error",
+            "sop": "Cek Gmail dengan tool yang tersedia. Laporkan hanya email error baru.",
+            "schedule": "every 2m",
+        })
+
+        assert "Autonomous agent run" in result
+        async with session_factory() as db:
+            job = (
+                await db.execute(
+                    select(ScheduledJob).where(ScheduledJob.session_id == session_id)
+                )
+            ).scalar_one()
+
+        assert job.execution_mode == "agent_run"
+        assert job.cron_expr == "*/2 * * * *"
+        assert job.status == "active"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_autonomous_agent_run_rejects_one_minute_interval() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(ScheduledJob.__table__.create)
+        tools = build_scheduler_tools(uuid.uuid4(), uuid.uuid4(), session_factory)
+        set_autonomous = next(tool for tool in tools if tool.name == "set_autonomous_agent_run")
+        result = await set_autonomous.ainvoke({
+            "label": "too_fast",
+            "sop": "Cek status.",
+            "schedule": "every 1m",
+        })
+        assert "minimum" in result
+    finally:
+        await engine.dispose()
+
+
 def test_whatsapp_reminder_request_self_heals_scheduler_when_disabled() -> None:
     session = SimpleNamespace(channel_type="whatsapp")
 

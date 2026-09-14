@@ -31,6 +31,11 @@ class ScheduledJob(Base):
     run_once_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # The message payload injected as a user message when the job fires
     payload: Mapped[str] = mapped_column(Text, nullable=False)
+    # reminder = send payload directly; agent_run = execute payload as an SOP
+    # through the agent runtime before notifying the owner.
+    execution_mode: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="reminder", server_default="reminder"
+    )
     # active | running | paused | cancelled | done
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
