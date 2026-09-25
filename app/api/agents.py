@@ -6,7 +6,7 @@ from urllib.parse import urlsplit
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import AnyHttpUrl, BaseModel, Field, ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config_schema import ToolsConfig
@@ -15,6 +15,7 @@ from app.core.infra.channel_service import decrypt_value, encrypt_value
 from app.database import get_db
 from app.deps import verify_api_key
 from app.models.agent import Agent
+from app.models.scheduled_job import ScheduledJob
 from app.schemas.agent import (
     AgentCreate,
     AgentListResponse,
@@ -265,7 +266,19 @@ async def delete_agent(
             await delete_wa_device(agent.wa_device_id)
         except Exception as exc:
             logger.warning("delete_agent.wa_disconnect_failed", error=str(exc))
+
+    # Deletion is intentionally a soft-delete so the agent's audit trail stays
+    # available.  Database ON DELETE CASCADE therefore does not apply: cancel
+    # every executable background artifact explicitly in this same transaction.
     agent.is_deleted = True
+    await db.execute(
+        update(ScheduledJob)
+        .where(
+            ScheduledJob.agent_id == agent.id,
+            ScheduledJob.status.in_(("active", "running", "paused")),
+        )
+        .values(status="cancelled", next_run_at=None)
+    )
     await db.flush()
 
 

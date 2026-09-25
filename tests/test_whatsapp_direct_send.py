@@ -184,7 +184,9 @@ async def test_outbound_wa_window_treats_wadev_devices_as_shared_number(monkeypa
         (True, 1),
         (True, 2),
         (True, 3),
-        (False, 4),
+        # Rejected attempts do not enter the window, otherwise a retry would
+        # keep extending its own cooldown and a durable queue could never drain.
+        (False, 3),
     ]
     clear_wa_outbound_direct_memory()
 

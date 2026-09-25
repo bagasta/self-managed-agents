@@ -205,14 +205,8 @@ from app.core.engine.google_mcp_support import (
     _is_google_sheets_authoring_intent,
     _is_google_slides_relayout_intent,
     has_verified_google_pdf_artifact,
-    is_google_pdf_report_followup,
-    is_google_spreadsheet_pdf_report_intent,
-    resolve_google_spreadsheet_pdf_report_intent,
     google_spreadsheet_pdf_report_directive,
     scope_google_pdf_report_tools,
-    _needs_google_forms_followup,
-    _needs_google_sheets_followup,
-    _needs_google_slides_followup,
     apply_google_mcp_reply_overrides,
     apply_mcp_error_notice,
     google_forms_create_retry_directive,
@@ -220,10 +214,8 @@ from app.core.engine.google_mcp_support import (
     google_forms_followup_retry_directive,
     google_forms_request_kind_retry_directive,
     google_sheets_followup_directive,
-    google_spreadsheet_bootstrap_directive,
     filter_google_mcp_tools_by_services,
     is_google_workspace_mcp_configured,
-    needs_google_spreadsheet_bootstrap,
     prepare_google_mcp_runtime,
     sanitize_google_forms_tools,
     google_slides_dimension_retry_directive,
@@ -1022,6 +1014,19 @@ async def run_agent(
         model=agent_model.model,
     )
     log.info("agent_run.start")
+
+    # A fresh customer turn makes any earlier unsent reply obsolete.  The new
+    # run will either send a current response or enqueue a replacement.
+    if getattr(session, "channel_type", None) == "whatsapp" and not str(user_message or "").startswith("["):
+        from app.core.domain.outbound_queue_service import cancel_queued_outbound_for_target
+
+        cancelled = await cancel_queued_outbound_for_target(
+            db,
+            agent_id=agent_id,
+            target=getattr(session, "external_user_id", None),
+        )
+        if cancelled:
+            log.info("outbound_queue.superseded_by_inbound", cancelled=cancelled)
     _phase_timings_ms: dict[str, int] = {}
     _phase_invocation_counts: dict[str, int] = {}
 
@@ -1314,48 +1319,17 @@ async def run_agent(
     google_auth_recovery_followup = False
     google_auth_recovery_request = None
     execution_user_message = user_message
-    _direct_google_pdf_report_intent = is_google_spreadsheet_pdf_report_intent(
-        execution_user_message
-    )
-    google_pdf_report_intent = resolve_google_spreadsheet_pdf_report_intent(
-        execution_user_message,
-        history_rows,
-    )
     _session_metadata = dict(getattr(session, "metadata_", None) or {})
     _active_pdf_workflow = _session_metadata.get("active_google_pdf_workflow")
-    _has_active_pdf_workflow = (
+    # Never activate or scope a workflow from words in a message.  Only a
+    # workflow state created by an explicit, structured action may continue
+    # across turns.  Normal requests always expose the agent's configured
+    # tools and the model must choose a tool through a real tool call.
+    google_pdf_report_intent = (
         isinstance(_active_pdf_workflow, dict)
         and _active_pdf_workflow.get("status") == "pending"
+        and _active_pdf_workflow.get("activation") == "explicit_tool_plan"
     )
-    if not google_pdf_report_intent and is_google_pdf_report_followup(execution_user_message):
-        if _has_active_pdf_workflow:
-            google_pdf_report_intent = True
-            log.info("agent_run.google_pdf_report_resumed_from_session_state")
-        else:
-            # Migration/recovery path for a workflow started before session task
-            # state existed. It is deliberately used only for an explicit report
-            # follow-up, never for arbitrary future chat.
-            _full_history_rows = await load_history(session.id, db, max_turns=None)
-            if any(
-                is_google_spreadsheet_pdf_report_intent(
-                    str(getattr(row, "content", "") or "")
-                )
-                for row in _full_history_rows
-                if str(getattr(row, "role", "") or "") == "user"
-            ):
-                google_pdf_report_intent = True
-                log.info("agent_run.google_pdf_report_recovered_from_history")
-
-    if google_pdf_report_intent and (
-        _direct_google_pdf_report_intent or not _has_active_pdf_workflow
-    ):
-        _session_metadata["active_google_pdf_workflow"] = {
-            "status": "pending",
-            "kind": "spreadsheet_pdf_report",
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }
-        session.metadata_ = _session_metadata
-        log.info("agent_run.google_pdf_report_session_state_pending")
     # Include only recent user turns. This preserves an explicit “lanjut
     # eksekusi” workflow without allowing an old agent reply to reactivate it.
     google_pdf_report_context = "\n".join(
@@ -1670,24 +1644,6 @@ async def run_agent(
                     user_message=user_message,
                     log=log,
                 )
-            if (
-                customer_survey_resource is None
-                and needs_google_spreadsheet_bootstrap(
-                    tools_config=tools_config,
-                    user_message=execution_user_message,
-                    agent_instructions=str(
-                        getattr(agent_model, "instructions", "") or ""
-                    ),
-                    mcp_tools=mcp_tools,
-                )
-            ):
-                system_prompt = (
-                    (system_prompt if isinstance(system_prompt, str) else "")
-                    + google_spreadsheet_bootstrap_directive(
-                        execution_user_message
-                    )
-                )
-                log.info("agent_run.google_spreadsheet_bootstrap_required")
             mcp_tool_names = [getattr(tool, "name", "") for tool in mcp_tools]
         if mcp_tools:
             if google_mcp_parent_only and subagent_list:
@@ -1844,16 +1800,16 @@ async def run_agent(
                         _middleware.append(TodoListMiddleware())
                         log.info(
                             "agent_run.google_pdf_report_task_planning_enabled",
-                            agent_id=str(agent.id),
-                            run_id=str(run.id),
+                            agent_id=str(agent_id),
+                            run_id=str(run_id),
                         )
                     except ImportError:
                         # Retain the Google-native workflow and artifact guard for
                         # deployments which are still upgrading LangChain.
                         log.warning(
                             "agent_run.google_pdf_report_task_planning_unavailable",
-                            agent_id=str(agent.id),
-                            run_id=str(run.id),
+                            agent_id=str(agent_id),
+                            run_id=str(run_id),
                         )
                 if google_mcp_parent_only:
                     _middleware.append(BlockTaskToolMiddleware())
@@ -2086,13 +2042,10 @@ async def run_agent(
                     wa_outbound_block_reply,
                 )
 
-                _recent_direct_wa_context = "\n".join(
-                    _operator_message_payload(getattr(row, "content", "") or "")
-                    for row in (history_rows or [])[-12:]
-                )
-                if looks_like_outbound_wa_spam_request(
-                    f"{execution_user_message}\n{_recent_direct_wa_context}"
-                ):
+                # Previous delivery-error copy can itself contain the word
+                # "spam". Classify the current instruction only so a failed
+                # Kamil send never blocks a legitimate reply to Gusti.
+                if looks_like_outbound_wa_spam_request(execution_user_message):
                     _wa_send_failed = True
                     tool_result = f"[send_to_number blocked] {wa_outbound_block_reply('spam_request')}"
                     steps[0]["result"] = tool_result
@@ -2104,12 +2057,21 @@ async def run_agent(
                         target=target_phone,
                     )
                     if not allowed:
-                        _wa_send_failed = True
-                        tool_result = f"[send_to_number blocked] {wa_outbound_block_reply('rate_limit')}"
+                        from app.core.domain.outbound_queue_service import enqueue_outbound_message
+
+                        queued = await enqueue_outbound_message(
+                            db,
+                            agent_id=agent_id,
+                            session_id=session.id,
+                            target=target_phone,
+                            text=draft_message,
+                            source_device_id=str(_channel_cfg.get("device_id", "") or ""),
+                        )
+                        tool_result = f"[QUEUED_TO_NUMBER:{target_phone}] id={queued.id}"
                         steps[0]["result"] = tool_result
-                        final_reply = wa_outbound_block_reply("rate_limit")
+                        final_reply = "Pesan masuk antrean dan akan dikirim otomatis saat slot pengiriman tersedia."
                         log.warning(
-                            "agent_run.direct_wa_confirmation_blocked_rate_limit",
+                            "agent_run.direct_wa_confirmation_queued_rate_limit",
                             target=target_phone,
                             count=count,
                         )
@@ -3240,7 +3202,9 @@ async def run_agent(
         for _msg_record in parsed["db_messages"]:
             db.add(_msg_record)
 
-        _needs_forms_followup, _followup_form_id = _needs_google_forms_followup(execution_user_message, steps)
+        # Do not launch another agent/tool pass from words in the original
+        # request.  A model tool call is the only authority to continue work.
+        _needs_forms_followup, _followup_form_id = False, None
         if _needs_forms_followup and _followup_form_id:
             log.info("agent_run.forms_followup_continue", form_id=_followup_form_id)
             _forms_followup_directive = google_forms_followup_directive(_followup_form_id)
@@ -3315,7 +3279,7 @@ async def run_agent(
                             form_id=_followup_form_id,
                         )
 
-        _needs_slides_followup, _followup_presentation_id = _needs_google_slides_followup(execution_user_message, steps)
+        _needs_slides_followup, _followup_presentation_id = False, None
         if _needs_slides_followup and _followup_presentation_id:
             log.info("agent_run.slides_followup_continue", presentation_id=_followup_presentation_id)
             _slides_followup_directive = google_slides_followup_directive(
@@ -3355,7 +3319,7 @@ async def run_agent(
                     presentation_id=_followup_presentation_id,
                 )
 
-        _needs_sheets_followup, _followup_spreadsheet_id = _needs_google_sheets_followup(execution_user_message, steps)
+        _needs_sheets_followup, _followup_spreadsheet_id = False, None
         if _needs_sheets_followup and _followup_spreadsheet_id:
             log.info("agent_run.sheets_followup_continue", spreadsheet_id=_followup_spreadsheet_id)
             _sheets_followup_directive = google_sheets_followup_directive(

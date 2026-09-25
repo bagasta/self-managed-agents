@@ -238,6 +238,7 @@ async def get_google_auth_link(
     external_user_id: str = Query(...),
     agent_id: str = Query(...),
     scopes: str = Query(..., min_length=1, description="Comma-separated, least-privilege OAuth scopes for the target agent."),
+    return_url: str | None = Query(None, max_length=2048),
 ) -> JSONResponse:
     """
     Generate Google OAuth auth URL untuk user tertentu.
@@ -247,7 +248,12 @@ async def get_google_auth_link(
         requested_scopes = [s.strip() for s in scopes.split(",") if s.strip()]
         if not requested_scopes:
             return JSONResponse({"error": "OAuth scopes wajib diisi; default scope luas tidak diizinkan."}, status_code=422)
-        body: dict = {"external_user_id": external_user_id, "agent_id": agent_id, "scopes": requested_scopes}
+        body: dict = {
+            "external_user_id": external_user_id,
+            "agent_id": agent_id,
+            "scopes": requested_scopes,
+            "return_url": return_url,
+        }
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
                 f"{_integration_service_url()}/v1/integrations/google/connect",

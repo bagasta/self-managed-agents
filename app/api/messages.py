@@ -1,6 +1,7 @@
 import asyncio
 import uuid
 
+import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -26,6 +27,7 @@ from app.schemas.message import MessageCreate, MessageResponse, StepSummary
 
 router = APIRouter(prefix="/v1/agents", tags=["messages"])
 limiter = Limiter(key_func=get_remote_address)
+log = structlog.get_logger(__name__)
 
 
 @router.post(
@@ -138,6 +140,20 @@ async def send_message(
         # This run was interrupted by a subsequent message from the same user.
         # The new request will handle the reply — nothing to return here.
         raise
+    except Exception:
+        # A provider/MCP failure must not surface as a bare 500 in the dashboard.
+        # Keep the exception (with traceback) in the API log for diagnosis, while
+        # returning a retryable message to the end user.
+        log.exception(
+            "agent_message.run_failed",
+            agent_id=str(agent_id),
+            session_id=str(session_id),
+        )
+        return MessageResponse(
+            reply="Maaf, saya sedang mengalami gangguan saat memproses pesan ini. Silakan coba lagi sebentar lagi.",
+            steps=[],
+            run_id=None,
+        )
     finally:
         await unregister_active_task(session_id, asyncio.current_task())
 

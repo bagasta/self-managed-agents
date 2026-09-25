@@ -101,15 +101,19 @@ async def check_wa_outbound_direct_window(
     if r:
         try:
             await r.zremrangebyscore(key, 0, now - window_seconds)
+            count = int(await r.zcard(key))
+            if count >= limit:
+                return False, count
             await r.zadd(key, {str(now): now})
             await r.expire(key, window_seconds * 2)
-            count = int(await r.zcard(key))
-            return count <= limit, count
+            return True, count + 1
         except Exception as exc:
             log.warning("wa_outbound_guard.redis_fail", error=str(exc))
 
     timestamps = _mem_outbound_windows.setdefault(key, [])
     timestamps[:] = [ts for ts in timestamps if now - ts <= window_seconds]
+    if len(timestamps) >= limit:
+        return False, len(timestamps)
     timestamps.append(now)
     if len(_mem_outbound_windows) > 5000:
         stale_keys = [
@@ -119,8 +123,7 @@ async def check_wa_outbound_direct_window(
         ]
         for stale_key in stale_keys:
             _mem_outbound_windows.pop(stale_key, None)
-    count = len(timestamps)
-    return count <= limit, count
+    return True, len(timestamps)
 
 
 def clear_wa_outbound_direct_memory() -> None:

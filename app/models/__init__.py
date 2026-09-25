@@ -5,6 +5,7 @@ from app.models.custom_tool import CustomTool
 from app.models.document import Document
 from app.models.memory import Memory
 from app.models.message import Message
+from app.models.outbound_message import OutboundMessage
 from app.models.run import Run
 from app.models.scheduled_job import ScheduledJob
 from app.models.session import Session
@@ -18,6 +19,7 @@ __all__ = [
     "Document",
     "Memory",
     "Message",
+    "OutboundMessage",
     "Run",
     "ScheduledJob",
     "Session",

@@ -19,6 +19,16 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class CreateSheetArgs(BaseModel):
+    """Normalized arguments for creating a tab in an existing spreadsheet."""
+
+    model_config = ConfigDict(extra="allow")
+
+    spreadsheet_id: str
+    sheet_name: str
+    source_sheet_name: str | None = None
+
+
 class ModifySheetValuesArgs(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -99,7 +109,10 @@ def is_google_spreadsheet_pdf_report_intent(message: str) -> bool:
     spreadsheet source to a verified PDF artifact.
     """
     text = str(message or "").casefold()
-    wants_pdf = any(marker in text for marker in ("pdf", "laporan", "report"))
+    # A spreadsheet called a "laporan" is still an ordinary spreadsheet task.
+    # Only an explicit PDF deliverable may activate the specialized, narrowed
+    # workflow; otherwise it hides the normal Drive/Sheets/Form tools.
+    wants_pdf = "pdf" in text
     has_sheet_source = any(
         marker in text
         for marker in ("spreadsheet", "google sheet", "google sheets", "sheet ", "sheetnya")
@@ -585,68 +598,6 @@ def build_google_workspace_resource_notice(tools_config: dict[str, Any]) -> str:
         "Jangan pernah mengarang atau mengganti spreadsheet_id. Jika ID ini menghasilkan 404, "
         "buat resource pengganti hanya untuk request tulis dari Owner/operator.\n"
         "[/SYSTEM NOTICE]\n"
-    )
-
-
-def needs_google_spreadsheet_bootstrap(
-    *,
-    tools_config: dict[str, Any] | None,
-    user_message: str,
-    agent_instructions: str,
-    mcp_tools: list[Any],
-) -> bool:
-    """Detect an authorized owner write when no verified default Sheet exists."""
-    config = tools_config if isinstance(tools_config, dict) else {}
-    resources = config.get("google_workspace_resources")
-    resources = resources if isinstance(resources, dict) else {}
-    if (
-        resources.get("default_spreadsheet_verified") is True
-        and str(resources.get("default_spreadsheet_id") or "").strip()
-    ):
-        return False
-    if not any(
-        str(getattr(tool, "name", "") or "") == "create_spreadsheet"
-        for tool in mcp_tools
-    ):
-        return False
-    current = str(user_message or "").casefold()
-    write_requested = any(
-        marker in current
-        for marker in (
-            "catat",
-            "simpan",
-            "tambahkan",
-            "masukkan",
-            "input",
-            "rekam",
-            "tulis",
-            "buatkan tabel",
-        )
-    )
-    sheet_context = f"{current}\n{str(agent_instructions or '').casefold()}"
-    sheet_required = any(
-        marker in sheet_context
-        for marker in (
-            "google sheet",
-            "google spreadsheet",
-            "spreadsheet",
-            "catat keuangan",
-            "laporan keuangan",
-        )
-    )
-    return write_requested and sheet_required
-
-
-def google_spreadsheet_bootstrap_directive(user_message: str) -> str:
-    return (
-        "\n\n## Verified Spreadsheet Bootstrap\n"
-        "Owner meminta aksi tulis ke Google Sheets, OAuth sudah aktif, dan belum ada "
-        "spreadsheet default yang terverifikasi. Jangan meminta ID, jangan menyuruh Owner "
-        "membuat Sheet manual, dan jangan meminta aktivasi Google Tasks/Calendar/API lain. "
-        "Gunakan hanya Sheets/Drive: buat spreadsheet yang sesuai workflow, isi header yang "
-        "diperlukan, selesaikan aksi tulis user pada turn ini, lalu baca kembali hasilnya. "
-        "Jangan mengklaim selesai sebelum tool tulis berhasil.\n"
-        f"Permintaan asli: {str(user_message or '').strip()[:1000]}"
     )
 
 
@@ -2238,6 +2189,10 @@ def sanitize_google_forms_tools(mcp_tools: list, log: Any) -> list:
     wrapped_tools: list = []
     sanitized_tool_names: list[str] = []
     get_events_tool = next((tool for tool in mcp_tools if getattr(tool, "name", "") == "get_events"), None)
+    get_spreadsheet_info_tool = next(
+        (tool for tool in mcp_tools if getattr(tool, "name", "") == "get_spreadsheet_info"),
+        None,
+    )
     create_sheet_tool = next((tool for tool in mcp_tools if getattr(tool, "name", "") == "create_sheet"), None)
     read_sheet_values_available = any(
         getattr(tool, "name", "") == "read_sheet_values" for tool in mcp_tools
@@ -2277,6 +2232,48 @@ def sanitize_google_forms_tools(mcp_tools: list, log: Any) -> list:
                     name=mcp_tool.name,
                     description=getattr(mcp_tool, "description", None),
                     args_schema=CreateSpreadsheetArgs,
+                )
+            )
+            sanitized_tool_names.append(tool_name)
+            continue
+
+        if tool_name == "create_sheet":
+            def _build_create_sheet_guarded(tool_to_call: Any):
+                async def _create_sheet_guarded(**kwargs):
+                    spreadsheet_id = str(kwargs.get("spreadsheet_id") or "").strip()
+                    sheet_name = str(kwargs.get("sheet_name") or "").strip()
+                    if spreadsheet_id and sheet_name and get_spreadsheet_info_tool is not None:
+                        try:
+                            info = await get_spreadsheet_info_tool.ainvoke(
+                                {"spreadsheet_id": spreadsheet_id}
+                            )
+                            existing_sheets = {
+                                name.casefold()
+                                for name in re.findall(r'-\s+"([^"]+)"\s+\(ID:', str(info))
+                            }
+                            if sheet_name.casefold() in existing_sheets:
+                                return (
+                                    "SHEETS_SHEET_ALREADY_EXISTS: Tab "
+                                    f"'{sheet_name}' sudah ada di spreadsheet {spreadsheet_id}. "
+                                    "Jangan buat/duplikasi tab lagi; gunakan tab tersebut dengan "
+                                    "modify_sheet_values atau format_sheet_range."
+                                )
+                        except Exception as exc:
+                            log.warning(
+                                "google_mcp.create_sheet_preflight_failed",
+                                spreadsheet_id=spreadsheet_id,
+                                error=str(exc)[:300],
+                            )
+                    return await tool_to_call.ainvoke(kwargs)
+
+                return _create_sheet_guarded
+
+            wrapped_tools.append(
+                StructuredTool.from_function(
+                    coroutine=_build_create_sheet_guarded(mcp_tool),
+                    name=mcp_tool.name,
+                    description=getattr(mcp_tool, "description", None),
+                    args_schema=CreateSheetArgs,
                 )
             )
             sanitized_tool_names.append(tool_name)
@@ -2731,7 +2728,6 @@ def _needs_generated_form_questions(questions: Any) -> bool:
     if not isinstance(questions, list) or not questions:
         return False
 
-    meaningful = 0
     blank_or_placeholder = 0
     for question in questions:
         if not isinstance(question, dict) or not question:
@@ -2741,9 +2737,10 @@ def _needs_generated_form_questions(questions: Any) -> bool:
         if not title or _is_placeholder_question_title(title):
             blank_or_placeholder += 1
             continue
-        meaningful += 1
-
-    return meaningful < 3 or blank_or_placeholder > 0
+    # A short, explicit list is a user requirement, not an incomplete form.
+    # Auto-filling two supplied questions used to silently replace them with
+    # the eight-question template. Only repair malformed placeholders.
+    return blank_or_placeholder > 0
 
 
 def _is_placeholder_question_title(title: str) -> bool:

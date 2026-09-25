@@ -29,6 +29,7 @@ _MAX_CONCURRENT_JOBS = 5
 _job_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_JOBS)
 _TICK_INTERVAL_SECONDS = 10
 _RUNNING_JOB_STALE_AFTER = timedelta(minutes=15)
+_OUTBOUND_QUEUE_RETRY_SECONDS = 10
 _running_tasks: set[asyncio.Task] = set()
 _SCHEDULER_HEARTBEAT_KEY = "health:scheduler_worker"
 _SCHEDULER_HEARTBEAT_TTL_SECONDS = max(30, _TICK_INTERVAL_SECONDS * 4)
@@ -142,6 +143,8 @@ async def _tick() -> None:
     from app.database import AsyncSessionLocal
     from app.models.scheduled_job import ScheduledJob
 
+    await _tick_outbound_queue()
+
     now = datetime.now(timezone.utc)
     stale_before = now - _RUNNING_JOB_STALE_AFTER
 
@@ -184,6 +187,100 @@ async def _tick() -> None:
 
     for task in tasks:
         _track_task(task)
+
+
+async def _tick_outbound_queue() -> None:
+    """Claim due outbound messages and dispatch them through the shared worker."""
+    from app.database import AsyncSessionLocal
+    from app.models.outbound_message import OutboundMessage
+
+    now = datetime.now(timezone.utc)
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(OutboundMessage)
+            .where(
+                OutboundMessage.status == "queued",
+                OutboundMessage.available_at <= now,
+            )
+            .order_by(OutboundMessage.available_at, OutboundMessage.created_at)
+            .limit(_MAX_CONCURRENT_JOBS)
+            .with_for_update(skip_locked=True)
+        )
+        messages = list(result.scalars().all())
+        for message in messages:
+            message.status = "sending"
+        if messages:
+            await db.commit()
+
+    for message in messages:
+        _track_task(asyncio.create_task(_run_outbound_message_guarded(message.id)))
+
+
+async def _run_outbound_message_guarded(message_id: Any) -> None:
+    async with _job_semaphore:
+        await _run_outbound_message(message_id)
+
+
+async def _run_outbound_message(message_id: Any) -> None:
+    """Send one claimed queue item, or defer it until the recipient slot opens."""
+    from app.core.engine.wa_outbound_guard import check_wa_outbound_direct_window
+    from app.core.infra.channel_service import send_message
+    from app.database import AsyncSessionLocal
+    from app.models.agent import Agent
+    from app.models.outbound_message import OutboundMessage
+    from app.models.session import Session
+
+    async with AsyncSessionLocal() as db:
+        item = (await db.execute(select(OutboundMessage).where(OutboundMessage.id == message_id))).scalar_one_or_none()
+        if item is None or item.status != "sending":
+            return
+        session = (await db.execute(select(Session).where(Session.id == item.session_id))).scalar_one_or_none()
+        agent = (await db.execute(select(Agent).where(Agent.id == item.agent_id))).scalar_one_or_none()
+        if session is None or agent is None:
+            item.status = "cancelled"
+            item.last_error = "session_or_agent_missing"
+            await db.commit()
+            return
+
+        if session.channel_type != "whatsapp":
+            item.status = "failed"
+            item.last_error = "outbound_queue_requires_whatsapp"
+            await db.commit()
+            return
+
+        channel_config = _scheduled_channel_config(session, agent)
+        allowed, count = await check_wa_outbound_direct_window(
+            device_id=item.source_device_id,
+            target=item.target,
+        )
+        if not allowed:
+            item.status = "queued"
+            item.available_at = datetime.now(timezone.utc) + timedelta(seconds=_OUTBOUND_QUEUE_RETRY_SECONDS)
+            item.last_error = f"rate_limited_count_{count}"
+            await db.commit()
+            logger.info("outbound_queue.deferred", message_id=str(item.id), target=item.target, count=count)
+            return
+
+        try:
+            await send_message(
+                channel_type="whatsapp",
+                channel_config=channel_config,
+                text=item.text,
+                to_override=item.target,
+            )
+        except Exception as exc:
+            item.status = "queued"
+            item.available_at = datetime.now(timezone.utc) + timedelta(seconds=_OUTBOUND_QUEUE_RETRY_SECONDS)
+            item.last_error = str(exc)[:500]
+            await db.commit()
+            logger.warning("outbound_queue.send_failed", message_id=str(item.id), error=str(exc))
+            return
+
+        item.status = "sent"
+        item.sent_at = datetime.now(timezone.utc)
+        item.last_error = None
+        await db.commit()
+        logger.info("outbound_queue.sent", message_id=str(item.id), target=item.target)
 
 
 async def _run_job_guarded(job_id) -> None:
@@ -334,6 +431,15 @@ async def _run_autonomous_agent_job(job, agent_model, session, db, log) -> bool:
         log.info("autonomous_agent_run.ok")
         return False
 
+    # The agent may have been deleted while its SOP was running.  Suppress the
+    # report and leave the job cancelled instead of allowing one final message.
+    await db.refresh(agent_model)
+    if agent_model.is_deleted:
+        job.status = "cancelled"
+        job.next_run_at = None
+        log.info("autonomous_agent_run.suppressed_agent_deleted")
+        return False
+
     try:
         from app.core.workers import event_bus
         await event_bus.publish(str(session.id), {
@@ -395,9 +501,14 @@ async def _run_job(job_id) -> None:
 
         agent_result = await db.execute(select(Agent).where(Agent.id == job.agent_id))
         agent_model = agent_result.scalar_one_or_none()
-        if not agent_model:
-            logger.warning("scheduler_service.agent_not_found", job_id=str(job_id))
+        if not agent_model or agent_model.is_deleted:
+            logger.warning(
+                "scheduler_service.agent_not_runnable",
+                job_id=str(job_id),
+                reason="deleted" if agent_model is not None else "missing",
+            )
             job.status = "cancelled"
+            job.next_run_at = None
             await db.commit()
             return
 
@@ -465,7 +576,14 @@ async def _run_job(job_id) -> None:
                 except Exception as bus_exc:
                     log.warning("scheduler_service.event_bus_failed", error=str(bus_exc))
 
-                if session.channel_type:
+                # A delete can happen after the worker claimed the job. Refresh
+                # right before delivery so a soft-deleted agent cannot send a
+                # final scheduled reminder.
+                await db.refresh(agent_model)
+                if agent_model.is_deleted:
+                    job.status = "cancelled"
+                    job.next_run_at = None
+                elif session.channel_type:
                     try:
                         await _send_scheduled_channel_message(session, agent_model, reply, log)
                     except Exception as send_exc:

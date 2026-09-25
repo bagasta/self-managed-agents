@@ -304,3 +304,24 @@ async def test_batch_update_presentation_returns_instruction_for_empty_requests(
 
     assert result.startswith("SLIDES_REQUESTS_REQUIRED")
     assert not batch_update.calls
+
+
+@pytest.mark.asyncio
+async def test_create_sheet_does_not_duplicate_existing_tab() -> None:
+    info = FakeTool(
+        "get_spreadsheet_info",
+        'Spreadsheet: "Laporan"\nSheets (2):\n  - "Sheet1" (ID: 0)\n  - "Laporan" (ID: 42)',
+    )
+    create_sheet = FakeTool("create_sheet", "created")
+    wrapped = sanitize_google_forms_tools(
+        [info, create_sheet], SimpleNamespace(warning=lambda *a, **k: None)
+    )
+    guarded = next(tool for tool in wrapped if tool.name == "create_sheet")
+
+    result = await guarded.ainvoke(
+        {"spreadsheet_id": "sheet123", "sheet_name": "Laporan"}
+    )
+
+    assert result.startswith("SHEETS_SHEET_ALREADY_EXISTS")
+    assert info.calls == [{"spreadsheet_id": "sheet123"}]
+    assert not create_sheet.calls

@@ -434,12 +434,23 @@ def build_escalation_tools(
                     target=phone_or_target,
                 )
                 if not allowed:
+                    from app.core.domain.outbound_queue_service import enqueue_outbound_message
+
+                    queued = await enqueue_outbound_message(
+                        db,
+                        agent_id=agent_id,
+                        session_id=session_id,
+                        target=phone_or_target,
+                        text=message,
+                        source_device_id=str(channel_config_val.get("device_id", "") or ""),
+                    )
+                    await db.commit()
                     logger.warning(
-                        "escalation_tool.send_to_number.blocked_rate_limit",
+                        "escalation_tool.send_to_number.queued_rate_limit",
                         target=phone_or_target,
                         count=count,
                     )
-                    return f"[send_to_number blocked] {wa_outbound_block_reply('rate_limit')}"
+                    return f"[QUEUED_TO_NUMBER:{phone_or_target}] Pesan masuk antrean dan akan dikirim otomatis."
 
             db.add(Msg(
                 session_id=session_id,

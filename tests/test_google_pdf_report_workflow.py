@@ -22,6 +22,7 @@ def test_google_spreadsheet_pdf_intent_requires_source_and_pdf() -> None:
     assert is_google_spreadsheet_pdf_report_intent("Buatkan PDF laporan dari spreadsheet Cashflow")
     assert not is_google_spreadsheet_pdf_report_intent("Buatkan PDF laporan dari catatan ini")
     assert not is_google_spreadsheet_pdf_report_intent("Baca spreadsheet Cashflow")
+    assert not is_google_spreadsheet_pdf_report_intent("Buat spreadsheet laporan penjualan harian")
 
 
 def test_google_pdf_intent_is_preserved_for_explicit_follow_up() -> None:
