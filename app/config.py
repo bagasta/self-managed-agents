@@ -57,6 +57,18 @@ class Settings(BaseSettings):
     sandbox_container_ttl_seconds: int = 900   # kill labeled containers older than this
     sandbox_workspace_ttl_seconds: int = 86400  # remove workspace dirs idle longer than this
 
+    # Optional interactive-computer runtime. This is deliberately separate
+    # from DockerSandbox: Docker remains the file/code/deploy execution path.
+    # A computer is only exposed to an opted-in agent whose owner matches the
+    # assigned principal below.
+    computer_runtime_enabled: bool = False
+    computer_runtime_owner_id: str = ""
+    computer_runtime_vnc_host: str = "127.0.0.1"
+    computer_runtime_vnc_port: int = 5902
+    computer_runtime_viewer_url: str = ""
+    computer_runtime_timeout_seconds: int = 12
+    computer_runtime_max_actions_per_run: int = 20
+
     # Agent limits
     agent_max_steps: int = 12
     agent_timeout_seconds: int = 300

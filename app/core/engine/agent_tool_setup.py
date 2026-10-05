@@ -29,6 +29,7 @@ from app.core.engine.tool_builder import (
     build_skill_tools,
     build_tavily_tools,
     build_tool_creator_tools,
+    build_computer_tools,
     build_wa_agent_manager_tools,
     build_wa_notify_tool,
     build_whatsapp_media_tools,
@@ -36,6 +37,7 @@ from app.core.engine.tool_builder import (
 from app.core.engine.sop_runtime_gate import filter_tools_by_sop
 from app.core.engine.scheduler_intent import looks_like_scheduler_workflow
 from app.core.infra.sandbox import DockerSandbox
+from app.core.infra.computer_runtime import ComputerRuntime
 from app.core.utils.phone_utils import normalize_phone
 from app.models.agent import Agent as AgentModel
 from app.models.session import Session
@@ -156,6 +158,14 @@ async def build_agent_tool_setup(
         if deploy_enabled:
             tools.extend(build_deployment_tools(sandbox))
             active_groups.append("deploy")
+
+    # Computer control is intentionally independent from DockerSandbox. It is
+    # opt-in per agent and the runtime checks that the computer is assigned to
+    # the same owner before exposing any action.
+    if (not operator_turn) and (not builder_agent) and _is_enabled(tools_config, "computer", default=False):
+        computer_runtime = ComputerRuntime.from_settings(settings)
+        tools.extend(build_computer_tools(computer_runtime, owner_id=str(getattr(agent_model, "owner_user_id", "") or "")))
+        active_groups.append("computer")
 
     memory_scope = getattr(session, "external_user_id", None)
     arthur_owner_user_id = None

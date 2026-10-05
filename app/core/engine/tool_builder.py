@@ -44,6 +44,7 @@ from app.core.domain.memory_service import (
     upsert_memory,
 )
 from app.core.infra.sandbox import DockerSandbox
+from app.core.tools.computer_tool import build_computer_tools
 from app.core.domain.skill_service import (
     create_or_update_skill,
     get_skill,

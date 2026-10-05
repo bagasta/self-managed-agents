@@ -166,6 +166,10 @@ class CreateAssistantInput(BaseModel):
         default=False,
         description="Aktifkan hanya untuk assistant yang perlu membuat dan mempublikasikan website/aplikasi. Otomatis mengaktifkan sandbox dan tool deployment.",
     )
+    enable_computer: bool = Field(
+        default=False,
+        description="Aktifkan hanya untuk assistant yang perlu memakai computer kerja owner lewat Chrome/terminal. Tidak menggantikan sandbox Docker dan tetap meminta owner mengambil alih untuk login atau input sensitif.",
+    )
     google_workspace_services: list[str] = Field(
         default_factory=list,
         description=(
@@ -940,6 +944,7 @@ def _runtime_capabilities(agent: Agent) -> dict[str, bool]:
     return {
         "sandbox": enabled("sandbox") or deploy,
         "deploy": deploy,
+        "computer": enabled("computer"),
     }
 
 
@@ -1212,6 +1217,7 @@ def build_arthur_v2_tools(
         assistant_kind: str = "personal",
         workflow: AssistantWorkflowInput | dict[str, str] | None = None,
         enable_deploy: bool = False,
+        enable_computer: bool = False,
         google_workspace_services: list[str] | None = None,
         google_spreadsheet_url: str | None = None,
         confirmed: bool = False,
@@ -1287,6 +1293,7 @@ def build_arthur_v2_tools(
         tools_config: dict[str, Any] = {
             "sandbox": bool(enable_deploy),
             "deploy": bool(enable_deploy),
+            "computer": bool(enable_computer),
             "scheduler": scheduler_enabled,
             # Arthur-created assistants may receive knowledge after creation.
             # Keep retrieval enabled so an owner-provided FAQ/SOP is available
@@ -1405,6 +1412,7 @@ def build_arthur_v2_tools(
             "runtime": {
                 "sandbox": bool(enable_deploy),
                 "deploy": bool(enable_deploy),
+                "computer": bool(enable_computer),
                 "scheduler": scheduler_enabled,
                 "max_tokens": ARTHUR_V2_CODING_DEPLOY_MAX_TOKENS if enable_deploy else None,
             },
@@ -1971,6 +1979,7 @@ def build_arthur_v2_tools(
         agent_id: str,
         enable_sandbox: bool | None = None,
         enable_deploy: bool | None = None,
+        enable_computer: bool | None = None,
         subagent_ids: list[str] | None = None,
         google_workspace_services: list[str] | None = None,
         mcp_servers: dict[str, str] | None = None,
@@ -1984,7 +1993,7 @@ def build_arthur_v2_tools(
         to remove Google Workspace from an existing assistant.
         """
         if not confirmed:
-            return {"ok": False, "needs_confirmation": True, "error": "Minta konfirmasi eksplisit sebelum mengaktifkan sandbox, deploy, subagent, atau MCP."}
+            return {"ok": False, "needs_confirmation": True, "error": "Minta konfirmasi eksplisit sebelum mengaktifkan sandbox, deploy, computer, subagent, atau MCP."}
         agent = await _owned(agent_id)
         if agent is None:
             return {"ok": False, "error": "Assistant tidak ditemukan atau bukan milik pengguna ini."}
@@ -2020,6 +2029,12 @@ def build_arthur_v2_tools(
                 enable_deploy=enable_deploy,
                 subagent_ids=subagent_ids,
             )
+            computer_enabled = (
+                bool(config.get("computer"))
+                if enable_computer is None
+                else bool(enable_computer)
+            )
+            config["computer"] = computer_enabled
             if requested_google_services is not None:
                 if requested_google_services:
                     try:
@@ -2047,6 +2062,7 @@ def build_arthur_v2_tools(
             "runtime": {
                 "sandbox": sandbox_enabled,
                 "deploy": deploy_enabled,
+                "computer": computer_enabled,
                 "subagent_count": len(requested_subagents),
                 "mcp_servers": sorted(((config.get("mcp") or {}).get("servers") or {})),
                 "google_workspace_services": requested_google_services,

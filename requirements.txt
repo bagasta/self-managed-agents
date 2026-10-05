@@ -18,6 +18,7 @@ langchain-mcp-adapters==0.3.2
 mcp==1.30.0
 
 docker==7.2.0
+vncdotool==1.2.0
 httpx==0.28.1
 pgvector==0.5.0
 python-docx==1.2.0
