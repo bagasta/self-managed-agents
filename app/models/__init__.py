@@ -10,6 +10,9 @@ from app.models.run import Run
 from app.models.scheduled_job import ScheduledJob
 from app.models.session import Session
 from app.models.skill import Skill
+from app.models.workforce_task import WorkforceTask, WorkforceTaskEvent, WorkforceTaskStep
+from app.models.user_api_key import UserApiKey
+from app.models.team_chat import TeamChatRoom, TeamChatMember, TeamChatMessage
 
 __all__ = [
     "Agent",
@@ -24,4 +27,11 @@ __all__ = [
     "ScheduledJob",
     "Session",
     "Skill",
+    "WorkforceTask",
+    "WorkforceTaskEvent",
+    "WorkforceTaskStep",
+    "UserApiKey",
+    "TeamChatRoom",
+    "TeamChatMember",
+    "TeamChatMessage",
 ]

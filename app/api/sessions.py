@@ -10,9 +10,75 @@ from app.database import get_db
 from app.deps import verify_api_key
 from app.models.agent import Agent
 from app.models.session import Session
+from app.models.subscription import SubscriptionPlan, User, UserSubscription
 from app.schemas.session import SessionCreate, SessionResponse
 
 router = APIRouter(prefix="/v1/agents", tags=["sessions"])
+
+_ARTHUR_UI_ENTERPRISE_TEST_ID = "clevio-arthur-ui-enterprise-test"
+
+
+async def _ensure_arthur_ui_enterprise_test_owner(db: AsyncSession) -> None:
+    """Provision only the reserved local UI-test principal with Enterprise capacity."""
+    from app.config import get_settings
+    from app.core.domain.subscription_service import ensure_default_subscription_plans
+
+    if get_settings().environment.lower() not in {"development", "dev", "test"}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="UI test plan is disabled outside development.")
+
+    await ensure_default_subscription_plans(db)
+    user = (
+        await db.execute(select(User).where(User.external_id == _ARTHUR_UI_ENTERPRISE_TEST_ID))
+    ).scalar_one_or_none()
+    if user is None:
+        user = User(
+            email="arthur-ui-enterprise-test@local.invalid",
+            password_hash="",
+            full_name="Arthur UI Enterprise Test",
+            external_id=_ARTHUR_UI_ENTERPRISE_TEST_ID,
+            has_used_trial=True,
+            email_verified=False,
+        )
+        db.add(user)
+        await db.flush()
+
+    plan = (
+        await db.execute(
+            select(SubscriptionPlan).where(SubscriptionPlan.id == SubscriptionPlan.TIER_3_ID)
+        )
+    ).scalar_one()
+    subscription = (
+        await db.execute(select(UserSubscription).where(UserSubscription.user_id == user.id))
+    ).scalar_one_or_none()
+    if subscription is None:
+        subscription = UserSubscription(
+            user_id=user.id,
+            plan_id=plan.id,
+            status="active",
+            token_quota=plan.token_quota,
+            tokens_used=0,
+            expires_at=None,
+            grace_until=None,
+        )
+        db.add(subscription)
+    else:
+        subscription.plan_id = plan.id
+        subscription.status = "active"
+        subscription.token_quota = plan.token_quota
+        subscription.expires_at = None
+        subscription.grace_until = None
+    await db.flush()
+
+
+def _is_arthur_ui_enterprise_test(payload: SessionCreate) -> bool:
+    metadata = payload.metadata if isinstance(payload.metadata, dict) else {}
+    return (
+        payload.channel_type == "api"
+        and payload.external_user_id == _ARTHUR_UI_ENTERPRISE_TEST_ID
+        and metadata.get("source") == "arthur-ui"
+        and metadata.get("memory_mode") == "isolated"
+        and metadata.get("test_plan") == "enterprise"
+    )
 
 
 @router.post(
@@ -26,6 +92,9 @@ async def create_session(
     db: AsyncSession = Depends(get_db),
     _: str = Depends(verify_api_key),
 ) -> SessionResponse:
+    if _is_arthur_ui_enterprise_test(payload):
+        await _ensure_arthur_ui_enterprise_test_owner(db)
+
     agent = (
         await db.execute(
             select(Agent).where(Agent.id == agent_id, Agent.is_deleted.is_(False))

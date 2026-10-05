@@ -91,6 +91,18 @@ _MIXIN_SUPPORTING_TOOL_ALLOWLISTS = {
     },
 }
 
+# Arthur's owner-scoped workforce tools are part of the manager control plane,
+# not a skill-specific integration. Keep them available when progressive skill
+# scoping is active so the production builder graph can inspect a roster and
+# dispatch an explicitly requested internal task.
+_WORKFORCE_SUPPORTING_TOOLS = {
+    "list_managed_assistants",
+    "list_owner_workforce_roster",
+    "orchestrate_owner_workforce_task",
+    "list_owner_workforce_tasks",
+    "manage_owner_workforce_task",
+}
+
 _SKILL_SUPPORTING_TOOL_ALLOWLISTS = {
     "arthur-discovery": {"tavily_search", "tavily_extract", "recall"},
     "arthur-create-agent": {
@@ -123,7 +135,10 @@ def scope_arthur_builder_tools(
     whatsapp_action: str | None = None,
 ) -> tuple[list[Any], list[str]]:
     allowed = set(_SKILL_TOOL_ALLOWLISTS.get(primary_skill, set()))
-    allowed_supporting = set(_SKILL_SUPPORTING_TOOL_ALLOWLISTS.get(primary_skill, set()))
+    allowed_supporting = (
+        set(_SKILL_SUPPORTING_TOOL_ALLOWLISTS.get(primary_skill, set()))
+        | _WORKFORCE_SUPPORTING_TOOLS
+    )
     # A user may confirm OAuth and select a WhatsApp path in the same message.
     # Keep the integration/setup workflow primary, but expose only the selected
     # channel action so setup can finish transactionally in one turn.

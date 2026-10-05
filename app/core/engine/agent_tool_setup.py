@@ -158,8 +158,29 @@ async def build_agent_tool_setup(
             active_groups.append("deploy")
 
     memory_scope = getattr(session, "external_user_id", None)
+    arthur_owner_user_id = None
+    if str((tools_config or {}).get("system_plugin") or "").strip() == "arthur_v2":
+        from app.core.domain.tenant_identity import (
+            arthur_memory_scope,
+            arthur_ui_session_isolated_memory,
+            resolve_unique_user_id,
+        )
+
+        # Arthur is a shared control-plane agent; memory must use the stable
+        # User principal, never a phone number or global user-specific scope.
+        arthur_external_id = str(getattr(session, "external_user_id", None) or "").strip()
+        arthur_owner_user_id = await resolve_unique_user_id(db, arthur_external_id)
+        memory_scope = arthur_memory_scope(
+            arthur_owner_user_id,
+            session.id,
+            isolate_session=arthur_ui_session_isolated_memory(session),
+        )
     if _is_enabled(tools_config, "memory", default=True):
-        tools.extend(build_memory_tools(agent_id, AsyncSessionLocal, scope=memory_scope))
+        team_chat_session = bool((getattr(session, "metadata_", None) or {}).get("team_chat_room_id"))
+        tools.extend(build_memory_tools(
+            agent_id, AsyncSessionLocal, scope=memory_scope,
+            max_recalls=8 if team_chat_session else None,
+        ))
         tools.extend(build_heartbeat_tools(agent_id, session.id, AsyncSessionLocal, scope=memory_scope))
         active_groups.append("memory")
 
@@ -269,7 +290,12 @@ async def build_agent_tool_setup(
         tools.extend(build_system_agent_tools(
             tools_config=tools_config,
             db_factory=AsyncSessionLocal,
-            owner_phone=_resolve_builder_owner_phone(session),
+            owner_phone=(
+                normalize_phone(str(getattr(session, "external_user_id", None) or "")) or None
+                if str((tools_config or {}).get("system_plugin") or "").strip() == "arthur_v2"
+                else _resolve_builder_owner_phone(session)
+            ),
+            owner_user_id=arthur_owner_user_id,
             self_agent_id=str(agent_id),
             sender_device_id=channel_cfg.get("device_id", "") or "",
             default_target=channel_cfg.get("user_phone", "") or "",

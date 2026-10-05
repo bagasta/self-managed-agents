@@ -67,7 +67,7 @@ def build_system_agent_tools(*, tools_config: dict[str, Any] | None, **context: 
         # owner through Arthur's existing WhatsApp session.
         v2_context = {
             field: context[field]
-            for field in ("db_factory", "owner_phone", "self_agent_id", "sender_device_id", "default_target", "session_id")
+            for field in ("db_factory", "owner_phone", "owner_user_id", "self_agent_id", "sender_device_id", "default_target", "session_id")
             if field in context
         }
         return build_arthur_v2_tools(**v2_context)

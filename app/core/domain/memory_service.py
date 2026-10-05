@@ -178,6 +178,7 @@ async def delete_memory(
 
 _LAYERED_KEYS = {
     "soul",
+    "identity",
     "user_profile",
     "longterm",
     "agent_context_version",
@@ -239,7 +240,7 @@ async def build_memory_context(
             m.key not in _LAYERED_KEYS
             and not m.key.startswith("daily:")
             and not m.key.startswith("heartbeat:")
-            and not re.match(r"^(soul|agent_blueprint|setup_summary):v\d+$", m.key)
+            and not re.match(r"^(soul|identity|agent_blueprint|setup_summary):v\d+$", m.key)
         )
     ]
     if not filtered:
@@ -265,6 +266,7 @@ async def load_layered_memory(
     yesterday = memory_yesterday()
 
     active_version = await get_active_context_version(agent_id, db)
+    identity_mem = await get_versioned_memory(agent_id, "identity", db, active_version=active_version, scope=None)
     soul_mem = await get_versioned_memory(agent_id, "soul", db, active_version=active_version, scope=None)
     user_profile_mem = await get_memory(agent_id, "user_profile", db, scope=scope)
     longterm_mem = await get_memory(agent_id, "longterm", db, scope=scope)
@@ -276,6 +278,7 @@ async def load_layered_memory(
     daily_yesterday_mem = await get_memory(agent_id, f"daily:{yesterday}", db, scope=scope)
 
     return {
+        "identity": identity_mem.value_data if identity_mem else "",
         "soul": soul_mem.value_data if soul_mem else "",
         "agent_context_version": str(active_version or ""),
         "user_profile": user_profile_mem.value_data if user_profile_mem else "",

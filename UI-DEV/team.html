@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Team Chat · Managed Agents</title>
+  <link rel="stylesheet" href="team.css?v=7">
+</head>
+<body>
+  <div class="app">
+    <aside class="rail">
+      <div class="rail-head"><div class="brand">◆ <span>Team Chat</span></div><div class="rail-actions"><button id="search-open" aria-label="Cari percakapan" title="Cari percakapan">⌕</button><button id="new-open" aria-label="Percakapan baru" title="Percakapan baru">＋</button></div></div>
+      <div id="search-wrap" hidden><input id="search" placeholder="Cari bot atau grup…" aria-label="Cari percakapan"></div>
+      <div id="rooms" class="room-list"></div>
+      <div class="rail-foot"><span class="account-mark">B</span><button id="settings-open">Pengaturan koneksi</button><a href="./">Dashboard ↗</a></div>
+    </aside>
+
+    <main class="conversation">
+      <header class="chat-head"><button class="mobile-rooms" id="mobile-rooms" aria-label="Lihat daftar chat">☰</button><div id="chat-title" class="chat-title">Pilih bot atau buat grup</div><button id="details-open" title="Detail percakapan" aria-label="Detail percakapan">☷</button></header>
+      <div id="connection-status" class="connection-status" role="status" hidden></div>
+      <div id="timeline" class="timeline"><div class="welcome"><div class="welcome-icon">◆</div><h1>Tim agent kamu, satu tempat.</h1><p>Chat langsung dengan bot, atau buat grup untuk kerja bersama.</p><button id="welcome-new">Buat grup</button></div></div>
+      <div class="composer-wrap"><div id="mention-menu" class="mention-menu" hidden></div><form id="composer" class="composer"><button id="mention-open" type="button" title="Mention bot" aria-label="Mention bot" hidden>@</button><div id="draft" class="composer-editor" contenteditable="false" role="textbox" aria-label="Pesan" aria-multiline="true" data-placeholder="Pilih percakapan untuk mulai chat…"></div><button id="send" type="submit" aria-label="Kirim pesan" disabled>↑</button></form><div id="composer-hint" class="composer-hint" hidden>Di grup, ketik @ untuk memilih bot. Tanpa mention, pesan masuk ke Arthur untuk didelegasikan.</div></div>
+    </main>
+
+    <aside id="details" class="details" hidden><div class="details-head"><h2>Detail</h2><button id="details-close" aria-label="Tutup detail">×</button></div><div id="details-body"></div></aside>
+  </div>
+
+  <dialog id="new-dialog"><form method="dialog" id="new-form"><div class="dialog-head"><h2>Percakapan baru</h2><button type="button" id="new-close" aria-label="Tutup">×</button></div><div class="tabs"><button type="button" class="active" data-kind="direct">Chat personal</button><button type="button" data-kind="group">Buat grup</button></div><div id="new-direct" class="choice-list"></div><div id="new-group" hidden><label>Nama grup<input id="group-name" maxlength="255" placeholder="Misalnya: Tim Website"></label><label>Manager<select id="group-manager"></select></label><span class="field-label">Anggota grup</span><div id="group-members" class="choice-list"></div><p class="muted">Manager menerima pesan biasa. Mention mengirim tugas langsung ke bot pilihan.</p></div><div id="new-error" class="error" role="alert"></div><div class="dialog-foot"><button type="button" id="new-cancel">Batal</button><button id="new-submit" type="submit" hidden>Buat grup</button></div></form></dialog>
+
+  <dialog id="settings-dialog"><form method="dialog" id="settings-form"><div class="dialog-head"><h2>Koneksi</h2><button type="button" id="settings-close" aria-label="Tutup">×</button></div><p class="muted">Masukkan API key admin untuk menguji Arthur dan timnya.</p><label>Mode<select id="auth-mode"><option value="owner">Owner · QA Arthur</option><option value="admin">Admin · QA Arthur</option></select></label><label>API key<input id="admin-key" type="password" autocomplete="off"></label><div id="settings-error" class="error" role="alert"></div><div class="dialog-foot"><button type="button" id="settings-cancel">Batal</button><button type="submit">Simpan & muat</button></div></form></dialog>
+  <script src="team.js?v=13"></script>
+</body>
+</html>

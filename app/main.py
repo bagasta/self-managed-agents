@@ -18,7 +18,7 @@ from slowapi.util import get_remote_address
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api import agents, auth, channels, custom_tools, documents, history, memory, messages, meta_signup, meta_webhooks, models, runs, sessions, skills, stream, subscriptions, users
+from app.api import agents, auth, channels, custom_tools, documents, history, memory, messages, meta_signup, meta_webhooks, models, runs, sessions, skills, stream, subscriptions, users, workforce, team_chat
 from app.config import get_settings
 from app.database import engine, get_db
 from app.middleware.request_id import RequestIDMiddleware
@@ -162,7 +162,14 @@ async def lifespan(_app: FastAPI):
 
     sandbox_reaper_task = asyncio.create_task(_sandbox_reaper_loop())
 
+    from app.database import AsyncSessionLocal
+    from app.core.domain.workforce_jobs import workforce_queue_loop
+    workforce_queue_task = asyncio.create_task(workforce_queue_loop(AsyncSessionLocal))
+
     yield
+
+    workforce_queue_task.cancel()
+    await asyncio.gather(workforce_queue_task, return_exceptions=True)
 
     deployment_cleanup_task.cancel()
     sandbox_reaper_task.cancel()
@@ -215,6 +222,8 @@ app.include_router(runs.router)
 app.include_router(stream.router)
 app.include_router(meta_webhooks.router)
 app.include_router(meta_signup.router)
+app.include_router(workforce.router)
+app.include_router(team_chat.router)
 from app.api import integrations
 app.include_router(integrations.router)
 

@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 
-from sqlalchemy import Boolean, DateTime, Index, String, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -33,6 +33,12 @@ class UserApiKey(Base):
     )
     key_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     label: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Nullable for backwards compatibility. Workforce access requires a bound
+    # owner; legacy unbound keys remain valid only for their existing APIs.
+    owner_external_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_default_expires_at
     )

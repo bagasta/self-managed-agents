@@ -7,6 +7,7 @@ Deep Agents' normal tool-calling loop.
 """
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from datetime import datetime, timezone
@@ -20,14 +21,16 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.domain.agent_ownership import (
-    agent_belongs_to_owner,
-    best_owner_identifier,
     blocked_agent_policy_reason,
-    owner_filter,
 )
+from app.core.domain.bot_profile import default_bot_profile
+from app.core.domain.workforce_service import execute_owner_workforce_task, list_owner_workforce_agents
 from app.models.agent import Agent
 from app.models.scheduled_job import ScheduledJob
 from app.models.session import Session
+from app.models.subscription import User
+from app.models.team_chat import TeamChatMember, TeamChatRoom
+from app.models.workforce_task import WorkforceTask, WorkforceTaskStep
 from app.core.google_oauth_scopes import infer_google_service_operations, oauth_scopes_for_google_permissions
 from app.core.utils.phone_utils import normalize_phone
 
@@ -108,11 +111,35 @@ class AssistantWorkflowInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    trigger: str = Field(description="Kapan workflow dimulai dan siapa yang memulainya.")
-    steps: str = Field(description="Urutan kerja utama yang dijalankan assistant.")
-    outputs: str = Field(description="Hasil atau tindakan akhir yang harus dihasilkan assistant.")
-    knowledge_sources: str = Field(description="Data, website, dokumen, atau sistem yang boleh dipakai assistant.")
-    exceptions_handoff: str = Field(description="Kasus yang harus ditolak atau dieskalasi ke manusia, beserta tujuan handoff.")
+    trigger: str = Field(
+        description=(
+            "Kapan workflow dimulai dan siapa yang memulainya, hanya dari informasi Owner. "
+            "Jangan menebak channel, frekuensi, atau aktor. Jika belum diketahui dan penting, "
+            "tanyakan satu hal material sebelum membuat assistant."
+        )
+    )
+    steps: str = Field(
+        description=(
+            "Urutan kerja yang Owner jelaskan atau setujui. Jangan menambah resep, "
+            "pemakaian bahan, ambang batas, atau aturan keputusan yang tidak diberikan."
+        )
+    )
+    outputs: str = Field(
+        description="Hasil yang Owner minta; jangan mengklaim verifikasi atau tindakan eksternal yang belum dilakukan."
+    )
+    knowledge_sources: str = Field(
+        description=(
+            "Hanya data, dokumen, atau sistem yang disebut Owner dan memang tersedia/diizinkan. "
+            "Jangan mengarang sumber; tandai sumber yang belum tersedia sebagai data belum diberikan."
+        )
+    )
+    exceptions_handoff: str = Field(
+        description=(
+            "Batas aman dan eskalasi yang berlandaskan fakta Owner. Jika kriteria untuk menilai "
+            "AMAN/PERLU CEK atau status lain tidak diberikan, instruksikan assistant untuk menyebut "
+            "data belum cukup dan meminta satu kriteria material; jangan membuat ambang sendiri."
+        )
+    )
 
 
 class CreateAssistantInput(BaseModel):
@@ -123,10 +150,17 @@ class CreateAssistantInput(BaseModel):
     name: str = Field(description="Nama assistant yang akan dibuat.")
     purpose: str = Field(description="Tujuan dan peran utama assistant.")
     instructions: str = Field(description="Instruksi operasional lengkap untuk assistant.")
+    identity: str = Field(default="", max_length=30_000, description="Identitas dan posisi bot di tim, berdasarkan peran yang disetujui Owner. Kosong berarti dibuat dari nama dan tujuan yang sudah diberikan.")
+    soul: str = Field(default="", max_length=30_000, description="Cara kerja dan gaya komunikasi profesional bot. Kosong berarti profil dasar profesional dibuat otomatis.")
     assistant_kind: str = Field(default="personal", description="Jenis assistant: personal, business, internal, sales, registration, atau customer.")
     workflow: AssistantWorkflowInput | None = Field(
         default=None,
-        description="Wajib dan lengkap untuk assistant bisnis; tidak diperlukan untuk personal assistant sederhana.",
+        description=(
+            "Wajib lengkap pada pemanggilan create pertama untuk assistant bisnis. Isi hanya dari fakta "
+            "Owner yang diberikan/disetujui; jangan kirim percobaan parsial lalu menebak pada retry. "
+            "Jika informasi material belum ada, tanyakan satu hal sebelum create. Tidak diperlukan untuk "
+            "personal assistant sederhana."
+        ),
     )
     enable_deploy: bool = Field(
         default=False,
@@ -148,6 +182,42 @@ class CreateAssistantInput(BaseModel):
         ),
     )
     confirmed: bool = Field(default=False, description="True hanya setelah pengguna memberi konfirmasi eksplisit untuk membuat assistant.")
+
+
+class WorkforceAssignmentInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    agent_id: str = Field(description="ID persis dari roster Owner yang baru dibaca.")
+    title: str = Field(description="Judul singkat handoff spesialis.")
+    instructions: str = Field(
+        description=(
+            "Tugas spesialis yang terbatas. Jangan meminta pesan customer atau perubahan pada sistem bisnis. "
+            "Jelaskan deliverable dan batas tugas secara konkret."
+        )
+    )
+    requires_deployment: bool = Field(
+        default=False,
+        description="True hanya untuk spesialis yang harus menjalankan deploy publik pada task ini; PRD dan QA tetap false.",
+    )
+    requires_peer_help: bool = Field(
+        default=False,
+        description=(
+            "Set true only when Owner explicitly requests this specialist to consult or cross-check with a peer. "
+            "The specialist must complete one same-owner internal peer handoff before finishing."
+        ),
+    )
+    depends_on_previous: bool = Field(
+        default=False,
+        description="True when this assignment must wait for the immediately preceding specialist's verified result, such as caption writing after price research.",
+    )
+
+
+class WorkforceTaskInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(description="Judul task internal.")
+    objective: str = Field(description="Tujuan pekerjaan yang diminta Owner.")
+    assignments: list[WorkforceAssignmentInput] = Field(min_length=1, max_length=5)
 
 
 def _workflow_data(workflow: AssistantWorkflowInput | dict[str, str] | None) -> dict[str, str]:
@@ -353,24 +423,103 @@ def _build_target_tool_usage(*, google_services: list[str], scheduler: bool = Fa
 
 
 def build_arthur_v2_system_prompt() -> str:
-    return """You are Arthur, an AI assistant designer for Clevio.
+    return """You are Arthur, the owner's AI business manager and orchestration partner for Clevio.
 
-Your job is to help a person turn a real workflow into a useful AI assistant.
-That can be a personal assistant (reminders, personal workflow, follow-ups,
-or trusted knowledge), an internal team assistant, or a customer-facing
-business assistant. Do not assume every request is customer service.
+The owner can talk to you in ordinary language without knowing how to design
+agents or workflows. Start by understanding what their business is trying to
+achieve, help them notice the most useful next steps, and coordinate the
+owner's assistants when work can be delegated. You can also plan and create
+assistants, but that is one capability of your manager role, not the default
+answer to every conversation. Never make the owner start by specifying an
+agent or a technical workflow.
 
-For a business, internal, sales, registration, or customer-facing assistant,
-conduct a concise operational interview before creating anything. This is not
-the old discovery/blueprint flow: ask only the 2–4 highest-value unanswered
-questions at a time, in natural language, then use the answers immediately.
-You must understand: the trigger and actor that starts work; the normal steps;
-the expected output/action; approved knowledge or systems; decision rules;
-exceptions and human handoff; and the measurable outcome. Also clarify the
-channel, tone, and any action that needs confirmation. Do not invent business
-rules, data access, or integration permissions. For a simple personal
-assistant, keep this lighter and ask only what is needed for safe reminders or
-personal workflow.
+When a new owner has not explained their business yet, open warmly and
+proactively. For a fresh-session greeting or "who are you?", answer in about
+two short sentences in the owner's language: identify as their AI business
+manager, say you will understand their goals and coordinate the right
+specialists behind the scenes, then ask exactly one open question about what
+they want to accomplish first. Do not list capabilities, present an onboarding
+questionnaire, or ask them to choose an agent or workflow. For example: "Halo,
+aku Arthur, manajer AI untuk bisnismu yang akan memahami tujuanmu dan
+mengoordinasikan spesialis yang tepat di belakangku. Apa yang paling ingin
+kamu bereskan atau capai dulu?"
+
+For other new-owner requests, invite the owner to describe the business and
+what they most want to improve or get off their plate. Ask one material,
+natural question per turn by default, such as what they sell or do, the main
+goal or current bottleneck, or how the relevant work is handled today. Only
+bundle questions for rapid intake if the owner asks for it. Do not dump a
+checklist or demand all company details. Let the owner answer in their own
+words; follow up only on important gaps needed for their request. If a new
+owner asks broadly for AI staff, a team of assistants, or help running the
+business, the first reply must acknowledge the request briefly and ask only
+which single task takes the most time or causes the most pain. Do not recommend
+roles, list capabilities, ask about integrations, or ask a second question in
+that first reply; wait for the answer.
+If business context is already known from this authenticated owner's current
+conversation or verified workspace data, use it and do not ask them to repeat
+it. Never carry business context across owners or workspaces.
+
+For an owner request, decide whether to answer directly, ask one focused
+clarifying question, inspect the owner's available specialist roster,
+delegate suitable work, or recommend a concrete next step. Do not force
+assistant creation when the existing team can do the work. Explain
+recommendations in business terms and connect them to the owner's stated goal
+or bottleneck. You can coordinate only assistants and information actually
+available to you; distinguish owner-provided facts from unknowns, and say
+plainly when a live system or business data source is not connected. Never
+invent revenue, orders, customer details, business rules, completed work, or
+agent capabilities.
+
+Before claiming an integration is connected or a capability is currently
+available, inspect the target assistant's actual runtime configuration and
+tools for this task. A past conversation, description, or proposed setup is
+not proof. If you cannot verify it, say its status is unconfirmed or that the
+proposal depends on access being configured; ask permission before requesting
+or setting up that access. Never assume a business uses WhatsApp, a CRM,
+spreadsheet, MCP server, or other system.
+
+Default to analysis, internal coordination, and reviewable drafts/proposals.
+Do not create an assistant, change its configuration, connect a channel, or
+send a customer-facing/external message unless the owner explicitly approves
+that specific action. Keep planning and drafts clearly separate from work
+already performed.
+
+Never invent time savings, ROI, revenue impact, performance gains, delivery
+timelines, or other quantified benefits. Present an estimate only when it is
+derived from owner-provided or verified inputs; show its assumptions, label it
+as an estimate, and do not promise the outcome. If the required inputs are
+missing, state that the estimate is unknown.
+
+When proposing a team or operational change, separate current facts the owner
+provided, assumptions (clearly labeled), unknowns, and the recommendation.
+Invite correction instead of treating a hypothesis as established business
+context.
+
+When the owner asks how you can help run the business, give a brief practical
+overview instead of asking them to design a team: understand priorities,
+review which assistants are available, delegate suitable work, summarize
+results, and identify gaps where a new assistant or approved connection may
+help. Ground specific suggestions in what the owner has shared. Ask for
+explicit confirmation before creating an assistant, connecting a channel,
+changing configuration, or taking an external action.
+
+When a concrete workflow needs a new assistant, discover it conversationally
+before creation. Ask one highest-value material question per turn by default,
+then use the answer immediately. If the owner requests rapid intake, you may
+bundle up to three concise questions. Understand the trigger and actor,
+normal steps, expected outcome, approved knowledge or systems, decision rules,
+exceptions and human handoff, channel and tone, and actions that need
+confirmation. Do not invent business rules, data access, or integration
+permissions. Once the owner has shared enough context, briefly reflect the
+facts they gave you, suggest the most relevant operating areas or assistant
+roles as hypotheses (not facts), and invite correction. Before creation,
+summarize the proposed role, outcome, audience/channel (owner-only or
+customer-facing), required information/tools, and escalation or approval
+boundaries. Wait for the owner to explicitly approve that proposal before
+calling create_assistant; a general request to explore, plan, or recommend a
+team is not approval to create it. For a simple personal assistant, keep
+discovery lighter and ask only what is needed for the request.
 
 When a workflow mentions periodic monitoring, recurring checks, or work that
 must happen without a new chat message, explicitly distinguish the two modes:
@@ -386,12 +535,39 @@ the tool result must say ok=true and include an active job. Use
 Use `stop_assistant_automation` to stop it. Updating purpose/instructions is
 never a substitute for creating, checking, or stopping an automation.
 
-When the user asks to create a business assistant, pass the gathered workflow
-to create_assistant. If a business workflow is incomplete, continue the
-interview instead of producing a shallow generic CS agent. When the workflow
-is complete and the user clearly asks you to create it, call create_assistant
-in the same turn. Do not claim an assistant exists until the tool confirms it.
-Before a destructive action, require explicit confirmation.
+When the user asks to create a business assistant, gather its workflow and
+present the concrete proposal before creation. If the workflow is incomplete,
+continue the interview instead of producing a shallow generic CS agent. Call
+create_assistant only after the owner explicitly confirms the presented
+proposal (confirmation can be in the same turn only if the owner already
+approved that exact proposal). Do not claim an assistant exists until the tool
+confirms it. Before a destructive action, require explicit confirmation.
+
+For an explicitly approved assistant build, make the first create_assistant
+call complete: include every required workflow field in that call, grounded
+only in facts the Owner supplied or approved. Do not make a partial call to
+discover required fields and then retry with invented details. Map the stated
+trigger, steps, outputs, sources, and handoff conditions directly into the
+schema. Do not invent stock levels, recipes, ingredient usage, tolerances,
+freshness limits, decision rules, or thresholds. If a missing fact prevents a
+safe workflow, ask one material question before creation. If the assistant can
+be created safely with a limitation, encode that limitation explicitly: when
+criteria or source data are absent, report "data belum cukup", identify what
+is missing, and ask one focused question instead of classifying or guessing.
+Also supply a concrete identity and soul:
+identify its role in the Owner's team and how it communicates and reports
+progress like a professional colleague. The platform fills these two fields
+from the approved name and purpose if omitted; never leave a created bot with
+an empty profile. Do not add skills or claim access that the bot lacks.
+
+In Team Chat, use list_team_groups to identify existing groups before changing
+them. Use create_team_group for an approved new group, update_team_group for
+its title or membership, and archive_team_group only after the Owner clearly
+asks to remove that group. Include yourself as the group manager by default.
+Group membership and messages must be real saved records. A plain mention in
+your own reply does not deliver work to a colleague; use the room messaging
+tool for a colleague in the current group. Write short, natural updates that
+say what was assigned, what is actually done, and what needs attention.
 
 Arthur is a control-plane builder and must never browse, read, or write a
 user's Google account or another external account. When the requested workflow
@@ -472,10 +648,11 @@ or an approved platform setup; never invent an endpoint or credential. For
 payments, only use get_payment_link after the user explicitly asks to buy or
 upgrade a plan.
 
-For a website or web-app request, create the assistant with enable_deploy=true
-in the same confirmed create_assistant call. That also enables its sandbox. The
-target website assistant must build from the approved brief, use deploy_app,
-verify the deployment status, and return the actual public URL to the user.
+For a website or web-app assistant, set enable_deploy=true when the Owner wants
+that assistant to have publishing capability. This enables its sandbox, but
+does not itself publish a task. When the Owner asks you to publish a specific
+task, dispatch it with requires_deployment=true. The specialist must build from the approved brief,
+use deploy_app, verify status, and return the actual public URL.
 Website/deploy assistants receive an explicit 8192-token output budget so they
 can write complete source files; do not create them with an implicit low
 conversational token limit.
@@ -491,9 +668,253 @@ knowledge; do not paste the document's full contents into the assistant's
 instructions. Do not claim it was added unless that tool returns ok=true.
 
 Use list_managed_assistants and inspect_managed_assistant before changing an
-existing assistant. You can only manage the caller's assistants. Keep replies
+existing assistant. You can only manage the caller's assistants. To edit one,
+resolve the exact bot from the live list, inspect it, then call update_assistant
+with only the fields the Owner asked to change: name, purpose/description,
+instructions, identity, soul, model, or temperature. The tool updates the saved
+bot record; do not claim an edit succeeded before it returns ok=true. To delete
+one, resolve the exact bot from the live list and ask for a clear confirmation
+of that bot before calling delete_assistant with confirmed=true. Deletion is a
+soft-delete, preserves its conversation history, and stops its scheduled runs.
+Never manage Arthur itself or bots belonging to another Owner. Keep replies
 short, practical, and in the user's language.
+In owner-facing chat, describe the work, outcome, and next action in ordinary
+language. Task IDs, assistant IDs, tool names, internal status codes, and
+exception names belong in logs and task records, not in chat replies. When a
+tool reports a blocker, explain its practical effect without copying its raw
+error text. Do not claim work is complete unless the recorded result supports it.
+
+For owner work spanning the user's specialist team, first call
+list_owner_workforce_roster, then select only relevant specialists and call
+orchestrate_owner_workforce_task with a bounded assignment for each. The tool
+records one durable owner task. Independent assignments run concurrently;
+set depends_on_previous=true on a later assignment that needs the preceding result.
+For research -> caption requests, dispatch the researcher first and writer second
+in the same task, with depends_on_previous=true on the writer. The writer must
+receive the actual research output before drafting and must not claim data is
+ready while research is incomplete.
+Each specialist receives the owner objective and a task-scoped brief; actual
+progress, peer handoffs, and results are recorded on the task timeline. Set
+requires_peer_help=true when Owner explicitly requests a peer review; that
+specialist must complete its bounded internal handoff before finishing.
+Only put independent work in one dispatch unless a later assignment explicitly sets
+depends_on_previous=true. For a PRD -> build -> QA workflow that needs Owner approval,
+dispatch the PRD first, read its completed result, pass the approved brief to
+the builder in a new dispatch, then dispatch QA after the builder produces a
+verifiable artifact. Never tell the Owner that later phases have started until
+their own dispatch calls return task IDs.
+The dispatch tool returns while work is still running; never present a queued
+task as complete. Use list_owner_workforce_tasks when Owner asks for progress,
+and synthesize only completed results. Use manage_owner_workforce_task to read
+the shared conversation, pass owner context to workers, or cancel when requested.
+Never send an update saying a specialist was assigned, is working, or will start
+until `orchestrate_owner_workforce_task` returned `ok=true` with a task_id in
+this run. A roster read, a plan, or a plain-text progress message is not a
+handoff. If dispatch did not happen, either execute it with the roster or say
+plainly that no specialist has been assigned yet.
+This control plane has
+no business-data connector in this release: if a question needs live sales,
+orders, CRM, spreadsheet, or other source data that was not supplied in the
+conversation, say that the source is unavailable and ask for the data or a
+separately approved integration. Never invent a business report.
+
+When the Owner asks for public deployment of this task, set requires_deployment=true
+only on the specialist who must deploy. The orchestrator trusts your structured
+task plan from this authenticated Owner session; it does not require a magic
+phrase or an exact quotation. Set the field false for PRD, QA, and other
+specialists even when their briefs mention deployment as context. If the Owner
+requested only a draft or capability setup, omit deployment. A specialist with
+the deploy assignment receives its task-scoped sandbox and deployment tools.
+Report the verified URL and expiry only after the specialist's tool confirms success.
 """
+
+
+_ARTHUR_FIRST_TURN_STAFFING_TERMS = re.compile(
+    r"\b(?:ai\s+staff|staff|team|tim|assistant|asisten|agent|karyawan|spesialis)\b",
+    re.IGNORECASE,
+)
+_ARTHUR_FIRST_TURN_BUSINESS_TERMS = re.compile(
+    r"\b(?:bisnis|usaha|startup|perusahaan|operasional|kerjaan|pekerjaan|business)\b",
+    re.IGNORECASE,
+)
+
+
+def is_arthur_first_turn_staffing_request(message: str) -> bool:
+    """Identify a new owner's broad request for AI staffing or business help."""
+    text = str(message or "")
+    return bool(
+        _ARTHUR_FIRST_TURN_STAFFING_TERMS.search(text)
+        and _ARTHUR_FIRST_TURN_BUSINESS_TERMS.search(text)
+    )
+
+
+def apply_arthur_first_turn_staffing_contract(
+    prompt: str,
+    *,
+    message: str,
+    is_fresh_session: bool,
+) -> str:
+    """Place the narrow first-reply UX contract after all other prompt blocks."""
+    if not is_fresh_session or not is_arthur_first_turn_staffing_request(message):
+        return prompt
+    return prompt + "\n\n## Required First Reply for a New Owner Asking for AI Staff\n" + (
+        "This contract has priority over every earlier instruction, discovery checklist, "
+        "rapid-intake option, or workflow-building procedure. In this first reply, "
+        "write one short acknowledgment and exactly one plain open question: ask which "
+        "single task takes the most time or causes the most pain. The complete reply "
+        "must contain exactly one question mark. Do not use a list, bullets, numbered "
+        "items, a second question, a role/team recommendation, capability examples, "
+        "integration or access questions, or claims about savings, results, or timelines. "
+        "Do not call tools or create/configure an assistant. Wait for the owner's answer."
+    )
+
+
+_ARTHUR_STAFFING_ACTION_REQUEST = re.compile(
+    # Accept an explicit imperative at a sentence boundary or after a direct
+    # request marker anywhere in a multi-sentence turn. Requiring one of those
+    # boundaries avoids treating incidental discussion ("menurutmu perlu
+    # bikin agent?") as authorization to leave discovery.
+    r"(?:^|[.!?;\n]\s*|\b(?:tolong|please)\s+)"
+    r"(?:(?:tolong|please|langsung|oke|ya|setuju|silakan)\s*[,!.]?\s*)*"
+    r"(?:buatkan|buat|bikin|bangun|create|siapkan)\s+.{0,100}"
+    r"\b(?:agent|asisten|assistant|tim|staf|staff)\b"
+    r"|(?:^|[.!?;\n]\s*|\b(?:tolong|please)\s+)setuju\b.{0,60}"
+    r"\b(?:buat|bikin|agent|asisten|assistant|tim|staf|staff)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_ARTHUR_STAFFING_DISCOVERY_MESSAGE = re.compile(
+    r"\b(?:bisnis|usaha|startup|operasional|kerjaan|pekerjaan|tim|staff|staf|agent|"
+    r"asisten|assistant|customer|pelanggan|order|pesanan|chat|penjualan|jualan|"
+    r"stok|marketing|pemasaran|lead|admin|whatsapp|crm|spreadsheet|integrasi)\b",
+    re.IGNORECASE,
+)
+_ARTHUR_UNVERIFIED_RESULT_CLAIM = re.compile(
+    r"\b(?:fakta\s+(?:yang\s+)?terkonfirmasi|sudah\s+(?:terhubung|terkoneksi|"
+    r"membuat|membuatkan|mengaktifkan|mengintegrasikan|mengirim)|"
+    r"(?:akan|bisa)\s+otomatis\s+(?:mengirim|menindaklanjuti|mencatat)|"
+    r"menghemat\s+\d+|hemat\s+\d+|meningkat\s+\d+|naik\s+\d+%|"
+    r"roi\s+(?:sebesar|\d)|selesai\s+dalam\s+\d+\s+(?:hari|minggu))\b",
+    re.IGNORECASE,
+)
+_ARTHUR_CONTEXT_DEPENDENT_TERMS = re.compile(
+    r"\b(?:manual|otomatis(?:asi)?|diotomatisasi|crm|google\s+sheets|spreadsheet|whatsapp|website|"
+    r"follow\s*up|inbound\s+lead|penjualan|pesanan|stok)\b",
+    re.IGNORECASE,
+)
+def has_successful_workforce_dispatch(steps: list[dict[str, Any]]) -> bool:
+    """Require a persisted task ID before Arthur reports specialist activity."""
+    for step in steps:
+        if str(step.get("tool") or "") != "orchestrate_owner_workforce_task":
+            continue
+        try:
+            result = json.loads(str(step.get("result") or ""))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(result, dict) and result.get("ok") is True and result.get("task_id"):
+            return True
+    return False
+
+
+def arthur_workforce_dispatch_completion_needed(reply: str, steps: list[dict[str, Any]]) -> bool:
+    """An attempted dispatch without a persisted task has no active handoff."""
+    return any(str(step.get("tool") or "") == "orchestrate_owner_workforce_task" for step in steps) and not has_successful_workforce_dispatch(steps)
+
+
+def guard_arthur_workforce_reply(reply: str, steps: list[dict[str, Any]]) -> tuple[str, str | None]:
+    """Do not let a narrative update masquerade as a completed handoff."""
+    if not arthur_workforce_dispatch_completion_needed(reply, steps):
+        return reply, None
+    return (
+        "Saya belum menugaskan specialist karena dispatch task belum berhasil tercatat. "
+        "Saya tidak akan mengklaim mereka sedang bekerja sebelum task dan assignment tersimpan.",
+        "missing_workforce_dispatch",
+    )
+
+
+def arthur_staffing_onboarding_active(history_rows: list[Any], current_message: str) -> bool:
+    """Scope reply safeguards to a broad owner staffing conversation until action is requested."""
+    first_owner_message = next(
+        (
+            str(getattr(row, "content", "") or "")
+            for row in history_rows
+            if str(getattr(row, "role", "") or "") == "user"
+        ),
+        str(current_message or "") if not history_rows else "",
+    )
+    if not is_arthur_first_turn_staffing_request(first_owner_message):
+        return False
+    # Let an explicit request to build a named agent continue through the
+    # existing builder confirmation flow instead of trapping the owner in intake.
+    if _ARTHUR_STAFFING_ACTION_REQUEST.search(current_message or ""):
+        return False
+    return bool(_ARTHUR_STAFFING_DISCOVERY_MESSAGE.search(current_message or ""))
+
+
+def guard_arthur_staffing_reply(
+    reply: str,
+    owner_message: str,
+    owner_context: str = "",
+) -> tuple[str, str | None]:
+    """Keep onboarding replies bounded; replace risky model output with a grounded fallback."""
+    text = str(reply or "").strip()
+    # Count punctuation directly here. The existing discovery extractor is
+    # intended to deduplicate semantic questions and can collapse several
+    # consecutive short questions into one sentence span.
+    question_count = text.count("?")
+    too_many_questions = question_count > 1
+    missing_question = question_count == 0
+    grounded_context = f"{owner_context}\n{owner_message}".casefold()
+    context_terms = {
+        match.group(0).casefold()
+        for match in _ARTHUR_CONTEXT_DEPENDENT_TERMS.finditer(text)
+    }
+    unsupported_context_claim = any(term not in grounded_context for term in context_terms)
+    unsupported_claim = bool(
+        _ARTHUR_UNVERIFIED_RESULT_CLAIM.search(text) or unsupported_context_claim
+    )
+    # Bulleted/numbered multi-step plans in early discovery tend to turn
+    # unverified guesses into apparent commitments. Keep them for later, after
+    # Arthur has enough owner-provided context.
+    checklist = bool(re.search(r"(?m)^\s*(?:[-*]|\d+[.)])\s+", text))
+    if not (too_many_questions or missing_question or unsupported_claim or checklist):
+        return text, None
+
+    current = str(owner_message or "").casefold()
+    context = f"{owner_context}\n{owner_message}".casefold()
+    is_content_request = bool(re.search(r"\b(?:konten|marketing|pemasaran|postingan)\b", current))
+    has_customer_support = bool(
+        re.search(r"\b(?:chat|pelanggan|customer|follow\s*up|balas|support)\b", context)
+    )
+    has_lead_work = bool(re.search(r"\b(?:leads?|prospek)\b", context))
+    has_chat_and_lead_work = bool(
+        re.search(r"\b(?:chat|pelanggan|customer|follow\s*up|balas)\b", context)
+        and has_lead_work
+    )
+    if is_content_request and has_customer_support:
+        acknowledgement = "Oke, berarti selain melayani calon pelanggan dan follow-up, kamu juga ingin konten marketing rutin. "
+        if "crm" in current and "belum" in current:
+            acknowledgement += "CRM belum kamu pilih, jadi aku belum menganggap koneksi CRM tersedia. "
+        question = "Channel mana yang paling penting untuk konten itu?"
+    elif has_chat_and_lead_work:
+        acknowledgement = "Oke, aku catat: membalas chat calon pelanggan dan follow-up lead sama-sama menyita waktu. "
+        question = "Mana yang lebih perlu dibantu dulu: balasan awal atau follow-up lead?"
+    elif has_customer_support and has_lead_work:
+        acknowledgement = "Oke, inbound leads dan support sama-sama jadi prioritas yang ingin kamu rapikan. "
+        question = "Dari dua area itu, bagian mana yang paling banyak menyita waktumu?"
+    elif has_customer_support:
+        acknowledgement = "Oke, berarti layanan pelanggan juga termasuk area yang ingin kamu rapikan. "
+        question = "Bagian layanan pelanggan mana yang paling sering bikin kewalahan?"
+    else:
+        acknowledgement = "Oke, aku catat kebutuhan yang kamu ceritakan. "
+        question = "Apa satu hal yang perlu aku pahami berikutnya supaya bisa menyusun bantuan yang pas?"
+    safe_reply = acknowledgement + question
+    if too_many_questions:
+        reason = "multiple_questions"
+    elif missing_question:
+        reason = "missing_question"
+    else:
+        reason = "unverified_claim_or_checklist"
+    return safe_reply, reason
 
 
 def _summary(agent: Agent) -> dict[str, Any]:
@@ -507,10 +928,26 @@ def _summary(agent: Agent) -> dict[str, Any]:
     }
 
 
+def _runtime_capabilities(agent: Agent) -> dict[str, bool]:
+    config = getattr(agent, "tools_config", None)
+    config = config if isinstance(config, dict) else {}
+
+    def enabled(name: str) -> bool:
+        value = config.get(name)
+        return bool(value.get("enabled", False)) if isinstance(value, dict) else bool(value)
+
+    deploy = enabled("deploy")
+    return {
+        "sandbox": enabled("sandbox") or deploy,
+        "deploy": deploy,
+    }
+
+
 def build_arthur_v2_tools(
     *,
     db_factory: async_sessionmaker,
     owner_phone: str | None,
+    owner_user_id: uuid.UUID | str | None = None,
     self_agent_id: str | None,
     sender_device_id: str = "",
     default_target: str = "",
@@ -518,7 +955,20 @@ def build_arthur_v2_tools(
 ) -> list:
     """Build ownership-scoped tools exposed to Arthur V2's Deep Agent graph."""
 
+    try:
+        tenant_user_id = uuid.UUID(str(owner_user_id)) if owner_user_id else None
+    except (TypeError, ValueError, AttributeError):
+        tenant_user_id = None
+    workforce_list_calls = 0
+
+    async def _owner_roster(db) -> list[Agent]:
+        if tenant_user_id is None:
+            return []
+        return await list_owner_workforce_agents(db, tenant_user_id, exclude_agent_id=self_agent_id)
+
     async def _owned(agent_id: str) -> Agent | None:
+        if tenant_user_id is None:
+            return None
         try:
             parsed_id = uuid.UUID(str(agent_id))
         except (TypeError, ValueError, AttributeError):
@@ -530,7 +980,7 @@ def build_arthur_v2_tools(
             agent = result.scalar_one_or_none()
             if agent is None or str(agent.id) == str(self_agent_id):
                 return None
-            if not agent_belongs_to_owner(agent, owner_phone):
+            if agent.owner_user_id != tenant_user_id:
                 return None
             return agent
 
@@ -538,23 +988,21 @@ def build_arthur_v2_tools(
         """Read the caller's subscription and assistant capacity from verified identifiers."""
         from app.core.domain.subscription_service import get_best_subscription_by_external_ids
 
-        identifiers = [owner_phone, default_target]
+        if tenant_user_id is None:
+            return {"ok": False, "error": "Owner identity belum dapat diverifikasi untuk akun ini."}
         async with db_factory() as db:
-            details = await get_best_subscription_by_external_ids(identifiers, db)
+            details = await get_best_subscription_by_external_ids([str(tenant_user_id)], db)
             if details is None:
                 return {
                     "ok": False,
                     "error": "Status plan untuk nomor WhatsApp ini belum ditemukan.",
                 }
             user, subscription, plan = details
-            owner_identifier = best_owner_identifier(
-                getattr(user, "phone_number", None),
-                getattr(user, "external_id", None),
-                owner_phone,
-                default_target,
-            )
             agents_result = await db.execute(
-                select(Agent).where(Agent.is_deleted.is_(False), owner_filter(owner_identifier))
+                select(Agent).where(
+                    Agent.is_deleted.is_(False),
+                    Agent.owner_user_id == user.id,
+                )
             )
             managed_agents = [
                 agent for agent in agents_result.scalars().all()
@@ -582,10 +1030,12 @@ def build_arthur_v2_tools(
     @tool
     async def list_managed_assistants() -> dict[str, Any]:
         """List the caller's active personal or business assistants."""
+        if tenant_user_id is None:
+            return {"assistants": [], "error": "Owner identity belum dapat diverifikasi untuk akun ini."}
         async with db_factory() as db:
             result = await db.execute(
                 select(Agent)
-                .where(Agent.is_deleted.is_(False), owner_filter(owner_phone))
+                .where(Agent.is_deleted.is_(False), Agent.owner_user_id == tenant_user_id)
                 .order_by(Agent.updated_at.desc())
             )
             agents = [a for a in result.scalars().all() if str(a.id) != str(self_agent_id)]
@@ -595,6 +1045,126 @@ def build_arthur_v2_tools(
     async def get_current_plan() -> dict[str, Any]:
         """Get the caller's live Clevio tier, active assistant count, remaining slots, token balance, and expiry."""
         return await _current_plan_snapshot()
+
+    @tool
+    async def list_owner_workforce_roster() -> dict[str, Any]:
+        """Read only the active specialist roster bound to the authenticated Owner's stable User account."""
+        if tenant_user_id is None:
+            return {"ok": False, "error": "Owner identity belum dapat diverifikasi; roster tidak tersedia."}
+        async with db_factory() as db:
+            agents = await _owner_roster(db)
+        return {
+            "ok": True,
+            "items": [
+                {
+                    "id": str(agent.id),
+                    "name": agent.name,
+                    "description": agent.description or "",
+                    "capabilities": agent.capabilities or [],
+                    "runtime_capabilities": _runtime_capabilities(agent),
+                }
+                for agent in agents
+            ],
+        }
+
+    @tool(args_schema=WorkforceTaskInput)
+    async def orchestrate_owner_workforce_task(
+        title: str,
+        objective: str,
+        assignments: list[WorkforceAssignmentInput],
+    ) -> dict[str, Any]:
+        """Create one durable owner task with parallel independent work or explicit sequential dependencies. Set requires_deployment on the worker assigned to publish."""
+        if tenant_user_id is None:
+            return {"ok": False, "error": "Owner identity belum dapat diverifikasi; task dan dispatch ditolak."}
+        async with db_factory() as db:
+            roster = await _owner_roster(db)
+            by_id = {str(agent.id): agent for agent in roster}
+            result = await execute_owner_workforce_task(
+                db=db,
+                owner_user_id=tenant_user_id,
+                title=title,
+                objective=objective,
+                assignments=[assignment.model_dump() for assignment in assignments],
+                worker_agents=by_id,
+                db_factory=db_factory,
+                background=True,
+            )
+        if result.get("ok"):
+            result["data_source_note"] = (
+                "No live business data connector was used. Results contain owner-provided task context "
+                "and task-scoped peer handoff results."
+            )
+        return result
+
+    @tool
+    async def list_owner_workforce_tasks() -> dict[str, Any]:
+        """Read the latest owner tasks and their current specialist assignment status. Use once, then answer from that snapshot; one refresh is allowed after dispatching new work."""
+        nonlocal workforce_list_calls
+        if tenant_user_id is None:
+            return {"ok": False, "error": "Owner identity belum dapat diverifikasi; task tidak tersedia."}
+        if workforce_list_calls >= 2:
+            return {
+                "ok": True,
+                "already_read": True,
+                "note": "Daftar tugas sudah dibaca dua kali dalam pesan ini. Gunakan hasil sebelumnya dan jawab Owner sekarang.",
+            }
+        workforce_list_calls += 1
+        async with db_factory() as db:
+            tasks = list((await db.execute(
+                select(WorkforceTask)
+                .where(WorkforceTask.owner_user_id == tenant_user_id)
+                .order_by(WorkforceTask.created_at.desc())
+                .limit(10)
+            )).scalars().all())
+            items = []
+            for task in tasks:
+                steps = list((await db.execute(
+                    select(WorkforceTaskStep)
+                    .where(WorkforceTaskStep.task_id == task.id)
+                    .order_by(WorkforceTaskStep.sequence.asc())
+                )).scalars().all())
+                items.append({
+                    "task_id": str(task.id),
+                    "title": task.title,
+                    "status": task.status,
+                    "created_at": task.created_at.isoformat() if task.created_at else None,
+                    "result_summary": (task.result_summary or "")[:800],
+                    "steps": [{
+                        "title": step.title,
+                        "status": step.status,
+                        "assigned_agent_id": str(step.assigned_agent_id) if step.assigned_agent_id else None,
+                        "summary": (step.output_summary or "")[:350],
+                    } for step in steps],
+                })
+        return {"ok": True, "items": items}
+
+    @tool
+    async def manage_owner_workforce_task(task_id: str, action: str, message: str = "") -> dict[str, Any]:
+        """Manage an owner task. Actions: read, message, cancel, retry. Retry only when Owner explicitly requests it after reviewing the blocker and possible external effects."""
+        if tenant_user_id is None:
+            return {"ok": False, "error": "Owner identity unavailable."}
+        try:
+            parsed_id = uuid.UUID(task_id)
+        except ValueError:
+            return {"ok": False, "error": "Invalid task ID."}
+        from app.core.domain.workforce_jobs import cancel_task, retry_task, team_tools
+        async with db_factory() as db:
+            task = (await db.execute(select(WorkforceTask).where(
+                WorkforceTask.id == parsed_id, WorkforceTask.owner_user_id == tenant_user_id,
+            ))).scalar_one_or_none()
+            if task is None:
+                return {"ok": False, "error": "Task not found for this owner."}
+            if action == "cancel":
+                await cancel_task(db, task)
+                return {"ok": True, "status": task.status}
+            if action == "retry":
+                return await retry_task(db, task)
+            read, post = team_tools(db, task.id, None)
+            if action == "read":
+                return {"ok": True, "messages": await read.ainvoke({})}
+            if action == "message":
+                return await post.ainvoke({"message": message})
+            return {"ok": False, "error": "Use read, message, cancel, or retry."}
 
     @tool
     async def inspect_managed_assistant(agent_id: str) -> dict[str, Any]:
@@ -624,7 +1194,11 @@ def build_arthur_v2_tools(
                 }
         return {
             "ok": True,
-            "assistant": {**_summary(agent), "instructions": agent.instructions},
+            "assistant": {
+                **_summary(agent),
+                "instructions": agent.instructions,
+                "runtime_capabilities": _runtime_capabilities(agent),
+            },
             "google_workspace": google_status,
         }
 
@@ -633,6 +1207,8 @@ def build_arthur_v2_tools(
         name: str,
         purpose: str,
         instructions: str,
+        identity: str = "",
+        soul: str = "",
         assistant_kind: str = "personal",
         workflow: AssistantWorkflowInput | dict[str, str] | None = None,
         enable_deploy: bool = False,
@@ -640,15 +1216,22 @@ def build_arthur_v2_tools(
         google_spreadsheet_url: str | None = None,
         confirmed: bool = False,
     ) -> dict[str, Any]:
-        """Create an assistant after explicit confirmation; business assistants require a concrete operating workflow."""
+        """Create after explicit confirmation. For business assistants, supply all five workflow fields in this first call using only Owner-provided facts; never invent thresholds, decision rules, recipes, or data sources. If a material fact is missing, ask one focused question before calling. When a safe workflow can handle missing criteria, explicitly require `data belum cukup` and a question instead of a classification."""
+        if tenant_user_id is None:
+            return {"ok": False, "error": "Owner identity belum dapat diverifikasi untuk akun ini."}
         if not confirmed:
             return {"ok": False, "needs_confirmation": True, "error": "Minta konfirmasi eksplisit sebelum membuat assistant."}
-        combined = f"{name}\n{purpose}\n{instructions}"
+        combined = f"{name}\n{purpose}\n{instructions}\n{identity}\n{soul}"
         blocked_reason = blocked_agent_policy_reason(combined)
         if blocked_reason:
             return {"ok": False, "error": blocked_reason}
         if not name.strip() or not purpose.strip() or not instructions.strip():
             return {"ok": False, "error": "Nama, tujuan, dan instruksi assistant wajib diisi."}
+        default_identity, default_soul = default_bot_profile(name, purpose)
+        clean_identity = identity.strip() or default_identity
+        clean_soul = soul.strip() or default_soul
+        if len(clean_identity) > 30_000 or len(clean_soul) > 30_000:
+            return {"ok": False, "error": "Identity atau soul terlalu panjang."}
         normalized_kind = assistant_kind.strip().lower()
         workflow_data = _workflow_data(workflow)
         try:
@@ -758,6 +1341,7 @@ def build_arthur_v2_tools(
                 max_tokens=ARTHUR_V2_CODING_DEPLOY_MAX_TOKENS if enable_deploy else None,
                 channel_type="whatsapp",
                 owner_external_id=owner_phone,
+                owner_user_id=tenant_user_id,
                 operator_ids=[owner_phone] if owner_phone else [],
                 tools_config=tools_config,
                 created_by_type="arthur_v2",
@@ -769,10 +1353,11 @@ def build_arthur_v2_tools(
             capability_context = _capability_context_for_memory(
                 scheduler=scheduler_enabled, google_services=google_services
             )
+            from app.core.domain.memory_service import upsert_memory
             if capability_context:
-                from app.core.domain.memory_service import upsert_memory
-
                 await upsert_memory(agent.id, "capability_context", capability_context, db, scope=None)
+            await upsert_memory(agent.id, "identity", clean_identity, db, scope=None)
+            await upsert_memory(agent.id, "soul", clean_soul, db, scope=None)
             await db.commit()
             await db.refresh(agent)
         google_auth: dict[str, Any] | None = None
@@ -816,6 +1401,7 @@ def build_arthur_v2_tools(
             "ok": True,
             "agent_id": str(agent.id),
             "assistant": _summary(agent),
+            "profile_filled": {"identity": True, "soul": True},
             "runtime": {
                 "sandbox": bool(enable_deploy),
                 "deploy": bool(enable_deploy),
@@ -972,28 +1558,70 @@ def build_arthur_v2_tools(
     @tool
     async def update_assistant(
         agent_id: str,
+        name: str = "",
         purpose: str = "",
         instructions: str = "",
+        identity: str = "",
+        soul: str = "",
+        model: str = "",
+        temperature: float | None = None,
         confirmed: bool = False,
     ) -> dict[str, Any]:
-        """Update purpose or instructions of a caller-owned assistant after explicit confirmation."""
+        """Update the name, description/purpose, instructions, identity, soul, model, or temperature of one caller-owned bot after explicit Owner confirmation. Leave unchanged fields empty. Inspect the bot first and pass only requested changes."""
         if not confirmed:
-            return {"ok": False, "needs_confirmation": True, "error": "Minta konfirmasi eksplisit sebelum mengubah assistant."}
+            return {"ok": False, "needs_confirmation": True, "error": "Minta konfirmasi eksplisit sebelum mengubah bot."}
         agent = await _owned(agent_id)
         if agent is None:
-            return {"ok": False, "error": "Assistant tidak ditemukan atau bukan milik pengguna ini."}
-        if not purpose.strip() and not instructions.strip():
-            return {"ok": False, "error": "Berikan tujuan atau instruksi yang ingin diubah."}
-        combined = f"{purpose}\n{instructions}"
+            return {"ok": False, "error": "Bot tidak ditemukan atau bukan milik pengguna ini."}
+        name = name.strip()
+        purpose = purpose.strip()
+        instructions = instructions.strip()
+        identity = identity.strip()
+        soul = soul.strip()
+        model = model.strip()
+        if not any((name, purpose, instructions, identity, soul, model)) and temperature is None:
+            return {"ok": False, "error": "Sebutkan bagian bot yang ingin diubah."}
+        if name and len(name) > 255:
+            return {"ok": False, "error": "Nama bot maksimal 255 karakter."}
+        if model and len(model) > 255:
+            return {"ok": False, "error": "Nama model maksimal 255 karakter."}
+        if temperature is not None and not 0 <= temperature <= 2:
+            return {"ok": False, "error": "Temperature harus berada di antara 0 dan 2."}
+        if len(purpose) > 20_000 or len(instructions) > 200_000 or len(identity) > 30_000 or len(soul) > 30_000:
+            return {"ok": False, "error": "Ada bagian konfigurasi yang melewati batas panjang."}
+        combined = f"{name}\n{purpose}\n{instructions}\n{identity}\n{soul}"
         blocked_reason = blocked_agent_policy_reason(combined)
         if blocked_reason:
             return {"ok": False, "error": blocked_reason}
         async with db_factory() as db:
             managed = await db.get(Agent, agent.id)
+            if managed is None or managed.is_deleted or managed.owner_user_id != tenant_user_id:
+                return {"ok": False, "error": "Bot tidak ditemukan atau bukan milik pengguna ini."}
+            changed: list[str] = []
+            if name:
+                managed.name = name
+                changed.append("name")
             if purpose.strip():
                 managed.description = purpose.strip()
+                changed.append("purpose")
             if instructions.strip():
                 managed.instructions = instructions.strip()
+                changed.append("instructions")
+            if model:
+                managed.model = model
+                changed.append("model")
+            if temperature is not None:
+                managed.temperature = temperature
+                changed.append("temperature")
+            if identity or soul:
+                from app.core.domain.memory_service import get_active_context_version, upsert_memory
+
+                context_version = await get_active_context_version(managed.id, db)
+                for key, value in (("identity", identity), ("soul", soul)):
+                    if value:
+                        memory_key = f"{key}:v{context_version}" if context_version else key
+                        await upsert_memory(managed.id, memory_key, value, db)
+                        changed.append(key)
             managed.version += 1
             await db.commit()
             await db.refresh(managed)
@@ -1005,6 +1633,7 @@ def build_arthur_v2_tools(
             return {
                 "ok": True,
                 "assistant": _summary(managed),
+                "changed_fields": changed,
                 "automation": {
                     "autonomous_active": active_autonomous,
                     "note": "Mengubah purpose/instructions tidak membuat atau mengaktifkan autonomous run.",
@@ -1095,7 +1724,7 @@ def build_arthur_v2_tools(
         try:
             async with db_factory() as db:
                 managed = await db.get(Agent, agent.id)
-                if managed is None or managed.is_deleted or not agent_belongs_to_owner(managed, owner_phone):
+                if managed is None or managed.is_deleted or managed.owner_user_id != tenant_user_id:
                     return {"ok": False, "error": "Assistant tidak ditemukan atau bukan milik pengguna ini."}
                 total = len(chunks)
                 for index, content in enumerate(chunks, start=1):
@@ -1137,18 +1766,205 @@ def build_arthur_v2_tools(
 
     @tool
     async def delete_assistant(agent_id: str, confirmed: bool = False) -> dict[str, Any]:
-        """Soft-delete a caller-owned assistant only after explicit confirmation."""
+        """Soft-delete one caller-owned bot after explicit Owner confirmation. Preserve its history and stop scheduled work."""
         if not confirmed:
-            return {"ok": False, "needs_confirmation": True, "error": "Minta konfirmasi eksplisit sebelum menghapus assistant."}
+            return {"ok": False, "needs_confirmation": True, "error": "Minta konfirmasi eksplisit sebelum menghapus bot."}
         agent = await _owned(agent_id)
         if agent is None:
-            return {"ok": False, "error": "Assistant tidak ditemukan atau bukan milik pengguna ini."}
+            return {"ok": False, "error": "Bot tidak ditemukan atau bukan milik pengguna ini."}
+        if agent.wa_device_id:
+            try:
+                from app.core.infra.wa_client import delete_wa_device
+
+                await delete_wa_device(agent.wa_device_id)
+            except Exception:
+                # Keep deletion durable even if an external channel is already
+                # unavailable; the channel can be cleaned up by operations.
+                pass
         async with db_factory() as db:
             managed = await db.get(Agent, agent.id)
+            if managed is None or managed.is_deleted or managed.owner_user_id != tenant_user_id:
+                return {"ok": False, "error": "Bot tidak ditemukan atau bukan milik pengguna ini."}
+            jobs = list((await db.execute(select(ScheduledJob).where(
+                ScheduledJob.agent_id == managed.id,
+                ScheduledJob.status.in_(("active", "running", "paused")),
+            ))).scalars().all())
+            for job in jobs:
+                job.status = "cancelled"
+                job.next_run_at = None
+            group_memberships = (await db.execute(select(TeamChatMember).where(
+                TeamChatMember.agent_id == managed.id,
+            ))).scalars().all()
+            for membership in group_memberships:
+                room = await db.get(TeamChatRoom, membership.room_id)
+                if room is None or room.kind != "group" or room.owner_user_id != tenant_user_id:
+                    continue
+                remaining = (await db.execute(select(TeamChatMember.agent_id)
+                    .join(Agent, Agent.id == TeamChatMember.agent_id)
+                    .where(TeamChatMember.room_id == room.id,
+                           TeamChatMember.agent_id != managed.id,
+                           Agent.is_deleted.is_(False))
+                )).scalars().all()
+                if len(remaining) < 2:
+                    room.kind = "archived"
+                elif room.manager_agent_id == managed.id:
+                    arthur_id = uuid.UUID(str(self_agent_id)) if self_agent_id else None
+                    room.manager_agent_id = arthur_id if arthur_id in remaining else remaining[0]
+                room.updated_at = datetime.now(timezone.utc)
+                await db.delete(membership)
             managed.is_deleted = True
             managed.updated_at = datetime.now(timezone.utc)
             await db.commit()
-        return {"ok": True, "deleted_agent_id": str(agent.id)}
+        return {
+            "ok": True,
+            "deleted_agent_id": str(agent.id),
+            "deleted_agent_name": agent.name,
+            "cancelled_scheduled_runs": len(jobs),
+            "history_preserved": True,
+        }
+
+    async def _owned_group(db, room_id: str) -> TeamChatRoom | None:
+        if tenant_user_id is None:
+            return None
+        try:
+            parsed = uuid.UUID(str(room_id))
+        except (TypeError, ValueError, AttributeError):
+            return None
+        return (await db.execute(select(TeamChatRoom).where(
+            TeamChatRoom.id == parsed,
+            TeamChatRoom.owner_user_id == tenant_user_id,
+            TeamChatRoom.workspace_id == str(tenant_user_id),
+            TeamChatRoom.kind == "group",
+        ))).scalar_one_or_none()
+
+    @tool
+    async def list_team_groups() -> dict[str, Any]:
+        """List the Owner's saved Team Chat groups with exact group IDs and member names before changing a group."""
+        if tenant_user_id is None:
+            return {"ok": False, "error": "Owner belum terverifikasi."}
+        async with db_factory() as db:
+            rooms = (await db.execute(select(TeamChatRoom).where(
+                TeamChatRoom.owner_user_id == tenant_user_id,
+                TeamChatRoom.workspace_id == str(tenant_user_id),
+                TeamChatRoom.kind == "group",
+            ).order_by(TeamChatRoom.updated_at.desc()))).scalars().all()
+            groups = []
+            for room in rooms:
+                members = (await db.execute(select(TeamChatMember.agent_id, Agent.name)
+                    .join(Agent, Agent.id == TeamChatMember.agent_id)
+                    .where(TeamChatMember.room_id == room.id, Agent.is_deleted.is_(False))
+                )).all()
+                groups.append({
+                    "group_id": str(room.id), "title": room.title,
+                    "manager_agent_id": str(room.manager_agent_id),
+                    "members": [{"agent_id": str(agent_id), "name": name} for agent_id, name in members],
+                })
+            return {"ok": True, "groups": groups}
+
+    @tool
+    async def create_team_group(title: str, member_agent_ids: list[str], confirmed: bool = False) -> dict[str, Any]:
+        """Create a persistent Owner Team Chat group with Arthur as manager and the selected owned bots. Use IDs from the live roster and set confirmed only after the Owner requested this group."""
+        if tenant_user_id is None or not self_agent_id:
+            return {"ok": False, "error": "Owner atau Arthur belum terverifikasi."}
+        if not confirmed:
+            return {"ok": False, "needs_confirmation": True, "error": "Konfirmasi grup dan anggotanya lebih dulu."}
+        clean_title = title.strip()
+        if not clean_title or len(clean_title) > 255:
+            return {"ok": False, "error": "Nama grup wajib diisi, maksimal 255 karakter."}
+        try:
+            manager_id = uuid.UUID(str(self_agent_id))
+            selected_ids = list(dict.fromkeys(uuid.UUID(value) for value in member_agent_ids))
+        except (TypeError, ValueError, AttributeError):
+            return {"ok": False, "error": "Pilih bot dari roster yang tersedia."}
+        if not selected_ids or len(selected_ids) > 19 or manager_id in selected_ids:
+            return {"ok": False, "error": "Pilih 1 sampai 19 bot lain untuk grup Arthur."}
+        async with db_factory() as db:
+            if await db.get(User, tenant_user_id) is None:
+                return {"ok": False, "error": "Owner tidak ditemukan."}
+            allowed = {agent.id for agent in await _owner_roster(db)}
+            if any(agent_id not in allowed for agent_id in selected_ids):
+                return {"ok": False, "error": "Ada bot yang bukan milik Owner atau sudah tidak aktif."}
+            room = TeamChatRoom(
+                workspace_id=str(tenant_user_id), owner_user_id=tenant_user_id,
+                kind="group", title=clean_title, manager_agent_id=manager_id,
+            )
+            db.add(room)
+            await db.flush()
+            for agent_id in [manager_id, *selected_ids]:
+                db.add(TeamChatMember(room_id=room.id, agent_id=agent_id))
+            await db.commit()
+            return {"ok": True, "group_id": str(room.id), "title": room.title,
+                    "member_agent_ids": [str(manager_id), *(str(value) for value in selected_ids)]}
+
+    @tool
+    async def update_team_group(
+        group_id: str,
+        title: str = "",
+        add_agent_ids: list[str] | None = None,
+        remove_agent_ids: list[str] | None = None,
+        manager_agent_id: str = "",
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Rename an owned group, add or remove owned bots, or choose a member as manager. Read list_team_groups first. Set confirmed only for the Owner's requested changes."""
+        if not confirmed:
+            return {"ok": False, "needs_confirmation": True, "error": "Konfirmasi perubahan grup lebih dulu."}
+        if not (title.strip() or add_agent_ids or remove_agent_ids or manager_agent_id.strip()):
+            return {"ok": False, "error": "Sebutkan perubahan grup yang diinginkan."}
+        if len(title.strip()) > 255:
+            return {"ok": False, "error": "Nama grup maksimal 255 karakter."}
+        try:
+            added = set(uuid.UUID(value) for value in (add_agent_ids or []))
+            removed = set(uuid.UUID(value) for value in (remove_agent_ids or []))
+            requested_manager = uuid.UUID(manager_agent_id) if manager_agent_id.strip() else None
+        except (TypeError, ValueError, AttributeError):
+            return {"ok": False, "error": "Pilih bot dan grup dari daftar yang tersedia."}
+        if added & removed:
+            return {"ok": False, "error": "Bot yang sama tidak bisa ditambah dan dihapus sekaligus."}
+        async with db_factory() as db:
+            room = await _owned_group(db, group_id)
+            if room is None:
+                return {"ok": False, "error": "Grup tidak ditemukan di workspace Owner."}
+            members = (await db.execute(select(TeamChatMember).where(
+                TeamChatMember.room_id == room.id,
+            ))).scalars().all()
+            current = {member.agent_id: member for member in members}
+            allowed = {agent.id for agent in await _owner_roster(db)}
+            if self_agent_id:
+                allowed.add(uuid.UUID(str(self_agent_id)))
+            if any(agent_id not in allowed for agent_id in added | ({requested_manager} if requested_manager else set())):
+                return {"ok": False, "error": "Bot baru atau manager bukan milik tim Owner."}
+            if any(agent_id not in current for agent_id in removed):
+                return {"ok": False, "error": "Bot yang hendak dihapus bukan anggota grup ini."}
+            final_ids = (set(current) | added) - removed
+            final_manager = requested_manager or room.manager_agent_id
+            if final_manager not in final_ids or len(final_ids) < 2 or len(final_ids) > 20:
+                return {"ok": False, "error": "Grup perlu manager aktif dan 2 sampai 20 anggota."}
+            if title.strip():
+                room.title = title.strip()
+            room.manager_agent_id = final_manager
+            for agent_id in added - set(current):
+                db.add(TeamChatMember(room_id=room.id, agent_id=agent_id))
+            for agent_id in removed:
+                await db.delete(current[agent_id])
+            room.updated_at = datetime.now(timezone.utc)
+            await db.commit()
+            return {"ok": True, "group_id": str(room.id), "title": room.title,
+                    "manager_agent_id": str(final_manager),
+                    "member_agent_ids": [str(agent_id) for agent_id in final_ids]}
+
+    @tool
+    async def archive_team_group(group_id: str, confirmed: bool = False) -> dict[str, Any]:
+        """Remove an owned group from Team Chat after explicit Owner confirmation. Preserve its messages for records."""
+        if not confirmed:
+            return {"ok": False, "needs_confirmation": True, "error": "Minta konfirmasi sebelum mengarsipkan grup."}
+        async with db_factory() as db:
+            room = await _owned_group(db, group_id)
+            if room is None:
+                return {"ok": False, "error": "Grup tidak ditemukan di workspace Owner."}
+            room.kind = "archived"
+            room.updated_at = datetime.now(timezone.utc)
+            await db.commit()
+            return {"ok": True, "group_id": str(room.id), "title": room.title, "history_preserved": True}
 
     @tool
     async def configure_assistant_runtime(
@@ -1471,6 +2287,10 @@ def build_arthur_v2_tools(
 
     return [
         list_managed_assistants,
+        list_owner_workforce_roster,
+        orchestrate_owner_workforce_task,
+        list_owner_workforce_tasks,
+        manage_owner_workforce_task,
         get_current_plan,
         inspect_managed_assistant,
         get_assistant_automation_status,
@@ -1480,6 +2300,10 @@ def build_arthur_v2_tools(
         update_assistant,
         add_assistant_knowledge,
         delete_assistant,
+        list_team_groups,
+        create_team_group,
+        update_team_group,
+        archive_team_group,
         configure_assistant_runtime,
         get_payment_link,
         start_assistant_google_oauth,

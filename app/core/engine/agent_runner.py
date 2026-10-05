@@ -990,6 +990,8 @@ async def run_agent(
     current_attachment_name: str | None = None,
     sender_name: str | None = None,
     prior_run_was_interrupted: bool = False,
+    extra_tools: list[Any] | None = None,
+    max_tokens_override: int | None = None,
 ) -> AgentRunResult:
     """
     Jalankan agent end-to-end:
@@ -1127,7 +1129,9 @@ async def run_agent(
     if _quota_block is not None:
         return _quota_block
 
-    llm_raw, llm = build_agent_llms(agent_model, settings, temperature)
+    llm_raw, llm = build_agent_llms(
+        agent_model, settings, temperature, max_tokens_override=max_tokens_override,
+    )
 
     # Fetch operating manual early so it can be passed to tool setup for SOP gating.
     _early_operating_manual = await get_latest_agent_operating_manual(
@@ -1295,7 +1299,13 @@ async def run_agent(
     if _is_enabled(tools_config, "rag", default=False):
         rag_context = await build_rag_context(agent_id, user_message, db, tools_config, log)
 
-    context_summary = await maybe_summarize_context(session, db, llm, log)
+    # Team Chat supplies a bounded, shared room transcript for every group turn.
+    # Replaying earlier full group prompts from this member session duplicates
+    # that transcript and grows the model input on every message.
+    _team_chat_group = (session.metadata_ or {}).get("kind") == "group" and bool(
+        (session.metadata_ or {}).get("team_chat_room_id")
+    )
+    context_summary = "" if _team_chat_group else await maybe_summarize_context(session, db, llm, log)
 
     memory_block = await build_memory_context(agent_id, db, scope=_memory_scope)
     layered_memory = await load_layered_memory(agent_id, db, scope=_memory_scope)
@@ -1312,7 +1322,7 @@ async def run_agent(
         if context_summary
         else settings.short_term_memory_turns
     )
-    history_rows = await load_history(session.id, db, max_turns=_history_turns)
+    history_rows = [] if _team_chat_group else await load_history(session.id, db, max_turns=_history_turns)
     prior_messages = db_messages_to_lc(history_rows)
     # Follow-up routing is intentionally not inferred from message wording.
     # A future auth continuation must arrive as explicit structured state.
@@ -1691,6 +1701,9 @@ async def run_agent(
                     )
         if direct_wa_text_send_context:
             tools = _prioritize_direct_whatsapp_text_send_tools(tools, log)
+        if extra_tools:
+            tools.extend(extra_tools)
+            active_groups.append("team_chat")
         if mcp_errors:
             log.warning("agent_run.mcp_errors", errors=mcp_errors)
             _google_mcp_auth_url, system_prompt = await apply_mcp_error_notice(
@@ -1701,6 +1714,41 @@ async def run_agent(
                 api_key=settings.api_key,
                 system_prompt=system_prompt,
                 log=log,
+            )
+
+        _arthur_staffing_onboarding_active = False
+        if (
+            runtime_policy.is_builder
+            and str(tools_config.get("system_plugin") or "").strip() == "arthur_v2"
+            and not (session.metadata_ or {}).get("team_chat_room_id")
+        ):
+            from arthur_v2.plugin import (
+                apply_arthur_first_turn_staffing_contract,
+                arthur_staffing_onboarding_active,
+            )
+
+            _arthur_staffing_onboarding_active = arthur_staffing_onboarding_active(
+                history_rows,
+                execution_user_message,
+            )
+            if _arthur_staffing_onboarding_active:
+                # During owner staffing discovery, Arthur should ask and listen
+                # without persisting guessed facts or creating/configuring staff.
+                # An explicit build request exits this scope and restores the
+                # normal builder tools and their existing confirmation gates.
+                tools = []
+                _arthur_unscoped_tools = []
+                active_groups = []
+                log.info("agent_run.arthur_staffing_discovery_tools_suppressed")
+
+        if _arthur_staffing_onboarding_active and not history_rows:
+            # Apply this after canonical instructions, discovery skills,
+            # preflight contracts, and MCP notices so none can turn a first
+            # broad staffing request into a bundled intake questionnaire.
+            system_prompt = apply_arthur_first_turn_staffing_contract(
+                system_prompt,
+                message=execution_user_message,
+                is_fresh_session=True,
             )
 
         backend = None
@@ -3171,11 +3219,17 @@ async def run_agent(
                     error=str(_deploy_followup_exc)[:300],
                 )
 
-        _needs_wa_file_followup, _wa_shared_file_path = _needs_whatsapp_file_delivery_followup(
-            execution_user_message,
-            tools_config,
-            steps,
-            final_reply,
+        # File delivery is a WhatsApp transport action. Web and team-chat runs
+        # can mention shared files without asking this runtime to send media.
+        _needs_wa_file_followup, _wa_shared_file_path = (
+            _needs_whatsapp_file_delivery_followup(
+                execution_user_message,
+                tools_config,
+                steps,
+                final_reply,
+            )
+            if getattr(session, "channel_type", None) == "whatsapp"
+            else (False, None)
         )
         if _needs_wa_file_followup and _wa_shared_file_path:
             log.info("agent_run.whatsapp_file_delivery_followup", path=_wa_shared_file_path)
@@ -3433,6 +3487,60 @@ async def run_agent(
         ):
             db.add(agent_model)
 
+        # Arthur may produce a plausible progress update without actually
+        # calling the workforce dispatch tool. Give the graph one bounded
+        # completion turn before the reply guard replaces that claim.
+        if str((tools_config or {}).get("system_plugin") or "").strip() == "arthur_v2":
+            from arthur_v2.plugin import arthur_workforce_dispatch_completion_needed
+
+            if arthur_workforce_dispatch_completion_needed(final_reply, steps):
+                log.warning(
+                    "agent_run.arthur_workforce_dispatch_completion",
+                    steps=len(steps),
+                )
+                _workforce_completion_input = _sanitize_input_messages(input_messages)
+                _workforce_completion_input.append(
+                    HumanMessage(
+                        content=(
+                            "Your reply claimed that specialists were assigned or working, but this run has no "
+                            "successful orchestrate_owner_workforce_task result. If the Owner requested concrete "
+                            "work and the roster supports it, now read the roster and dispatch the bounded task. "
+                            "Otherwise correct the reply: do not say any specialist was assigned, is working, or "
+                            "will start."
+                        )
+                    )
+                )
+                try:
+                    async with asyncio.timeout(_timeout):
+                        _workforce_completion_output = await _timed_graph_invoke(
+                            graph,
+                            "arthur_workforce_dispatch_completion",
+                            _workforce_completion_input,
+                            _graph_config,
+                        )
+                        result = await _graph_result_from_output(
+                            graph=graph,
+                            graph_config=_graph_config,
+                            graph_output=_workforce_completion_output,
+                            log=log,
+                        )
+                    parsed = parse_agent_result(
+                        result=result,
+                        input_messages=input_messages,
+                        session_id=session.id,
+                        run_id=run_id,
+                        step_start=step_counter,
+                        log=log,
+                    )
+                    final_reply = parsed["final_reply"]
+                    steps = parsed["steps"]
+                    total_tokens_used = _agent_logger.total_tokens_from_callbacks or parsed["total_tokens_used"]
+                except Exception as _workforce_completion_exc:
+                    log.warning(
+                        "agent_run.arthur_workforce_dispatch_completion_failed",
+                        error=str(_workforce_completion_exc)[:300],
+                    )
+
     await db.flush()
 
     # ------------------------------------------------------------------ #
@@ -3591,6 +3699,41 @@ async def run_agent(
             before_preview=(_reply_before_google_auth_guard or "")[:220],
             after_preview=(final_reply or "")[:220],
         )
+
+    if _arthur_staffing_onboarding_active:
+        from arthur_v2.plugin import guard_arthur_staffing_reply
+
+        _reply_before_staffing_guard = final_reply
+        _staffing_owner_context = "\n".join(
+            str(getattr(_row, "content", "") or "")
+            for _row in history_rows
+            if str(getattr(_row, "role", "") or "") == "user"
+        )
+        final_reply, _staffing_guard_reason = guard_arthur_staffing_reply(
+            final_reply,
+            execution_user_message,
+            _staffing_owner_context,
+        )
+        if _staffing_guard_reason:
+            log.warning(
+                "agent_run.arthur_staffing_reply_guard_applied",
+                reason=_staffing_guard_reason,
+                before_len=len(_reply_before_staffing_guard or ""),
+                after_len=len(final_reply or ""),
+            )
+
+    if str((tools_config or {}).get("system_plugin") or "").strip() == "arthur_v2":
+        from arthur_v2.plugin import guard_arthur_workforce_reply
+
+        _reply_before_workforce_guard = final_reply
+        final_reply, _workforce_guard_reason = guard_arthur_workforce_reply(final_reply, steps)
+        if _workforce_guard_reason:
+            log.warning(
+                "agent_run.arthur_workforce_reply_guard_applied",
+                reason=_workforce_guard_reason,
+                before_len=len(_reply_before_workforce_guard or ""),
+                after_len=len(final_reply or ""),
+            )
 
     if _arthur_skill_context is not None and _arthur_skill_context.draft is not None:
         if _arthur_skill_context.primary_skill == "arthur-discovery":

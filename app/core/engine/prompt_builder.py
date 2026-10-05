@@ -768,6 +768,7 @@ def build_system_prompt(
 
     # --- Layered memory (OpenClaw-style) ---
     _lm = layered_memory or {}
+    _identity = _lm.get("identity", "").strip()
     _soul = _lm.get("soul", "").strip()
     _user_profile = _lm.get("user_profile", "").strip()
     _longterm = _lm.get("longterm", "").strip()
@@ -781,7 +782,8 @@ def build_system_prompt(
     _yesterday_date = _lm.get("yesterday_date", "")
 
     if (
-        _soul
+        _identity
+        or _soul
         or _user_profile
         or _longterm
         or _active_context
@@ -801,7 +803,10 @@ def build_system_prompt(
 
         # --- Identitas ---
         p.append("\n## Identitasmu")
-        p.append(_soul if _soul else base_instructions)
+        p.append(_identity or _soul or base_instructions)
+        if _identity and _soul:
+            p.append("\n## Karakter dan cara berinteraksi")
+            p.append(_soul)
 
         # --- User ---
         p.append("\n## User yang Kamu Bantu")
@@ -898,7 +903,7 @@ def build_system_prompt(
 
         layered_block = "\n".join(p)
         system_prompt = f"{context_block}\n\n{current_time_block}\n\n{layered_block}"
-        if _soul and base_instructions and base_instructions.strip() != _soul:
+        if base_instructions and base_instructions.strip() not in {_identity, _soul} and (_identity or _soul):
             system_prompt += f"\n\n---\n\n{base_instructions}"
     else:
         system_prompt = f"{context_block}\n\n{current_time_block}\n\n{base_instructions}"
@@ -968,7 +973,27 @@ def build_system_prompt(
         "Jangan membuat ulang file final_v2/final_v3/final_v4 tanpa permintaan eksplisit dari user.\n"
     )
 
-    if "builder" in active_groups:
+    _is_arthur_v2 = str(
+        ((getattr(agent_model, "tools_config", None) or {}).get("system_plugin") or "")
+    ).strip() == "arthur_v2"
+
+    if "builder" in active_groups and _is_arthur_v2:
+        system_prompt += _build_arthur_tool_category_guide()
+        system_prompt += (
+            "\n\n## Arthur V2 Owner Manager Mode\n"
+            "Arthur is the Owner's business manager and orchestrator. Agent design is one capability, not the default topic.\n"
+            "- For a fresh-session `hello`/`Halo` or `who are you?`, answer in about two short sentences in the user's language. Identify yourself as the Owner's AI manager, say you will understand their goals and coordinate the right specialists behind the scenes, then ask exactly one open question about what they want to accomplish first. Do not list capabilities, ask an onboarding questionnaire, ask them to choose a specialist, or offer a create-agent-versus-chat menu. Example: `Halo, aku Arthur, manajer AI untuk bisnismu yang akan memahami tujuanmu dan mengoordinasikan spesialis yang tepat di belakangku. Apa yang paling ingin kamu bereskan atau capai dulu?`\n"
+            "- If a new Owner's first message broadly asks for AI staff, a team of assistants, or help running the business, acknowledge briefly and ask exactly one open question about the single task that takes the most time or causes the most pain. Do not recommend roles, list capabilities, ask about integrations, or ask a second question; wait for the answer.\n"
+            "- For other discovery, ask one material question per turn by default; bundle up to three concise questions only if the Owner asks for rapid intake.\n"
+            "- Once the Owner shares context, distinguish Owner-provided facts, clearly labeled assumptions, unknowns, and recommendations. Suggest roles only as hypotheses and invite correction; don't ask them to design their own team.\n"
+            "- Before claiming an integration is connected or a capability is available, inspect the target assistant's actual runtime configuration and tools for this task. Past conversation, agent description, or proposed setup is not proof. If status cannot be verified, call it unconfirmed/conditional and ask permission before requesting or configuring access; do not assume the business uses WhatsApp, CRM, spreadsheets, MCP, or any other system.\n"
+            "- Default to analysis, internal coordination, and reviewable drafts. Never create an assistant, change configuration, connect a channel, or send a customer-facing/external message without explicit approval for that specific action. Separate plans and drafts from completed work.\n"
+            "- Never invent time savings, ROI, revenue impact, performance gains, delivery timelines, or quantified benefits. Estimate only from Owner-provided or verified inputs; show assumptions, label it as an estimate, and make no promise. If inputs are missing, say the estimate is unknown.\n"
+            "- For an actual request, answer directly where possible; otherwise inspect the authenticated Owner's roster and delegate relevant internal work, then synthesize results. Never claim access to unavailable live business data or invent metrics, staff, rules, or completed work.\n"
+            "- Keep every roster, task, conversation, and memory scoped to the authenticated Owner/workspace.\n"
+        )
+
+    if "builder" in active_groups and not _is_arthur_v2:
         system_prompt += _build_arthur_tool_category_guide()
         system_prompt += (
             "\n\n## Arthur Builder Mode\n"

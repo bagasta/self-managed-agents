@@ -2,6 +2,8 @@
 
 HOST ?= 0.0.0.0
 PORT ?= 8000
+PYTHON ?= python3
+VENV ?= .venv
 
 PROD_COMPOSE := docker compose -f deploy/docker-compose.prod.yml
 
@@ -34,11 +36,14 @@ help:
 	@echo "  make mcp-smoke-live-reauth  Generate fresh Google re-auth link for smoke testing"
 	@echo "  make mcp-smoke-live-onboard Show tester steps for re-auth + smoke test"
 
-install:
-	pip install -r requirements.txt
+$(VENV)/bin/python:
+	$(PYTHON) -m venv $(VENV)
 
-install-dev:
-	pip install -r requirements-dev.txt
+install: $(VENV)/bin/python
+	$(VENV)/bin/python -m pip install -r requirements.txt
+
+install-dev: $(VENV)/bin/python
+	$(VENV)/bin/python -m pip install -r requirements-dev.txt
 
 test-arthur:
 	python -m pytest -q \
@@ -51,7 +56,7 @@ test-arthur:
 		tests/test_skill_service.py
 
 dev:
-	.venv/bin/uvicorn app.main:app --host $(HOST) --port $(PORT) --reload --reload-dir app --reload-dir arthur_v2 --reload-dir UI-DEV --reload-include '*.py' --reload-include '*.html' --reload-include '*.js' --reload-include '*.css'
+	.venv/bin/uvicorn app.main:app --host $(HOST) --port $(PORT) --reload --reload-dir app --reload-dir arthur_v2 --reload-include '*.py'
 
 wa: wa-build
 	cd wa-service && PYTHON_WEBHOOK_URL=http://localhost:8000/v1/channels/wa/incoming ./wa-service

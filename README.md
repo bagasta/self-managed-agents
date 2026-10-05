@@ -53,6 +53,9 @@ Client (webchat / WhatsApp / CLI / webhook)
 make install
 ```
 
+Perintah ini membuat `.venv` bila belum ada dan memasang dependency proyek di
+sana. Jalankan API dengan `make dev`, jangan memakai `uvicorn` global.
+
 ### 2. Konfigurasi environment
 
 ```bash
@@ -225,6 +228,58 @@ POST /v1/agents
 | `GET` | `/v1/sessions/{session_id}/stream` | SSE stream — terima reminder proaktif real-time |
 | `GET` | `/v1/runs/{run_id}` | Detail satu run (steps + tool calls) |
 
+### Workforce Task Control Plane (MVP, opt-in)
+
+Workforce tasks are durable internal assignments for a workspace. A task is
+separate from a `Session` and a `Run`: a task can have multiple internal steps,
+and each step can link to a persisted run for observability. An explicit
+dispatch lets a selected Manager choose one specialist and run an internal
+assignment. Both Deep Agents runs exclude the built-in filesystem, execution,
+todo, and delegation tools; no application or channel tools are exposed. The
+workforce session has no customer/channel identity. This does not create
+schedules or change the existing `ai_staff` / `n8n` inbound-routing behavior.
+
+The global platform `X-API-Key` remains trusted-admin access and requires an
+explicit `workspace_id`. A platform operator can provision an owner-bound
+`X-User-Key` through `POST /v1/auth/keys` by setting `owner_external_id`; key
+provisioning requires at least one active agent whose `owner_external_id`
+matches. Owner keys derive workspace scope from the key, ignore supplied
+`workspace_id`, and only match agents by `owner_external_id` (never by legacy
+`operator_ids`). Unbound legacy user keys cannot access workforce endpoints.
+Agent, session, and run references are checked within that owner scope.
+
+| Method | Endpoint | Deskripsi |
+|--------|----------|-----------|
+| `GET` | `/v1/workforce/roster?workspace_id=...` | Agent roster + jumlah task aktif |
+| `POST` | `/v1/workforce/tasks` | Buat task internal yang persisten |
+| `GET` | `/v1/workforce/tasks?workspace_id=...` | List task dalam satu workspace |
+| `GET/PATCH` | `/v1/workforce/tasks/{task_id}?workspace_id=...` | Detail/timeline dan ubah lifecycle task |
+| `POST` | `/v1/workforce/tasks/{task_id}/steps?workspace_id=...` | Buat handoff internal yang dibatasi maksimal 8 langkah per task |
+| `PATCH` | `/v1/workforce/tasks/{task_id}/steps/{step_id}?workspace_id=...` | Update langkah dan link sebuah run yang sudah ada |
+| `POST` | `/v1/workforce/tasks/{task_id}/dispatch` | Manager memilih spesialis dan menjalankan satu handoff internal |
+
+Contoh membuat task owner-facing dengan specialist yang ditugaskan:
+
+```json
+POST /v1/workforce/tasks
+{
+  "workspace_id": "628123456789",
+  "title": "Siapkan ringkasan follow-up pelanggan",
+  "description": "Buat ringkasan internal dari discovery yang sudah disetujui.",
+  "priority": "normal",
+  "assigned_agent_id": "<uuid-agent-manager>",
+  "context": {"source": "dashboard"},
+  "idempotency_key": "owner-task-2026-09-25-001"
+}
+```
+
+Every create, lifecycle change, handoff, and run link appends an internal task
+event. Context and event metadata reject obvious credential fields. The API
+also limits child-task delegation to one level and handoffs to eight steps per
+task. Dispatch records both Manager and specialist runs, and links the
+specialist run, output summary, task event, and step. It never sends customer
+or WhatsApp replies.
+
 ### Memory, Skills, Custom Tools
 
 | Method | Endpoint | Deskripsi |
@@ -385,8 +440,8 @@ Format OpenRouter: `provider/model-name`. Lihat daftar lengkap: `GET /v1/models`
 ## Development Commands
 
 ```bash
-make install          # pip install -r requirements.txt
-make dev              # uvicorn --reload (port 8000)
+make install          # installs dependencies into .venv
+make dev              # runs .venv/bin/uvicorn with reload (port 8000)
 make db-up            # start PostgreSQL via docker compose
 make upgrade          # alembic upgrade head
 make migrate MSG="x"  # generate migration baru

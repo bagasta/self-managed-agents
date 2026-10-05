@@ -31,9 +31,10 @@
 <!-- ── Topbar ── -->
 <div id="topbar">
   <div class="logo">🤖 AgentDev</div>
+  <a href="team.html" style="color:#e6edf3;text-decoration:none;border:1px solid #4493f8;border-radius:8px;padding:7px 12px;white-space:nowrap">Team Chat ↗</a>
   <label>Base URL</label>
   <input id="cfg-url" type="text" value="http://localhost:8000" style="width:200px">
-  <label>API Key</label>
+  <label>Admin API Key</label>
   <input id="cfg-key" type="text" placeholder="sk-..." style="width:160px">
   <button id="save-config" onclick="saveConfig()">Save & Ping</button>
   <div id="status-dot" title="Server status"></div>
@@ -51,6 +52,7 @@
     <div class="nav-group">
       <div class="nav-group-label">Core</div>
       <div class="nav-item active" onclick="nav('agents')"><span class="icon">🤖</span> Agents</div>
+      <button class="nav-item nav-button" type="button" onclick="nav('workforce')"><span class="nav-symbol" aria-hidden="true">WF</span> Workforce</button>
       <div class="nav-item" onclick="nav('sessions')"><span class="icon">💬</span> Sessions</div>
       <div class="nav-item" onclick="nav('chat')"><span class="icon">📨</span> Chat / Messages</div>
       <div class="nav-item" onclick="nav('history')"><span class="icon">📜</span> History</div>
@@ -71,7 +73,7 @@
     </div>
     <div class="nav-group">
       <div class="nav-group-label">Platform</div>
-      <div class="nav-item" onclick="nav('arthur')" style="color:var(--accent);font-weight:600"><span class="icon">🏗️</span> Arthur Builder</div>
+      <div class="nav-item" onclick="nav('arthur')" style="color:var(--accent);font-weight:600"><span class="icon">🏗️</span> Arthur Manager</div>
       <div class="nav-item" onclick="nav('integrations')"><span class="icon">🔌</span> Google MCP</div>
     </div>
   </nav>
@@ -158,6 +160,90 @@
           <div class="btn-group">
             <button class="btn btn-success" onclick="submitAgent()">💾 Save Agent</button>
             <button class="btn btn-ghost" onclick="resetAgentForm()">✖ Reset</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════ WORKFORCE ═══════════════════════════ -->
+      <div class="section" id="sec-workforce">
+        <h1 class="section-title">Workforce</h1>
+        <p class="section-intro">Pantau penugasan internal, handoff, dan run yang terkait. Catatan ini tidak mengirim pesan ke customer.</p>
+
+        <div class="card workforce-workspace-card">
+          <div class="card-title">Workforce access</div>
+          <div class="workforce-auth-form">
+            <div class="form-group">
+              <label for="wf-auth-mode">Access mode</label>
+              <select id="wf-auth-mode" onchange="setWorkforceAuthMode()">
+                <option value="admin">Platform admin</option>
+                <option value="owner">Owner key</option>
+              </select>
+            </div>
+            <div class="form-group" id="wf-owner-key-field" hidden>
+              <label for="wf-owner-key">Owner workforce key</label>
+              <input id="wf-owner-key" type="password" autocomplete="off" placeholder="Paste owner-bound X-User-Key">
+            </div>
+            <p class="text-muted workforce-note" id="wf-auth-note">Admin mode uses the platform key above and requires a workspace ID.</p>
+          </div>
+          <div class="card-title workforce-workspace-title">Workspace</div>
+          <div class="workforce-workspace-form">
+            <div class="form-group" id="wf-workspace-field">
+              <label for="wf-workspace-id">Workspace ID (admin mode)</label>
+              <input id="wf-workspace-id" type="text" autocomplete="off" placeholder="Contoh: 628123456789">
+            </div>
+            <button class="btn btn-primary" type="button" id="wf-load-btn" onclick="loadWorkforce()">Load workforce</button>
+          </div>
+        </div>
+
+        <div class="workforce-layout">
+          <div class="card workforce-roster-card">
+            <div class="card-title">Agent roster</div>
+            <div id="wf-roster" class="workforce-state" aria-live="polite">Masukkan workspace untuk memuat roster.</div>
+          </div>
+
+          <div class="card workforce-tasks-card">
+            <div class="card-title">Active tasks</div>
+            <div id="wf-tasks" class="workforce-state" aria-live="polite">Task akan muncul setelah workspace dimuat.</div>
+          </div>
+        </div>
+
+        <div class="workforce-layout workforce-detail-layout">
+          <div class="card workforce-create-card">
+            <div class="card-title">Create internal task</div>
+            <div class="form-group">
+              <label for="wf-task-title">Task title</label>
+              <input id="wf-task-title" type="text" maxlength="255" placeholder="Contoh: Ringkas discovery untuk review owner">
+            </div>
+            <div class="form-group">
+              <label for="wf-task-assignee">Assigned agent</label>
+              <select id="wf-task-assignee"><option value="">Belum ditugaskan</option></select>
+            </div>
+            <div class="form-group">
+              <label for="wf-task-priority">Priority</label>
+              <select id="wf-task-priority">
+                <option value="normal">Normal</option>
+                <option value="low">Low</option>
+                <option value="high">High</option>
+                <option value="urgent">Urgent</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="wf-task-description">Internal brief</label>
+              <textarea id="wf-task-description" rows="4" placeholder="Tujuan dan konteks minimum untuk agent yang menerima handoff."></textarea>
+            </div>
+            <div class="form-group">
+              <label for="wf-task-context">Context JSON</label>
+              <textarea id="wf-task-context" rows="3" aria-describedby="wf-context-help">{}</textarea>
+              <span id="wf-context-help" class="text-muted">Jangan masukkan token, password, API key, atau credential.</span>
+            </div>
+            <div class="btn-group">
+              <button class="btn btn-success" type="button" id="wf-create-btn" onclick="createWorkforceTask()">Create task</button>
+            </div>
+          </div>
+
+          <div class="card workforce-timeline-card">
+            <div class="card-title">Task timeline</div>
+            <div id="wf-timeline" class="workforce-state" aria-live="polite">Pilih task untuk melihat handoff dan run yang terkait.</div>
           </div>
         </div>
       </div>
@@ -594,9 +680,9 @@
 
       <!-- ═══════════════════════════ ARTHUR BUILDER ═══════════════════════════ -->
       <div class="section" id="sec-arthur">
-        <div class="section-title">🏗️ Arthur V2 — Agent Builder</div>
+      <div class="section-title">🏗️ Arthur V2 — Manager Bisnis AI</div>
         <p class="text-muted" style="margin-bottom:16px">
-          Kelola Arthur V2 (system agent). Setup instruksi, hubungkan WhatsApp resmi lewat Meta Embedded Signup, dan chat langsung untuk testing.
+          Arthur membantu memahami prioritas bisnis, mengoordinasikan assistant yang tersedia, dan menyarankan bantuan tambahan. Uji percakapan Owner di sini.
         </p>
 
         <!-- ── Status & Quick Actions ── -->
@@ -646,17 +732,17 @@
           <div class="card-title">
             💬 Chat dengan Arthur
             <span id="arthur-session-badge" class="badge badge-blue" style="margin-left:8px;display:none"></span>
-            <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="arthurNewSession()">➕ Session Baru</button>
+            <button class="btn btn-ghost btn-sm" style="margin-left:auto" id="arthur-new-session-btn" onclick="arthurNewSession()">➕ Session Baru</button>
           </div>
           <p class="text-muted" style="font-size:11px;margin-bottom:10px">
-            Minta Arthur buatkan agent — misalnya: <em>"Buatkan CS agent untuk toko baju, bahasa Indonesia, santai"</em>
+            Arthur adalah manajer AI yang memahami tujuanmu dan mengoordinasikan spesialis di belakang layar. Mulai dengan menyapa atau ceritakan apa yang ingin kamu capai.
           </p>
           <div id="arthur-chat-messages" style="min-height:260px;max-height:420px;overflow-y:auto;background:var(--surface-2);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:8px;margin-bottom:10px">
-            <div class="bubble-system">Buat session baru untuk mulai chat dengan Arthur</div>
+            <div class="bubble-system">Buat session baru, lalu sapa Arthur atau ceritakan tujuan yang ingin kamu capai.</div>
           </div>
           <div style="display:flex;gap:8px">
-            <textarea id="arthur-chat-input" rows="2" placeholder="Ketik pesan ke Arthur... (Enter kirim, Shift+Enter baris baru)" style="flex:1;resize:none" onkeydown="arthurChatKeydown(event)"></textarea>
-            <button class="btn btn-primary" onclick="arthurSendMessage()" id="arthur-send-btn" style="align-self:flex-end">Send ↑</button>
+            <textarea id="arthur-chat-input" rows="2" placeholder="Sapa Arthur atau ceritakan tujuan yang ingin dicapai..." style="flex:1;resize:none" onkeydown="arthurChatKeydown(event)"></textarea>
+            <button class="btn btn-primary" onclick="arthurSendMessage()" id="arthur-send-btn" style="align-self:flex-end" disabled>Send ↑</button>
           </div>
         </div>
 

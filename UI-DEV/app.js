@@ -56,6 +56,12 @@ const S = {
   waQRPoller: null,
   waModalDeviceId: null,
   waModalAgentId: null,
+  workforce: {
+    authMode: localStorage.getItem('workforceAuthMode') || 'admin',
+    workspaceId: localStorage.getItem('workforceWorkspaceId') || '',
+    roster: [],
+    selectedTaskId: null,
+  },
 };
 
 // During local development, reload the page after Uvicorn reloads. This also
@@ -78,8 +84,13 @@ window.addEventListener('DOMContentLoaded', () => {
   if (isStaleProductionBaseUrl) localStorage.setItem('baseUrl', window.location.origin);
   document.getElementById('cfg-url').value = S.baseUrl;
   document.getElementById('cfg-key').value = S.apiKey;
+  document.getElementById('wf-auth-mode').value = S.workforce.authMode;
+  setWorkforceAuthMode();
   setAgentFormDefaults();
-  loadAgents().then(() => pingWAService());
+  (S.apiKey ? loadAgents() : Promise.resolve()).then(() => {
+    hydrateWorkforceWorkspace();
+    pingWAService();
+  });
   nav('agents');
 });
 
@@ -114,6 +125,7 @@ async function pingWAService() {
 
 // ── Navigation ─────────────────────────────────────────────────────
 function nav(id) {
+  if (id !== 'workforce') S.workforce.streamController?.abort();
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   document.getElementById(`sec-${id}`).classList.add('active');
@@ -137,6 +149,338 @@ function nav(id) {
         S.agents.map(a => `<option value="${a.id}">${escHtml(a.name)}</option>`).join('');
     }
   }
+  if (id === 'workforce') hydrateWorkforceWorkspace();
+}
+
+// ── Workforce control plane ───────────────────────────────────────
+function hydrateWorkforceWorkspace() {
+  const input = document.getElementById('wf-workspace-id');
+  if (!input) return;
+  if (!input.value && S.workforce.workspaceId) input.value = S.workforce.workspaceId;
+  if (!input.value) {
+    const candidate = S.agents.find(a => a.owner_external_id)?.owner_external_id;
+    if (candidate) input.value = candidate;
+  }
+}
+
+function setWorkforceAuthMode() {
+  const mode = document.getElementById('wf-auth-mode')?.value || 'admin';
+  S.workforce.authMode = mode;
+  localStorage.setItem('workforceAuthMode', mode);
+  const ownerMode = mode === 'owner';
+  const keyField = document.getElementById('wf-owner-key-field');
+  const workspaceField = document.getElementById('wf-workspace-field');
+  const workspaceInput = document.getElementById('wf-workspace-id');
+  const note = document.getElementById('wf-auth-note');
+  if (keyField) keyField.hidden = !ownerMode;
+  if (workspaceField) workspaceField.hidden = ownerMode;
+  if (workspaceInput) workspaceInput.disabled = ownerMode;
+  if (note) note.textContent = ownerMode
+    ? 'Owner mode uses only the bound X-User-Key. The platform admin key is not used; workspace scope comes from the owner key.'
+    : 'Admin mode uses the platform key above and requires a workspace ID.';
+}
+
+function workforceOwnerMode() {
+  return (document.getElementById('wf-auth-mode')?.value || S.workforce.authMode) === 'owner';
+}
+
+function workforceWorkspaceQuery() {
+  if (workforceOwnerMode()) return '';
+  const workspaceId = workforceWorkspaceId();
+  return workspaceId ? `workspace_id=${encodeURIComponent(workspaceId)}&` : '';
+}
+
+function workforceWorkspaceId() {
+  const input = document.getElementById('wf-workspace-id');
+  return input ? input.value.trim() : '';
+}
+
+function renderWorkforceState(targetId, message, kind = 'empty') {
+  const target = document.getElementById(targetId);
+  if (!target) return;
+  target.className = `workforce-state workforce-state-${kind}`;
+  target.textContent = message;
+}
+
+function workforceStatusClass(value) {
+  return `workforce-status workforce-status-${String(value || 'open').replace(/[^a-z_]/g, '')}`;
+}
+
+function formatWorkforceTime(value) {
+  if (!value) return 'Belum ada waktu';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+function populateWorkforceAssignees() {
+  const select = document.getElementById('wf-task-assignee');
+  if (!select) return;
+  const current = select.value;
+  select.innerHTML = '<option value="">Belum ditugaskan</option>' +
+    S.workforce.roster.map(agent => `<option value="${agent.id}">${escHtml(agent.name)}</option>`).join('');
+  select.value = current;
+}
+
+async function loadWorkforce() {
+  const ownerMode = workforceOwnerMode();
+  const workspaceId = ownerMode ? '' : workforceWorkspaceId();
+  const ownerKey = document.getElementById('wf-owner-key')?.value.trim() || '';
+  if (ownerMode && !ownerKey) {
+    renderWorkforceState('wf-roster', 'Masukkan owner workforce key terlebih dahulu.', 'error');
+    return;
+  }
+  if (!ownerMode && !workspaceId) {
+    renderWorkforceState('wf-roster', 'Masukkan owner atau operator ID terlebih dahulu.', 'error');
+    return;
+  }
+  const button = document.getElementById('wf-load-btn');
+  button.disabled = true;
+  button.textContent = 'Loading...';
+  renderWorkforceState('wf-roster', 'Memuat roster...', 'loading');
+  renderWorkforceState('wf-tasks', 'Memuat task...', 'loading');
+  const workspaceQuery = ownerMode ? '' : `workspace_id=${encodeURIComponent(workspaceId)}&`;
+  const [rosterResult, tasksResult] = await Promise.all([
+    api('GET', `/v1/workforce/roster${workspaceQuery ? `?${workspaceQuery.slice(0, -1)}` : ''}`),
+    api('GET', `/v1/workforce/tasks?${workspaceQuery}limit=50`),
+  ]);
+  button.disabled = false;
+  button.textContent = 'Load workforce';
+  if (!rosterResult.ok) {
+    S.workforce.roster = [];
+    populateWorkforceAssignees();
+    renderWorkforceState('wf-roster', `Roster tidak dapat dimuat: ${workforceError(rosterResult)}`, 'error');
+  } else {
+    S.workforce.workspaceId = ownerMode ? (rosterResult.data.workspace_id || '') : workspaceId;
+    S.workforce.roster = rosterResult.data.items || [];
+    if (!ownerMode) localStorage.setItem('workforceWorkspaceId', workspaceId);
+    populateWorkforceAssignees();
+    renderWorkforceRoster(S.workforce.roster);
+  }
+  if (!tasksResult.ok) {
+    renderWorkforceState('wf-tasks', `Task tidak dapat dimuat: ${workforceError(tasksResult)}`, 'error');
+  } else {
+    renderWorkforceTasks(tasksResult.data.items || []);
+  }
+}
+
+function workforceError(result) {
+  const detail = result?.data?.detail;
+  if (typeof detail === 'string') return detail;
+  return 'Periksa koneksi dan akses API.';
+}
+
+function renderWorkforceRoster(items) {
+  const target = document.getElementById('wf-roster');
+  if (!target) return;
+  if (!items.length) {
+    renderWorkforceState('wf-roster', 'Belum ada agent yang terdaftar di workspace ini.');
+    return;
+  }
+  target.className = 'workforce-roster-list';
+  target.innerHTML = items.map(agent => `
+    <article class="workforce-agent-row">
+      <div>
+        <strong>${escHtml(agent.name)}</strong>
+        <p>${escHtml(agent.description || 'Tanpa deskripsi')}</p>
+      </div>
+      <span class="workforce-count">${Number(agent.active_task_count) || 0} active</span>
+    </article>`).join('');
+}
+
+function renderWorkforceTasks(tasks) {
+  const target = document.getElementById('wf-tasks');
+  if (!target) return;
+  if (!tasks.length) {
+    renderWorkforceState('wf-tasks', 'Belum ada task. Buat task internal setelah memilih agent yang sesuai.');
+    return;
+  }
+  target.className = 'workforce-task-list';
+  target.innerHTML = tasks.map(task => `
+    <article class="workforce-task-row">
+      <div class="workforce-task-copy">
+        <div class="workforce-task-heading">
+          <strong>${escHtml(task.title)}</strong>
+          <span class="${workforceStatusClass(task.status)}">${escHtml(task.status)}</span>
+        </div>
+        <p>${escHtml(task.result_summary || task.description || 'Belum ada ringkasan.')}</p>
+      </div>
+      <button class="btn btn-ghost btn-sm" type="button" onclick="loadWorkforceTask('${task.id}')">View timeline</button>
+    </article>`).join('');
+}
+
+async function loadWorkforceTask(taskId) {
+  S.workforce.streamController?.abort();
+  S.workforce.selectedTaskId = taskId;
+  const workspaceId = workforceWorkspaceId() || S.workforce.workspaceId;
+  if (!workforceOwnerMode() && !workspaceId) return;
+  renderWorkforceState('wf-timeline', 'Memuat timeline...', 'loading');
+  const workspaceQuery = workforceOwnerMode() ? '' : `?workspace_id=${encodeURIComponent(workspaceId)}`;
+  const result = await api('GET', `/v1/workforce/tasks/${encodeURIComponent(taskId)}${workspaceQuery}`);
+  if (!result.ok) {
+    renderWorkforceState('wf-timeline', `Timeline tidak dapat dimuat: ${workforceError(result)}`, 'error');
+    return;
+  }
+  renderWorkforceTimeline(result.data);
+  if (result.data.status === 'in_progress') streamWorkforceTask(taskId, workspaceQuery).catch(() => {});
+}
+
+async function streamWorkforceTask(taskId, workspaceQuery) {
+  const controller = new AbortController();
+  S.workforce.streamController = controller;
+  const ownerKey = document.getElementById('wf-owner-key')?.value.trim() || '';
+  const headers = workforceOwnerMode() ? { 'X-User-Key': ownerKey } : { 'X-API-Key': S.apiKey };
+  try {
+    const response = await fetch(`${S.baseUrl}/v1/workforce/tasks/${encodeURIComponent(taskId)}/stream${workspaceQuery}`, {
+      headers, signal: controller.signal, cache: 'no-store',
+    });
+    if (!response.ok || !response.body) return;
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let pending = '';
+    while (!controller.signal.aborted) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      pending += decoder.decode(value, { stream: true });
+      const frames = pending.split('\n\n');
+      pending = frames.pop();
+      for (const frame of frames) {
+        const data = frame.split('\n').find(line => line.startsWith('data: '));
+        if (data && S.workforce.selectedTaskId === taskId) renderWorkforceTimeline(JSON.parse(data.slice(6)));
+      }
+    }
+  } finally {
+    if (S.workforce.streamController === controller) S.workforce.streamController = null;
+  }
+}
+
+async function refreshWorkforceProgress() {
+  const ownerMode = workforceOwnerMode();
+  const workspaceId = ownerMode ? '' : (workforceWorkspaceId() || S.workforce.workspaceId);
+  const workspaceQuery = ownerMode ? '' : `workspace_id=${encodeURIComponent(workspaceId)}&`;
+  const tasksResult = await api('GET', `/v1/workforce/tasks?${workspaceQuery}limit=50`);
+  if (tasksResult.ok) renderWorkforceTasks(tasksResult.data.items || []);
+  if (!S.workforce.selectedTaskId) return;
+  const detailQuery = ownerMode ? '' : `?workspace_id=${encodeURIComponent(workspaceId)}`;
+  const detailResult = await api(
+    'GET', `/v1/workforce/tasks/${encodeURIComponent(S.workforce.selectedTaskId)}${detailQuery}`,
+  );
+  if (detailResult.ok) renderWorkforceTimeline(detailResult.data);
+}
+
+window.setInterval(() => {
+  const section = document.getElementById('sec-workforce');
+  if (!section?.classList.contains('active')) return;
+  const ownerReady = !workforceOwnerMode() || Boolean(document.getElementById('wf-owner-key')?.value.trim());
+  const workspaceReady = workforceOwnerMode() || Boolean(workforceWorkspaceId() || S.workforce.workspaceId);
+  if (ownerReady && workspaceReady) refreshWorkforceProgress().catch(() => {});
+}, 5000);
+
+function renderWorkforceTimeline(task) {
+  const target = document.getElementById('wf-timeline');
+  if (!target) return;
+  const events = task.events || [];
+  const steps = task.steps || [];
+  const canDispatch = ['open', 'blocked'].includes(task.status);
+  const managerOptions = S.workforce.roster.map(agent =>
+    `<option value="${agent.id}"${agent.id === task.assigned_agent_id ? ' selected' : ''}>${escHtml(agent.name)}</option>`
+  ).join('');
+  target.className = 'workforce-timeline';
+  target.innerHTML = `
+    <div class="workforce-timeline-summary">
+      <div>
+        <span class="${workforceStatusClass(task.status)}">${escHtml(task.status)}</span>
+        <strong>${escHtml(task.title)}</strong>
+      </div>
+      <span class="text-muted">Updated ${escHtml(formatWorkforceTime(task.updated_at))}</span>
+    </div>
+    <div class="workforce-dispatch-form">
+      <label for="wf-dispatch-manager">Manager</label>
+      <select id="wf-dispatch-manager" ${!canDispatch || S.workforce.roster.length < 2 ? 'disabled' : ''}>${managerOptions}</select>
+      <button class="btn btn-primary btn-sm" type="button" ${!canDispatch || S.workforce.roster.length < 2 ? 'disabled' : ''} onclick="dispatchWorkforceTask('${task.id}')">Dispatch internally</button>
+    </div>
+    <div class="workforce-timeline-block">
+      <h2>Handoffs</h2>
+      ${steps.length ? steps.map(step => `<div class="workforce-step">
+        <div><strong>${escHtml(step.title)}</strong><span class="${workforceStatusClass(step.status)}">${escHtml(step.status)}</span></div>
+        <p>${escHtml(step.output_summary || step.instructions || 'Belum ada hasil.')}</p>
+      </div>`).join('') : '<p class="text-muted">Belum ada handoff internal.</p>'}
+    </div>
+    <div class="workforce-timeline-block">
+      <h2>Activity</h2>
+      ${events.length ? events.map(event => `<div class="workforce-event">
+        <span>${escHtml(event.event_type.replaceAll('_', ' '))}</span>
+        ${event.event_type === 'team_message' ? `<p>${escHtml(event.metadata?.message || '')}</p>` : ''}
+        <time datetime="${escHtml(event.created_at)}">${escHtml(formatWorkforceTime(event.created_at))}</time>
+      </div>`).join('') : '<p class="text-muted">Belum ada activity yang tercatat.</p>'}
+    </div>`;
+}
+
+async function dispatchWorkforceTask(taskId) {
+  const managerId = document.getElementById('wf-dispatch-manager')?.value || '';
+  if (!managerId) {
+    renderWorkforceState('wf-timeline', 'Pilih Manager dari roster terlebih dahulu.', 'error');
+    return;
+  }
+  const workspaceId = workforceWorkspaceId() || S.workforce.workspaceId;
+  const workspaceQuery = workforceOwnerMode() ? '' : `?workspace_id=${encodeURIComponent(workspaceId)}`;
+  renderWorkforceState('wf-timeline', 'Manager sedang memilih spesialis internal...', 'loading');
+  const result = await api(
+    'POST',
+    `/v1/workforce/tasks/${encodeURIComponent(taskId)}/dispatch${workspaceQuery}`,
+    { manager_agent_id: managerId },
+  );
+  if (!result.ok) {
+    renderWorkforceState('wf-timeline', `Dispatch tidak dapat dijalankan: ${workforceError(result)}`, 'error');
+    return;
+  }
+  renderWorkforceTimeline(result.data);
+  await loadWorkforce();
+}
+
+async function createWorkforceTask() {
+  const ownerMode = workforceOwnerMode();
+  const workspaceId = ownerMode ? '' : workforceWorkspaceId();
+  const title = document.getElementById('wf-task-title').value.trim();
+  if (!ownerMode && !workspaceId) {
+    renderWorkforceState('wf-timeline', 'Muat workspace sebelum membuat task.', 'error');
+    return;
+  }
+  if (!title) {
+    document.getElementById('wf-task-title').focus();
+    return;
+  }
+  let context = {};
+  try {
+    context = JSON.parse(document.getElementById('wf-task-context').value || '{}');
+    if (!context || Array.isArray(context) || typeof context !== 'object') throw new Error('not an object');
+  } catch (_) {
+    renderWorkforceState('wf-timeline', 'Context JSON harus berupa object yang valid.', 'error');
+    return;
+  }
+  const button = document.getElementById('wf-create-btn');
+  button.disabled = true;
+  button.textContent = 'Creating...';
+  const payload = {
+    title,
+    description: document.getElementById('wf-task-description').value.trim() || null,
+    priority: document.getElementById('wf-task-priority').value,
+    assigned_agent_id: document.getElementById('wf-task-assignee').value || null,
+    context,
+  };
+  if (!ownerMode) payload.workspace_id = workspaceId;
+  const result = await api('POST', '/v1/workforce/tasks', payload);
+  button.disabled = false;
+  button.textContent = 'Create task';
+  if (!result.ok) {
+    renderWorkforceState('wf-timeline', `Task tidak dapat dibuat: ${workforceError(result)}`, 'error');
+    return;
+  }
+  document.getElementById('wf-task-title').value = '';
+  document.getElementById('wf-task-description').value = '';
+  document.getElementById('wf-task-context').value = '{}';
+  renderWorkforceTimeline(result.data);
+  await loadWorkforce();
 }
 
 // ── SSE ────────────────────────────────────────────────────────────
@@ -191,7 +535,12 @@ function appendScheduledBubble(content, label) {
 // ── API Helpers ────────────────────────────────────────────────────
 async function api(method, path, body = null, isFormData = false) {
   const url = `${S.baseUrl}${path}`;
-  const headers = { 'X-API-Key': S.apiKey };
+  const workforceRequest = path.startsWith('/v1/workforce/');
+  const ownerMode = workforceRequest && workforceOwnerMode();
+  const ownerKey = document.getElementById('wf-owner-key')?.value.trim() || '';
+  const headers = ownerMode
+    ? { 'X-User-Key': ownerKey }
+    : { 'X-API-Key': S.apiKey };
   if (body && !isFormData) headers['Content-Type'] = 'application/json';
   // Dashboard data is operational state. Do not let a browser reuse a stale
   // authenticated GET response after an agent has been created or updated.
@@ -665,10 +1014,20 @@ async function loadChatHistory() {
 async function createChatSession() {
   const agentId = document.getElementById('chat-agent-sel').value;
   if (!agentId) return alert('Pilih agent dulu');
-  const userId = prompt('External User ID (kosongkan untuk anonim):') || null;
+  const selectedAgent = S.agents.find(agent => agent.id === agentId);
+  const isArthurV2 = selectedAgent?.tools_config?.system_plugin === 'arthur_v2';
+  const payload = isArthurV2
+    ? {
+        external_user_id: 'clevio-arthur-ui-enterprise-test',
+        channel_type: 'api',
+        metadata: { source: 'arthur-ui', memory_mode: 'isolated', test_plan: 'enterprise' },
+      }
+    : {
+        external_user_id: prompt('External User ID (kosongkan untuk anonim):') || null,
+        metadata: {},
+      };
   const r = await api('POST', `/v1/agents/${agentId}/sessions`, {
-    external_user_id: userId,
-    metadata: {},
+    ...payload,
   });
   if (r.ok) {
     await loadSessionsForChat();
@@ -1521,7 +1880,24 @@ async function getRun() {
 /* ═══════════════════════════════════════════════════════════════════
    ARTHUR BUILDER
    ═══════════════════════════════════════════════════════════════════ */
-const Arthur = { id: null, apiKey: null, sessionId: null, deviceId: null, connectionType: null, qrPoller: null };
+const Arthur = {
+  id: null, apiKey: null, sessionId: null, deviceId: null, connectionType: null, qrPoller: null,
+  sessionGeneration: 0, sessionCreatePromise: null, sendInProgress: false,
+};
+
+function _arthurUpdateSessionControls() {
+  const creating = Boolean(Arthur.sessionCreatePromise);
+  const newSessionButton = document.getElementById('arthur-new-session-btn');
+  const sendButton = document.getElementById('arthur-send-btn');
+  if (newSessionButton) newSessionButton.disabled = creating;
+  if (sendButton) sendButton.disabled = creating || !Arthur.sessionId || Arthur.sendInProgress;
+}
+
+function _arthurSessionError(result) {
+  const detail = result?.data?.detail || result?.data?.error || result?.data;
+  const message = typeof detail === 'string' ? detail : JSON.stringify(detail || 'Koneksi API gagal.');
+  return `❌ Gagal membuat session baru${result?.status ? ` (HTTP ${result.status})` : ''}: ${message}. Coba lagi setelah koneksi/API diperiksa.`;
+}
 
 async function arthurLoad() {
   const panel = document.getElementById('arthur-status-panel');
@@ -1708,27 +2084,80 @@ function arthurStopQRPoller() {
 }
 
 async function arthurNewSession() {
-  if (!Arthur.id) { await arthurLoad(); }
-  if (!Arthur.id) { alert('Arthur belum ada.'); return; }
-  const r = await api('POST', `/v1/agents/${Arthur.id}/sessions`, { external_user_id: 'dev-tester', metadata: { source: 'arthur-ui' } });
-  if (!r.ok) { _arthurAppendBubble('system', `❌ Gagal buat session: ${JSON.stringify(r.data)}`); return; }
-  Arthur.sessionId = r.data.id;
-  document.getElementById('arthur-session-badge').textContent = `Session: ${Arthur.sessionId.slice(0, 8)}...`;
-  document.getElementById('arthur-session-badge').style.display = 'inline';
-  document.getElementById('arthur-chat-messages').innerHTML = '';
-  _arthurAppendBubble('system', '✅ Session baru dibuat. Silakan kirim pesan ke Arthur!');
+  if (Arthur.sessionCreatePromise) return Arthur.sessionCreatePromise;
+  const generation = ++Arthur.sessionGeneration;
+  Arthur.sessionId = null;
+  Arthur.sendInProgress = false;
+  const chat = document.getElementById('arthur-chat-messages');
+  chat.innerHTML = '';
+  document.getElementById('arthur-session-badge').style.display = 'none';
+  _arthurAppendBubble('system', 'Membuat session baru...');
+  const sendButton = document.getElementById('arthur-send-btn');
+  if (sendButton) sendButton.textContent = 'Send ↑';
+  _arthurUpdateSessionControls();
+
+  const createPromise = (async () => {
+    let agentId = Arthur.id;
+    try {
+      if (!agentId) {
+        await arthurLoad();
+        agentId = Arthur.id;
+      }
+      if (!agentId) {
+        chat.innerHTML = '';
+        _arthurAppendBubble('system', '❌ Arthur belum termuat. Periksa API key/koneksi, lalu coba lagi.');
+        return;
+      }
+      const r = await api('POST', `/v1/agents/${agentId}/sessions`, {
+        // Arthur's UI test chat uses a reserved, isolated local test owner so
+        // generated staff are evaluated against Enterprise capacity without
+        // changing any real owner's subscription.
+        external_user_id: 'clevio-arthur-ui-enterprise-test',
+        channel_type: 'api',
+        metadata: { source: 'arthur-ui', memory_mode: 'isolated', test_plan: 'enterprise' },
+      });
+      if (generation !== Arthur.sessionGeneration || agentId !== Arthur.id) return;
+      const sessionId = r?.data?.id;
+      if (!r.ok || typeof sessionId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(sessionId)) {
+        chat.innerHTML = '';
+        _arthurAppendBubble('system', _arthurSessionError(r));
+        return;
+      }
+      Arthur.sessionId = sessionId;
+      const badge = document.getElementById('arthur-session-badge');
+      badge.textContent = `Session: ${sessionId.slice(0, 8)}...`;
+      badge.style.display = 'inline';
+      chat.innerHTML = '';
+      _arthurAppendBubble('system', '✅ Session baru dibuat · akun uji terpisah (Enterprise). Sapa Arthur atau ceritakan tujuan yang ingin kamu capai.');
+    } catch (error) {
+      if (generation !== Arthur.sessionGeneration || agentId !== Arthur.id) return;
+      chat.innerHTML = '';
+      _arthurAppendBubble('system', _arthurSessionError({ data: { error: error?.message || 'Koneksi API gagal.' } }));
+    } finally {
+      if (Arthur.sessionCreatePromise === createPromise) Arthur.sessionCreatePromise = null;
+      if (generation === Arthur.sessionGeneration) _arthurUpdateSessionControls();
+    }
+  })();
+  Arthur.sessionCreatePromise = createPromise;
+  _arthurUpdateSessionControls();
+  return createPromise;
 }
 
 async function arthurSendMessage() {
-  if (!Arthur.sessionId) { await arthurNewSession(); if (!Arthur.sessionId) return; }
+  if (Arthur.sessionCreatePromise || !Arthur.sessionId || Arthur.sendInProgress) return;
+  const sessionId = Arthur.sessionId;
+  const generation = Arthur.sessionGeneration;
+  const agentId = Arthur.id;
   const input = document.getElementById('arthur-chat-input');
   const msg = input.value.trim();
   if (!msg) return;
   input.value = '';
   _arthurAppendBubble('user', msg);
   const btn = document.getElementById('arthur-send-btn');
-  btn.disabled = true; btn.textContent = '...';
-  const url = `/v1/agents/${Arthur.id}/sessions/${Arthur.sessionId}/messages`;
+  Arthur.sendInProgress = true;
+  _arthurUpdateSessionControls();
+  btn.textContent = '...';
+  const url = `/v1/agents/${agentId}/sessions/${sessionId}/messages`;
   const headers = { 'X-Agent-Key': Arthur.apiKey, 'Content-Type': 'application/json' };
   logRequest('POST', `${S.baseUrl}${url}`, { message: msg });
   try {
@@ -1737,10 +2166,21 @@ async function arthurSendMessage() {
     let data;
     try { data = JSON.parse(text); } catch { data = { reply: text }; }
     logResponse(res.status, data, 'POST', `${S.baseUrl}${url}`);
-    if (res.ok) _arthurAppendBubble('agent', data.reply || '(no reply)');
-    else _arthurAppendBubble('system', `❌ Error ${res.status}: ${JSON.stringify(data)}`);
-  } catch (err) { _arthurAppendBubble('system', `❌ Network error: ${err.message}`); }
-  btn.disabled = false; btn.textContent = 'Send ↑';
+    if (generation === Arthur.sessionGeneration && sessionId === Arthur.sessionId && agentId === Arthur.id) {
+      if (res.ok) _arthurAppendBubble('agent', data.reply || '(no reply)');
+      else _arthurAppendBubble('system', `❌ Error ${res.status}: ${JSON.stringify(data)}`);
+    }
+  } catch (err) {
+    if (generation === Arthur.sessionGeneration && sessionId === Arthur.sessionId && agentId === Arthur.id) {
+      _arthurAppendBubble('system', `❌ Network error: ${err.message}`);
+    }
+  } finally {
+    if (generation === Arthur.sessionGeneration && sessionId === Arthur.sessionId && agentId === Arthur.id) {
+      Arthur.sendInProgress = false;
+      btn.textContent = 'Send ↑';
+      _arthurUpdateSessionControls();
+    }
+  }
 }
 
 function arthurChatKeydown(e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); arthurSendMessage(); } }

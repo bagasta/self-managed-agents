@@ -21,6 +21,8 @@ from app.models.user_api_key import (
     generate_user_key,
     hash_user_key,
 )
+from app.core.domain.tenant_identity import resolve_unique_user
+from app.models.agent import Agent
 from app.schemas.user_api_key import (
     UserApiKeyCreate,
     UserApiKeyCreateResponse,
@@ -39,8 +41,35 @@ async def generate_key(
     _: str = Depends(verify_api_key),
 ) -> UserApiKeyCreateResponse:
     """Generate a new user API key. Admin-only (requires X-API-Key)."""
+    owner_external_id = (payload.owner_external_id or "").strip() or None
+    owner_user = None
+    if owner_external_id is not None:
+        owner_user = await resolve_unique_user(db, owner_external_id)
+        if owner_user is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Owner identity does not map to one unique user",
+            )
+        has_agent = (
+            await db.execute(
+                select(Agent.id).where(
+                    Agent.is_deleted.is_(False),
+                    Agent.owner_user_id == owner_user.id,
+                ).limit(1)
+            )
+        ).scalar_one_or_none()
+        if has_agent is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Owner has no registered agents",
+            )
     raw_key = generate_user_key()
-    key = UserApiKey(label=payload.label, key_hash=hash_user_key(raw_key))
+    key = UserApiKey(
+        label=payload.label,
+        owner_external_id=owner_external_id,
+        owner_user_id=owner_user.id if owner_user is not None else None,
+        key_hash=hash_user_key(raw_key),
+    )
     db.add(key)
     await db.flush()
     await db.refresh(key)

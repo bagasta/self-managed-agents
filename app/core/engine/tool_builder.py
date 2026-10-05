@@ -98,7 +98,17 @@ def build_sandbox_binary_tool(sandbox: DockerSandbox) -> list:
 # Memory tools
 # ---------------------------------------------------------------------------
 
-def build_memory_tools(agent_id: uuid.UUID, db_factory: async_sessionmaker, scope: str | None = None) -> list:
+def build_memory_tools(
+    agent_id: uuid.UUID,
+    db_factory: async_sessionmaker,
+    scope: str | None = None,
+    *,
+    max_recalls: int | None = None,
+) -> list:
+    recall_count = 0
+    recalled_keys: set[str] = set()
+    available_keys_shown = False
+
     @tool
     async def remember(key: str, value: str) -> str:
         """Store or update a fact in long-term memory. Args: key (short label), value (text to remember)."""
@@ -109,7 +119,17 @@ def build_memory_tools(agent_id: uuid.UUID, db_factory: async_sessionmaker, scop
 
     @tool
     async def recall(query: str) -> str:
-        """Retrieve a memory entry by its key. Args: query (the key to look up)."""
+        """Retrieve a memory entry by its key. Use available keys from a miss instead of guessing repeatedly."""
+        nonlocal recall_count, available_keys_shown
+        query = query.strip()
+        if not query:
+            return "Sebutkan kunci memori yang ingin dicari."
+        if query in recalled_keys:
+            return "Memori untuk kunci ini sudah diberikan di langkah sebelumnya. Gunakan hasil itu untuk menjawab."
+        if max_recalls is not None and recall_count >= max_recalls:
+            return "Batas pencarian memori untuk pesan ini tercapai. Gunakan konteks yang sudah tersedia dan jawab sekarang."
+        recall_count += 1
+        recalled_keys.add(query)
         async with db_factory() as db:
             mem = await get_memory(agent_id, query, db, scope=scope)
             if mem:
@@ -117,7 +137,13 @@ def build_memory_tools(agent_id: uuid.UUID, db_factory: async_sessionmaker, scop
             all_mems = await list_memories(agent_id, db, scope=scope)
         if not all_mems:
             return "No memories stored yet."
-        keys = ", ".join(m.key for m in all_mems)
+        if max_recalls is not None and available_keys_shown:
+            return f"No memory found for '{query}'. Available keys were listed earlier in this run."
+        available_keys_shown = True
+        names = [m.key for m in all_mems]
+        keys = ", ".join(names[:50] if max_recalls is not None else names)
+        if max_recalls is not None and len(names) > 50:
+            keys += f", … ({len(names) - 50} other keys)"
         return f"No memory found for '{query}'. Available keys: {keys}"
 
     @tool

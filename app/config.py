@@ -129,6 +129,9 @@ class Settings(BaseSettings):
     default_subagent_max_tokens: int = 8192
     media_doc_max_chars: int = 12000
     llm_max_tokens: int = 1024
+    # Internal workforce steps may need one bounded tool handoff plus a concise
+    # result. The runner caps this configurable value at 3072 completion tokens.
+    workforce_llm_max_tokens: int = 2048
     # Sandbox/deploy agents need enough output to write real source files in a
     # single tool call. Keep the normal conversational default conservative.
     coding_agent_max_tokens: int = 8192
