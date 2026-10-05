@@ -44,12 +44,12 @@ class ComputerRuntime:
             max_actions=max(1, int(getattr(settings, "computer_runtime_max_actions_per_run", 20) or 20)),
         )
 
-    def status(self, *, owner_id: str | None) -> dict[str, Any]:
+    def status(self, *, owner_id: str | None, is_platform_admin: bool = False) -> dict[str, Any]:
         if not self.enabled:
             return {"ok": False, "code": "computer_runtime_disabled", "message": "Computer runtime belum diaktifkan oleh platform."}
         if not self.owner_id:
             return {"ok": False, "code": "computer_unassigned", "message": "Computer belum ditetapkan ke owner mana pun."}
-        if str(owner_id or "") != self.owner_id:
+        if not is_platform_admin and str(owner_id or "") != self.owner_id:
             return {"ok": False, "code": "computer_not_assigned", "message": "Computer ini tidak ditetapkan ke owner assistant ini."}
         try:
             with socket.create_connection((self.vnc_host, self.vnc_port), timeout=self.timeout_seconds):

@@ -1227,6 +1227,13 @@ def build_arthur_v2_tools(
             return {"ok": False, "error": "Owner identity belum dapat diverifikasi untuk akun ini."}
         if not confirmed:
             return {"ok": False, "needs_confirmation": True, "error": "Minta konfirmasi eksplisit sebelum membuat assistant."}
+        if enable_computer:
+            from app.config import get_settings
+            from app.core.infra.computer_runtime import ComputerRuntime
+
+            availability = ComputerRuntime.from_settings(get_settings()).status(owner_id=str(tenant_user_id))
+            if not availability.get("ok"):
+                return {"ok": False, "error": availability["message"]}
         combined = f"{name}\n{purpose}\n{instructions}\n{identity}\n{soul}"
         blocked_reason = blocked_agent_policy_reason(combined)
         if blocked_reason:
@@ -1997,6 +2004,13 @@ def build_arthur_v2_tools(
         agent = await _owned(agent_id)
         if agent is None:
             return {"ok": False, "error": "Assistant tidak ditemukan atau bukan milik pengguna ini."}
+        if enable_computer is True:
+            from app.config import get_settings
+            from app.core.infra.computer_runtime import ComputerRuntime
+
+            availability = ComputerRuntime.from_settings(get_settings()).status(owner_id=str(tenant_user_id))
+            if not availability.get("ok"):
+                return {"ok": False, "error": availability["message"]}
         if mcp_servers:
             return {
                 "ok": False,

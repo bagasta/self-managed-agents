@@ -40,6 +40,7 @@ def test_computer_runtime_requires_the_assigned_owner(monkeypatch):
     ready = runtime.status(owner_id="owner-1")
     assert ready["ok"] is True
     assert ready["takeover_supported"] is True
+    assert runtime.status(owner_id=None, is_platform_admin=True)["ok"] is True
 
 
 def test_computer_runtime_opens_url_without_using_docker(monkeypatch):
@@ -83,6 +84,20 @@ def test_computer_tools_expose_only_bounded_vnc_actions():
         "computer_type_text",
         "computer_press_key",
     }
+
+
+def test_computer_api_allows_platform_admin_or_assigned_owner(monkeypatch):
+    from app.api import computer as computer_api
+    from app.api.workforce import WorkforcePrincipal
+
+    runtime = _runtime()
+    monkeypatch.setattr("app.core.infra.computer_runtime.socket.create_connection", lambda *_args, **_kwargs: _Socket())
+    monkeypatch.setattr(computer_api.ComputerRuntime, "from_settings", lambda _settings: runtime)
+
+    owner = computer_api._runtime_result(WorkforcePrincipal(owner_user_id="owner-1"))
+    admin = computer_api._runtime_result(WorkforcePrincipal(owner_user_id=None, is_platform_admin=True))
+    assert owner["ok"] is True
+    assert admin["ok"] is True
 
 
 @pytest.mark.asyncio
