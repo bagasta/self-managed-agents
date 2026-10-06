@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import socket
 import subprocess
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -105,7 +107,11 @@ class ComputerRuntime:
             return status
         if self._actions >= self.max_actions:
             return {"ok": False, "code": "computer_action_limit", "message": "Batas aksi komputer untuk satu run tercapai. Laporkan progres atau minta instruksi lanjutan."}
-        command = ["vncdotool", "-s", f"{self.vnc_host}::{self.vnc_port}"]
+        # The API process may be launched through a virtualenv while its PATH
+        # remains the host PATH. Resolve the companion console script from the
+        # active interpreter first so a correctly installed driver is usable.
+        driver = Path(sys.executable).resolve().parent / "vncdotool"
+        command = [str(driver) if driver.is_file() else "vncdotool", "-s", f"{self.vnc_host}::{self.vnc_port}"]
         command.extend(commands or [])
         if text is not None:
             command.extend(["type", text])

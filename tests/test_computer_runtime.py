@@ -56,10 +56,11 @@ def test_computer_runtime_opens_url_without_using_docker(monkeypatch):
     result = runtime.open_url(owner_id="owner-1", url="https://example.com/path")
 
     assert result["ok"] is True
-    assert calls == [[
-        "vncdotool", "-s", "127.0.0.1::5902", "key", "CTRL-L",
+    assert calls[0][1:] == [
+        "-s", "127.0.0.1::5902", "key", "CTRL-L",
         "type", "https://example.com/path", "key", "ENTER",
-    ]]
+    ]
+    assert calls[0][0].endswith("vncdotool")
 
 
 def test_computer_runtime_blocks_sensitive_input_and_action_overrun(monkeypatch):
