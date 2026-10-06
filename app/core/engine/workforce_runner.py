@@ -332,7 +332,10 @@ async def run_workforce_deep_agent(
         run.error_message = "Workforce capability preflight blocked the assignment"
         run.runtime_metadata = {**(run.runtime_metadata or {}), "failure_code": blocker_code}
         await db.flush()
-        await report_progress("worker_blocked", {"phase": "capability_preflight"})
+        await report_progress(
+            "worker_failed",
+            {"phase": "capability_preflight", "failure_code": blocker_code},
+        )
         return run.id, f"[BLOCKED: {blocker}]", False
 
     try:
@@ -358,6 +361,7 @@ async def run_workforce_deep_agent(
         run.status = "failed"
         run.completed_at = datetime.now(timezone.utc)
         run.error_message = f"Internal workforce run failed ({failure_code})"
+        run.runtime_metadata = {**(run.runtime_metadata or {}), "failure_code": failure_code}
         await db.flush()
         await report_progress(
             "worker_failed",
@@ -440,6 +444,7 @@ async def run_workforce_deep_agent(
         run.status = "failed"
         run.completed_at = datetime.now(timezone.utc)
         run.error_message = f"Internal workforce run failed ({failure_code})"
+        run.runtime_metadata = {**(run.runtime_metadata or {}), "failure_code": failure_code}
         await db.flush()
         await report_progress(
             "worker_failed",
@@ -468,7 +473,10 @@ async def run_workforce_deep_agent(
             run.error_message = "Research result lacks verified product-page source URLs"
             run.runtime_metadata = {**(run.runtime_metadata or {}), "failure_code": "unverified_product_sources"}
             await db.flush()
-            await report_progress("worker_blocked", {"phase": "source_verification"})
+            await report_progress(
+                "worker_failed",
+                {"phase": "source_verification", "failure_code": "unverified_product_sources"},
+            )
             return run.id, "[BLOCKED: Riset belum memiliki tautan produk spesifik yang terverifikasi dari pencarian ini.]", False
 
     result = result[:20_000]

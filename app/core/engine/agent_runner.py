@@ -992,6 +992,7 @@ async def run_agent(
     prior_run_was_interrupted: bool = False,
     extra_tools: list[Any] | None = None,
     max_tokens_override: int | None = None,
+    allowed_tool_names_override: frozenset[str] | None = None,
 ) -> AgentRunResult:
     """
     Jalankan agent end-to-end:
@@ -1749,6 +1750,24 @@ async def run_agent(
                 system_prompt,
                 message=execution_user_message,
                 is_fresh_session=True,
+            )
+
+        if allowed_tool_names_override is not None:
+            tools = [
+                available for available in tools
+                if getattr(available, "name", None) in allowed_tool_names_override
+            ]
+            _arthur_unscoped_tools = []
+            subagent_list = []
+            if sandbox is not None:
+                await sandbox.aclose()
+            sandbox = None
+            mcp_tools = []
+            active_groups = ["bounded_manager_recovery"]
+            system_prompt += (
+                "\n\nThis is a bounded internal Group recovery turn. The only callable tools "
+                "are: " + ", ".join(sorted(allowed_tool_names_override)) + ". "
+                "Do not attempt any external communication or action."
             )
 
         backend = None

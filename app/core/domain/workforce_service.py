@@ -166,6 +166,11 @@ async def execute_owner_workforce_task(
     deployment_requested = any(item[4] for item in selected)
 
     workspace_id = str(owner_user_id)
+    from app.core.domain.workforce_recovery import recovery_lineage
+    recovery_parent = recovery_lineage.get() if existing_task is None else None
+    recovery_context = (
+        {"manager_recovery_depth": recovery_parent[1]} if recovery_parent else {}
+    )
     task = existing_task or WorkforceTask(
         workspace_id=workspace_id,
         owner_user_id=owner_user_id,
@@ -174,7 +179,9 @@ async def execute_owner_workforce_task(
         status="in_progress",
         context={"orchestrator": "arthur_v2", "worker_count": len(selected),
                  "durable_dispatch": background,
-                 "deployment_requested": deployment_requested},
+                 "deployment_requested": deployment_requested,
+                 **recovery_context},
+        parent_task_id=recovery_parent[0] if recovery_parent else None,
         started_at=datetime.now(timezone.utc),
     )
     if existing_task is None:
@@ -490,7 +497,11 @@ async def execute_owner_workforce_task(
             for result in results
         )[:MAX_SUMMARY_CHARS]
         final_task.completed_at = datetime.now(timezone.utc)
-        final_db.add(_event(task.id, "task_completed" if all_ok else "task_blocked"))
+        final_db.add(_event(
+            task.id,
+            "task_completed" if all_ok else "task_blocked",
+            metadata={"manager_recovery_eligible": True} if not all_ok else None,
+        ))
         await final_db.commit()
         return {"ok": all_ok, "task_id": str(task.id), "status": final_task.status, "results": results}
 

@@ -12,7 +12,7 @@ from app.models.session import Session
 from app.models.skill import Skill
 from app.models.workforce_task import WorkforceTask, WorkforceTaskEvent, WorkforceTaskStep
 from app.models.user_api_key import UserApiKey
-from app.models.team_chat import TeamChatRoom, TeamChatMember, TeamChatMessage
+from app.models.team_chat import TeamChatRoom, TeamChatMember, TeamChatMessage, TeamChatRecovery
 
 __all__ = [
     "Agent",
@@ -34,4 +34,5 @@ __all__ = [
     "TeamChatRoom",
     "TeamChatMember",
     "TeamChatMessage",
+    "TeamChatRecovery",
 ]

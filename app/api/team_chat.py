@@ -536,11 +536,11 @@ async def _sync_workforce_replies(db: AsyncSession, room: TeamChatRoom) -> None:
             run = by_run_id.get(step.run_id)
             failure_code = (run.runtime_metadata or {}).get("failure_code") if run else None
             if failure_code in {"sandbox_runtime_unavailable", "sandbox_capability_disabled"}:
-                content = "Aku belum bisa mengerjakan ini karena lingkungan kerja untuk membuat dan menerbitkan situs belum siap. Arthur perlu mengaktifkannya sebelum aku mencoba lagi."
+                content = "Pekerjaan ini tertahan karena lingkungan kerja belum siap."
             elif failure_code == "unverified_product_sources":
-                content = "Riset belum selesai: tautan halaman produk spesifik belum terbukti dari pencarian ini. Caption belum bisa dibuat dari data tersebut."
+                content = "Riset ini tertahan karena tautan halaman produk spesifik belum cukup terverifikasi."
             else:
-                content = "Aku belum bisa menyelesaikan tugas ini. Arthur perlu memeriksa kendalanya sebelum melanjutkan."
+                content = "Pekerjaan ini tertahan. Penyebabnya tercatat untuk ditindaklanjuti Arthur."
             status = "failed"
         if message.content != content or message.status != status:
             message.content, message.status = content, status

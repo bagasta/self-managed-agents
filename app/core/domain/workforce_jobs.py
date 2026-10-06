@@ -154,6 +154,7 @@ async def run_persisted_task(factory, task_id):
 
 async def workforce_queue_loop(factory):
     active: dict[uuid.UUID, asyncio.Task] = {}
+    recovery_future: asyncio.Task | None = None
     try:
         while True:
             for key, future in list(active.items()):
@@ -163,6 +164,12 @@ async def workforce_queue_loop(factory):
                     except Exception:
                         log.exception("Workforce job interrupted; persisted state retained")
                     del active[key]
+            if recovery_future is not None and recovery_future.done():
+                try:
+                    recovery_future.result()
+                except Exception:
+                    log.exception("Group manager recovery interrupted; persisted state retained")
+                recovery_future = None
             try:
                 async with factory() as db:
                     ids = list((await db.execute(select(WorkforceTask.id).where(
@@ -172,6 +179,11 @@ async def workforce_queue_loop(factory):
                 for key in ids:
                     if key not in active and len(active) < 2:
                         active[key] = asyncio.create_task(run_persisted_task(factory, key))
+                if recovery_future is None:
+                    # A model-backed manager turn can take longer than a queue
+                    # poll. Keep workforce dispatch moving while it runs.
+                    from app.core.domain.workforce_recovery import recover_group_workforce_failures
+                    recovery_future = asyncio.create_task(recover_group_workforce_failures(factory))
             except Exception:
                 log.exception("Workforce queue poll failed")
             await asyncio.sleep(2)
@@ -179,3 +191,6 @@ async def workforce_queue_loop(factory):
         for future in active.values():
             future.cancel()
         await asyncio.gather(*active.values(), return_exceptions=True)
+        if recovery_future is not None:
+            recovery_future.cancel()
+            await asyncio.gather(recovery_future, return_exceptions=True)
