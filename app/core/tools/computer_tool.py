@@ -61,6 +61,11 @@ def build_computer_tools(
         return observed(runtime.type_text(owner_id=owner_id, text=text))
 
     @tool
+    def computer_request_human_takeover(reason: str) -> dict:
+        """Record the exact blocked sensitive step for a human takeover. Call this only after completing all safe independent work still possible in this request; it does not end the run by itself."""
+        return runtime.request_human_takeover(owner_id=owner_id, reason=reason)
+
+    @tool
     def computer_press_key(key: str) -> dict | list[dict[str, Any]]:
         """Press one navigation key/combo, then inspect the returned screen before assuming its effect."""
         return observed(runtime.press_key(owner_id=owner_id, key=key))
@@ -76,6 +81,6 @@ def build_computer_tools(
                 {"type": "text", "text": "Screenshot komputer terbaru terlampir. Tentukan satu aksi kecil berdasarkan apa yang benar-benar terlihat."},
                 {"type": "image_url", "image_url": {"url": f"data:{screen['mime_type']};base64,{screen['image_base64']}"}},
             ]
-        return [computer_get_status, computer_screenshot, computer_open_url, computer_click, computer_type_text, computer_press_key]
+        return [computer_get_status, computer_screenshot, computer_open_url, computer_click, computer_type_text, computer_request_human_takeover, computer_press_key]
 
-    return [computer_get_status, computer_open_url, computer_click, computer_type_text, computer_press_key]
+    return [computer_get_status, computer_open_url, computer_click, computer_type_text, computer_request_human_takeover, computer_press_key]

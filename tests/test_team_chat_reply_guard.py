@@ -2,6 +2,7 @@ import json
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -137,6 +138,11 @@ def test_obviously_cut_bot_reply_is_not_final():
     assert looks_truncated("Sekarang")
     assert looks_truncated("**Caption IG — pupuk organik")
     assert not looks_truncated("**Caption IG**\nCek tiga pilihan di tabel.")
+
+
+def test_direct_chat_uses_a_reply_even_when_group_truncation_heuristic_matches():
+    source = Path("app/api/team_chat.py").read_text()
+    assert 'room.kind == "group" and looks_truncated(result.get("reply") or "")' in source
 
 
 def test_research_blocker_can_mention_colleague_without_claiming_prices():

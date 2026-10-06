@@ -14,7 +14,9 @@ from arthur_v2.plugin import (
     AssistantWorkflowInput,
     arthur_workforce_dispatch_completion_needed,
     build_arthur_v2_system_prompt,
+    guard_arthur_assistant_creation_reply,
     guard_arthur_workforce_reply,
+    has_successful_assistant_creation,
 )
 from arthur.runtime.skill_runtime import scope_arthur_builder_tools
 from app.core.domain import workforce_service
@@ -144,6 +146,22 @@ def test_arthur_progress_claim_requires_persisted_dispatch_result():
     }]
     assert not arthur_workforce_dispatch_completion_needed(claim, failed_steps + successful_steps)
     assert guard_arthur_workforce_reply(claim, failed_steps + successful_steps) == (claim, None)
+
+
+def test_arthur_creation_claim_requires_a_persisted_assistant_id():
+    claim = "Langsung dieksekusi! Bot sudah dibuat dan siap bekerja."
+
+    guarded, reason = guard_arthur_assistant_creation_reply(claim, [])
+    assert reason == "missing_assistant_creation"
+    assert "belum dibuat" in guarded
+    assert not has_successful_assistant_creation([])
+
+    steps = [{
+        "tool": "create_assistant",
+        "result": json.dumps({"ok": True, "agent_id": str(uuid.uuid4())}),
+    }]
+    assert has_successful_assistant_creation(steps)
+    assert guard_arthur_assistant_creation_reply(claim, steps) == (claim, None)
 
 
 @pytest.mark.asyncio

@@ -52,3 +52,26 @@ async def computer_takeover(
         "shared": True,
         "note": "Gunakan takeover untuk login, OTP, password, atau keputusan sensitif.",
     }
+
+
+@router.get("/snapshot")
+async def computer_snapshot(
+    principal: WorkforcePrincipal = Depends(get_workforce_principal),
+) -> dict:
+    """Return the actual VNC framebuffer used by computer tools.
+
+    This is intentionally authenticated like takeover.  It lets a UI prove it
+    is showing the same desktop the agent acts on, rather than treating an
+    independently loaded noVNC iframe as evidence.
+    """
+    runtime = ComputerRuntime.from_settings(get_settings())
+    result = runtime.capture_screen(
+        owner_id=str(principal.owner_user_id) if principal.owner_user_id else None,
+        is_platform_admin=principal.is_platform_admin,
+    )
+    if result.get("ok"):
+        return result
+    code = str(result.get("code") or "computer_unavailable")
+    if code in {"computer_not_assigned", "computer_unassigned"}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=result["message"])
+    raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=result["message"])

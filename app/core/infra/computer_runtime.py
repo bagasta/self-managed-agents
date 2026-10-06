@@ -87,8 +87,39 @@ class ComputerRuntime:
         if len(clean) > 2_000:
             return {"ok": False, "code": "text_too_long", "message": "Teks dibatasi 2.000 karakter per aksi."}
         if any(marker in clean.lower() for marker in _SENSITIVE_MARKERS):
-            return {"ok": False, "code": "sensitive_input_blocked", "message": "Jangan mengetik kredensial, OTP, atau token. Minta owner mengambil alih komputer melalui viewer."}
+            return {
+                "ok": False,
+                "code": "sensitive_input_blocked",
+                "message": "Jangan mengetik kredensial, OTP, atau token. Langkah ini perlu takeover owner melalui viewer.",
+                # A blocked credential is local to this one field; it is not a
+                # failure of every other task the agent was asked to do.
+                "requires_human_takeover": True,
+                "continue_independent_tasks": True,
+            }
         return self._run(owner_id=owner_id, text=clean)
+
+    def request_human_takeover(self, *, owner_id: str | None, reason: str) -> dict[str, Any]:
+        """Record a bounded handoff without treating the computer as failed.
+
+        The caller should use this only after it has completed every safe,
+        independent action still available in the current request.  This keeps
+        one login/CAPTCHA from abandoning the rest of an automation job.
+        """
+        status = self.status(owner_id=owner_id)
+        if not status.get("ok"):
+            return status
+        clean_reason = " ".join(reason.split())
+        if not clean_reason:
+            return {"ok": False, "code": "handoff_reason_required", "message": "Alasan takeover wajib diisi."}
+        if len(clean_reason) > 1_000:
+            return {"ok": False, "code": "handoff_reason_too_long", "message": "Alasan takeover dibatasi 1.000 karakter."}
+        return {
+            "ok": True,
+            "status": "human_takeover_required",
+            "message": "Takeover manusia diperlukan hanya untuk langkah yang disebutkan. Selesaikan tugas aman lain yang independen sebelum memberi laporan akhir.",
+            "reason": clean_reason,
+            "viewer_url_available": bool(status.get("viewer_url")),
+        }
 
     def press_key(self, *, owner_id: str | None, key: str) -> dict[str, Any]:
         raw_parts = key.strip().upper().replace("+", "-").split("-")
@@ -97,9 +128,14 @@ class ComputerRuntime:
         normalized = "-".join(_KEY_ALIASES.get(part, part.lower()) for part in raw_parts)
         return self._run(owner_id=owner_id, commands=["key", normalized])
 
-    def capture_screen(self, *, owner_id: str | None) -> dict[str, Any]:
+    def capture_screen(
+        self,
+        *,
+        owner_id: str | None,
+        is_platform_admin: bool = False,
+    ) -> dict[str, Any]:
         """Capture the actual VNC framebuffer for a visual agent observation."""
-        status = self.status(owner_id=owner_id)
+        status = self.status(owner_id=owner_id, is_platform_admin=is_platform_admin)
         if not status.get("ok"):
             return status
         capture_path: Path | None = None

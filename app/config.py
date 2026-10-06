@@ -67,7 +67,10 @@ class Settings(BaseSettings):
     computer_runtime_vnc_port: int = 5902
     computer_runtime_viewer_url: str = ""
     computer_runtime_timeout_seconds: int = 12
-    computer_runtime_max_actions_per_run: int = 20
+    # A visual form flow needs several clicks, fields, validation passes, and
+    # a final submit. Keep this bounded, but do not make normal multi-field
+    # automation fail halfway through its work.
+    computer_runtime_max_actions_per_run: int = 60
 
     # Agent limits
     agent_max_steps: int = 12

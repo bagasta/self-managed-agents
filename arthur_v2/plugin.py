@@ -39,6 +39,10 @@ from .google_oauth import get_google_oauth_status, google_mcp_url, start_google_
 
 ARTHUR_V2_PLUGIN = "arthur_v2"
 ARTHUR_V2_ASSISTANT_MODEL = "deepseek/deepseek-v4-flash"
+# A computer agent must inspect the VNC framebuffer. DeepSeek V4 Flash is a
+# text-only routing model in this runtime, so using it would leave browser
+# actions blind and unverifiable.
+ARTHUR_V2_COMPUTER_ASSISTANT_MODEL = "openai/gpt-4.1-mini"
 ARTHUR_V2_CODING_DEPLOY_MAX_TOKENS = 8192
 
 _BUSINESS_ASSISTANT_KINDS = {"business", "internal", "sales", "registration", "customer"}
@@ -835,6 +839,37 @@ def guard_arthur_workforce_reply(reply: str, steps: list[dict[str, Any]]) -> tup
     )
 
 
+_ASSISTANT_CREATION_CLAIM = re.compile(
+    r"\b(?:langsung\s+(?:di)?eksekusi|assistant\s+(?:sudah|telah)\s+(?:dibuat|jadi)|bot\s+(?:sudah|telah)\s+(?:dibuat|jadi))\b",
+    re.IGNORECASE,
+)
+
+
+def has_successful_assistant_creation(steps: list[dict[str, Any]]) -> bool:
+    """Only a persisted assistant id is proof that an Arthur build completed."""
+    for step in steps:
+        if str(step.get("tool") or "") != "create_assistant":
+            continue
+        try:
+            result = json.loads(str(step.get("result") or ""))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(result, dict) and result.get("ok") is True and result.get("agent_id"):
+            return True
+    return False
+
+
+def guard_arthur_assistant_creation_reply(reply: str, steps: list[dict[str, Any]]) -> tuple[str, str | None]:
+    """Prevent a progress phrase from being presented as a created assistant."""
+    if not _ASSISTANT_CREATION_CLAIM.search(reply or "") or has_successful_assistant_creation(steps):
+        return reply, None
+    return (
+        "Assistant belum dibuat: belum ada hasil create yang menyimpan ID assistant. "
+        "Saya tidak akan mengklaim bot sudah berjalan sebelum pembuatan benar-benar berhasil.",
+        "missing_assistant_creation",
+    )
+
+
 def arthur_staffing_onboarding_active(history_rows: list[Any], current_message: str) -> bool:
     """Scope reply safeguards to a broad owner staffing conversation until action is requested."""
     first_owner_message = next(
@@ -1351,7 +1386,7 @@ def build_arthur_v2_tools(
                 name=name.strip(),
                 description=purpose.strip(),
                 instructions=target_instructions,
-                model=ARTHUR_V2_ASSISTANT_MODEL,
+                model=(ARTHUR_V2_COMPUTER_ASSISTANT_MODEL if enable_computer else ARTHUR_V2_ASSISTANT_MODEL),
                 max_tokens=ARTHUR_V2_CODING_DEPLOY_MAX_TOKENS if enable_deploy else None,
                 channel_type="whatsapp",
                 owner_external_id=owner_phone,

@@ -876,7 +876,13 @@ async def send(room_id: uuid.UUID, payload: ChatSend, workspace_id: str | None =
                 evidence_steps = list(result.get("steps") or [])
                 run_record = await run_db.get(Run, result["run_id"])
                 empty_reply = (run_record.runtime_metadata or {}).get("reply_guard_reason") == "fallback_empty_reply" if run_record else False
-                incomplete_reply = looks_truncated(result.get("reply") or "")
+                # A direct-chat reply must remain visible unless the runner itself
+                # reports a failure.  `looks_truncated` is a deliberately cheap
+                # heuristic for recovering group hand-offs; it cannot determine a
+                # provider finish reason and was hiding otherwise useful personal
+                # assistant replies (notably Indonesian sentences ending in a
+                # connector such as "untuk").
+                incomplete_reply = room.kind == "group" and looks_truncated(result.get("reply") or "")
                 deferred_reply = room.kind == "group" and _unbacked_deferred_work(
                     result.get("reply") or "", result.get("steps") or [],
                 )
@@ -911,7 +917,7 @@ async def send(room_id: uuid.UUID, payload: ChatSend, workspace_id: str | None =
                     evidence_steps.extend(result.get("steps") or [])
                     run_record = await run_db.get(Run, result["run_id"])
                     empty_reply = (run_record.runtime_metadata or {}).get("reply_guard_reason") == "fallback_empty_reply" if run_record else False
-                    incomplete_reply = looks_truncated(result.get("reply") or "")
+                    incomplete_reply = room.kind == "group" and looks_truncated(result.get("reply") or "")
                     deferred_reply = _unbacked_deferred_work(result.get("reply") or "", result.get("steps") or [])
                 if used_tokens > 0:
                     await record_agent_token_usage(agent, used_tokens, run_db)

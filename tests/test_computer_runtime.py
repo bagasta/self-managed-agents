@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,6 +33,12 @@ def _runtime(**overrides) -> ComputerRuntime:
     )
     base.update(overrides)
     return ComputerRuntime(**base)
+
+
+def test_default_computer_budget_allows_a_multifield_visual_flow():
+    from app.config import Settings
+
+    assert Settings().computer_runtime_max_actions_per_run == 60
 
 
 def test_computer_runtime_requires_the_assigned_owner(monkeypatch):
@@ -91,7 +98,10 @@ def test_computer_runtime_blocks_sensitive_input_and_action_overrun(monkeypatch)
         lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
     )
 
-    assert runtime.type_text(owner_id="owner-1", text="password=secret")["code"] == "sensitive_input_blocked"
+    blocked = runtime.type_text(owner_id="owner-1", text="password=secret")
+    assert blocked["code"] == "sensitive_input_blocked"
+    assert blocked["requires_human_takeover"] is True
+    assert blocked["continue_independent_tasks"] is True
     assert runtime.press_key(owner_id="owner-1", key="CTRL-L")["ok"] is True
     assert runtime.press_key(owner_id="owner-1", key="ENTER")["code"] == "computer_action_limit"
 
@@ -145,8 +155,23 @@ def test_computer_tools_expose_only_bounded_vnc_actions():
         "computer_open_url",
         "computer_click",
         "computer_type_text",
+        "computer_request_human_takeover",
         "computer_press_key",
     }
+
+
+def test_computer_handoff_preserves_the_running_automation(monkeypatch):
+    runtime = _runtime()
+    monkeypatch.setattr("app.core.infra.computer_runtime.socket.create_connection", lambda *_args, **_kwargs: _Socket())
+
+    result = runtime.request_human_takeover(
+        owner_id="owner-1",
+        reason="Masukkan password pada halaman login.",
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "human_takeover_required"
+    assert result["viewer_url_available"] is True
 
 
 def test_computer_api_allows_platform_admin_or_assigned_owner(monkeypatch):
@@ -161,6 +186,29 @@ def test_computer_api_allows_platform_admin_or_assigned_owner(monkeypatch):
     admin = computer_api._runtime_result(WorkforcePrincipal(owner_user_id=None, is_platform_admin=True))
     assert owner["ok"] is True
     assert admin["ok"] is True
+
+
+def test_computer_api_snapshot_uses_the_same_vnc_runtime_for_admin(monkeypatch):
+    from app.api import computer as computer_api
+    from app.api.workforce import WorkforcePrincipal
+
+    runtime = _runtime()
+    monkeypatch.setattr("app.core.infra.computer_runtime.socket.create_connection", lambda *_args, **_kwargs: _Socket())
+    monkeypatch.setattr(runtime, "capture_screen", lambda **kwargs: {
+        "ok": True,
+        "status": "screen_captured",
+        "mime_type": "image/png",
+        "image_base64": "c2NyZWVu",
+        "is_platform_admin": kwargs["is_platform_admin"],
+    })
+    monkeypatch.setattr(computer_api.ComputerRuntime, "from_settings", lambda _settings: runtime)
+
+    result = asyncio.run(
+        computer_api.computer_snapshot(WorkforcePrincipal(owner_user_id=None, is_platform_admin=True))
+    )
+
+    assert result["image_base64"] == "c2NyZWVu"
+    assert result["is_platform_admin"] is True
 
 
 @pytest.mark.asyncio
@@ -194,8 +242,41 @@ async def test_agent_tool_setup_adds_computer_without_replacing_docker(monkeypat
     assert "computer" in setup.active_groups
     assert setup.sandbox is None
     assert {item.name for item in setup.tools} == {
-        "computer_get_status", "computer_open_url", "computer_click", "computer_type_text", "computer_press_key",
+        "computer_get_status", "computer_open_url", "computer_click", "computer_type_text",
+        "computer_request_human_takeover", "computer_press_key",
     }
+
+
+@pytest.mark.asyncio
+async def test_team_chat_does_not_expose_whatsapp_escalation_tools(monkeypatch):
+    from app.core.engine.agent_tool_setup import build_agent_tool_setup
+
+    owner_id = uuid.uuid4()
+    agent = SimpleNamespace(id=uuid.uuid4(), owner_user_id=owner_id, capabilities=[])
+    session = SimpleNamespace(
+        id=uuid.uuid4(), agent_id=agent.id, channel_type=None, channel_config={}, external_user_id="owner",
+    )
+    setup = await build_agent_tool_setup(
+        agent_model=agent,
+        session=session,
+        tools_config={
+            "computer": False,
+            "sandbox": False,
+            "memory": False,
+            "skills": False,
+            "escalation": True,
+            "tavily": False,
+        },
+        raw_tools_config={},
+        db=AsyncMock(),
+        log=MagicMock(),
+        escalation_user_jid=None,
+        sender_name=None,
+        user_message="Cari lowongan kerja yang relevan.",
+    )
+
+    assert "escalation" not in setup.active_groups
+    assert "escalate_to_human" not in {item.name for item in setup.tools}
 
 
 @pytest.mark.asyncio

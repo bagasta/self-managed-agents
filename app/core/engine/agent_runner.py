@@ -3723,7 +3723,10 @@ async def run_agent(
             )
 
     if str((tools_config or {}).get("system_plugin") or "").strip() == "arthur_v2":
-        from arthur_v2.plugin import guard_arthur_workforce_reply
+        from arthur_v2.plugin import (
+            guard_arthur_assistant_creation_reply,
+            guard_arthur_workforce_reply,
+        )
 
         _reply_before_workforce_guard = final_reply
         final_reply, _workforce_guard_reason = guard_arthur_workforce_reply(final_reply, steps)
@@ -3732,6 +3735,15 @@ async def run_agent(
                 "agent_run.arthur_workforce_reply_guard_applied",
                 reason=_workforce_guard_reason,
                 before_len=len(_reply_before_workforce_guard or ""),
+                after_len=len(final_reply or ""),
+            )
+        _reply_before_creation_guard = final_reply
+        final_reply, _creation_guard_reason = guard_arthur_assistant_creation_reply(final_reply, steps)
+        if _creation_guard_reason:
+            log.warning(
+                "agent_run.arthur_assistant_creation_reply_guard_applied",
+                reason=_creation_guard_reason,
+                before_len=len(_reply_before_creation_guard or ""),
                 after_len=len(final_reply or ""),
             )
 

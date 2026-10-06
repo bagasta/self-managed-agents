@@ -235,7 +235,11 @@ async def build_agent_tool_setup(
         tools.extend(build_scheduler_tools(session.id, agent_id, AsyncSessionLocal))
         active_groups.append("scheduler")
 
-    if _is_enabled(tools_config, "escalation", default=True):
+    # Escalation is a customer-support/WhatsApp workflow. Team Chat has no
+    # operator channel to receive that handoff, so exposing it there leads to
+    # fictional claims such as "sudah diteruskan ke tim" instead of an
+    # actionable computer takeover request.
+    if _is_enabled(tools_config, "escalation", default=True) and getattr(session, "channel_type", None) == "whatsapp":
         from app.core.tools.escalation_tool import build_escalation_tools
 
         raw_cfg = session.channel_config
