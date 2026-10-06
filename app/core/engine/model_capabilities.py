@@ -9,6 +9,11 @@ def model_supports_image_input(model: str | None) -> bool:
         return False
     if any(marker in name for marker in ("deepseek/", "moonshotai/", "kimi-")):
         return False
+    # Current OpenAI GPT-6 family accepts image input. Keep this explicit so
+    # an OpenRouter-style identifier such as ``openai/gpt-6-luna`` enables the
+    # computer vision loop instead of falling back to blind input-only control.
+    if "gpt-6" in name:
+        return True
     if "qwen3" in name and "vl" not in name:
         return False
     return any(

@@ -196,3 +196,41 @@ async def test_agent_tool_setup_adds_computer_without_replacing_docker(monkeypat
     assert {item.name for item in setup.tools} == {
         "computer_get_status", "computer_open_url", "computer_click", "computer_type_text", "computer_press_key",
     }
+
+
+@pytest.mark.asyncio
+async def test_gpt6_computer_agent_gets_visual_observation_tools(monkeypatch):
+    """GPT-6 agents must observe the screen, not receive blind action_sent replies."""
+    from app.core.engine.agent_tool_setup import build_agent_tool_setup
+
+    owner_id = uuid.uuid4()
+    agent = SimpleNamespace(
+        id=uuid.uuid4(),
+        owner_user_id=owner_id,
+        capabilities=[],
+        model="openai/gpt-6-luna",
+    )
+    session = SimpleNamespace(
+        id=uuid.uuid4(), agent_id=agent.id, channel_type="api", channel_config={}, external_user_id="owner",
+    )
+    setup = await build_agent_tool_setup(
+        agent_model=agent,
+        session=session,
+        tools_config={
+            "computer": True,
+            "sandbox": False,
+            "memory": False,
+            "skills": False,
+            "escalation": False,
+            "tavily": False,
+        },
+        raw_tools_config={},
+        db=AsyncMock(),
+        log=MagicMock(),
+        escalation_user_jid=None,
+        sender_name=None,
+        user_message="open browser",
+    )
+
+    assert "computer_visual" in setup.active_groups
+    assert "computer_screenshot" in {item.name for item in setup.tools}
