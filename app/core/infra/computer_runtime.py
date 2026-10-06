@@ -15,10 +15,11 @@ from typing import Any
 from urllib.parse import urlparse
 
 
-_ALLOWED_KEYS = {
-    "ALT", "BACKSPACE", "CTRL", "DELETE", "DOWN", "END", "ENTER", "ESC",
-    "F5", "HOME", "LEFT", "PAGEDOWN", "PAGEUP", "RIGHT", "SHIFT", "SPACE",
-    "TAB", "UP",
+_KEY_ALIASES = {
+    "ALT": "alt", "BACKSPACE": "bsp", "CTRL": "ctrl", "DELETE": "delete",
+    "DOWN": "down", "END": "end", "ENTER": "enter", "ESC": "esc",
+    "HOME": "home", "LEFT": "left", "PAGEDOWN": "pgdn", "PAGEUP": "pgup",
+    "RIGHT": "right", "SHIFT": "shift", "SPACE": "space", "TAB": "tab", "UP": "up",
 }
 _SENSITIVE_MARKERS = ("password", "passcode", "otp", "one-time code", "verification code", "api key", "access token")
 
@@ -70,7 +71,7 @@ class ComputerRuntime:
         parsed = urlparse(url.strip())
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             return {"ok": False, "code": "invalid_url", "message": "URL harus memakai http:// atau https://."}
-        return self._run(owner_id=owner_id, commands=["key", "CTRL-L"], text=url.strip(), trailing_key="ENTER")
+        return self._run(owner_id=owner_id, commands=["key", "ctrl-l"], text=url.strip(), trailing_key="enter")
 
     def click(self, *, owner_id: str | None, x: int, y: int) -> dict[str, Any]:
         if not (0 <= x <= 3840 and 0 <= y <= 2160):
@@ -88,10 +89,10 @@ class ComputerRuntime:
         return self._run(owner_id=owner_id, text=clean)
 
     def press_key(self, *, owner_id: str | None, key: str) -> dict[str, Any]:
-        normalized = key.strip().upper().replace("+", "-")
-        parts = normalized.split("-")
-        if not normalized or any(part not in _ALLOWED_KEYS and not (len(part) == 1 and part.isalnum()) for part in parts):
+        raw_parts = key.strip().upper().replace("+", "-").split("-")
+        if not raw_parts or any(part not in _KEY_ALIASES and not (len(part) == 1 and part.isalnum()) for part in raw_parts):
             return {"ok": False, "code": "unsupported_key", "message": "Key tidak didukung. Gunakan tombol navigasi atau kombinasi CTRL/ALT/SHIFT dengan huruf/angka."}
+        normalized = "-".join(_KEY_ALIASES.get(part, part.lower()) for part in raw_parts)
         return self._run(owner_id=owner_id, commands=["key", normalized])
 
     def _run(

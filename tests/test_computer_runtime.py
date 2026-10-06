@@ -57,8 +57,8 @@ def test_computer_runtime_opens_url_without_using_docker(monkeypatch):
 
     assert result["ok"] is True
     assert calls[0][1:] == [
-        "-s", "127.0.0.1::5902", "key", "CTRL-L",
-        "type", "https://example.com/path", "key", "ENTER",
+        "-s", "127.0.0.1::5902", "key", "ctrl-l",
+        "type", "https://example.com/path", "key", "enter",
     ]
     assert calls[0][0].endswith("vncdotool")
 
@@ -92,6 +92,19 @@ def test_computer_runtime_blocks_sensitive_input_and_action_overrun(monkeypatch)
     assert runtime.type_text(owner_id="owner-1", text="password=secret")["code"] == "sensitive_input_blocked"
     assert runtime.press_key(owner_id="owner-1", key="CTRL-L")["ok"] is True
     assert runtime.press_key(owner_id="owner-1", key="ENTER")["code"] == "computer_action_limit"
+
+
+def test_computer_runtime_translates_friendly_key_names_for_vnc(monkeypatch):
+    runtime = _runtime()
+    commands = []
+    monkeypatch.setattr("app.core.infra.computer_runtime.socket.create_connection", lambda *_args, **_kwargs: _Socket())
+    monkeypatch.setattr(
+        "app.core.infra.computer_runtime.subprocess.run",
+        lambda command, **_kwargs: commands.append(command) or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    assert runtime.press_key(owner_id="owner-1", key="ALT+TAB")["ok"] is True
+    assert commands[0][-2:] == ["key", "alt-tab"]
 
 
 def test_computer_tools_expose_only_bounded_vnc_actions():
