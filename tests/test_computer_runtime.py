@@ -63,6 +63,24 @@ def test_computer_runtime_opens_url_without_using_docker(monkeypatch):
     assert calls[0][0].endswith("vncdotool")
 
 
+def test_computer_runtime_keeps_virtualenv_driver_path(monkeypatch, tmp_path):
+    runtime = _runtime()
+    venv_bin = tmp_path / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    driver = venv_bin / "vncdotool"
+    driver.touch()
+    monkeypatch.setattr("app.core.infra.computer_runtime.socket.create_connection", lambda *_args, **_kwargs: _Socket())
+    monkeypatch.setattr("app.core.infra.computer_runtime.sys.executable", str(venv_bin / "python"))
+    calls = []
+    monkeypatch.setattr(
+        "app.core.infra.computer_runtime.subprocess.run",
+        lambda command, **_kwargs: calls.append(command) or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    assert runtime.press_key(owner_id="owner-1", key="ENTER")["ok"] is True
+    assert calls[0][0] == str(driver)
+
+
 def test_computer_runtime_blocks_sensitive_input_and_action_overrun(monkeypatch):
     runtime = _runtime(max_actions=1)
     monkeypatch.setattr("app.core.infra.computer_runtime.socket.create_connection", lambda *_args, **_kwargs: _Socket())

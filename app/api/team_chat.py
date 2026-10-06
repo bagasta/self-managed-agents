@@ -109,6 +109,9 @@ class BotConfigUpdate(BaseModel):
     model: str = Field(min_length=1, max_length=255)
     temperature: float = Field(ge=0, le=2)
     skills_enabled: bool = True
+    # Optional keeps older clients from silently revoking an existing computer
+    # assignment when they save an unrelated profile change.
+    computer_enabled: bool | None = None
 
 
 class BotSkillWrite(BaseModel):
@@ -162,6 +165,7 @@ async def _bot_config_data(db: AsyncSession, agent: Agent) -> dict:
         "soul": soul.value_data if soul else "", "model": agent.model,
         "temperature": agent.temperature,
         "skills_enabled": (agent.tools_config or {}).get("skills", True),
+        "computer_enabled": bool((agent.tools_config or {}).get("computer", False)),
         "skills": [
             {"name": skill.name, "description": skill.description,
              "content_md": skill.content_md, "editable": not skill.immutable}
@@ -643,7 +647,10 @@ async def update_bot_config(agent_id: uuid.UUID, payload: BotConfigUpdate, works
     if not agent.model:
         raise HTTPException(422, "Model wajib diisi")
     agent.temperature = payload.temperature
-    agent.tools_config = {**(agent.tools_config or {}), "skills": payload.skills_enabled}
+    tools_config = {**(agent.tools_config or {}), "skills": payload.skills_enabled}
+    if payload.computer_enabled is not None:
+        tools_config["computer"] = payload.computer_enabled
+    agent.tools_config = tools_config
     agent.version += 1
     context_version = await get_active_context_version(agent.id, db)
     for key, value in (("identity", payload.identity), ("soul", payload.soul)):

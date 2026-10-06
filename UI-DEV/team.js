@@ -35,6 +35,14 @@ async function request(method, path, body) {
   return data;
 }
 
+async function computerRequest(method, path) {
+  const url = new URL(`${state.base.replace(/\/$/,'')}/v1/computer${path}`, location.href);
+  const response = await fetch(url, {method, headers:{'X-API-Key':state.adminKey}, cache:'no-store'});
+  const data = await response.json().catch(()=>({detail:`HTTP ${response.status}`}));
+  if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail || data));
+  return data;
+}
+
 function credentialsReady() { return !!state.adminKey; }
 function fillSettings() {
   $('admin-key').value = state.adminKey;
@@ -257,6 +265,7 @@ function rememberConfigDraft(){
     identity:$('config-identity').value,soul:$('config-soul').value,
     instructions:$('config-instructions').value,model:$('config-model').value,
     temperature:$('config-temperature').value,skills_enabled:$('config-skills-enabled').checked,
+    computer_enabled:$('config-computer-enabled').checked,
   });
 }
 function renderDetails(){
@@ -271,6 +280,11 @@ function renderDetails(){
     return `<button type="button" class="detail-member ${id===selected?'selected':''}" data-config-agent="${esc(id)}">${avatar(member)}<span>${esc(member.name)}${id===room.manager_agent_id?'<small>Manager</small>':''}</span><span class="member-chevron">›</span></button>`;
   }).join('')}</div>`:'';
   $('details-body').innerHTML=`<div class="detail-hero">${avatar(group?room:chosen,group)}<h3>${esc(group?room.title:chosen.name)}</h3><p>${group?`${room.member_agent_ids.length} bot dalam grup`:'Chat personal'}</p></div>${members}
+    <section id="computer-panel" class="computer-panel" aria-live="polite">
+      <div class="computer-panel-head"><div><div class="detail-label">Komputer bersama</div><strong>${esc(chosen.name)}</strong></div><span id="computer-state" class="computer-state pending">Memeriksa</span></div>
+      <p id="computer-copy" class="computer-copy">Memeriksa akses komputer bot ini…</p>
+      <div id="computer-live" class="computer-live" hidden><iframe id="computer-viewer" title="Komputer realtime ${esc(chosen.name)}" referrerpolicy="no-referrer"></iframe><div class="computer-actions"><button type="button" id="computer-open" class="quiet-action">Buka penuh</button><button type="button" id="computer-retry" class="quiet-action">Muat ulang</button></div></div>
+    </section>
     <div class="detail-section-head"><div><div class="detail-label">Konfigurasi bot</div><h3>${esc(chosen.name)}</h3></div></div>
     <div id="config-feedback" class="config-feedback" role="status"></div>
     <form id="config-form" class="config-form" data-dirty="false">
@@ -281,6 +295,8 @@ function renderDetails(){
       <label>Job / instruksi kerja<span class="field-help">Tugas, batasan, dan cara bekerja bot.</span><textarea id="config-instructions" rows="7" maxlength="200000"></textarea></label>
       <div class="config-pair"><label>Model<input id="config-model" maxlength="255" required></label><label>Temperature<input id="config-temperature" type="number" min="0" max="2" step="0.1" required></label></div>
       <label class="config-check"><input id="config-skills-enabled" type="checkbox">Bot dapat memakai skill</label>
+      <label class="config-check"><input id="config-computer-enabled" type="checkbox">Bot dapat memakai komputer bersama</label>
+      <p class="field-help computer-setting-help">Saat aktif, bot mendapat tool browser/VNC. Login, OTP, password, dan aksi sensitif tetap harus diambil alih oleh owner atau admin.</p>
       <button id="config-save" class="primary-action" type="submit">Simpan konfigurasi</button>
     </form>
     <div class="detail-section-head skill-heading"><div><div class="detail-label">Skill</div><p>Petunjuk kerja yang bisa dibaca bot saat diperlukan.</p></div><button type="button" id="skill-new" class="quiet-action">Tambah</button></div>
@@ -297,9 +313,36 @@ function fillBotConfig(data){
   const draft=state.configDrafts.get(data.id)||data;
   for(const [field,id] of Object.entries({name:'config-name',description:'config-description',identity:'config-identity',soul:'config-soul',instructions:'config-instructions',model:'config-model',temperature:'config-temperature'}))$(id).value=draft[field]??'';
   $('config-skills-enabled').checked=!!draft.skills_enabled;
+  $('config-computer-enabled').checked=!!draft.computer_enabled;
   $('config-form').dataset.dirty=state.configDrafts.has(data.id)?'true':'false';
   $('config-feedback').textContent=state.configDrafts.has(data.id)?'Perubahan belum disimpan.':'';
   renderConfigSkills(data.skills||[]);
+  loadComputerPanel(data);
+}
+function setComputerPanel(status, copy, tone='pending'){
+  const stateEl=$('computer-state'),copyEl=$('computer-copy');
+  if(!stateEl||!copyEl)return;
+  stateEl.textContent=status;stateEl.className=`computer-state ${tone}`;copyEl.textContent=copy;
+}
+async function loadComputerPanel(data){
+  const panel=$('computer-panel');if(!panel||data.id!==state.configAgentId)return;
+  const live=$('computer-live'),viewer=$('computer-viewer');
+  live.hidden=true;viewer.removeAttribute('src');
+  if(!data.computer_enabled){
+    setComputerPanel('Tidak aktif','Aktifkan akses komputer pada konfigurasi bot, lalu simpan. Preview live akan muncul di sini.','idle');
+    return;
+  }
+  setComputerPanel('Menghubungkan','Meminta akses viewer komputer untuk bot ini…');
+  try{
+    const takeover=await computerRequest('POST','/takeover');
+    if(data.id!==state.configAgentId||$('details').hidden)return;
+    viewer.src=takeover.viewer_url;
+    live.hidden=false;
+    setComputerPanel('Online','Tampilan live dari komputer bersama. Klik di dalam preview untuk mengambil alih saat diperlukan.','ready');
+  }catch(error){
+    if(data.id!==state.configAgentId||$('details').hidden)return;
+    setComputerPanel('Tidak tersedia',error.message,'error');
+  }
 }
 function renderConfigSkills(skills){
   $('config-skills').innerHTML=skills.length?skills.map(skill=>`<div class="skill-card"><div class="skill-card-head"><strong>${esc(skill.name)}</strong>${skill.editable?`<button type="button" class="quiet-action" data-skill-edit="${esc(skill.name)}">Edit</button>`:'<span class="built-in">Bawaan</span>'}</div><p>${esc(skill.description)}</p></div>`).join(''):'<p class="empty-skills">Belum ada skill untuk bot ini.</p>';
@@ -320,12 +363,14 @@ async function saveBotConfig(){
     identity:$('config-identity').value,soul:$('config-soul').value,
     instructions:$('config-instructions').value,model:$('config-model').value.trim(),
     temperature:Number($('config-temperature').value),skills_enabled:$('config-skills-enabled').checked,
+    computer_enabled:$('config-computer-enabled').checked,
   };
   button.disabled=true;button.textContent='Menyimpan…';$('config-feedback').textContent='';
   try{
     const oldName=agent(id)?.name;
     const data=await request('PATCH',`/agents/${id}/config`,payload);
     state.configData=data;state.configDrafts.delete(id);form.dataset.dirty='false';
+    loadComputerPanel(data);
     const rosterAgent=agent(id);if(rosterAgent){rosterAgent.name=data.name;rosterAgent.description=data.description}
     if(oldName!==data.name){for(const room of state.rooms)if(room.kind==='direct'&&room.manager_agent_id===id&&room.title===oldName)room.title=data.name}
     if(state.room?.kind==='direct'&&state.room.manager_agent_id===id){$('chat-title').innerHTML=`${avatar(rosterAgent||data)} ${esc(data.name)}`;$('draft').dataset.placeholder=`Message ${data.name}`}
@@ -457,6 +502,8 @@ $('details-body').onclick=event=>{
   if(event.target.closest('#skill-new')){openSkillEditor(null);return}
   const edit=event.target.closest('[data-skill-edit]');
   if(edit){const skill=state.configData?.skills?.find(item=>item.name===edit.dataset.skillEdit&&item.editable);if(skill)openSkillEditor(skill);return}
+  if(event.target.closest('#computer-retry')){if(state.configData)loadComputerPanel(state.configData);return}
+  if(event.target.closest('#computer-open')){const viewer=$('computer-viewer')?.src;if(viewer)window.open(viewer,'_blank','noopener');return}
   if(event.target.closest('#skill-cancel')){$('skill-editor').hidden=true;return}
   if(event.target.closest('#skill-delete')){deleteBotSkill()}
 };

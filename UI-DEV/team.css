@@ -73,6 +73,10 @@
 .detail-section-head{display:flex;align-items:end;justify-content:space-between;gap:12px;margin:16px 0 12px}
 .detail-section-head .detail-label{margin:0 0 3px}.detail-section-head h3{margin:0;font-size:17px;overflow-wrap:anywhere}
 .detail-section-head p{margin:3px 0 0;color:var(--muted);font-size:12px;line-height:1.4}
+.computer-panel{margin:12px 0 20px;padding:13px;border:1px solid #3a4a48;border-radius:13px;background:#151b1a}
+.computer-panel-head{display:flex;align-items:center;justify-content:space-between;gap:10px}.computer-panel-head .detail-label{margin:0 0 3px}.computer-panel-head strong{font-size:13px;overflow-wrap:anywhere}
+.computer-state{flex:none;border:1px solid #515151;border-radius:999px;padding:3px 7px;color:#c8c8c8;font-size:10px;font-weight:700}.computer-state.ready{border-color:#377b72;background:#173c37;color:#a9f5ea}.computer-state.pending{border-color:#776136;background:#332b17;color:#f4d58f}.computer-state.idle{border-color:#515151;background:#252525;color:#bbb}.computer-state.error{border-color:#833f46;background:#3c1d21;color:#ffafb5}
+.computer-copy{margin:9px 0 0;color:#b6c1bf;font-size:12px;line-height:1.45}.computer-live{margin-top:12px}.computer-live iframe{display:block;width:100%;aspect-ratio:16/10;border:1px solid #445553;border-radius:9px;background:#090909}.computer-actions{display:flex;justify-content:flex-end;gap:7px;margin-top:8px}.computer-actions .quiet-action{min-height:31px}
 .config-feedback{min-height:18px;color:#86d7cd;font-size:12px;line-height:1.4;margin-bottom:9px}
 .config-form,.skill-editor{display:grid;gap:13px}
 .config-form label,.skill-editor label{display:grid;gap:6px;margin:0;color:#d4d4d4;font-size:12px;font-weight:600}
@@ -82,6 +86,7 @@
 .field-help{color:var(--muted);font-size:11px;font-weight:400;line-height:1.4}
 .config-pair{display:grid;grid-template-columns:minmax(0,1fr) 104px;gap:10px}
 .config-check{display:flex!important;align-items:center;gap:9px}.config-check input{width:17px;height:17px;accent-color:var(--accent)}
+.computer-setting-help{margin:-6px 0 0;padding-left:26px}
 .primary-action,.quiet-action,.danger-action{border-radius:10px;min-height:35px;padding:7px 11px;font-size:12px;font-weight:650}
 .primary-action{border:1px solid #d9efec;background:#d9efec;color:#092b28}
 .primary-action:hover{background:#fff}.primary-action:disabled{opacity:.55;cursor:wait}

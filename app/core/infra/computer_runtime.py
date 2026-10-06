@@ -110,7 +110,11 @@ class ComputerRuntime:
         # The API process may be launched through a virtualenv while its PATH
         # remains the host PATH. Resolve the companion console script from the
         # active interpreter first so a correctly installed driver is usable.
-        driver = Path(sys.executable).resolve().parent / "vncdotool"
+        # Keep the virtualenv launcher path intact. ``resolve()`` follows the
+        # common ``.venv/bin/python -> /usr/bin/python`` symlink and would
+        # incorrectly look for ``/usr/bin/vncdotool`` instead of the driver
+        # installed beside the active virtualenv interpreter.
+        driver = Path(sys.executable).parent / "vncdotool"
         command = [str(driver) if driver.is_file() else "vncdotool", "-s", f"{self.vnc_host}::{self.vnc_port}"]
         command.extend(commands or [])
         if text is not None:
