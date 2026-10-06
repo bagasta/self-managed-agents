@@ -17,6 +17,7 @@ from app.core.engine.agent_policy import (
     build_agent_runtime_policy,
     should_use_google_workspace_parent_only,
 )
+from app.core.engine.model_capabilities import model_supports_image_input
 from app.core.engine.subagent_builder import build_subagents
 from app.core.engine.tool_builder import (
     _is_enabled,
@@ -164,8 +165,15 @@ async def build_agent_tool_setup(
     # the same owner before exposing any action.
     if (not operator_turn) and (not builder_agent) and _is_enabled(tools_config, "computer", default=False):
         computer_runtime = ComputerRuntime.from_settings(settings)
-        tools.extend(build_computer_tools(computer_runtime, owner_id=str(getattr(agent_model, "owner_user_id", "") or "")))
+        visual_observation = model_supports_image_input(getattr(agent_model, "model", None))
+        tools.extend(build_computer_tools(
+            computer_runtime,
+            owner_id=str(getattr(agent_model, "owner_user_id", "") or ""),
+            visual_observation=visual_observation,
+        ))
         active_groups.append("computer")
+        if visual_observation:
+            active_groups.append("computer_visual")
 
     memory_scope = getattr(session, "external_user_id", None)
     arthur_owner_user_id = None

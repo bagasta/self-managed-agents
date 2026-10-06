@@ -6,9 +6,11 @@ desktop explicitly assigned by runtime configuration.
 """
 from __future__ import annotations
 
+import base64
 import socket
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -95,6 +97,48 @@ class ComputerRuntime:
         normalized = "-".join(_KEY_ALIASES.get(part, part.lower()) for part in raw_parts)
         return self._run(owner_id=owner_id, commands=["key", normalized])
 
+    def capture_screen(self, *, owner_id: str | None) -> dict[str, Any]:
+        """Capture the actual VNC framebuffer for a visual agent observation."""
+        status = self.status(owner_id=owner_id)
+        if not status.get("ok"):
+            return status
+        capture_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(prefix="managed-agents-screen-", suffix=".png", delete=False) as capture_file:
+                capture_path = Path(capture_file.name)
+            result = subprocess.run(
+                [*self._driver_command(), "capture", str(capture_path)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout_seconds,
+            )
+            if result.returncode != 0:
+                return {
+                    "ok": False,
+                    "code": "computer_capture_failed",
+                    "message": "Screenshot komputer gagal diambil.",
+                    "detail": (result.stderr or result.stdout).strip()[:300],
+                }
+            image = capture_path.read_bytes()
+            if not image:
+                return {"ok": False, "code": "computer_capture_empty", "message": "Screenshot komputer kosong."}
+            if len(image) > 2_500_000:
+                return {"ok": False, "code": "computer_capture_too_large", "message": "Screenshot komputer terlalu besar untuk dianalisis."}
+            return {
+                "ok": True,
+                "status": "screen_captured",
+                "mime_type": "image/png",
+                "image_base64": base64.b64encode(image).decode("ascii"),
+            }
+        except FileNotFoundError:
+            return {"ok": False, "code": "computer_driver_missing", "message": "Driver VNC belum terpasang pada runtime aplikasi."}
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "code": "computer_capture_timeout", "message": "Screenshot komputer melebihi batas waktu."}
+        finally:
+            if capture_path is not None:
+                capture_path.unlink(missing_ok=True)
+
     def _run(
         self,
         *,
@@ -115,8 +159,7 @@ class ComputerRuntime:
         # common ``.venv/bin/python -> /usr/bin/python`` symlink and would
         # incorrectly look for ``/usr/bin/vncdotool`` instead of the driver
         # installed beside the active virtualenv interpreter.
-        driver = Path(sys.executable).parent / "vncdotool"
-        command = [str(driver) if driver.is_file() else "vncdotool", "-s", f"{self.vnc_host}::{self.vnc_port}"]
+        command = self._driver_command()
         command.extend(commands or [])
         if text is not None:
             command.extend(["type", text])
@@ -132,3 +175,7 @@ class ComputerRuntime:
             return {"ok": False, "code": "computer_action_failed", "message": "Aksi komputer gagal dijalankan.", "detail": (result.stderr or result.stdout).strip()[:300]}
         self._actions += 1
         return {"ok": True, "status": "action_sent", "remaining_actions": self.max_actions - self._actions}
+
+    def _driver_command(self) -> list[str]:
+        driver = Path(sys.executable).parent / "vncdotool"
+        return [str(driver) if driver.is_file() else "vncdotool", "-s", f"{self.vnc_host}::{self.vnc_port}"]

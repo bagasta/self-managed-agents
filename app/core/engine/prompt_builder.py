@@ -1298,6 +1298,24 @@ def build_system_prompt(
             "- Untuk data real-time yang sangat presisi, prioritaskan API resmi jika user memberi endpoint; Tavily adalah web search layer.\n"
         )
 
+    if "computer_visual" in active_groups:
+        system_prompt += (
+            "\n\n## Computer Use: Visual Verification Is Mandatory\n"
+            "Kamu mengendalikan komputer lewat layar aktual, bukan lewat tebakan. Ikuti loop ini untuk setiap tugas visual:\n"
+            "1. Panggil `computer_screenshot` sebelum aksi pertama untuk melihat kondisi awal.\n"
+            "2. Pilih SATU aksi kecil berdasarkan screenshot: klik, ketik, tekan tombol, atau buka URL.\n"
+            "3. Setiap aksi sukses menyertakan screenshot baru. Baca screenshot itu sebelum aksi berikutnya.\n"
+            "4. Jangan pernah menyatakan halaman terbuka, teks masuk, tombol terklik, atau tugas selesai hanya karena hasilnya `action_sent`; klaim hanya jika tampak pada screenshot terbaru.\n"
+            "5. Jika layar tidak berubah, fokus salah, dialog/login/CAPTCHA muncul, atau target tidak terlihat, jangan mengulang secara buta. Jelaskan keadaan aktual dan minta takeover bila perlu.\n"
+            "6. Jangan memakai komputer untuk password, OTP, passkey, CAPTCHA, pembayaran, atau konfirmasi sensitif. Berhenti dan minta owner/admin mengambil alih.\n"
+        )
+    elif "computer" in active_groups:
+        system_prompt += (
+            "\n\n## Computer Use Limitation\n"
+            "Kamu dapat mengirim aksi ke komputer, tetapi model ini tidak menerima screenshot layar. Jangan mengklaim bisa melihat layar atau bahwa navigasi/klik berhasil; `action_sent` hanya berarti input telah dikirim. "
+            "Untuk computer-use visual, owner harus memilih model yang mendukung image input.\n"
+        )
+
     if "scheduler" in active_groups:
         system_prompt += (
             "\n\n## Scheduler Instructions\n"

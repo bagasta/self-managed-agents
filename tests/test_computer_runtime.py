@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+from pathlib import Path
 from types import SimpleNamespace
 import uuid
 
@@ -105,6 +107,35 @@ def test_computer_runtime_translates_friendly_key_names_for_vnc(monkeypatch):
 
     assert runtime.press_key(owner_id="owner-1", key="ALT+TAB")["ok"] is True
     assert commands[0][-2:] == ["key", "alt-tab"]
+
+
+def test_computer_runtime_captures_and_removes_the_vnc_frame(monkeypatch):
+    runtime = _runtime()
+    monkeypatch.setattr("app.core.infra.computer_runtime.socket.create_connection", lambda *_args, **_kwargs: _Socket())
+
+    def fake_run(command, **_kwargs):
+        assert command[-2] == "capture"
+        Path(command[-1]).write_bytes(b"screen-bytes")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("app.core.infra.computer_runtime.subprocess.run", fake_run)
+    screen = runtime.capture_screen(owner_id="owner-1")
+
+    assert screen["ok"] is True
+    assert base64.b64decode(screen["image_base64"]) == b"screen-bytes"
+
+
+def test_visual_computer_tools_return_a_screen_after_an_action(monkeypatch):
+    runtime = _runtime()
+    monkeypatch.setattr(runtime, "open_url", lambda **_kwargs: {"ok": True, "status": "action_sent"})
+    monkeypatch.setattr(runtime, "capture_screen", lambda **_kwargs: {"ok": True, "mime_type": "image/png", "image_base64": "c2NyZWVu"})
+    tools = {item.name: item for item in build_computer_tools(runtime, owner_id="owner-1", visual_observation=True)}
+
+    result = tools["computer_open_url"].invoke({"url": "https://example.com"})
+
+    assert "computer_screenshot" in tools
+    assert result[0]["type"] == "text"
+    assert result[1]["image_url"]["url"] == "data:image/png;base64,c2NyZWVu"
 
 
 def test_computer_tools_expose_only_bounded_vnc_actions():
