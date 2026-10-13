@@ -28,6 +28,43 @@ logger = structlog.get_logger(__name__)
 N8N_INLINE_AUDIO_MAX_BYTES = 11 * 1024 * 1024
 
 
+def _is_arthur_system_agent(agent: Agent) -> bool:
+    """Return whether this is the platform's Arthur control-plane agent."""
+    from app.core.system_agents.registry import (
+        ARTHUR_LEGACY_PLUGIN,
+        ARTHUR_V2_PLUGIN,
+        system_agent_key,
+    )
+
+    return system_agent_key(getattr(agent, "tools_config", None)) in {
+        ARTHUR_LEGACY_PLUGIN,
+        ARTHUR_V2_PLUGIN,
+    }
+
+
+async def _provision_arthur_trial_user(agent: Agent, external_id: str) -> None:
+    """Give a first-time Arthur WhatsApp user the Trial subscription.
+
+    A separate database session keeps a provisioning error from rolling back
+    the inbound chat session that is currently being processed.
+    """
+    if not _is_arthur_system_agent(agent):
+        return
+
+    from app.core.domain.subscription_service import get_or_create_wa_user
+
+    try:
+        async with AsyncSessionLocal() as subscription_db:
+            await get_or_create_wa_user(external_id, subscription_db)
+            await subscription_db.commit()
+    except Exception as exc:
+        logger.warning(
+            "meta_webhook.arthur_trial_provision_failed",
+            agent_id=str(agent.id),
+            error_type=type(exc).__name__,
+        )
+
+
 def _n8n_event_payload(agent: Agent, phone_number_id: str, message: dict, sender_name: str) -> dict:
     message_type = str(message.get("type") or "")
     typed_content = message.get(message_type) or {}
@@ -236,6 +273,7 @@ async def _process(agent_id: str, phone_number_id: str, message: dict, sender_na
         media = message.get(message_type) or {}
         if not sender or message_type not in {"text", "image", "document", "audio"}:
             return
+        await _provision_arthur_trial_user(agent, sender)
         session, _ = await find_or_create_wa_session(agent=agent, lookup_user_id=sender, effective_reply_target=sender, device_id=f"meta:{phone_number_id}", db=db, is_operator=False, phone_number=sender, sender_name=sender_name)
         config = dict(session.channel_config or {})
         config["meta_access_token"] = agent.wa_access_token_encrypted

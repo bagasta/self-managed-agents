@@ -44,6 +44,45 @@ async def test_cloud_webhook_does_not_send_when_ai_is_disabled(monkeypatch):
     sent.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_arthur_cloud_chat_provisions_trial_for_new_sender(monkeypatch):
+    agent = SimpleNamespace(
+        id="arthur-id",
+        tools_config={"system_plugin": "arthur_v2"},
+    )
+    subscription_db = SimpleNamespace(commit=AsyncMock())
+    provision = AsyncMock()
+
+    class SessionContext:
+        async def __aenter__(self):
+            return subscription_db
+
+        async def __aexit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(meta_webhooks, "AsyncSessionLocal", lambda: SessionContext())
+    monkeypatch.setattr(
+        "app.core.domain.subscription_service.get_or_create_wa_user",
+        provision,
+    )
+
+    await meta_webhooks._provision_arthur_trial_user(agent, "628999")
+
+    provision.assert_awaited_once_with("628999", subscription_db)
+    subscription_db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_non_arthur_cloud_chat_does_not_provision_subscription(monkeypatch):
+    agent = SimpleNamespace(id="customer-agent", tools_config={})
+    create_session = AsyncMock()
+    monkeypatch.setattr(meta_webhooks, "AsyncSessionLocal", create_session)
+
+    await meta_webhooks._provision_arthur_trial_user(agent, "628999")
+
+    create_session.assert_not_called()
+
+
 def test_agent_runner_skips_legacy_typing_for_cloud_api_sessions():
     from app.core.engine import agent_runner
 

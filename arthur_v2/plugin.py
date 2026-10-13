@@ -11,7 +11,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote, urlparse
 
 from langchain.tools import tool
@@ -31,12 +31,21 @@ from app.models.session import Session
 from app.core.google_oauth_scopes import infer_google_service_operations, oauth_scopes_for_google_permissions
 from app.core.utils.phone_utils import normalize_phone
 
-from .payments import PLAN_CAPACITY, PLAN_LABELS, build_payment_link, resolve_payment_plan
+from .payments import PLAN_CAPACITY, PLAN_LABELS, PLAN_MONTHLY_PRICES_IDR, build_payment_link, resolve_payment_plan
 from .google_oauth import get_google_oauth_status, google_mcp_url, start_google_oauth
 
 ARTHUR_V2_PLUGIN = "arthur_v2"
-ARTHUR_V2_ASSISTANT_MODEL = "deepseek/deepseek-v4-flash"
+ARTHUR_V2_ASSISTANT_MODEL = "anthropic/claude-haiku-5.5"
+ARTHUR_V2_TOOL_AGENT_MAX_TOKENS = 4096
 ARTHUR_V2_CODING_DEPLOY_MAX_TOKENS = 8192
+ASSISTANT_MODELS = {
+    "normal": "deepseek/deepseek-v4-flash",
+    "advance": "anthropic/claude-haiku-5.5",
+}
+ASSISTANT_MODEL_LABELS = {
+    "normal": "kepintaran normal",
+    "advance": "kepintaran advance",
+}
 
 _BUSINESS_ASSISTANT_KINDS = {"business", "internal", "sales", "registration", "customer"}
 _GOOGLE_WORKSPACE_SERVICES = {
@@ -49,6 +58,14 @@ _WORKFLOW_FIELDS = {
     "knowledge_sources": "data, dokumen, atau sistem yang boleh dipakai",
     "exceptions_handoff": "kasus yang harus ditolak atau dieskalasi ke manusia",
 }
+
+
+def _assistant_model_level(model: str | None) -> str:
+    """Return the user-facing level without exposing provider model IDs."""
+    for level, model_id in ASSISTANT_MODELS.items():
+        if model == model_id:
+            return level
+    return "normal"
 
 
 def _merge_runtime_config(
@@ -160,6 +177,23 @@ def _workflow_data(workflow: AssistantWorkflowInput | dict[str, str] | None) -> 
 def _missing_workflow_fields(workflow: AssistantWorkflowInput | dict[str, str] | None) -> list[str]:
     data = _workflow_data(workflow)
     return [description for field, description in _WORKFLOW_FIELDS.items() if not str(data.get(field) or "").strip()]
+
+
+def _assistant_google_permission_context(agent: Agent) -> str:
+    """Build write-intent evidence from an existing assistant's saved workflow."""
+    tools_config = agent.tools_config if isinstance(agent.tools_config, dict) else {}
+    profile = tools_config.get("assistant_profile")
+    workflow = profile.get("workflow") if isinstance(profile, dict) else {}
+    workflow_text = "\n".join(
+        str(value or "") for value in workflow.values()
+    ) if isinstance(workflow, dict) else str(workflow or "")
+    return "\n".join(
+        (
+            str(agent.description or ""),
+            str(agent.instructions or ""),
+            workflow_text,
+        )
+    )
 
 
 def _with_google_workspace_mcp(
@@ -423,10 +457,16 @@ and offer only the remaining relevant setup step, if any.
 
 Never invent, reconstruct, or repeat an OAuth URL from conversation memory.
 Only send the exact auth_url returned by start_assistant_google_oauth in the
-same tool turn. If that link expired, call the tool again after the Owner asks
-for a new link. For any claim that Google is pending or connected, inspect the
-assistant first in that turn unless the immediately preceding successful tool
-result establishes the same status.
+same tool turn. If the Owner asks for the link again, says the previous link
+expired, says they cannot find it, or explicitly asks to reconnect Google,
+Treat that as an explicit request for a new link: inspect the owned assistant,
+then call start_assistant_google_oauth in that *same* turn with
+force_reauth=true and send its returned auth_url—even when the stored status still says
+connected. Do not reply only that you need to check, do not refuse to
+resend the link, and do not require the Owner to repeat the agent setup. For any other
+claim that Google is pending or connected, inspect
+the assistant first in that turn unless the immediately preceding successful
+tool result establishes the same status.
 
 For every external action in a target assistant's workflow, specify the
 required capability and its decision rule in the instructions: what data must
@@ -441,11 +481,25 @@ they can create another assistant, call get_current_plan first. State the live
 plan, active assistants, limit, and remaining slots from its result; never
 guess from the number of assistants alone. Do this before asking build
 questions or offering WhatsApp setup. If the limit is reached, explain the
-smallest tier that solves it (Starter: 1 assistant, Pro: 2, Enterprise:
-unlimited) and preserve the user's build context. If the user explicitly asks
+smallest tier that solves it (Growth: 5 assistants, Rp299.000/bulan; Business:
+unlimited assistants, Rp999.000/bulan) and preserve the user's build context.
+Trial is gratis dengan 1 assistant dan 500 pesan/bulan. Growth mencakup 5
+assistant dan 10.000 pesan/bulan; Business mencakup assistant dan pesan tak
+terbatas serta SLA & onboarding. Semua paket memiliki kemampuan assistant yang
+sama, termasuk integrasi Google Workspace dan pilihan kepintaran. Jangan pernah
+meminta upgrade hanya untuk mengaktifkan Google, integrasi, tools, atau model.
+Upgrade hanya relevan bila slot assistant habis, kuota token habis, atau masa
+aktif berakhir. Paket tahunan hemat 20%. If the user explicitly asks
 to buy or upgrade and names a tier, call get_payment_link in the same turn.
 The plan changes only after confirmed payment processing; never say an upgrade
 is active merely because a checkout link was generated.
+
+Saat Owner meminta mengganti kepintaran assistant, tawarkan tepat dua pilihan:
+`kepintaran normal` atau `kepintaran advance`. Jangan sebut nama teknis/provider
+model kepada user. Sebelum mengubahnya, inspect assistant milik Owner tersebut,
+jelaskan bahwa perubahan berlaku untuk chat berikutnya, minta konfirmasi, lalu
+panggil configure_assistant_runtime dengan model_level yang dipilih dan
+confirmed=true. Jangan menerima atau meneruskan nama model mentah dari user.
 
 When a user wants to use an assistant with their own WhatsApp Business number,
 use connect_assistant_whatsapp_cloud after explicit confirmation. In the same
@@ -503,6 +557,7 @@ def _summary(agent: Agent) -> dict[str, Any]:
         "purpose": agent.description or "",
         "channel": agent.channel_type,
         "version": agent.version,
+        "model_level": _assistant_model_level(agent.model),
         "active": not agent.is_deleted,
     }
 
@@ -576,6 +631,9 @@ def build_arthur_v2_tools(
                 "agents_remaining": remaining,
                 "active_assistant_names": [agent.name for agent in managed_agents],
                 "tokens_remaining": getattr(subscription, "tokens_remaining", None),
+                "monthly_price_idr": getattr(plan, "monthly_price_idr", None),
+                "monthly_message_limit": getattr(plan, "monthly_message_limit", None),
+                "marketing_features": getattr(plan, "marketing_features", []),
                 "expires_at": subscription.expires_at.isoformat() if subscription.expires_at else None,
             }
 
@@ -686,7 +744,7 @@ def build_arthur_v2_tools(
                 "needs_plan_upgrade": True,
                 "error": "Slot assistant di plan kamu sudah penuh. Upgrade plan sebelum membuat assistant baru.",
                 "plan": plan_snapshot,
-                "recommended_plan": "tier_2" if plan_snapshot.get("agents_limit") == 1 else "tier_3",
+                "recommended_plan": "tier_1" if plan_snapshot.get("agents_limit") == 1 else "tier_3",
             }
         scheduler_enabled = _needs_scheduler(
             name, purpose, instructions, workflow_data.get("trigger", ""),
@@ -754,8 +812,14 @@ def build_arthur_v2_tools(
                 name=name.strip(),
                 description=purpose.strip(),
                 instructions=target_instructions,
-                model=ARTHUR_V2_ASSISTANT_MODEL,
-                max_tokens=ARTHUR_V2_CODING_DEPLOY_MAX_TOKENS if enable_deploy else None,
+                model=ASSISTANT_MODELS["normal"],
+                max_tokens=(
+                    ARTHUR_V2_CODING_DEPLOY_MAX_TOKENS
+                    if enable_deploy
+                    else ARTHUR_V2_TOOL_AGENT_MAX_TOKENS
+                    if google_services
+                    else None
+                ),
                 channel_type="whatsapp",
                 owner_external_id=owner_phone,
                 operator_ids=[owner_phone] if owner_phone else [],
@@ -1153,6 +1217,7 @@ def build_arthur_v2_tools(
     @tool
     async def configure_assistant_runtime(
         agent_id: str,
+        model_level: Literal["normal", "advance"] | None = None,
         enable_sandbox: bool | None = None,
         enable_deploy: bool | None = None,
         subagent_ids: list[str] | None = None,
@@ -1160,7 +1225,7 @@ def build_arthur_v2_tools(
         mcp_servers: dict[str, str] | None = None,
         confirmed: bool = False,
     ) -> dict[str, Any]:
-        """Configure runtime capabilities for an owned assistant after explicit confirmation.
+        """Configure an owned assistant's model level and runtime capabilities after confirmation.
 
         Third-party MCP URLs are deliberately not accepted here.  Platform
         connectors use typed setup. Pass ``google_workspace_services`` with
@@ -1168,7 +1233,7 @@ def build_arthur_v2_tools(
         to remove Google Workspace from an existing assistant.
         """
         if not confirmed:
-            return {"ok": False, "needs_confirmation": True, "error": "Minta konfirmasi eksplisit sebelum mengaktifkan sandbox, deploy, subagent, atau MCP."}
+            return {"ok": False, "needs_confirmation": True, "error": "Minta konfirmasi eksplisit sebelum mengganti kepintaran model atau mengubah runtime assistant."}
         agent = await _owned(agent_id)
         if agent is None:
             return {"ok": False, "error": "Assistant tidak ditemukan atau bukan milik pengguna ini."}
@@ -1212,7 +1277,11 @@ def build_arthur_v2_tools(
                             mcp_url=google_mcp_url(),
                             integration_status="auth_pending",
                         )
-                        permissions = infer_google_service_operations("", requested_google_services)
+                        permission_context = _assistant_google_permission_context(managed)
+                        permissions = infer_google_service_operations(
+                            permission_context,
+                            requested_google_services,
+                        )
                         google_config = config["mcp"]["servers"]["google_workspace"]
                         google_config["allowed_services"] = requested_google_services
                         google_config["allowed_operations"] = permissions
@@ -1222,6 +1291,8 @@ def build_arthur_v2_tools(
                 else:
                     config = _without_google_workspace_mcp(config)
             managed.tools_config = config
+            if model_level is not None:
+                managed.model = ASSISTANT_MODELS[model_level]
             managed.version += 1
             await db.commit()
             await db.refresh(managed)
@@ -1229,6 +1300,8 @@ def build_arthur_v2_tools(
             "ok": True,
             "assistant": _summary(managed),
             "runtime": {
+                "model_level": _assistant_model_level(managed.model),
+                "model_label": ASSISTANT_MODEL_LABELS[_assistant_model_level(managed.model)],
                 "sandbox": sandbox_enabled,
                 "deploy": deploy_enabled,
                 "subagent_count": len(requested_subagents),
@@ -1250,7 +1323,7 @@ def build_arthur_v2_tools(
         """Create a payment link only when the caller explicitly asks to buy or upgrade a Clevio plan."""
         plan_code = resolve_payment_plan(plan)
         if plan_code is None:
-            return {"ok": False, "error": "Pilih paket Starter/tier_1, Pro/tier_2, atau Enterprise/tier_3."}
+            return {"ok": False, "error": "Pilih paket Growth/tier_1 atau Business/tier_3."}
         phone = normalize_phone(owner_phone or default_target)
         if not phone:
             return {"ok": False, "error": "Nomor WhatsApp pemilik belum tersedia; link pembayaran tidak dibuat."}
@@ -1259,12 +1332,21 @@ def build_arthur_v2_tools(
             "plan_code": plan_code,
             "plan_label": PLAN_LABELS[plan_code],
             "max_agents": PLAN_CAPACITY[plan_code],
+            "monthly_price_idr": PLAN_MONTHLY_PRICES_IDR[plan_code],
             "payment_link": build_payment_link(plan_code, phone),
-            "message": "Harga dan periode final ditampilkan di checkout. Paket aktif setelah notifikasi pembayaran berhasil diproses.",
+            "message": (
+                f"Harga {PLAN_LABELS[plan_code]} adalah "
+                f"Rp{PLAN_MONTHLY_PRICES_IDR[plan_code]:,}/bulan".replace(",", ".")
+                + ". Paket aktif setelah notifikasi pembayaran berhasil diproses."
+            ),
         }
 
     @tool
-    async def start_assistant_google_oauth(agent_id: str, confirmed: bool = False) -> dict[str, Any]:
+    async def start_assistant_google_oauth(
+        agent_id: str,
+        confirmed: bool = False,
+        force_reauth: bool = False,
+    ) -> dict[str, Any]:
         """Start Google OAuth for an existing caller-owned assistant and return its owner authorization link."""
         if not confirmed:
             return {"ok": False, "needs_confirmation": True, "error": "Minta konfirmasi eksplisit sebelum memulai koneksi akun Google."}
@@ -1296,6 +1378,7 @@ def build_arthur_v2_tools(
                 external_user_id=owner_phone,
                 agent_id=str(agent.id),
                 scopes=scopes,
+                force_reauth=force_reauth,
             )
         except Exception as exc:
             return {

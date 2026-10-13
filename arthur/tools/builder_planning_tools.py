@@ -545,6 +545,7 @@ def build_builder_planning_tools(
             tools_config = _configure_google_workspace_services(
                 tools_config,
                 discovery_integrations or google_context_text,
+                operation_requirement_text=google_context_text,
             )
 
         # --- Capability discovery: JANGAN asumsi kebutuhan file/data/visualisasi ---

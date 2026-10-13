@@ -57,57 +57,46 @@ DEFAULT_SUBSCRIPTION_PLANS: list[dict[str, Any]] = [
         "token_quota": 5_000_000,
         "period_days": 14,
         "grace_period_days": 3,
-        "allowed_models": [
-            "deepseek/deepseek-v4-flash",
-            "openai/gpt-4.1-mini",
-        ],
+        "allowed_models": [],
         "subagents_allowed": True,
         "wa_connect": True,
+        "monthly_price_idr": 0,
+        "monthly_message_limit": 500,
+        "marketing_features": ["1 asisten AI", "500 pesan / bulan", "Semua kemampuan termasuk integrasi Google", "Dukungan email"],
         "is_trial": True,
         "is_active": True,
     },
     {
         "id": SubscriptionPlan.TIER_1_ID,
         "code": "tier_1",
-        "label": "Starter",
-        "max_agents": 1,
+        "label": "Growth",
+        "max_agents": 5,
         "token_quota": 10_000_000,
         "period_days": 30,
         "grace_period_days": 3,
-        "allowed_models": [
-            "deepseek/deepseek-v4-flash",
-            "openai/gpt-4.1-mini",
-        ],
+        "allowed_models": [],
         "subagents_allowed": True,
         "wa_connect": True,
-        "is_trial": False,
-        "is_active": True,
-    },
-    {
-        "id": SubscriptionPlan.TIER_2_ID,
-        "code": "tier_2",
-        "label": "Pro",
-        "max_agents": 2,
-        "token_quota": 20_000_000,
-        "period_days": 30,
-        "grace_period_days": 3,
-        "allowed_models": ["openai/gpt-4.1-mini", "deepseek/deepseek-v4-flash"],
-        "subagents_allowed": True,
-        "wa_connect": True,
+        "monthly_price_idr": 299_000,
+        "monthly_message_limit": 10_000,
+        "marketing_features": ["5 asisten AI", "10.000 pesan / bulan", "Semua kemampuan termasuk integrasi Google", "Dukungan prioritas"],
         "is_trial": False,
         "is_active": True,
     },
     {
         "id": SubscriptionPlan.TIER_3_ID,
         "code": "tier_3",
-        "label": "Enterprise",
+        "label": "Business",
         "max_agents": None,
         "token_quota": TIER_3_TOKEN_QUOTA,
-        "period_days": None,
-        "grace_period_days": 7,
+        "period_days": 30,
+        "grace_period_days": 3,
         "allowed_models": [],
         "subagents_allowed": True,
         "wa_connect": True,
+        "monthly_price_idr": 999_000,
+        "monthly_message_limit": None,
+        "marketing_features": ["Asisten tak terbatas", "Pesan tak terbatas", "Semua kemampuan termasuk integrasi Google", "SLA & onboarding"],
         "is_trial": False,
         "is_active": True,
     },
@@ -134,20 +123,28 @@ async def ensure_default_subscription_plans(db: AsyncSession) -> None:
         if existing.id == SubscriptionPlan.TIER_3_ID:
             existing.max_agents = None
             existing.token_quota = TIER_3_TOKEN_QUOTA
+            existing.label = "Business"
+            existing.period_days = 30
+            existing.grace_period_days = 3
+            existing.monthly_price_idr = 999_000
+            existing.monthly_message_limit = None
+            existing.marketing_features = ["Asisten tak terbatas", "Pesan tak terbatas", "Semua kemampuan termasuk integrasi Google", "SLA & onboarding"]
         if existing.id == SubscriptionPlan.TRIAL_ID:
             existing.max_agents = 1
             existing.token_quota = 5_000_000
             existing.period_days = 14
-            existing.allowed_models = [
-                "deepseek/deepseek-v4-flash",
-                "openai/gpt-4.1-mini",
-            ]
+            existing.allowed_models = []
             existing.subagents_allowed = True
+            existing.monthly_price_idr = 0
+            existing.monthly_message_limit = 500
+            existing.marketing_features = ["1 asisten AI", "500 pesan / bulan", "Semua kemampuan termasuk integrasi Google", "Dukungan email"]
         if existing.id == SubscriptionPlan.TIER_1_ID:
-            existing.allowed_models = [
-                "deepseek/deepseek-v4-flash",
-                "openai/gpt-4.1-mini",
-            ]
+            existing.label = "Growth"
+            existing.max_agents = 5
+            existing.allowed_models = []
+            existing.monthly_price_idr = 299_000
+            existing.monthly_message_limit = 10_000
+            existing.marketing_features = ["5 asisten AI", "10.000 pesan / bulan", "Semua kemampuan termasuk integrasi Google", "Dukungan prioritas"]
     await db.flush()
 
 

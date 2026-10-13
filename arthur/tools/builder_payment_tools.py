@@ -16,28 +16,27 @@ logger = structlog.get_logger(__name__)
 
 PAYMENT_BASE_URL = "https://chiefaiofficer.id/pay"
 PLAN_ALIASES = {
-    "starter": "tier_1",
+    "growth": "tier_1",
     "tier1": "tier_1",
     "tier_1": "tier_1",
-    "growth": "tier_2",
-    "pro": "tier_2",
-    "tier2": "tier_2",
-    "tier_2": "tier_2",
+    "starter": "tier_1",
+    "pro": "tier_1",
+    "tier2": "tier_1",
+    "tier_2": "tier_1",
     "business": "tier_3",
     "enterprise": "tier_3",
     "tier3": "tier_3",
     "tier_3": "tier_3",
 }
 PLAN_LABELS = {
-    "tier_1": "Starter",
-    "tier_2": "Pro",
-    "tier_3": "Enterprise",
+    "tier_1": "Growth",
+    "tier_3": "Business",
 }
 PLAN_CAPACITY = {
-    "tier_1": 1,
-    "tier_2": 2,
+    "tier_1": 5,
     "tier_3": None,
 }
+PLAN_MONTHLY_PRICES_IDR = {"tier_1": 299_000, "tier_3": 999_000}
 
 
 def resolve_payment_plan(plan: str | None) -> str | None:
@@ -87,13 +86,19 @@ def payment_user_reply(payload: dict[str, Any]) -> str:
     plan_label = str(payload.get("plan_label") or "paket pilihanmu")
     payment_link = str(payload.get("payment_link") or "")
     max_agents = payload.get("max_agents")
+    monthly_price_idr = payload.get("monthly_price_idr")
     capacity = (
         "agent tanpa batas"
         if max_agents is None
         else f"maksimal {int(max_agents)} agent"
     )
+    price = (
+        f"Rp{int(monthly_price_idr):,}/bulan".replace(",", ".")
+        if isinstance(monthly_price_idr, int)
+        else "harga sesuai checkout"
+    )
     return (
-        f"Berikut link pembayaran paket {plan_label} ({capacity}):\n"
+        f"Berikut link pembayaran paket {plan_label} ({price}; {capacity}):\n"
         f"{payment_link}\n\n"
         "Harga dan periode yang berlaku ditampilkan di halaman checkout. "
         "Setelah pembayaran berhasil dan notifikasinya diterima, paket akan aktif otomatis."
@@ -122,7 +127,7 @@ def build_builder_payment_tools(
         tetap panggil tool ini dan berikan link hasilnya.
 
         Args:
-            plan: Paket yang diminta: tier_1/Starter, tier_2/Pro, atau tier_3/Enterprise.
+            plan: Paket yang diminta: Growth/tier_1 atau Business/tier_3.
             phone: Opsional. Fallback jika nomor pengirim sesi tidak terbaca.
         """
         try:
@@ -130,7 +135,7 @@ def build_builder_payment_tools(
             if plan_code is None:
                 return json.dumps({
                     "error": "plan_tidak_valid",
-                    "message": "Pilih paket Starter/tier_1, Pro/tier_2, atau Enterprise/tier_3.",
+                    "message": "Pilih paket Growth/tier_1 atau Business/tier_3.",
                     "available_plans": PLAN_LABELS,
                 }, ensure_ascii=False)
 
@@ -147,6 +152,7 @@ def build_builder_payment_tools(
                 "plan_code": plan_code,
                 "plan_label": PLAN_LABELS[plan_code],
                 "max_agents": PLAN_CAPACITY[plan_code],
+                "monthly_price_idr": PLAN_MONTHLY_PRICES_IDR[plan_code],
                 "phone": normalized_phone,
                 "payment_link": payment_link,
                 "message": (

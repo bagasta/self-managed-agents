@@ -132,21 +132,29 @@ async def test_get_best_subscription_can_infer_unique_paid_user_from_sender_name
 # Tests: get_or_create_wa_user
 # ---------------------------------------------------------------------------
 
-def test_default_tier3_plan_has_unlimited_agents_and_100m_tokens():
+def test_default_business_plan_has_unlimited_agents_and_100m_tokens():
     from app.core.domain.subscription_service import DEFAULT_SUBSCRIPTION_PLANS
 
     tier3 = next(plan for plan in DEFAULT_SUBSCRIPTION_PLANS if plan["code"] == "tier_3")
 
     assert tier3["max_agents"] is None
     assert tier3["token_quota"] == 100_000_000
+    assert tier3["label"] == "Business"
+    assert tier3["monthly_price_idr"] == 999_000
 
 
-def test_default_trial_and_starter_plans_allow_deepseek_v4_flash():
+def test_default_trial_and_growth_plans_match_the_public_catalog():
     from app.core.domain.subscription_service import DEFAULT_SUBSCRIPTION_PLANS
 
     for code in ("trial", "tier_1"):
         plan = next(plan for plan in DEFAULT_SUBSCRIPTION_PLANS if plan["code"] == code)
-        assert plan["allowed_models"][0] == "deepseek/deepseek-v4-flash"
+        assert plan["allowed_models"] == []
+        assert "Semua kemampuan termasuk integrasi Google" in plan["marketing_features"]
+    growth = next(plan for plan in DEFAULT_SUBSCRIPTION_PLANS if plan["code"] == "tier_1")
+    assert growth["label"] == "Growth"
+    assert growth["max_agents"] == 5
+    assert growth["monthly_message_limit"] == 10_000
+    assert growth["monthly_price_idr"] == 299_000
 
 
 class TestGetOrCreateWaUser:

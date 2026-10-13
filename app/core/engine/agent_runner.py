@@ -183,7 +183,9 @@ from arthur.tools.builder_payment_tools import (
     verified_payment_payload,
 )
 from app.core.engine.google_mcp_support import (
+    _GOOGLE_STORAGE_QUOTA_EXCEEDED,
     _build_google_mcp_auth_failure_reply,
+    _build_google_storage_quota_reply,
     _build_google_mcp_unavailable_reply,
     _build_google_mcp_validation_reply,
     _candidate_external_user_ids,
@@ -197,6 +199,7 @@ from app.core.engine.google_mcp_support import (
     _extract_google_mcp_resource_error,
     _extract_requested_slide_count,
     _fetch_google_auth_link,
+    _oauth_scopes_for_google_mcp_config,
     _has_google_mcp_step,
     _has_google_workspace_artifact_step,
     _is_google_auth_or_scope_error,
@@ -217,6 +220,7 @@ from app.core.engine.google_mcp_support import (
     filter_google_mcp_tools_by_services,
     is_google_workspace_mcp_configured,
     prepare_google_mcp_runtime,
+    reconcile_google_mcp_tools_config,
     sanitize_google_forms_tools,
     google_slides_dimension_retry_directive,
     google_slides_followup_directive,
@@ -1005,6 +1009,15 @@ async def run_agent(
     agent_id: uuid.UUID = session.agent_id
     _raw_tools_cfg = agent_model.tools_config
     tools_config: dict[str, Any] = _raw_tools_cfg if isinstance(_raw_tools_cfg, dict) else {}
+    tools_config = reconcile_google_mcp_tools_config(
+        tools_config,
+        requirement_text="\n".join(
+            (
+                str(getattr(agent_model, "description", "") or ""),
+                str(getattr(agent_model, "instructions", "") or ""),
+            )
+        ),
+    )
     temperature: float = getattr(agent_model, "temperature", 0.7)
 
     log = logger.bind(
@@ -2079,12 +2092,16 @@ async def run_agent(
                         _should_send_direct_wa = True
                 if _should_send_direct_wa:
                     from app.core.infra.channel_service import send_message as _channel_send_message
-                    await _channel_send_message(
+                    _send_result = await _channel_send_message(
                         channel_type=session.channel_type,
                         channel_config=_channel_cfg,
                         text=draft_message,
                         to_override=target_phone,
                     )
+                    if session.channel_type == "whatsapp" and not (
+                        isinstance(_send_result, dict) and _send_result.get("message_id")
+                    ):
+                        raise RuntimeError("Meta belum mengonfirmasi penerimaan pesan WhatsApp")
                     tool_result = f"[SENT_TO_NUMBER:{target_phone}] {draft_message}"
                     steps[0]["result"] = tool_result
                     final_reply = f"Pesan WhatsApp ke {target_phone} sudah saya kirim."
@@ -2562,6 +2579,24 @@ async def run_agent(
                         usage=_usage_summary(),
                     )
 
+                if (
+                    not _recovered_via_retry
+                    and google_mcp.preflight_error == _GOOGLE_STORAGE_QUOTA_EXCEEDED
+                ):
+                    _reply = _build_google_storage_quota_reply()
+                    run_record.status = "completed"
+                    run_record.completed_at = datetime.now(timezone.utc)
+                    _apply_run_usage(_agent_logger.total_tokens_from_callbacks)
+                    await db.flush()
+                    await _cleanup_sandboxes()
+                    return AgentRunResult(
+                        reply=_reply,
+                        steps=[],
+                        run_id=run_id,
+                        tokens_used=_agent_logger.total_tokens_from_callbacks,
+                        usage=_usage_summary(),
+                    )
+
                 if (not _recovered_via_retry) and _is_google_auth_or_scope_error(err_str):
                     if not _google_mcp_auth_url:
                         _google_mcp_auth_url = await _fetch_google_auth_link(
@@ -2569,6 +2604,7 @@ async def run_agent(
                             api_key=settings.api_key,
                             agent_id=agent_id,
                             candidate_user_ids=google_mcp.candidate_user_ids,
+                            scopes=_oauth_scopes_for_google_mcp_config(google_mcp.workspace_server),
                         )
                     _reply = await _build_google_mcp_auth_failure_reply(
                         llm=llm_raw,
@@ -2652,6 +2688,87 @@ async def run_agent(
         )
         final_reply = parsed["final_reply"]
         steps = parsed["steps"]
+
+        # A provider can stop while serialising a tool call when the response
+        # hits ``max_tokens``.  The graph then has neither an executable tool
+        # call nor a final reply, so the old path sent the generic WhatsApp
+        # fallback.  Retry only this provably side-effect-free case: no tool
+        # ran, no final reply exists, and the model used its full allowance.
+        # A separate checkpoint prevents an incomplete first attempt from
+        # contaminating the retry's graph state.
+        _configured_max_tokens = int(
+            getattr(agent_model, "max_tokens", None) or settings.llm_max_tokens
+        )
+        _completion_tokens = _agent_logger.completion_tokens_from_callbacks
+        _retry_max_tokens = min(max(_configured_max_tokens * 2, 4096), 8192)
+        if (
+            runtime_policy.is_builder
+            and not final_reply
+            and not steps
+            and _completion_tokens >= _configured_max_tokens
+            and _retry_max_tokens > _configured_max_tokens
+        ):
+            log.warning(
+                "agent_run.retry_after_truncated_builder_response",
+                completion_tokens=_completion_tokens,
+                initial_max_tokens=_configured_max_tokens,
+                retry_max_tokens=_retry_max_tokens,
+            )
+            try:
+                from langgraph.checkpoint.memory import MemorySaver
+                from langgraph.prebuilt import create_react_agent as _cra
+
+                _retry_graph = _cra(
+                    llm_raw.bind(
+                        max_tokens=_retry_max_tokens,
+                        parallel_tool_calls=False,
+                    ),
+                    tools=tools,
+                    prompt=system_prompt,
+                    checkpointer=MemorySaver(),
+                )
+                _retry_config = {
+                    **_graph_config,
+                    "configurable": {
+                        "thread_id": f"{_thread_id}:truncation-retry:{run_id}",
+                    },
+                }
+                _retry_output = await _timed_graph_invoke(
+                    _retry_graph,
+                    "truncated_builder_retry",
+                    input_messages,
+                    _retry_config,
+                )
+                _retry_result = await _graph_result_from_output(
+                    graph=_retry_graph,
+                    graph_config=_retry_config,
+                    graph_output=_retry_output,
+                    log=log,
+                )
+                _retry_parsed: ParsedResult = parse_agent_result(
+                    result=_retry_result,
+                    input_messages=input_messages,
+                    session_id=session.id,
+                    run_id=run_id,
+                    step_start=step_counter,
+                    log=log,
+                )
+                if _retry_parsed["final_reply"] or _retry_parsed["steps"]:
+                    parsed = _retry_parsed
+                    final_reply = parsed["final_reply"]
+                    steps = parsed["steps"]
+                    log.info(
+                        "agent_run.retry_after_truncated_builder_response_complete",
+                        steps=len(steps),
+                        reply_len=len(final_reply),
+                    )
+                else:
+                    log.warning("agent_run.retry_after_truncated_builder_response_incomplete")
+            except Exception as _truncation_retry_exc:
+                log.warning(
+                    "agent_run.retry_after_truncated_builder_response_failed",
+                    error_type=type(_truncation_retry_exc).__name__,
+                )
         _current_shared_artifact_path = _remember_latest_shared_artifact(
             session,
             steps,

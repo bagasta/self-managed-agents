@@ -70,7 +70,20 @@ async def send_text_message(phone_number_id: str, to: str, text: str, access_tok
             json={"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": text}},
         )
     response.raise_for_status()
-    return response.json()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("Respons Meta untuk pengiriman pesan tidak valid")
+
+    # Cloud API returns the WhatsApp stanza id at messages[0].id, while the
+    # rest of the channel layer uses message_id. Normalize it so escalation
+    # routing can persist and later match an Owner's quoted reply.
+    if not payload.get("message_id"):
+        messages = payload.get("messages")
+        if isinstance(messages, list) and messages and isinstance(messages[0], dict):
+            message_id = messages[0].get("id")
+            if message_id:
+                payload["message_id"] = str(message_id)
+    return payload
 
 
 async def mark_message_read(phone_number_id: str, message_id: str, access_token: str) -> None:

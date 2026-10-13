@@ -333,14 +333,15 @@ def _direct_whatsapp_send_guard_reply(
         return final_reply
     if _has_reply_to_user_step(steps) or _has_prior_reply_to_user_evidence(history_messages):
         return final_reply
-    if _has_send_to_number_step(steps) or _has_prior_send_to_number_evidence(history_messages):
+    if _has_send_to_number_step(steps):
         return final_reply
     if _is_direct_whatsapp_meta_request(user_message):
         return final_reply
-    if not (
-        _is_direct_whatsapp_send_request(user_message)
-        or _is_direct_whatsapp_send_confirmation(user_message)
-    ):
+    # A prior send only proves a delivery-status question such as "apakah tadi
+    # sudah terkirim?". It must not let the model claim that a new recipient
+    # was contacted when this run did not execute send_to_number.
+    status_question = bool(re.search(r"\b(apakah|udah|sudah|status|tadi)\b", _operator_message_payload(user_message).lower()))
+    if _has_prior_send_to_number_evidence(history_messages) and status_question:
         return final_reply
     return (
         "Belum saya kirim. Saya tidak menemukan eksekusi tool kirim WhatsApp ke nomor tujuan, "

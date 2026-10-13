@@ -543,9 +543,8 @@ def resolve_builder_payment_plan_selection(
     current = normalize_builder_language(user_message)
     prior = normalize_builder_language(prior_agent_message)
     plan_patterns = (
-        ("tier_1", r"\b(?:starter|tier[\s_-]?1)\b"),
-        ("tier_2", r"\b(?:pro|growth|tier[\s_-]?2)\b"),
-        ("tier_3", r"\b(?:enterprise|business|tier[\s_-]?3)\b"),
+        ("tier_1", r"\b(?:growth|starter|pro|tier[\s_-]?[12])\b"),
+        ("tier_3", r"\b(?:business|enterprise|tier[\s_-]?3)\b"),
     )
     selected = next(
         (plan for plan, pattern in plan_patterns if re.search(pattern, current)),

@@ -44,7 +44,7 @@ class UserCreate(BaseModel):
     )
     plan_code: str | None = Field(
         None,
-        description="Kode plan yang langsung diaktifkan: 'trial', 'tier_1', 'tier_2', 'tier_3'. "
+        description="Kode plan yang langsung diaktifkan: 'trial', 'tier_1' (Growth), atau 'tier_3' (Business). "
                     "Jika tidak diisi, user dibuat tanpa subscription.",
     )
 

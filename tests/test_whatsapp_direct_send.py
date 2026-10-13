@@ -1551,6 +1551,24 @@ def test_direct_send_guard_allows_success_with_prior_send_history():
     assert guarded == reply
 
 
+def test_direct_send_guard_blocks_new_success_claim_despite_prior_send_history():
+    reply = "Pesan pertama sudah saya kirim ke Eko."
+    guarded = _direct_whatsapp_send_guard_reply(
+        reply,
+        steps=[],
+        user_message="kirim pesan pertama ke Eko",
+        history_messages=[
+            ToolMessage(
+                content="[SENT_TO_NUMBER:6289516247011] Halo Julia",
+                name="send_to_number",
+                tool_call_id="call_1",
+            )
+        ],
+    )
+
+    assert guarded.startswith("Belum saya kirim.")
+
+
 def test_direct_send_guard_does_not_touch_escalation_reply_to_user():
     reply = "Terkirim ✓"
     guarded = _direct_whatsapp_send_guard_reply(

@@ -33,7 +33,11 @@ def google_mcp_url() -> str:
 
 
 async def start_google_oauth(
-    *, external_user_id: str, agent_id: str, scopes: list[str]
+    *,
+    external_user_id: str,
+    agent_id: str,
+    scopes: list[str],
+    force_reauth: bool = False,
 ) -> GoogleOAuthStartResult:
     settings = get_settings()
     base_url = str(settings.google_integration_service_url or "").rstrip("/")
@@ -46,6 +50,7 @@ async def start_google_oauth(
         "external_user_id": external_user_id,
         "agent_id": agent_id,
         "scopes": normalized_scopes,
+        "force_reauth": force_reauth,
         "callback_token": issue_google_oauth_callback_token(
             external_user_id=external_user_id,
             agent_id=agent_id,
@@ -61,7 +66,7 @@ async def start_google_oauth(
     data = response.json()
     url = str(data.get("auth_url") or data.get("authorization_url") or "").strip()
     email = str(data.get("email") or "").strip() or None
-    if bool(data.get("connected")):
+    if bool(data.get("connected")) and not force_reauth:
         return GoogleOAuthStartResult(connected=True, auth_url=None, email=email)
     if not url:
         raise RuntimeError("integration service tidak mengembalikan auth_url")

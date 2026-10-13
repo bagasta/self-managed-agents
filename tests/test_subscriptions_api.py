@@ -136,7 +136,7 @@ class TestListPlans:
         assert r.status_code == 200
         data = r.json()
         assert isinstance(data, list)
-        assert len(data) >= 4
+        assert len(data) == 3
 
     def test_plan_fields_present(self, client):
         r = client.get("/v1/subscriptions/plans", headers={"X-API-Key": ADMIN_KEY})
@@ -149,7 +149,18 @@ class TestListPlans:
     def test_all_plan_codes_present(self, client):
         r = client.get("/v1/subscriptions/plans", headers={"X-API-Key": ADMIN_KEY})
         codes = {p["code"] for p in r.json()}
-        assert {"trial", "tier_1", "tier_2", "tier_3"}.issubset(codes)
+        assert codes == {"trial", "tier_1", "tier_3"}
+
+    def test_public_catalog_exposes_growth_and_business_specs(self, client):
+        data = client.get("/v1/subscriptions/plans", headers={"X-API-Key": ADMIN_KEY}).json()
+        growth = next(plan for plan in data if plan["code"] == "tier_1")
+        business = next(plan for plan in data if plan["code"] == "tier_3")
+        assert growth["label"] == "Growth"
+        assert growth["monthly_price_idr"] == 299_000
+        assert growth["monthly_message_limit"] == 10_000
+        assert business["label"] == "Business"
+        assert business["monthly_price_idr"] == 999_000
+        assert business["monthly_message_limit"] is None
 
     def test_requires_admin_key(self, client):
         r = client.get("/v1/subscriptions/plans")
@@ -236,7 +247,7 @@ class TestActivateSubscription:
     def test_response_contains_plan_meta(self, client, user_id):
         r = client.post(
             f"/v1/subscriptions/{user_id}/activate",
-            json={"plan_code": "tier_2"},
+            json={"plan_code": "tier_1"},
             headers={"X-API-Key": ADMIN_KEY},
         )
         data = r.json()
@@ -275,7 +286,7 @@ class TestUpgradeSubscription:
         self._activate(client, user_id, "trial")
         r = client.post(
             f"/v1/subscriptions/{user_id}/upgrade",
-            json={"plan_code": "tier_2", "reference_id": f"INV-{uuid.uuid4().hex[:8]}"},
+            json={"plan_code": "tier_1", "reference_id": f"INV-{uuid.uuid4().hex[:8]}"},
             headers={"X-API-Key": ADMIN_KEY},
         )
         assert r.status_code == 200
@@ -310,7 +321,7 @@ class TestUpgradeSubscription:
 
         r = client.post(
             f"/v1/subscriptions/{user_id}/upgrade",
-            json={"plan_code": "tier_2", "reference_id": f"INV-{uuid.uuid4().hex[:8]}"},
+            json={"plan_code": "tier_1", "reference_id": f"INV-{uuid.uuid4().hex[:8]}"},
             headers={"X-API-Key": ADMIN_KEY},
         )
 
@@ -380,12 +391,12 @@ class TestUpgradeSubscription:
         self._activate(client, user_id, "trial")
         client.post(
             f"/v1/subscriptions/{user_id}/upgrade",
-            json={"plan_code": "tier_2", "reference_id": f"INV-{uuid.uuid4().hex[:8]}"},
+            json={"plan_code": "tier_1", "reference_id": f"INV-{uuid.uuid4().hex[:8]}"},
             headers={"X-API-Key": ADMIN_KEY},
         )
         r = client.get(f"/v1/subscriptions/{user_id}", headers={"X-API-Key": ADMIN_KEY})
         assert r.status_code == 200
-        assert r.json()["plan_code"] == "tier_2"
+        assert r.json()["plan_code"] == "tier_1"
 
 
 # ---------------------------------------------------------------------------
@@ -498,7 +509,7 @@ class TestGetSubscriptionStatus:
         assert r.status_code == 200
         data = r.json()
         assert data["plan_code"] == "tier_1"
-        assert data["plan_label"] == "Starter"
+        assert data["plan_label"] == "Growth"
         assert data["subscription_status"] == "active"
         assert data["tokens_remaining"] == data["token_quota"]
 
@@ -540,7 +551,7 @@ class TestGetSubscriptionStatus:
     def test_plan_meta_fields_present(self, client, user_id):
         client.post(
             f"/v1/subscriptions/{user_id}/activate",
-            json={"plan_code": "tier_2"},
+            json={"plan_code": "tier_1"},
             headers={"X-API-Key": ADMIN_KEY},
         )
         r = client.get(f"/v1/subscriptions/{user_id}", headers={"X-API-Key": ADMIN_KEY})

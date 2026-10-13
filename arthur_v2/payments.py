@@ -6,12 +6,14 @@ from uuid import uuid4
 
 PAYMENT_BASE_URL = "https://chiefaiofficer.id/pay"
 PLAN_ALIASES = {
-    "starter": "tier_1", "tier1": "tier_1", "tier_1": "tier_1",
-    "growth": "tier_2", "pro": "tier_2", "tier2": "tier_2", "tier_2": "tier_2",
-    "business": "tier_3", "enterprise": "tier_3", "tier3": "tier_3", "tier_3": "tier_3",
+    "growth": "tier_1", "tier1": "tier_1", "tier_1": "tier_1", "starter": "tier_1",
+    "business": "tier_3", "tier3": "tier_3", "tier_3": "tier_3", "enterprise": "tier_3",
+    # Legacy names retain a valid upgrade path, but are never offered to users.
+    "pro": "tier_1", "tier2": "tier_1", "tier_2": "tier_1",
 }
-PLAN_LABELS = {"tier_1": "Starter", "tier_2": "Pro", "tier_3": "Enterprise"}
-PLAN_CAPACITY = {"tier_1": 1, "tier_2": 2, "tier_3": None}
+PLAN_LABELS = {"tier_1": "Growth", "tier_3": "Business"}
+PLAN_CAPACITY = {"tier_1": 5, "tier_3": None}
+PLAN_MONTHLY_PRICES_IDR = {"tier_1": 299_000, "tier_3": 999_000}
 
 
 def resolve_payment_plan(plan: str) -> str | None:

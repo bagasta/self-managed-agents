@@ -84,7 +84,7 @@ def build_builder_read_tools(
             "available_presets": list(AGENT_PRESETS.keys()),
             "important_tools": {
                 "builder": "create_agent/update_agent/delete_agent/get_agent_detail/list_my_agents/set_agent_memory",
-                "payment": "get_payment_link untuk link pembayaran Starter/tier_1, Pro/tier_2, dan Enterprise/tier_3",
+                "payment": "get_payment_link untuk link pembayaran Growth/tier_1 dan Business/tier_3",
                 "whatsapp": (
                     "create_wa_dev_trial_link untuk nomor demo Arthur; "
                     "send_agent_wa_pairing_code untuk nomor khusus milik user"

@@ -6,6 +6,7 @@ from typing import Any
 
 from app.config import get_settings
 from app.core.google_oauth_scopes import (
+    GOOGLE_WORKSPACE_DASHBOARD_SERVICES,
     infer_google_service_operations,
     oauth_scopes_for_google_permissions,
 )
@@ -76,17 +77,30 @@ def infer_google_workspace_services(requirement_text: str) -> list[str]:
 def configure_google_workspace_services(
     tools_config: dict[str, Any] | None,
     requirement_text: str,
+    *,
+    operation_requirement_text: str | None = None,
 ) -> dict[str, Any]:
-    """Persist an explicit Google service allowlist without broadening access."""
+    """Persist explicit services and derive operations from the full workflow.
+
+    ``requirement_text`` remains the authoritative service allowlist source.
+    Callers may supply broader, already-confirmed workflow text solely to infer
+    whether those selected services need write access.
+    """
     merged = enable_google_workspace_tools(tools_config)
-    services = infer_google_workspace_services(requirement_text)
+    services = [
+        service for service in infer_google_workspace_services(requirement_text)
+        if service in GOOGLE_WORKSPACE_DASHBOARD_SERVICES
+    ]
     if not services:
         return merged
     mcp_cfg = dict(merged.get("mcp") or {})
     servers = dict(mcp_cfg.get("servers") or {})
     google_cfg = dict(servers.get("google_workspace") or {})
     google_cfg["allowed_services"] = services
-    permissions = infer_google_service_operations(requirement_text, services)
+    permissions = infer_google_service_operations(
+        operation_requirement_text if operation_requirement_text is not None else requirement_text,
+        services,
+    )
     google_cfg["allowed_operations"] = permissions
     google_cfg["oauth_scopes"] = oauth_scopes_for_google_permissions(permissions)
     servers["google_workspace"] = google_cfg

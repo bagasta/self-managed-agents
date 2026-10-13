@@ -36,6 +36,11 @@ from app.models.session import Session
 
 logger = structlog.get_logger(__name__)
 
+_OAUTH_REPLAY_GUARD_REPLY = (
+    "Saya tidak bisa mengirim ulang link OAuth tanpa membuatnya lewat pemeriksaan resmi. "
+    "Saya akan cek status koneksi Google agent terlebih dahulu."
+)
+
 
 # ---------------------------------------------------------------------------
 # Exported helpers
@@ -141,6 +146,12 @@ async def _append_builder_google_auth_link_if_needed(
 
     if auth_url in (final_reply or ""):
         return final_reply
+
+    # The reply guard intentionally strips an OAuth URL that did not come from
+    # the current tool call. When this function has subsequently fetched a
+    # fresh, verified URL, the defensive placeholder must not remain above it.
+    if (final_reply or "").strip() == _OAUTH_REPLAY_GUARD_REPLY:
+        return f"Buka link ini untuk menghubungkan Google Workspace:\n{auth_url}"
 
     log.info(
         "agent_run.builder_google_auth_link_appended",

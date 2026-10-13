@@ -13,11 +13,13 @@ from app.core.engine.agent_runner import (
     _route_google_workspace_blocker_to_owner_if_customer,
 )
 from app.core.engine.google_mcp_support import (
+    _GOOGLE_STORAGE_QUOTA_EXCEEDED,
     GoogleMcpRuntime,
     build_customer_survey_append_tools,
     customer_survey_google_resource,
     _fetch_google_auth_link,
     _google_integration_runtime_url,
+    _google_drive_storage_quota_exceeded,
     _has_google_mcp_step,
     _extract_google_mcp_resource_error,
     _is_google_resource_not_found_error,
@@ -35,6 +37,60 @@ from app.core.engine.google_mcp_support import (
 def test_google_scope_error_markers_include_google_api_scope_messages() -> None:
     err = "Request had insufficient authentication scopes. Required scope: https://www.googleapis.com/auth/presentations"
     assert _is_google_auth_or_scope_error(err) is True
+
+
+def test_generic_permission_denied_is_not_misclassified_as_oauth_failure() -> None:
+    err = "Google API error: PERMISSION_DENIED: The caller does not have permission"
+
+    assert _is_google_auth_or_scope_error(err) is False
+
+
+def test_google_drive_quota_preflight_requires_finite_exhausted_quota() -> None:
+    assert _google_drive_storage_quota_exceeded(
+        {"storageQuota": {"limit": "100", "usage": "100"}}
+    ) is True
+    assert _google_drive_storage_quota_exceeded(
+        {"storageQuota": {"limit": "100", "usage": "99"}}
+    ) is False
+    assert _google_drive_storage_quota_exceeded(
+        {"storageQuota": {"usage": "100"}}
+    ) is False
+
+
+@pytest.mark.asyncio
+async def test_quota_preflight_replaces_failed_google_reply_without_reauth() -> None:
+    runtime = GoogleMcpRuntime(
+        enabled=True,
+        workspace_server={"url": "http://google-workspace-mcp:8000/mcp"},
+        connected_user_id="628owner",
+        auth_url=None,
+        preflight_error=_GOOGLE_STORAGE_QUOTA_EXCEEDED,
+        integration_url="https://integration.example",
+        candidate_user_ids=["628owner"],
+        system_prompt="",
+    )
+    reply, _, auth_url = await apply_google_mcp_reply_overrides(
+        final_reply="Silakan login ulang.",
+        steps=[
+            {
+                "tool": "create_doc",
+                "result": "The caller does not have permission",
+            }
+        ],
+        mcp_errors={},
+        runtime=runtime,
+        auth_url="https://wrong.example/reconnect",
+        llm_raw=None,
+        user_message="buat Google Docs",
+        agent_id="00000000-0000-0000-0000-000000000000",
+        api_key="test",
+        log=None,
+    )
+
+    assert "penyimpanan Google Drive" in reply
+    assert "Login ulang tidak diperlukan" in reply
+    assert "wrong.example" not in reply
+    assert auth_url is None
 
 
 def test_google_resource_404_is_not_misclassified_as_oauth_failure() -> None:
@@ -574,6 +630,8 @@ async def test_google_auth_failure_reply_includes_reconnect_link_immediately() -
 
 @pytest.mark.asyncio
 async def test_fetch_google_auth_link_accepts_short_start_url(monkeypatch) -> None:
+    calls = []
+
     class FakeResponse:
         status_code = 200
         text = "{}"
@@ -594,6 +652,8 @@ async def test_fetch_google_auth_link_accepts_short_start_url(monkeypatch) -> No
             return None
 
         async def post(self, *args, **kwargs):
+            calls.append(kwargs["json"])
+            assert kwargs["json"]["scopes"] == ["https://www.googleapis.com/auth/documents"]
             return FakeResponse()
 
     monkeypatch.setattr("httpx.AsyncClient", FakeClient)
@@ -602,10 +662,18 @@ async def test_fetch_google_auth_link_accepts_short_start_url(monkeypatch) -> No
         integration_url="https://devtunnel.example",
         api_key="test",
         agent_id="00000000-0000-0000-0000-000000000000",
-        candidate_user_ids=["628111"],
+        candidate_user_ids=["628111", "+628111", "08111"],
+        scopes=["https://www.googleapis.com/auth/documents"],
     )
 
     assert auth_url == "https://devtunnel.example/v1/integrations/google/start?t=abc"
+    assert calls == [
+        {
+            "external_user_id": "628111",
+            "agent_id": "00000000-0000-0000-0000-000000000000",
+            "scopes": ["https://www.googleapis.com/auth/documents"],
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -656,13 +724,25 @@ async def test_prepare_google_mcp_runtime_uses_agent_owner_fallback_for_auth(mon
                     "google_workspace": {
                         "url": "http://localhost:8002/mcp",
                         "transport": "streamable_http",
+                        "allowed_services": ["docs", "drive"],
+                        "allowed_operations": {
+                            "docs": ["read", "write"],
+                            "drive": ["write"],
+                        },
                     }
                 },
             }
         },
         tools=[],
         active_groups=[],
-        session=type("Session", (), {"channel_config": {}, "external_user_id": None})(),
+        session=type(
+            "Session",
+            (),
+            {
+                "channel_config": {"user_phone": "74350933852232@lid"},
+                "external_user_id": "74350933852232",
+            },
+        )(),
         agent_id="00000000-0000-0000-0000-000000000000",
         memory_scope=None,
         api_key="test",
@@ -674,10 +754,17 @@ async def test_prepare_google_mcp_runtime_uses_agent_owner_fallback_for_auth(mon
 
     assert runtime.auth_url == "https://devtunnel.example/v1/integrations/google/start?t=abc"
     assert runtime.candidate_user_ids[0] == "62895619356936"
+    assert "74350933852232" not in runtime.candidate_user_ids
+    assert "74350933852232@lid" not in runtime.candidate_user_ids
     assert "## Google Workspace Runtime State" in runtime.system_prompt
     assert "State: enabled_needs_auth" in runtime.system_prompt
     assert "Owner membuka link otentikasi" in runtime.system_prompt
-    assert any(call[0] == "POST" and call[2]["json"]["external_user_id"] == "62895619356936" for call in calls)
+    post_calls = [call for call in calls if call[0] == "POST"]
+    assert len(post_calls) == 1
+    connect_payload = post_calls[0][2]["json"]
+    assert connect_payload["external_user_id"] == "62895619356936"
+    assert "https://www.googleapis.com/auth/documents" in connect_payload["scopes"]
+    assert "https://www.googleapis.com/auth/drive.file" in connect_payload["scopes"]
 
 
 @pytest.mark.asyncio

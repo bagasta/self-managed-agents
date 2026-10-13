@@ -29,10 +29,21 @@ logger = structlog.get_logger(__name__)
 
 
 def _normalize_jid(jid: str | None) -> str:
-    """Strip @lid / @s.whatsapp.net suffix and return clean number."""
+    """Return a WhatsApp Cloud API recipient in international digits.
+
+    Indonesian spreadsheets commonly contain a local mobile number (08...) or
+    a number whose leading zero was parsed away (8...). Cloud API requires the
+    country code; passing ``895...`` can target a different recipient.
+    """
     if not jid:
         return ""
-    return jid.split("@")[0]
+    raw = jid.split("@")[0].strip()
+    digits = _re.sub(r"\D", "", raw)
+    if digits.startswith("0") and len(digits) in range(10, 14):
+        return "62" + digits[1:]
+    if digits.startswith("8") and len(digits) in range(9, 13):
+        return "62" + digits
+    return digits
 
 
 import re as _re
@@ -176,17 +187,25 @@ def build_escalation_tools(
                 return "[error] Agent tidak memiliki Owner/operator terverifikasi untuk menerima eskalasi."
             escalation_cfg.setdefault("channel_type", operator_channel)
             escalation_cfg.setdefault("operator_phone", operator_phone)
+            # The outbound channel credentials belong to the active customer
+            # session. Keep them when changing only the recipient to the
+            # Owner; otherwise a Cloud API session silently falls back to the
+            # legacy device transport during escalation.
+            session_channel_config = (
+                dict(session.channel_config)
+                if isinstance(session.channel_config, dict)
+                else {}
+            )
             operator_config = {
                 **escalation_cfg,
+                **session_channel_config,
                 "user_phone": operator_phone,
-                "device_id": (session.channel_config or {}).get("device_id", "") if isinstance(session.channel_config, dict) else "",
             }
 
             import time
             case_id = f"esc_{int(time.time())}_{str(session_id)[:6]}"
 
-            _raw_cfg = session.channel_config
-            channel_cfg = _raw_cfg if isinstance(_raw_cfg, dict) else {}
+            channel_cfg = session_channel_config
             # phone_number = real phone from Go (max 15 digits). Reject if it looks like a LID number.
             _raw_phone = channel_cfg.get("phone_number") or ""
             _clean_raw_phone = _raw_phone.lstrip("+")
@@ -243,6 +262,16 @@ def build_escalation_tools(
                 channel_config=operator_config,
                 text=notif_text,
             )
+            if operator_channel == "whatsapp" and not isinstance(send_result, dict):
+                logger.error(
+                    "escalation_tool.operator_notification_failed",
+                    reason=reason,
+                    operator=operator_phone,
+                )
+                return (
+                    "[error] Notifikasi Owner gagal dikirim via WhatsApp. "
+                    "Periksa koneksi channel dan konfigurasi Meta/WhatsApp."
+                )
             logger.info("escalation_tool.notified_operator", reason=reason, operator=operator_phone)
 
             sent_message_ids: list[str] = []
@@ -396,6 +425,10 @@ def build_escalation_tools(
             or ""
         ))
         target_phone = _normalize_jid(str(phone_or_target or ""))
+        # Use the normalized value in every downstream path, including the
+        # actual Cloud API call. Previously it was only used for comparisons,
+        # while the raw local number (for example 895...) was sent to Meta.
+        phone_or_target = target_phone
         if operator_phone and target_phone and operator_phone == target_phone:
             return (
                 "[send_to_number blocked] Notifikasi workflow kepada Owner wajib memakai "
@@ -463,12 +496,23 @@ def build_escalation_tools(
         if channel_type_val:
             try:
                 from app.core.infra.channel_service import send_message
-                await send_message(
+                send_result = await send_message(
                     channel_type=channel_type_val,
                     channel_config=channel_config_val,
                     text=message,
                     to_override=phone_or_target,
                 )
+                if channel_type_val == "whatsapp" and not (
+                    isinstance(send_result, dict) and send_result.get("message_id")
+                ):
+                    logger.error(
+                        "escalation_tool.send_to_number_delivery_unconfirmed",
+                        target=phone_or_target,
+                    )
+                    return (
+                        "[error] Pesan WhatsApp belum diterima Meta, jadi tidak saya tandai terkirim. "
+                        "Periksa nomor tujuan atau gunakan template WhatsApp untuk memulai percakapan baru."
+                    )
                 logger.info("escalation_tool.send_to_number", target=phone_or_target)
             except Exception as exc:
                 logger.warning("escalation_tool.send_to_number_channel_failed", error=str(exc))

@@ -22,9 +22,24 @@ def build_agent_llms(agent_model: Any, settings: Any, temperature: float) -> tup
     is_coding_agent = isinstance(tools_config, dict) and bool(
         tools_config.get("sandbox") or tools_config.get("deploy")
     )
-    max_tokens: int = configured_max_tokens or (
-        settings.coding_agent_max_tokens if is_coding_agent else settings.llm_max_tokens
+    mcp_config = tools_config.get("mcp") if isinstance(tools_config, dict) else None
+    mcp_servers = (
+        mcp_config.get("servers", mcp_config)
+        if isinstance(mcp_config, dict)
+        else {}
     )
+    is_google_agent = isinstance(mcp_servers, dict) and isinstance(
+        mcp_servers.get("google_workspace"), dict
+    )
+    if is_coding_agent:
+        default_max_tokens = settings.coding_agent_max_tokens
+    elif is_google_agent:
+        default_max_tokens = getattr(settings, "google_agent_max_tokens", 4096)
+    else:
+        default_max_tokens = settings.llm_max_tokens
+    max_tokens = int(configured_max_tokens or default_max_tokens)
+    if is_google_agent:
+        max_tokens = max(max_tokens, int(getattr(settings, "google_agent_max_tokens", 4096)))
     llm_raw = ChatOpenAI(
         model=bare_model,
         api_key=api_key,

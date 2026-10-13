@@ -420,7 +420,23 @@ def build_builder_create_tools(
         )
         confirmed_integrations = str(confirmed_discovery.get("integrations") or "")
         if _infer_google_workspace_services(confirmed_integrations):
-            tc = _configure_google_workspace_services(tc, confirmed_integrations)
+            google_operation_context = "\n".join(
+                str(value or "")
+                for value in (
+                    confirmed_integrations,
+                    description,
+                    instructions,
+                    business_context,
+                    blueprint,
+                    soul,
+                    discovery_context_text,
+                )
+            )
+            tc = _configure_google_workspace_services(
+                tc,
+                confirmed_integrations,
+                operation_requirement_text=google_operation_context,
+            )
         if _has_google_workspace_tools(tc):
             instructions, _ = _append_google_workspace_instruction(instructions)
         instructions, business_name_sanitized = _sanitize_unverified_business_name(

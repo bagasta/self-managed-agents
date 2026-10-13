@@ -35,7 +35,7 @@ class Agent(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     instructions: Mapped[str] = mapped_column(Text, nullable=False, default="")
     model: Mapped[str] = mapped_column(
-        String(255), nullable=False, default="anthropic/claude-sonnet-4-6"
+        String(255), nullable=False, default="deepseek/deepseek-v4-flash"
     )
     temperature: Mapped[float] = mapped_column(Float, nullable=False, default=0.7)
     tools_config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)

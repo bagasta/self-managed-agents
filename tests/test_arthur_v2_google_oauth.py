@@ -169,6 +169,15 @@ def test_arthur_prompt_requires_runtime_configuration_before_existing_agent_oaut
     assert "installs a connector" in prompt
 
 
+def test_arthur_prompt_regenerates_requested_oauth_link_in_same_turn() -> None:
+    prompt = build_arthur_v2_system_prompt()
+
+    assert "asks for the link again" in prompt
+    assert "start_assistant_google_oauth in that *same* turn" in prompt
+    assert "do not refuse to\nresend the link" in prompt
+    assert "force_reauth=true" in prompt
+
+
 def test_arthur_status_recognizes_embedded_signup_coexistence_without_legacy_device() -> None:
     status = _cloud_assistant_whatsapp_status(
         SimpleNamespace(

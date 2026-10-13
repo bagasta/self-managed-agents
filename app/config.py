@@ -129,6 +129,7 @@ class Settings(BaseSettings):
     default_subagent_max_tokens: int = 8192
     media_doc_max_chars: int = 12000
     llm_max_tokens: int = 1024
+    google_agent_max_tokens: int = 4096
     # Sandbox/deploy agents need enough output to write real source files in a
     # single tool call. Keep the normal conversational default conservative.
     coding_agent_max_tokens: int = 8192

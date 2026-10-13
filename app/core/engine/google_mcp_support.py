@@ -18,6 +18,11 @@ from langchain_core.tools import StructuredTool, tool
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.google_oauth_scopes import (
+    oauth_scopes_for_google_permissions,
+    reconcile_google_service_operations,
+)
+
 
 class CreateSheetArgs(BaseModel):
     """Normalized arguments for creating a tab in an existing spreadsheet."""
@@ -99,6 +104,36 @@ class GoogleMcpRuntime:
     integration_url: str
     candidate_user_ids: list[str]
     system_prompt: Any
+
+
+def reconcile_google_mcp_tools_config(
+    tools_config: dict[str, Any] | None,
+    *,
+    requirement_text: str,
+) -> dict[str, Any]:
+    """Canonicalize an existing Google policy without enabling new services."""
+    config = copy.deepcopy(tools_config) if isinstance(tools_config, dict) else {}
+    mcp = config.get("mcp")
+    if not isinstance(mcp, dict):
+        return config
+    has_wrapper = "enabled" in mcp or "servers" in mcp
+    servers = mcp.get("servers") if has_wrapper else mcp
+    if not isinstance(servers, dict):
+        return config
+    google = servers.get("google_workspace")
+    if not isinstance(google, dict):
+        return config
+    services = list(google.get("allowed_services") or [])
+    if not services:
+        return config
+    permissions = reconcile_google_service_operations(
+        requirement_text,
+        services,
+        google.get("allowed_operations"),
+    )
+    google["allowed_operations"] = permissions
+    google["oauth_scopes"] = oauth_scopes_for_google_permissions(permissions)
+    return config
 
 
 def is_google_spreadsheet_pdf_report_intent(message: str) -> bool:
@@ -280,12 +315,38 @@ def _is_google_auth_or_scope_error(error_text: str) -> bool:
         "insufficient scope",
         "insufficient authentication scopes",
         "request had insufficient authentication scopes",
-        "permission_denied",
         "insufficientpermissions",
         "access_denied",
         "googleapis.com/auth/",
     )
     return any(m in e for m in markers)
+
+
+_GOOGLE_STORAGE_QUOTA_EXCEEDED = "google_drive_storage_quota_exceeded"
+
+
+def _google_drive_storage_quota_exceeded(payload: Any) -> bool:
+    """Return True only when Drive reports a finite, exhausted quota."""
+    if not isinstance(payload, dict):
+        return False
+    quota = payload.get("storageQuota")
+    if not isinstance(quota, dict):
+        return False
+    try:
+        limit = int(quota.get("limit") or 0)
+        usage = int(quota.get("usage") or 0)
+    except (TypeError, ValueError):
+        return False
+    return limit > 0 and usage >= limit
+
+
+def _build_google_storage_quota_reply() -> str:
+    return (
+        "Koneksi Google Workspace sudah aktif dan izin OAuth-nya benar, tetapi aksi tulis gagal "
+        "karena kapasitas penyimpanan Google Drive akun yang terhubung sudah penuh. "
+        "Kosongkan sebagian ruang di Google Drive/Google One (termasuk Trash), lalu kirim ulang "
+        "perintahnya. Login ulang tidak diperlukan."
+    )
 
 
 _GOOGLE_MCP_TOOL_NAME_MARKERS = (
@@ -1809,6 +1870,13 @@ def build_google_mcp_runtime_state_notice(runtime: GoogleMcpRuntime) -> str:
     if not runtime.enabled or not runtime.workspace_server:
         state = "disabled"
         action = "Google Workspace tidak aktif untuk agent ini. Jangan klaim bisa mengakses Google."
+    elif runtime.preflight_error == _GOOGLE_STORAGE_QUOTA_EXCEEDED:
+        state = "storage_quota_exceeded"
+        action = (
+            "OAuth sudah valid, tetapi kapasitas Google Drive akun terhubung penuh. "
+            "Jangan minta login ulang dan jangan klaim file berhasil dibuat. "
+            "Minta Owner mengosongkan ruang Drive/Google One lalu mencoba lagi."
+        )
     elif runtime.connected_user_id and not runtime.preflight_error:
         state = "connected"
         action = (
@@ -1972,28 +2040,63 @@ def google_sheets_followup_directive(spreadsheet_id: str, user_message: str) -> 
     )
 
 
+def _oauth_scopes_for_google_mcp_config(google_config: dict[str, Any] | None) -> list[str]:
+    """Return the least-privilege OAuth scopes persisted for a Workspace agent."""
+    config = google_config if isinstance(google_config, dict) else {}
+    services = [
+        str(service).strip().casefold()
+        for service in config.get("allowed_services") or []
+        if str(service).strip()
+    ]
+    if not services:
+        return []
+
+    configured_operations = config.get("allowed_operations")
+    operations_by_service = configured_operations if isinstance(configured_operations, dict) else {}
+    permissions = {
+        service: list(operations_by_service.get(service) or ["write"])
+        for service in services
+    }
+    return oauth_scopes_for_google_permissions(permissions)
+
+
 async def _fetch_google_auth_link(
-    *, integration_url: str, api_key: str, agent_id: uuid.UUID, candidate_user_ids: list[str]
+    *,
+    integration_url: str,
+    api_key: str,
+    agent_id: uuid.UUID,
+    candidate_user_ids: list[str],
+    scopes: list[str] | None = None,
 ) -> str | None:
-    if not integration_url:
+    if not integration_url or not candidate_user_ids:
         return None
     try:
         import httpx as _httpx
 
+        # OAuth state must have one stable subject.  Posting /connect for every
+        # phone-number variant creates several valid states and makes whichever
+        # URL happens to be returned last own the credential after callback.
+        # Candidate variants are only for read-only status/token discovery.
+        auth_subject_id = candidate_user_ids[0]
         async with _httpx.AsyncClient(timeout=8.0) as _hc:
-            for candidate in candidate_user_ids:
-                resp = await _hc.post(
-                    f"{integration_url}/v1/integrations/google/connect",
-                    json={"external_user_id": candidate, "agent_id": str(agent_id)},
-                    headers={"X-API-Key": api_key},
-                )
-                if resp.status_code == 200:
-                    data = resp.json() if resp.text else {}
-                    auth_url = data.get("auth_url") or data.get("authorization_url")
-                    if auth_url:
-                        auth_url = str(auth_url)
-                        if auth_url.startswith("http://") or auth_url.startswith("https://"):
-                            return auth_url
+            payload: dict[str, Any] = {
+                "external_user_id": auth_subject_id,
+                "agent_id": str(agent_id),
+            }
+            if scopes:
+                payload["scopes"] = scopes
+            resp = await _hc.post(
+                f"{integration_url}/v1/integrations/google/connect",
+                json=payload,
+                headers={"X-API-Key": api_key},
+            )
+            if resp.status_code == 200:
+                data = resp.json() if resp.text else {}
+                auth_url = data.get("auth_url") or data.get("authorization_url")
+                if auth_url:
+                    auth_url = str(auth_url)
+                    if auth_url.startswith("http://") or auth_url.startswith("https://"):
+                        return auth_url
     except Exception:
         return None
     return None
@@ -2057,6 +2160,7 @@ def _build_google_reauth_tool(
     api_key: str,
     agent_id: uuid.UUID,
     candidate_user_ids: list[str],
+    google_config: dict[str, Any] | None = None,
     preferred_auth_url: str | None = None,
 ) -> list:
     @tool
@@ -2069,6 +2173,7 @@ def _build_google_reauth_tool(
             api_key=api_key,
             agent_id=agent_id,
             candidate_user_ids=candidate_user_ids,
+            scopes=_oauth_scopes_for_google_mcp_config(google_config),
         )
         if not auth_url:
             return (
@@ -2844,14 +2949,10 @@ async def prepare_google_mcp_runtime(
         str(get_settings().google_integration_service_url).rstrip("/")
     )
     channel_cfg = session.channel_config if isinstance(session.channel_config, dict) else {}
-    delegated_runtime_access = bool(
-        isinstance(workspace_server, dict)
-        and workspace_server.get("delegated_runtime_access") is True
-    )
-    if delegated_runtime_access:
-        # The Google credential belongs to the Owner's configured agent, not
-        # the customer who happened to trigger the workflow.  In particular,
-        # never create an OAuth request for a customer WhatsApp identity.
+    if fallback_external_user_id:
+        # A managed agent's Google credential always belongs to its Owner.
+        # Delegation controls who may execute tools; it must never change the
+        # OAuth subject or bind a customer/LID identity to the Owner's token.
         candidate_ids = _candidate_external_user_ids(
             fallback_external_user_id,
             fallback_external_user_id,
@@ -2861,12 +2962,6 @@ async def prepare_google_mcp_runtime(
             memory_scope or getattr(session, "external_user_id", None) or fallback_external_user_id,
             channel_cfg.get("user_phone") or fallback_external_user_id,
         )
-        for owner_candidate in _candidate_external_user_ids(
-            fallback_external_user_id,
-            fallback_external_user_id,
-        ):
-            if owner_candidate not in candidate_ids:
-                candidate_ids.append(owner_candidate)
 
     connected_user_id: str | None = None
     auth_url: str | None = None
@@ -2885,7 +2980,11 @@ async def prepare_google_mcp_runtime(
 
             jwt = None
             jwt_external_user_id = None
+            storage_quota_exceeded = False
+            requested_scopes = _oauth_scopes_for_google_mcp_config(workspace_server)
             async with _httpx.AsyncClient(timeout=5.0) as http_client:
+                # Search known variants without mutating OAuth state.  Only the
+                # first canonical subject may be used to create an auth link.
                 for candidate in candidate_ids:
                     status_payload: dict[str, Any] | None = None
                     for agent_param in (str(agent_id), None):
@@ -2905,17 +3004,6 @@ async def prepare_google_mcp_runtime(
                                 break
 
                     if not status_payload or not bool(status_payload.get("connected")):
-                        connect_resp = await http_client.post(
-                            f"{integration_url}/v1/integrations/google/connect",
-                            json={"external_user_id": candidate, "agent_id": str(agent_id)},
-                            headers={"X-API-Key": api_key},
-                        )
-                        if connect_resp.status_code == 200:
-                            connect_data = connect_resp.json() if connect_resp.text else {}
-                            auth_url = connect_data.get("auth_url") or connect_data.get("authorization_url")
-                        preflight_error = "Google Workspace belum terhubung atau token sudah expired"
-                        if connected_user_id is None:
-                            connected_user_id = candidate
                         continue
 
                     for agent_param in (str(agent_id), None):
@@ -2934,9 +3022,35 @@ async def prepare_google_mcp_runtime(
                     if jwt:
                         break
 
+                if jwt and "https://www.googleapis.com/auth/drive.file" in requested_scopes:
+                    try:
+                        quota_resp = await http_client.get(
+                            "https://www.googleapis.com/drive/v3/about",
+                            params={"fields": "storageQuota(limit,usage)"},
+                            headers={"Authorization": f"Bearer {jwt}"},
+                        )
+                        if quota_resp.status_code == 200:
+                            quota_payload = quota_resp.json() if quota_resp.text else {}
+                            storage_quota_exceeded = _google_drive_storage_quota_exceeded(
+                                quota_payload
+                            )
+                    except Exception as quota_err:
+                        log.warning(
+                            "agent_run.google_drive_quota_preflight_failed",
+                            error=str(quota_err),
+                        )
+
+                if not jwt and candidate_ids:
+                    auth_subject_id = candidate_ids[0]
+                    connect_payload: dict[str, Any] = {
+                        "external_user_id": auth_subject_id,
+                        "agent_id": str(agent_id),
+                    }
+                    if requested_scopes:
+                        connect_payload["scopes"] = requested_scopes
                     connect_resp = await http_client.post(
                         f"{integration_url}/v1/integrations/google/connect",
-                        json={"external_user_id": candidate, "agent_id": str(agent_id)},
+                        json=connect_payload,
                         headers={"X-API-Key": api_key},
                     )
                     if connect_resp.status_code == 200:
@@ -2954,7 +3068,11 @@ async def prepare_google_mcp_runtime(
                     f"google_workspace:{agent_id}:{jwt_external_user_id}"
                 )
                 auth_url = None
-                preflight_error = None
+                preflight_error = (
+                    _GOOGLE_STORAGE_QUOTA_EXCEEDED
+                    if storage_quota_exceeded
+                    else None
+                )
                 log.info("agent_run.google_mcp_token_injected", external_user_id=jwt_external_user_id)
             elif candidate_ids:
                 log.info("agent_run.google_mcp_not_connected", external_user_ids=candidate_ids)
@@ -2972,6 +3090,7 @@ async def prepare_google_mcp_runtime(
                 api_key=api_key,
                 agent_id=agent_id,
                 candidate_user_ids=candidate_ids,
+                google_config=workspace_server,
                 preferred_auth_url=auth_url,
             )
         )
@@ -3046,14 +3165,19 @@ async def apply_google_mcp_reply_overrides(
     log: Any,
     control_plane_run: bool = False,
 ) -> tuple[str, list, str | None]:
-    """Preserve the model/tool result without lexical post-processing.
+    """Apply deterministic corrections backed by typed runtime/tool evidence.
 
-    A final response cannot be proven wrong by matching words in either the
-    request or reply. External-service failures must be represented by typed
-    tool results at execution time; this compatibility hook therefore never
-    rewrites a completed response.
+    Most responses are preserved. A quota override is allowed because it is
+    established independently by Drive's storageQuota endpoint and paired with
+    an attempted Google tool call, so it cannot be confused with OAuth failure.
     """
-    del mcp_errors, runtime, llm_raw, user_message, agent_id, api_key, log, control_plane_run
+    del mcp_errors, llm_raw, user_message, agent_id, api_key, log, control_plane_run
+    if (
+        runtime.preflight_error == _GOOGLE_STORAGE_QUOTA_EXCEEDED
+        and _has_google_mcp_step(steps)
+        and not _has_google_workspace_artifact_step(steps)
+    ):
+        return _build_google_storage_quota_reply(), steps, None
     return final_reply, steps, auth_url
 
 

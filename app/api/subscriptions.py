@@ -38,17 +38,20 @@ class PlanResponse(BaseModel):
     grace_period_days: int
     subagents_allowed: bool
     wa_connect: bool
+    monthly_price_idr: int
+    monthly_message_limit: int | None
+    marketing_features: list[str]
     is_trial: bool
 
     model_config = {"from_attributes": True}
 
 
 class ActivateRequest(BaseModel):
-    plan_code: str = Field(..., description="Kode plan: 'trial', 'tier_1', 'tier_2', 'tier_3'")
+    plan_code: str = Field(..., description="Kode plan: 'trial', 'tier_1' (Growth), atau 'tier_3' (Business)")
 
 
 class UpgradeRequest(BaseModel):
-    plan_code: str = Field(..., description="Kode plan tujuan: 'tier_1', 'tier_2', 'tier_3'")
+    plan_code: str = Field(..., description="Kode plan tujuan: 'tier_1' (Growth) atau 'tier_3' (Business)")
     reference_id: str = Field(..., min_length=1, description="ID transaksi dari payment gateway (harus unik)")
 
 

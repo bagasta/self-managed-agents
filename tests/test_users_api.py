@@ -204,7 +204,7 @@ class TestCreateUser:
         r = client.post("/v1/users", json={
             "email": email,
             "password": "securepass123",
-            "plan_code": "tier_2",
+            "plan_code": "tier_1",
         }, headers=_headers())
         assert r.status_code == 201
         sub = r.json()["subscription"]

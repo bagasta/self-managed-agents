@@ -8,9 +8,14 @@ from sqlalchemy import select
 from app.database import AsyncSessionLocal
 from app.models.agent import Agent
 
-from .plugin import ARTHUR_V2_PLUGIN, build_arthur_v2_system_prompt
+from .plugin import (
+    ARTHUR_V2_ASSISTANT_MODEL,
+    ARTHUR_V2_PLUGIN,
+    ARTHUR_V2_TOOL_AGENT_MAX_TOKENS,
+    build_arthur_v2_system_prompt,
+)
 
-ARTHUR_V2_MODEL = "deepseek/deepseek-v4-flash"
+ARTHUR_V2_MODEL = ARTHUR_V2_ASSISTANT_MODEL
 
 
 async def seed() -> Agent:
@@ -28,7 +33,10 @@ async def seed() -> Agent:
                 capabilities=["builder"],
                 tools_config={"system_plugin": ARTHUR_V2_PLUGIN, "builder": True},
                 model=ARTHUR_V2_MODEL,
-                max_tokens=2048,
+                # Arthur's control-plane turns can need a tool call followed by
+                # a user-facing answer.  2,048 tokens was repeatedly exhausted
+                # mid-turn, leaving no final message to deliver.
+                max_tokens=ARTHUR_V2_TOOL_AGENT_MAX_TOKENS,
                 created_by_type="system",
                 is_deleted=False,
             )
@@ -37,6 +45,9 @@ async def seed() -> Agent:
             agent.description = "Partner untuk membentuk dan mengelola AI assistant personal maupun bisnis."
             agent.instructions = build_arthur_v2_system_prompt()
             agent.model = ARTHUR_V2_MODEL
+            # Apply the increased budget to installations that already have
+            # Arthur; seed is deliberately idempotent and is run on release.
+            agent.max_tokens = ARTHUR_V2_TOOL_AGENT_MAX_TOKENS
             agent.is_deleted = False
             agent.capabilities = sorted(set(agent.capabilities or []) | {"builder"})
             agent.tools_config = {**dict(agent.tools_config or {}), "system_plugin": ARTHUR_V2_PLUGIN, "builder": True}
