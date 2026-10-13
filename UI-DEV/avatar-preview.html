@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="id">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pratinjau avatar bot</title>
+<link rel="stylesheet" href="team.css?v=8">
+<style>
+body{padding:24px;max-width:760px;margin:auto}h1{font-size:24px}p{color:#bbb}
+.samples{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin:24px 0}
+.sample{border:1px solid #383838;background:#171717;border-radius:16px;padding:24px 12px;display:flex;align-items:center;flex-direction:column;gap:16px;min-height:140px}
+.sample .avatar{width:64px;height:64px;border-radius:21px}.sample:focus-visible{outline:2px solid #8edac0;outline-offset:3px}
+#toggle{padding:12px 18px;min-height:44px;border-radius:8px;background:#d9efec;color:#092b28;border:0}
+</style>
+<h1>Avatar bot</h1>
+<p>Pratinjau komponen dengan data contoh, bukan status bot sungguhan. Fokuskan atau sentuh karakter untuk melihat responsnya.</p>
+<button id="toggle" aria-pressed="false">Simulasikan sedang bekerja</button>
+<p id="status" role="status">Status contoh: tidak sedang bekerja.</p>
+<div class="samples" id="samples"></div>
+<script src="bot-avatar.js?v=1"></script>
+<script>
+const samples=document.getElementById('samples');
+samples.innerHTML=Array.from({length:10},(_,i)=>`<button class="sample" type="button" aria-label="Sapa karakter ${i+1}">${BotAvatar.render({id:`agent-${i}`,name:`Karakter ${i+1}`})}<span>Karakter ${i+1}</span></button>`).join('');
+document.getElementById('toggle').onclick=event=>{
+ const working=event.currentTarget.getAttribute('aria-pressed')!=='true';
+ event.currentTarget.setAttribute('aria-pressed',String(working));
+ document.querySelectorAll('.bot-avatar').forEach(node=>node.classList.toggle('is-working',working));
+ document.getElementById('status').textContent=working?'Status contoh: sedang bekerja.':'Status contoh: tidak sedang bekerja.';
+};
+samples.onclick=event=>{const button=event.target.closest('button');if(button)document.getElementById('status').textContent=`${button.textContent.trim()} menyapa!`;};
+</script>
+</html>

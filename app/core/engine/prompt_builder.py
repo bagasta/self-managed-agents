@@ -990,6 +990,7 @@ def build_system_prompt(
             "- Default to analysis, internal coordination, and reviewable drafts. Never create an assistant, change configuration, connect a channel, or send a customer-facing/external message without explicit approval for that specific action. Separate plans and drafts from completed work.\n"
             "- Never invent time savings, ROI, revenue impact, performance gains, delivery timelines, or quantified benefits. Estimate only from Owner-provided or verified inputs; show assumptions, label it as an estimate, and make no promise. If inputs are missing, say the estimate is unknown.\n"
             "- For an actual request, answer directly where possible; otherwise inspect the authenticated Owner's roster and delegate relevant internal work, then synthesize results. Never claim access to unavailable live business data or invent metrics, staff, rules, or completed work.\n"
+            "- A request to create or configure an assistant is an Agent Builder request, not a browser task. Do not open the computer merely because the proposed assistant may later need browser access. Gather the material workflow facts or create the approved assistant using Builder tools first; use the computer only when the Owner asks to operate a website or application now.\n"
             "- Keep every roster, task, conversation, and memory scoped to the authenticated Owner/workspace.\n"
         )
 
@@ -1305,6 +1306,12 @@ def build_system_prompt(
             "1. Panggil `computer_screenshot` sebelum aksi pertama untuk melihat kondisi awal.\n"
             "2. Pilih SATU aksi kecil berdasarkan screenshot: klik, ketik, tekan tombol, atau buka URL.\n"
             "3. Setiap aksi sukses menyertakan screenshot baru. Baca screenshot itu sebelum aksi berikutnya.\n"
+            "Gunakan koordinat pada gambar yang ditampilkan; tool mengonversinya ke ukuran desktop. "
+            "Jangan mengambil screenshot tambahan setelah setiap aksi bila gambar hasil aksi sudah jelas. "
+            "Untuk daftar panjang, gunakan PAGEDOWN/PAGEUP dan catat bagian yang sudah diperiksa. "
+            "Jika diminta memeriksa semua level/blok/halaman, simpan daftar cakupan dan temuan per bagian "
+            "dalam catatan singkat selama bekerja; jangan mengulang bagian yang sudah diperiksa. "
+            "Jangan menyebut hasil lengkap sebelum seluruh cakupan diverifikasi.\n"
             "4. Jangan pernah menyatakan halaman terbuka, teks masuk, tombol terklik, atau tugas selesai hanya karena hasilnya `action_sent`; klaim hanya jika tampak pada screenshot terbaru.\n"
             "5. Jika layar tidak berubah, fokus salah, dialog/login/CAPTCHA muncul, atau target tidak terlihat, jangan mengulang secara buta. Jelaskan keadaan aktual dan minta takeover bila perlu.\n"
             "6. Jangan memakai komputer untuk password, OTP, passkey, CAPTCHA, pembayaran, atau konfirmasi sensitif. Jangan berhenti hanya karena satu langkah ini terblokir: tandai langkah tersebut dengan `computer_request_human_takeover`, lalu lanjutkan semua tugas aman yang independen dalam request yang sama.\n"

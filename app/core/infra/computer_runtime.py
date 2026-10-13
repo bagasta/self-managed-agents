@@ -7,6 +7,7 @@ desktop explicitly assigned by runtime configuration.
 from __future__ import annotations
 
 import base64
+import io
 import socket
 import subprocess
 import sys
@@ -16,6 +17,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from PIL import Image
+
+from app.core.infra.computer_handoff import ComputerInUse, computer_access, paused_result
+from app.core.infra.computer_turns import ComputerTurn, turn_status
+
 
 _KEY_ALIASES = {
     "ALT": "alt", "BACKSPACE": "bsp", "CTRL": "ctrl", "DELETE": "delete",
@@ -24,6 +30,10 @@ _KEY_ALIASES = {
     "RIGHT": "right", "SHIFT": "shift", "SPACE": "space", "TAB": "tab", "UP": "up",
 }
 _SENSITIVE_MARKERS = ("password", "passcode", "otp", "one-time code", "verification code", "api key", "access token")
+_VNC_INPUT_DELAY_MS = 50
+_VNC_FOCUS_SETTLE_SECONDS = "0.25"
+_AGENT_SCREEN_MAX_EDGE = 1280
+_AGENT_SCREEN_JPEG_QUALITY = 70
 
 
 @dataclass
@@ -36,6 +46,21 @@ class ComputerRuntime:
     timeout_seconds: int = 12
     max_actions: int = 20
     _actions: int = field(default=0, init=False)
+    _turn: ComputerTurn | None = field(default=None, init=False, repr=False)
+
+    def bind_agent(self, *, agent_id: str, agent_name: str, wait_seconds: int = 600) -> None:
+        self._turn = ComputerTurn(self.vnc_host, self.vnc_port, agent_id, agent_name, max(1, wait_seconds))
+
+    def release_turn(self) -> dict[str, Any]:
+        if self._turn is not None:
+            self._turn.release()
+        return {"ok": True, "status": "turn_released", "message": "Giliran komputer dilepas. Ambil screenshot baru jika memakai komputer lagi."}
+
+    def _wait_for_turn(self, owner_id: str | None, *, is_platform_admin: bool = False) -> dict[str, Any]:
+        status = self.status(owner_id=owner_id, is_platform_admin=is_platform_admin)
+        if not status.get("ok"):
+            return status
+        return self._turn.acquire() if self._turn is not None else {"ok": True}
 
     @classmethod
     def from_settings(cls, settings: Any) -> "ComputerRuntime":
@@ -57,8 +82,10 @@ class ComputerRuntime:
         if not is_platform_admin and str(owner_id or "") != self.owner_id:
             return {"ok": False, "code": "computer_not_assigned", "message": "Computer ini tidak ditetapkan ke owner assistant ini."}
         try:
-            with socket.create_connection((self.vnc_host, self.vnc_port), timeout=self.timeout_seconds):
-                pass
+            with socket.create_connection((self.vnc_host, self.vnc_port), timeout=self.timeout_seconds) as connection:
+                connection.settimeout(self.timeout_seconds)
+                if not connection.recv(12).startswith(b"RFB "):
+                    raise OSError("VNC handshake unavailable")
         except OSError:
             return {"ok": False, "code": "computer_unavailable", "message": "Computer yang ditetapkan sedang offline atau tidak dapat dijangkau."}
         return {
@@ -67,26 +94,33 @@ class ComputerRuntime:
             "viewer_url": self.viewer_url or None,
             "takeover_supported": bool(self.viewer_url),
             "remaining_actions": self.max_actions - self._actions,
+            "shared": True,
+            "turn": turn_status(self.vnc_host, self.vnc_port),
         }
 
     def open_url(self, *, owner_id: str | None, url: str) -> dict[str, Any]:
         parsed = urlparse(url.strip())
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             return {"ok": False, "code": "invalid_url", "message": "URL harus memakai http:// atau https://."}
-        return self._run(owner_id=owner_id, commands=["key", "ctrl-l"], text=url.strip(), trailing_key="enter")
+        return self._run(
+            owner_id=owner_id,
+            commands=["key", "ctrl-l", "pause", _VNC_FOCUS_SETTLE_SECONDS],
+            text=url.strip(), trailing_key="enter",
+        )
 
     def click(self, *, owner_id: str | None, x: int, y: int) -> dict[str, Any]:
         if not (0 <= x <= 3840 and 0 <= y <= 2160):
             return {"ok": False, "code": "invalid_coordinates", "message": "Koordinat klik berada di luar batas layar yang diizinkan."}
-        return self._run(owner_id=owner_id, commands=["move", str(x), str(y), "click", "1"])
+        return self._run(owner_id=owner_id, commands=[
+            "move", str(x), str(y), "click", "1", "pause", _VNC_FOCUS_SETTLE_SECONDS,
+        ])
 
     def type_text(self, *, owner_id: str | None, text: str) -> dict[str, Any]:
-        clean = text.strip()
-        if not clean:
+        if not text:
             return {"ok": False, "code": "empty_text", "message": "Teks yang diketik tidak boleh kosong."}
-        if len(clean) > 2_000:
+        if len(text) > 2_000:
             return {"ok": False, "code": "text_too_long", "message": "Teks dibatasi 2.000 karakter per aksi."}
-        if any(marker in clean.lower() for marker in _SENSITIVE_MARKERS):
+        if any(marker in text.lower() for marker in _SENSITIVE_MARKERS):
             return {
                 "ok": False,
                 "code": "sensitive_input_blocked",
@@ -96,7 +130,7 @@ class ComputerRuntime:
                 "requires_human_takeover": True,
                 "continue_independent_tasks": True,
             }
-        return self._run(owner_id=owner_id, text=clean)
+        return self._run(owner_id=owner_id, text=text)
 
     def request_human_takeover(self, *, owner_id: str | None, reason: str) -> dict[str, Any]:
         """Record a bounded handoff without treating the computer as failed.
@@ -113,6 +147,7 @@ class ComputerRuntime:
             return {"ok": False, "code": "handoff_reason_required", "message": "Alasan takeover wajib diisi."}
         if len(clean_reason) > 1_000:
             return {"ok": False, "code": "handoff_reason_too_long", "message": "Alasan takeover dibatasi 1.000 karakter."}
+        self.release_turn()
         return {
             "ok": True,
             "status": "human_takeover_required",
@@ -126,9 +161,31 @@ class ComputerRuntime:
         if not raw_parts or any(part not in _KEY_ALIASES and not (len(part) == 1 and part.isalnum()) for part in raw_parts):
             return {"ok": False, "code": "unsupported_key", "message": "Key tidak didukung. Gunakan tombol navigasi atau kombinasi CTRL/ALT/SHIFT dengan huruf/angka."}
         normalized = "-".join(_KEY_ALIASES.get(part, part.lower()) for part in raw_parts)
+        if normalized == "ctrl-a":
+            # Keep Ctrl down long enough for the guest desktop to process the
+            # selection before releasing it. A single rapid keyPress can be
+            # observed as an ordinary "a" on the VNC desktop.
+            return self._run(owner_id=owner_id, commands=[
+                "kdown", "ctrl", "pause", "0.08", "key", "a", "pause", "0.08", "kup", "ctrl",
+            ])
         return self._run(owner_id=owner_id, commands=["key", normalized])
 
     def capture_screen(
+        self, *, owner_id: str | None, is_platform_admin: bool = False, human_access: bool = False,
+    ) -> dict[str, Any]:
+        if not human_access:
+            turn = self._wait_for_turn(owner_id, is_platform_admin=is_platform_admin)
+            if not turn.get("ok"):
+                return turn
+        try:
+            with computer_access(self.vnc_host, self.vnc_port) as lease:
+                if lease and not human_access:
+                    return paused_result()
+                return self._capture_screen(owner_id=owner_id, is_platform_admin=is_platform_admin)
+        except ComputerInUse:
+            return {"ok": False, "code": "computer_busy", "message": "Komputer sedang menjalankan satu aksi. Coba lagi sebentar."}
+
+    def _capture_screen(
         self,
         *,
         owner_id: str | None,
@@ -161,11 +218,23 @@ class ComputerRuntime:
                 return {"ok": False, "code": "computer_capture_empty", "message": "Screenshot komputer kosong."}
             if len(image) > 2_500_000:
                 return {"ok": False, "code": "computer_capture_too_large", "message": "Screenshot komputer terlalu besar untuk dianalisis."}
+            original_image = image
+            mime_type, image = self._agent_screen_image(image)
+            geometry = {}
+            try:
+                with Image.open(io.BytesIO(original_image)) as original, Image.open(io.BytesIO(image)) as rendered:
+                    geometry = {
+                        "desktop_width": original.width, "desktop_height": original.height,
+                        "image_width": rendered.width, "image_height": rendered.height,
+                    }
+            except (OSError, ValueError):
+                pass
             return {
                 "ok": True,
                 "status": "screen_captured",
-                "mime_type": "image/png",
+                "mime_type": mime_type,
                 "image_base64": base64.b64encode(image).decode("ascii"),
+                **geometry,
             }
         except FileNotFoundError:
             return {"ok": False, "code": "computer_driver_missing", "message": "Driver VNC belum terpasang pada runtime aplikasi."}
@@ -175,7 +244,40 @@ class ComputerRuntime:
             if capture_path is not None:
                 capture_path.unlink(missing_ok=True)
 
+    @staticmethod
+    def _agent_screen_image(image: bytes) -> tuple[str, bytes]:
+        """Make a compact frame for the visual model without changing the VNC UI."""
+        try:
+            with Image.open(io.BytesIO(image)) as source:
+                source.thumbnail((_AGENT_SCREEN_MAX_EDGE, _AGENT_SCREEN_MAX_EDGE))
+                rendered = source.convert("RGB")
+                output = io.BytesIO()
+                rendered.save(output, format="JPEG", quality=_AGENT_SCREEN_JPEG_QUALITY, optimize=True)
+                compressed = output.getvalue()
+            if compressed:
+                return "image/jpeg", compressed
+        except (OSError, ValueError):
+            # Keep capture availability even if an unusual VNC encoder returns
+            # bytes Pillow cannot decode.
+            pass
+        return "image/png", image
+
     def _run(
+        self, *, owner_id: str | None, commands: list[str] | None = None,
+        text: str | None = None, trailing_key: str | None = None,
+    ) -> dict[str, Any]:
+        turn = self._wait_for_turn(owner_id)
+        if not turn.get("ok"):
+            return turn
+        try:
+            with computer_access(self.vnc_host, self.vnc_port) as lease:
+                if lease:
+                    return paused_result()
+                return self._run_action(owner_id=owner_id, commands=commands, text=text, trailing_key=trailing_key)
+        except ComputerInUse:
+            return {"ok": False, "code": "computer_busy", "message": "Komputer sedang menjalankan satu aksi. Coba lagi sebentar."}
+
+    def _run_action(
         self,
         *,
         owner_id: str | None,
@@ -195,14 +297,19 @@ class ComputerRuntime:
         # common ``.venv/bin/python -> /usr/bin/python`` symlink and would
         # incorrectly look for ``/usr/bin/vncdotool`` instead of the driver
         # installed beside the active virtualenv interpreter.
-        command = self._driver_command()
+        command = [*self._driver_command(), f"--delay={_VNC_INPUT_DELAY_MS}"]
         command.extend(commands or [])
         if text is not None:
-            command.extend(["type", text])
+            command.extend(["pause", "0.10", "type", text, "pause", "0.15"])
         if trailing_key:
             command.extend(["key", trailing_key])
+        command.extend(["pause", "0.15"])
         try:
-            result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=self.timeout_seconds)
+            text_timeout = len(text or "") * (_VNC_INPUT_DELAY_MS / 1000.0 + 0.02) + 3
+            result = subprocess.run(
+                command, check=False, capture_output=True, text=True,
+                timeout=max(self.timeout_seconds, text_timeout),
+            )
         except FileNotFoundError:
             return {"ok": False, "code": "computer_driver_missing", "message": "Driver VNC belum terpasang pada runtime aplikasi."}
         except subprocess.TimeoutExpired:

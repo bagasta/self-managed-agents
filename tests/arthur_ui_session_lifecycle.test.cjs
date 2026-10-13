@@ -29,7 +29,7 @@ function makeHarness(fetchImpl) {
   const context = vm.createContext({
     console, URLSearchParams, AbortSignal, setTimeout, clearTimeout, setInterval, clearInterval,
     localStorage: { getItem: () => null, setItem() {} },
-    window: { location: { hostname: 'example.test', origin: 'https://example.test' }, addEventListener() {} },
+    window: { location: { hostname: 'example.test', origin: 'https://example.test' }, addEventListener() {}, setInterval() { return 1; } },
     document: { getElementById, createElement: () => ({ className: '', innerHTML: '', textContent: '' }) },
     fetch: fetchImpl,
   });

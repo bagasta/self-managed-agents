@@ -107,6 +107,8 @@ def test_arthur_v2_does_not_receive_google_oauth_tools() -> None:
 
 def test_arthur_v2_setup_contract_uses_pairing_and_persists_scheduler_context() -> None:
     assert _needs_scheduler("asisten pribadi", "kirim reminder WhatsApp", "") is True
+    assert _needs_scheduler("Admin LMS", "Periksa LMS setiap hari dan laporkan lesson", "") is True
+    assert _needs_scheduler("Admin LMS", "pemeriksaan otomatis harian", "") is True
     assert _needs_scheduler("asisten tanya jawab", "jawab FAQ", "") is False
     memory = _capability_context_for_memory(scheduler=True, google_services=["calendar", "gmail"])
     assert "Scheduler aktif" in memory

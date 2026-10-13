@@ -6,7 +6,8 @@ from typing import Any
 
 import structlog
 from langchain.agents.middleware.types import AgentMiddleware
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import RemoveMessage, ToolMessage
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 logger = structlog.get_logger(__name__)
 
@@ -81,6 +82,43 @@ class ToolErrorRecoveryMiddleware(AgentMiddleware):
         except Exception as exc:  # noqa: BLE001 - intentional catch-all for recovery
             return self._error_message(request, exc)
 
+
+class VisualObservationCompactionMiddleware(AgentMiddleware):
+    """Keep only the newest computer framebuffer in the model's working state.
+
+    Each image is useful to decide the immediate next click, but resending all
+    previous frames turns a short visual task into a huge and slow prompt.
+    Tool-call text is retained for audit and reasoning; only old image blocks
+    are replaced with a short marker.
+    """
+
+    name = "VisualObservationCompactionMiddleware"
+
+    @staticmethod
+    def _has_image(message: Any) -> bool:
+        return isinstance(message, ToolMessage) and isinstance(message.content, list) and any(
+            isinstance(part, dict) and part.get("type") == "image_url"
+            for part in message.content
+        )
+
+    def before_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        messages = list(state.get("messages", []))
+        image_indexes = [index for index, message in enumerate(messages) if self._has_image(message)]
+        if len(image_indexes) <= 1:
+            return None
+        keep_index = image_indexes[-1]
+        compacted = []
+        for index, message in enumerate(messages):
+            if index in image_indexes and index != keep_index:
+                compacted.append(message.model_copy(update={
+                    "content": "\n".join(
+                        str(part.get("text", "")) for part in message.content
+                        if isinstance(part, dict) and part.get("type") == "text"
+                    ) + "\n[Screenshot komputer sebelumnya diringkas. Gunakan screenshot terbaru untuk menentukan aksi berikutnya.]"
+                }))
+            else:
+                compacted.append(message)
+        return {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *compacted]}
 
 class BlockTaskToolMiddleware(AgentMiddleware):
     """Block Deep Agents task delegation for flows that must execute in parent."""

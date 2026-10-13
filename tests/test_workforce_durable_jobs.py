@@ -21,6 +21,7 @@ from app.models.team_chat import TeamChatMember, TeamChatMessage, TeamChatRecove
 from app.models.workforce_task import WorkforceTask, WorkforceTaskStep, WorkforceTaskEvent
 from app.core.domain.workforce_service import execute_owner_workforce_task
 from app.core.domain.workforce_jobs import run_persisted_task, cancel_task, retry_task, workforce_queue_loop
+from app.api.team_chat import _sync_workforce_replies
 
 
 @pytest_asyncio.fixture
@@ -72,6 +73,110 @@ async def queue(factory, count=2):
             worker_agents={str(a.id): a for a in agents}, db_factory=factory, background=True,
         )
         return uuid.UUID(result['task_id'])
+
+
+@pytest.mark.asyncio
+async def test_workforce_group_progress_is_append_only(database):
+    owner = uuid.uuid4()
+    async with database() as db:
+        agent = Agent(name='Web Builder', owner_user_id=owner)
+        db.add(agent)
+        await db.flush()
+        room = TeamChatRoom(workspace_id=str(owner), owner_user_id=owner, kind='group',
+                            title='Website', manager_agent_id=agent.id)
+        db.add(room)
+        await db.flush()
+        task = WorkforceTask(workspace_id=str(owner), owner_user_id=owner,
+                             title='Draft HTML', description='Create a page', status='in_progress')
+        db.add(task)
+        await db.flush()
+        step = WorkforceTaskStep(task_id=task.id, sequence=0, title='Build page',
+                                instructions='Create HTML', assigned_agent_id=agent.id, status='in_progress')
+        db.add(step)
+        await db.flush()
+        placeholder = TeamChatMessage(room_id=room.id, sender_type='agent', sender_agent_id=agent.id,
+                                      workforce_step_id=step.id, content='Starting draft', status='working')
+        db.add(placeholder)
+        db.add(WorkforceTaskEvent(task_id=task.id, step_id=step.id, event_type='team_message',
+                                  actor_agent_id=agent.id, metadata_={'message': 'Drafting section one'}))
+        await db.commit()
+        await _sync_workforce_replies(db, room)
+        await _sync_workforce_replies(db, room)
+        rows = await db.execute(select(TeamChatMessage).where(
+            TeamChatMessage.room_id == room.id).order_by(TeamChatMessage.created_at))
+        messages = list(rows.scalars())
+        assert [message.content for message in messages] == ['Starting draft', 'Drafting section one']
+        step.status, step.output_summary = 'completed', '<html><body>Complete</body></html>'
+        await db.commit()
+        await _sync_workforce_replies(db, room)
+        rows = await db.execute(select(TeamChatMessage).where(
+            TeamChatMessage.room_id == room.id).order_by(TeamChatMessage.created_at))
+        messages = list(rows.scalars())
+        assert [message.content for message in messages] == [
+            'Starting draft', 'Drafting section one', '<html><body>Complete</body></html>',
+        ]
+        assert messages[0].status == 'sent'
+
+
+@pytest.mark.asyncio
+async def test_long_html_worker_result_reaches_next_specialist(database, monkeypatch):
+    owner = uuid.uuid4()
+    html = '<html><body>' + ('<section>Complete copy</section>' * 500) + '</body></html>'
+    received = []
+
+    async def specialist(*, agent, prompt, **_kwargs):
+        if agent.name == 'Copywriter':
+            return None, html, True
+        received.append(prompt)
+        return None, 'QA checked the complete draft.', True
+
+    monkeypatch.setattr('app.core.engine.workforce_runner.run_workforce_deep_agent', specialist)
+    async with database() as db:
+        agents = [Agent(name='Copywriter', owner_user_id=owner), Agent(name='QA Tester', owner_user_id=owner)]
+        db.add_all(agents)
+        await db.commit()
+        result = await execute_owner_workforce_task(
+            db=db, owner_user_id=owner, title='Website draft', objective='Produce complete HTML.',
+            assignments=[
+                {'agent_id': str(agents[0].id), 'title': 'Write HTML', 'instructions': 'Write complete HTML.'},
+                {'agent_id': str(agents[1].id), 'title': 'QA HTML', 'instructions': 'Review full HTML.',
+                 'depends_on_previous': True},
+            ],
+            worker_agents={str(agent.id): agent for agent in agents}, db_factory=database,
+        )
+        assert result['status'] == 'completed'
+        assert html in received[0]
+
+
+@pytest.mark.asyncio
+async def test_group_peer_scope_survives_background_queue(database, monkeypatch):
+    owner = uuid.uuid4()
+    calls = []
+
+    async def specialist(**_kwargs):
+        calls.append(True)
+        return None, 'Should not run without an eligible reviewer', True
+
+    monkeypatch.setattr('app.core.engine.workforce_runner.run_workforce_deep_agent', specialist)
+    async with database() as db:
+        worker = Agent(name='Web Builder', owner_user_id=owner)
+        unrelated = Agent(name='Penulis Konten', owner_user_id=owner)
+        db.add_all([worker, unrelated])
+        await db.commit()
+        result = await execute_owner_workforce_task(
+            db=db, owner_user_id=owner, title='Review website', objective='Review HTML.',
+            assignments=[{'agent_id': str(worker.id), 'title': 'Build and review',
+                          'instructions': 'Ask for a peer review.', 'requires_peer_help': True}],
+            worker_agents={str(worker.id): worker}, db_factory=database, background=True,
+            allowed_peer_agent_ids={worker.id},
+        )
+        task_id = uuid.UUID(result['task_id'])
+    await run_persisted_task(database, task_id)
+    async with database() as db:
+        step = (await db.execute(select(WorkforceTaskStep).where(
+            WorkforceTaskStep.task_id == task_id))).scalar_one()
+        assert step.status == 'blocked'
+    assert not calls
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,4 @@
-.PHONY: help install install-dev test-arthur dev db-up migrate upgrade downgrade lint format wa wa-build dev-all wa-dev-build wa-dev sandbox-build sandbox-check seed-agents deploy-api-fast deploy-app deploy-all mcp-smoke-live mcp-smoke-live-strict mcp-smoke-live-reauth mcp-smoke-live-onboard
+.PHONY: help install install-dev test-arthur dev computer-dev-up computer-dev-status computer-dev-stop db-up migrate upgrade downgrade lint format wa wa-build dev-all wa-dev-build wa-dev sandbox-build sandbox-check seed-agents deploy-api-fast deploy-app deploy-all mcp-smoke-live mcp-smoke-live-strict mcp-smoke-live-reauth mcp-smoke-live-onboard
 
 HOST ?= 0.0.0.0
 PORT ?= 8000
@@ -14,6 +14,9 @@ help:
 	@echo "  make install-dev            Install runtime + reproducible test dependencies"
 	@echo "  make test-arthur            Run Arthur guard, discovery, and orchestration regressions"
 	@echo "  make dev                    Run API in dev mode (uvicorn --reload)"
+	@echo "  make computer-dev-up        Start the local Firecracker desktop + VNC bridge"
+	@echo "  make computer-dev-status    Show local Firecracker/VNC readiness"
+	@echo "  make computer-dev-stop      Stop only processes started by computer-dev-up"
 	@echo "  make wa                     Run WhatsApp Go microservice (port 8080)"
 	@echo "  make wa-build               Build wa-service binary"
 	@echo "  make wa-dev-build           Build wa-dev-service binary"
@@ -56,7 +59,17 @@ test-arthur:
 		tests/test_skill_service.py
 
 dev:
+	@$(MAKE) --no-print-directory computer-dev-up
 	.venv/bin/uvicorn app.main:app --host $(HOST) --port $(PORT) --reload --reload-dir app --reload-dir arthur_v2 --reload-include '*.py'
+
+computer-dev-up:
+	bash scripts/firecracker-dev.sh up
+
+computer-dev-status:
+	bash scripts/firecracker-dev.sh status
+
+computer-dev-stop:
+	bash scripts/firecracker-dev.sh stop
 
 wa: wa-build
 	cd wa-service && PYTHON_WEBHOOK_URL=http://localhost:8000/v1/channels/wa/incoming ./wa-service

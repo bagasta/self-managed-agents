@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,6 +19,11 @@ class Settings(BaseSettings):
 
     # OpenRouter
     openrouter_api_key: str = ""
+    decision_router_enabled: bool = True
+    decision_router_model: str = "openai/gpt-6-luna-decisions"
+    decision_router_timeout_seconds: float = Field(default=8.0, gt=0, le=60)
+    decision_router_min_confidence: float = Field(default=0.7, ge=0, le=1)
+    decision_router_max_calls_per_run: int = Field(default=8, ge=1, le=64)
 
     # Mistral (used for PDF and Office document extraction)
     mistral_api_key: str = ""
@@ -71,6 +77,14 @@ class Settings(BaseSettings):
     # a final submit. Keep this bounded, but do not make normal multi-field
     # automation fail halfway through its work.
     computer_runtime_max_actions_per_run: int = 60
+    computer_runtime_turn_wait_seconds: int = 600
+    # One model turn is needed to inspect each computer result. This is a
+    # separate guard from VNC action count so a stuck visual loop ends cleanly.
+    computer_runtime_max_model_calls_per_run: int = Field(default=24, ge=4, le=64)
+    # URL reachable from the browser VM and its host-mounted Downloads folder.
+    # Empty values disable the optional Team Chat file bridge safely.
+    computer_runtime_file_base_url: str = ""
+    computer_runtime_download_dir: str = ""
 
     # Agent limits
     agent_max_steps: int = 12
@@ -118,8 +132,12 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = "INFO"
 
-    # CORS — comma-separated or JSON list; default allows all (dev only)
-    allowed_origins: list[str] = ["*"]
+    # Browser origins that may call the API with credentials.  An empty list is
+    # deliberately deny-by-default; set explicit production origins in env.
+    allowed_origins: list[str] = []
+    public_api_docs_enabled: bool = False
+    public_metrics_enabled: bool = False
+    marketplace_community_skill_install_enabled: bool = True
 
     # Developer notification phone (WhatsApp) for error alerts
     developer_phone: str = ""

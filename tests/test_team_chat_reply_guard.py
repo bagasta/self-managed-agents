@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastapi import BackgroundTasks, HTTPException
 
 from app.api import team_chat
 from app.api.team_chat import (
@@ -207,6 +208,8 @@ async def test_bot_mentions_trigger_next_bot_and_allow_bounded_reply_to_manager(
         async def execute(self, statement):
             entity = statement.column_descriptions[0].get("entity")
             if entity is Agent:
+                if any(isinstance(value, list) for value in statement.compile().params.values()):
+                    return QueryResult([])
                 agent_id = next(value for value in statement.compile().params.values()
                                 if isinstance(value, uuid.UUID) and value in sessions)
                 self.current_agent = next(agent for agent in agents if agent.id == agent_id)
@@ -214,11 +217,15 @@ async def test_bot_mentions_trigger_next_bot_and_allow_bounded_reply_to_manager(
             if entity is Session:
                 return QueryResult([sessions[self.current_agent.id]])
             if entity is TeamChatMessage:
+                if statement.column_descriptions[0].get("name") == "created_at":
+                    return QueryResult([])
                 return QueryResult([message for message in reversed(self.messages)
                                     if message.sender_type == "agent" and message.content])
             return QueryResult([])
 
         async def get(self, model, _id):
+            if model is TeamChatMessage:
+                return next((message for message in self.messages if message.id == _id), None)
             return SimpleNamespace(runtime_metadata={}) if model is Run else None
 
         def add(self, item):
@@ -288,10 +295,28 @@ async def test_bot_mentions_trigger_next_bot_and_allow_bounded_reply_to_manager(
         return SimpleNamespace(allowed=True)
 
     monkeypatch.setattr(team_chat, "check_agent_quota", quota)
-    result = await team_chat.send(
-        room_id, ChatSend(content="Tim, buat slogan acara."), workspace_id=None, db=db,
+    background = BackgroundTasks()
+    payload = ChatSend(content="Tim, buat slogan acara.", client_message_id=uuid.uuid4())
+    accepted = await team_chat.send(
+        room_id, payload, workspace_id=None, db=db,
         principal=WorkforcePrincipal(owner_user_id=owner_id),
+        background_tasks=background,
     )
+    assert not called, "HTTP acceptance must not wait for agent work"
+    assert accepted["message"]["status"] == "sent"
+    assert accepted["replies"][0]["status"] == "working"
+    assert len(background.tasks) == 1
+    retry_background = BackgroundTasks()
+    retried = await team_chat.send(
+        room_id, payload, workspace_id=None, db=db,
+        principal=WorkforcePrincipal(owner_user_id=owner_id), background_tasks=retry_background,
+    )
+    assert retried["message"]["id"] == accepted["message"]["id"]
+    assert len(db.messages) == 2
+    assert not retry_background.tasks, "A lost acceptance response must not start a second bot run"
+    await background()
+    result = {"replies": [team_chat._message_data(message) for message in dict.fromkeys(db.messages)
+                           if message.sender_type == "agent"]}
 
     assert [agent_id for agent_id, _ in called] == [manager, researcher, writer, writer, manager, researcher]
     assert "Riset Harga to @Penulis Konten" in called[2][1]
@@ -301,3 +326,29 @@ async def test_bot_mentions_trigger_next_bot_and_allow_bounded_reply_to_manager(
     assert "Diteruskan ke @Riset Harga." in result["replies"][0]["content"]
     assert "tidak mendapat giliran otomatis lagi" in result["replies"][-1]["content"]
     assert "Mention ini tidak membuat proses lanjutan di latar" in result["replies"][-1]["content"]
+
+    async def unavailable(*_args, **_kwargs):
+        raise RuntimeError("database setup failed")
+
+    monkeypatch.setattr(team_chat, "_run_chat_turns", unavailable)
+    failure_background = BackgroundTasks()
+    failure = await team_chat.send(
+        room_id, ChatSend(content="next request"), workspace_id=None, db=db,
+        principal=WorkforcePrincipal(owner_user_id=owner_id), background_tasks=failure_background,
+    )
+    await failure_background()
+    failed = await db.get(TeamChatMessage, failure["replies"][0]["id"])
+    assert failed.status == "failed"
+    assert "Pesan sudah tersimpan" in failed.content
+    assert "database" not in failed.content
+
+
+def test_send_identifier_cannot_disclose_another_room_or_replace_content():
+    room_id = uuid.uuid4()
+    message = TeamChatMessage(id=uuid.uuid4(), room_id=room_id, sender_type="owner",
+                              content="hello", status="sent", created_at=datetime.now(timezone.utc))
+    assert team_chat._existing_send(message, room_id, ChatSend(content="hello"))["message"]["id"] == message.id
+    for target_room, content in [(uuid.uuid4(), "hello"), (room_id, "changed")]:
+        with pytest.raises(HTTPException) as error:
+            team_chat._existing_send(message, target_room, ChatSend(content=content))
+        assert error.value.status_code == 409

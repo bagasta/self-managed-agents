@@ -2,18 +2,26 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 from pathlib import Path
 from types import SimpleNamespace
 import uuid
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
+from PIL import Image
 
 from app.core.infra.computer_runtime import ComputerRuntime
 from app.core.tools.computer_tool import build_computer_tools
 
 
 class _Socket:
+    def settimeout(self, _seconds):
+        return None
+
+    def recv(self, _length):
+        return b"RFB 003.008\n"
+
     def __enter__(self):
         return self
 
@@ -33,6 +41,15 @@ def _runtime(**overrides) -> ComputerRuntime:
     )
     base.update(overrides)
     return ComputerRuntime(**base)
+
+
+def test_open_proxy_without_vnc_handshake_is_offline(monkeypatch):
+    class ClosedSocket(_Socket):
+        def recv(self, _length):
+            return b""
+
+    monkeypatch.setattr("app.core.infra.computer_runtime.socket.create_connection", lambda *_args, **_kwargs: ClosedSocket())
+    assert _runtime().status(owner_id="owner-1")["code"] == "computer_unavailable"
 
 
 def test_default_computer_budget_allows_a_multifield_visual_flow():
@@ -65,10 +82,9 @@ def test_computer_runtime_opens_url_without_using_docker(monkeypatch):
     result = runtime.open_url(owner_id="owner-1", url="https://example.com/path")
 
     assert result["ok"] is True
-    assert calls[0][1:] == [
-        "-s", "127.0.0.1::5902", "key", "ctrl-l",
-        "type", "https://example.com/path", "key", "enter",
-    ]
+    assert calls[0][1:4] == ["-s", "127.0.0.1::5902", "--delay=50"]
+    assert calls[0][4:8] == ["key", "ctrl-l", "pause", "0.25"]
+    assert calls[0][-4:] == ["key", "enter", "pause", "0.15"]
     assert calls[0][0].endswith("vncdotool")
 
 
@@ -116,7 +132,26 @@ def test_computer_runtime_translates_friendly_key_names_for_vnc(monkeypatch):
     )
 
     assert runtime.press_key(owner_id="owner-1", key="ALT+TAB")["ok"] is True
-    assert commands[0][-2:] == ["key", "alt-tab"]
+    assert commands[0][-4:] == ["key", "alt-tab", "pause", "0.15"]
+
+
+def test_computer_input_waits_for_focus_and_preserves_exact_text(monkeypatch):
+    runtime = _runtime(max_actions=4)
+    commands = []
+    monkeypatch.setattr("app.core.infra.computer_runtime.socket.create_connection", lambda *_args, **_kwargs: _Socket())
+    monkeypatch.setattr(
+        "app.core.infra.computer_runtime.subprocess.run",
+        lambda command, **_kwargs: commands.append(command) or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    assert runtime.click(owner_id="owner-1", x=215, y=179)["ok"]
+    assert runtime.type_text(owner_id="owner-1", text=" QA-1422Z ")["ok"]
+    assert runtime.press_key(owner_id="owner-1", key="CTRL+A")["ok"]
+    assert commands[0][-4:] == ["pause", "0.25", "pause", "0.15"]
+    assert ["type", " QA-1422Z "] == commands[1][commands[1].index("type"):commands[1].index("type") + 2]
+    assert commands[2][-12:-2] == [
+        "kdown", "ctrl", "pause", "0.08", "key", "a", "pause", "0.08", "kup", "ctrl",
+    ]
 
 
 def test_computer_runtime_captures_and_removes_the_vnc_frame(monkeypatch):
@@ -135,6 +170,18 @@ def test_computer_runtime_captures_and_removes_the_vnc_frame(monkeypatch):
     assert base64.b64decode(screen["image_base64"]) == b"screen-bytes"
 
 
+def test_computer_runtime_compacts_valid_visual_frame_for_model():
+    source = Image.new("RGB", (2400, 1600), color="navy")
+    raw = io.BytesIO()
+    source.save(raw, format="PNG")
+
+    mime, compacted = ComputerRuntime._agent_screen_image(raw.getvalue())
+
+    assert mime == "image/jpeg"
+    with Image.open(io.BytesIO(compacted)) as rendered:
+        assert max(rendered.size) == 1280
+
+
 def test_visual_computer_tools_return_a_screen_after_an_action(monkeypatch):
     runtime = _runtime()
     monkeypatch.setattr(runtime, "open_url", lambda **_kwargs: {"ok": True, "status": "action_sent"})
@@ -148,6 +195,23 @@ def test_visual_computer_tools_return_a_screen_after_an_action(monkeypatch):
     assert result[1]["image_url"]["url"] == "data:image/png;base64,c2NyZWVu"
 
 
+def test_visual_computer_tools_block_repeated_click_on_unchanged_screen(monkeypatch):
+    runtime = _runtime()
+    clicks = []
+    monkeypatch.setattr(runtime, "click", lambda **kwargs: clicks.append(kwargs) or {"ok": True, "status": "action_sent"})
+    monkeypatch.setattr(runtime, "capture_screen", lambda **_kwargs: {
+        "ok": True, "mime_type": "image/png", "image_base64": "c3RhdGljLXNjcmVlbg==",
+    })
+    tools = {item.name: item for item in build_computer_tools(runtime, owner_id="owner-1", visual_observation=True)}
+
+    for _ in range(3):
+        assert tools["computer_click"].invoke({"x": 100, "y": 200})[0]["type"] == "text"
+    blocked = tools["computer_click"].invoke({"x": 100, "y": 200})
+
+    assert len(clicks) == 3
+    assert blocked["code"] == "replan_required"
+
+
 def test_computer_tools_expose_only_bounded_vnc_actions():
     names = {item.name for item in build_computer_tools(_runtime(), owner_id="owner-1")}
     assert names == {
@@ -157,6 +221,7 @@ def test_computer_tools_expose_only_bounded_vnc_actions():
         "computer_type_text",
         "computer_request_human_takeover",
         "computer_press_key",
+        "computer_release_turn",
     }
 
 
@@ -243,7 +308,7 @@ async def test_agent_tool_setup_adds_computer_without_replacing_docker(monkeypat
     assert setup.sandbox is None
     assert {item.name for item in setup.tools} == {
         "computer_get_status", "computer_open_url", "computer_click", "computer_type_text",
-        "computer_request_human_takeover", "computer_press_key",
+        "computer_request_human_takeover", "computer_press_key", "computer_release_turn",
     }
 
 

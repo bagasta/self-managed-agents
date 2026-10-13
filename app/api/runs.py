@@ -28,6 +28,11 @@ class RunDetailResponse(BaseModel):
     cached_tokens: int = 0
     openrouter_cost_usd: float = 0.0
     usage_details: list[dict] | None = None
+    decision_events: list[dict] = []
+    tool_trace: list[dict] = []
+    failure_code: str | None = None
+    completion_status: str | None = None
+    stop_reason: str | None = None
     messages: list[HistoryMessage]
 
 
@@ -69,5 +74,10 @@ async def get_run(
         cached_tokens=run_row.cached_tokens if run_row else 0,
         openrouter_cost_usd=float(run_row.openrouter_cost_usd or 0) if run_row else 0.0,
         usage_details=run_row.usage_details if run_row else None,
+        decision_events=list((run_row.runtime_metadata or {}).get("decisions") or []) if run_row else [],
+        tool_trace=list((run_row.runtime_metadata or {}).get("tool_trace") or []) if run_row else [],
+        failure_code=(run_row.runtime_metadata or {}).get("failure_code") if run_row else None,
+        completion_status=(run_row.runtime_metadata or {}).get("completion_status") if run_row else None,
+        stop_reason=(run_row.runtime_metadata or {}).get("stop_reason") if run_row else None,
         messages=[HistoryMessage.model_validate(r) for r in rows],
     )

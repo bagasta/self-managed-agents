@@ -163,12 +163,23 @@ async def build_agent_tool_setup(
     # Computer control is intentionally independent from DockerSandbox. It is
     # opt-in per agent and the runtime checks that the computer is assigned to
     # the same owner before exposing any action.
-    if (not operator_turn) and (not builder_agent) and _is_enabled(tools_config, "computer", default=False):
+    if (not operator_turn) and _is_enabled(tools_config, "computer", default=False):
         computer_runtime = ComputerRuntime.from_settings(settings)
+        computer_owner_id = str(getattr(agent_model, "owner_user_id", "") or "")
+        if str(tools_config.get("system_plugin") or "").strip() == "arthur_v2":
+            from app.core.domain.tenant_identity import resolve_unique_user_id
+
+            # Arthur is shared platform state; its current owner comes from
+            # the authenticated session, equally in direct and group chats.
+            computer_owner_id = str(await resolve_unique_user_id(db, str(session.external_user_id or "")) or "")
+        computer_runtime.bind_agent(
+            agent_id=str(agent_id), agent_name=str(getattr(agent_model, "name", "") or ""),
+            wait_seconds=settings.computer_runtime_turn_wait_seconds,
+        )
         visual_observation = model_supports_image_input(getattr(agent_model, "model", None))
         tools.extend(build_computer_tools(
             computer_runtime,
-            owner_id=str(getattr(agent_model, "owner_user_id", "") or ""),
+            owner_id=computer_owner_id,
             visual_observation=visual_observation,
         ))
         active_groups.append("computer")

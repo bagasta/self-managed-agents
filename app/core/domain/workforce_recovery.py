@@ -26,6 +26,26 @@ recovery_lineage: ContextVar[tuple[uuid.UUID, int] | None] = ContextVar(
 )
 
 
+async def _finish_manager_message(db, recovery: TeamChatRecovery, content: str, status: str) -> None:
+    """Publish a recovery outcome without changing text already shown in chat."""
+    message = await db.get(TeamChatMessage, recovery.manager_message_id)
+    if message is None:
+        return
+    if message.content:
+        message.status = "sent"
+        result_id = uuid.uuid5(uuid.NAMESPACE_URL, f"team-chat-recovery-result:{recovery.id}")
+        if await db.get(TeamChatMessage, result_id) is None:
+            db.add(TeamChatMessage(
+                id=result_id, room_id=message.room_id, sender_type="agent",
+                sender_agent_id=message.sender_agent_id, content=content,
+                status=status, created_at=datetime.now(timezone.utc),
+            ))
+    else:
+        message.content = content
+        message.status = status
+        message.created_at = datetime.now(timezone.utc)
+
+
 async def _enqueue_blocked_group_tasks(factory) -> None:
     """A locked task row serializes creation of the recovery and its chat receipt."""
     async with factory() as db:
@@ -95,21 +115,29 @@ async def _enqueue_blocked_group_tasks(factory) -> None:
                 sender_type="agent",
                 sender_agent_id=room.manager_agent_id,
                 content=(
-                    "Pekerjaan ini kembali tertahan setelah batas pemulihan otomatis. "
-                    "Saya perlu keputusan Owner sebelum menugaskannya lagi."
-                    if exhausted else "Arthur sedang meninjau kegagalan tugas dan menentukan langkah berikutnya."
+                    "Pemulihan otomatis mencapai batasnya. Saya perlu keputusan Owner sebelum penugasan baru."
+                    if exhausted else ""
                 ),
                 status="failed" if exhausted else "working",
             )
             db.add(pending)
             await db.flush()
-            db.add(TeamChatRecovery(
+            recovery = TeamChatRecovery(
+                id=uuid.uuid4(),
                 room_id=room_id,
                 task_id=task.id,
                 failure_event_id=failure.id,
                 manager_message_id=pending.id,
                 status="needs_review" if exhausted else "pending",
-            ))
+            )
+            db.add(recovery)
+            if not exhausted:
+                db.add(TeamChatMessage(
+                    id=uuid.uuid5(uuid.NAMESPACE_URL, f"team-chat-recovery-progress:{recovery.id}"),
+                    room_id=room_id, sender_type="agent", sender_agent_id=room.manager_agent_id,
+                    content="Arthur sedang meninjau kegagalan tugas dan menentukan langkah berikutnya.",
+                    status="sent", created_at=datetime.now(timezone.utc),
+                ))
             await db.commit()
 
 
@@ -157,13 +185,11 @@ async def _mark_uncertain_runs(factory) -> None:
         for recovery in stale:
             recovery.status = "needs_review"
             recovery.claim_token = None
-            message = await db.get(TeamChatMessage, recovery.manager_message_id)
-            if message is not None:
-                message.status = "failed"
-                message.content = (
-                    "Recovery Arthur terputus. Status penugasan baru belum pasti; "
-                    "periksa daftar tugas sebelum mencoba ulang."
-                )
+            await _finish_manager_message(
+                db, recovery,
+                "Pemulihan Arthur terputus. Status penugasan baru belum pasti; periksa daftar tugas sebelum mencoba ulang.",
+                "failed",
+            )
         if stale:
             await db.commit()
 
@@ -183,8 +209,9 @@ async def _run_manager_recovery(factory, recovery_id: uuid.UUID, token: uuid.UUI
         if room is None or task is None or pending is None or task.status == "cancelled":
             recovery.status = "needs_review"
             if pending is not None:
-                pending.status = "failed"
-                pending.content = "Recovery tidak dapat dilanjutkan karena room atau tugas sudah berubah."
+                await _finish_manager_message(
+                    db, recovery, "Pemulihan tidak dapat dilanjutkan karena grup atau tugas sudah berubah.", "failed",
+                )
             await db.commit()
             return False
         manager = await db.get(Agent, room.manager_agent_id)
@@ -195,8 +222,9 @@ async def _run_manager_recovery(factory, recovery_id: uuid.UUID, token: uuid.UUI
         session = await db.get(Session, member.session_id) if member and member.session_id else None
         if manager is None or manager.is_deleted or session is None:
             recovery.status = "needs_review"
-            pending.status = "failed"
-            pending.content = "Arthur tidak tersedia untuk menerima laporan kegagalan tugas ini."
+            await _finish_manager_message(
+                db, recovery, "Arthur tidak tersedia untuk menerima laporan kegagalan tugas ini.", "failed",
+            )
             await db.commit()
             return False
         steps = list((await db.execute(select(WorkforceTaskStep).where(
@@ -254,23 +282,25 @@ async def _run_manager_recovery(factory, recovery_id: uuid.UUID, token: uuid.UUI
                 owner_user_id=room.owner_user_id,
             )
             if receipt:
-                pending.content = receipt
+                content = receipt
             elif team_chat._unbacked_deferred_work(reply, list(result.get("steps") or [])):
-                pending.content = "Belum ada tugas baru yang tercatat. Saya perlu memperjelas hambatan ini sebelum menugaskan ulang."
+                content = "Belum ada tugas baru yang tercatat. Saya perlu memperjelas hambatan ini sebelum menugaskan ulang."
             else:
-                pending.content = reply[:3500] + "\n\nBelum ada tugas lanjutan yang tercatat."
+                content = reply[:3500] + "\n\nBelum ada tugas lanjutan yang tercatat."
             if result.get("tokens_used", 0) > 0:
                 await record_agent_token_usage(manager, result["tokens_used"], db)
-            pending.status = "sent"
+            await _finish_manager_message(db, recovery, content, "sent")
             existing_step_ids = set((await db.execute(select(TeamChatMessage.workforce_step_id).where(
                 TeamChatMessage.room_id == room.id,
                 TeamChatMessage.workforce_step_id.is_not(None),
             ))).scalars().all())
-            owner = team_chat.WorkforcePrincipal(owner_user_id=room.owner_user_id)
+            member_ids = set((await db.execute(select(TeamChatMember.agent_id).where(
+                TeamChatMember.room_id == room.id,
+            ))).scalars().all())
             for step in dispatched:
                 if step.id in existing_step_ids:
                     continue
-                if not await team_chat._add_group_member(db, room, step.assigned_agent_id, owner):
+                if step.assigned_agent_id not in member_ids:
                     continue
                 db.add(TeamChatMessage(
                     room_id=room.id, sender_type="agent", sender_agent_id=step.assigned_agent_id,
@@ -306,8 +336,10 @@ async def _run_manager_recovery(factory, recovery_id: uuid.UUID, token: uuid.UUI
                     current.claim_token = None
                     message = await cancelled_db.get(TeamChatMessage, current.manager_message_id)
                     if message is not None:
-                        message.status = "failed"
-                        message.content = "Recovery Arthur terputus. Periksa daftar tugas sebelum menugaskan ulang."
+                        await _finish_manager_message(
+                            cancelled_db, current,
+                            "Pemulihan Arthur terputus. Periksa daftar tugas sebelum menugaskan ulang.", "failed",
+                        )
                     await cancelled_db.commit()
             raise
         except Exception as exc:
@@ -324,8 +356,10 @@ async def _run_manager_recovery(factory, recovery_id: uuid.UUID, token: uuid.UUI
                     current.claim_token = None
                     message = await failure_db.get(TeamChatMessage, current.manager_message_id)
                     if message is not None:
-                        message.status = "failed"
-                        message.content = "Recovery Arthur gagal. Periksa status tugas sebelum menugaskan ulang."
+                        await _finish_manager_message(
+                            failure_db, current,
+                            "Pemulihan Arthur gagal. Periksa status tugas sebelum menugaskan ulang.", "failed",
+                        )
                     failure_db.add(WorkforceTaskEvent(
                         task_id=current.task_id, event_type="manager_recovery_failed",
                         metadata_={"recovery_id": str(recovery_id), "failure_type": type(exc).__name__},

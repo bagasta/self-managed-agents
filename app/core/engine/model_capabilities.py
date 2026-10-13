@@ -25,6 +25,8 @@ def model_supports_image_input(model: str | None) -> bool:
             "gemini",
             "claude-3",
             "claude-sonnet-4",
+            "claude-haiku-5",
+            "claude-opus-4",
             "pixtral",
             "llava",
             "vision",

@@ -337,6 +337,56 @@ async def test_create_assistant_persists_resolved_owner_user_uuid(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_create_computer_assistant_uses_gpt6_luna(monkeypatch):
+    RecordingDb.instances.clear()
+    owner_id = uuid.uuid4()
+    user = SimpleNamespace(id=owner_id, external_id="computer-owner")
+
+    async def subscription_snapshot(_external_ids, _db):
+        return (
+            user,
+            SimpleNamespace(
+                status="active", is_usable=True, tokens_remaining=1000, expires_at=None
+            ),
+            SimpleNamespace(max_agents=8, code="test", label="Test"),
+        )
+
+    monkeypatch.setattr(
+        "app.core.domain.subscription_service.get_best_subscription_by_external_ids",
+        subscription_snapshot,
+    )
+    monkeypatch.setattr(
+        "app.core.infra.computer_runtime.ComputerRuntime.from_settings",
+        lambda _settings: SimpleNamespace(status=lambda **_kwargs: {"ok": True}),
+    )
+    tools = {
+        tool.name: tool
+        for tool in build_arthur_v2_tools(
+            db_factory=AsyncContext,
+            owner_phone="628123456789",
+            owner_user_id=owner_id,
+            self_agent_id="arthur-v2",
+        )
+    }
+
+    result = await tools["create_assistant"].ainvoke({
+        "name": "Computer model test",
+        "purpose": "Verify the model assigned to computer assistants.",
+        "instructions": "Use the assigned computer for browser work.",
+        "enable_computer": True,
+        "confirmed": True,
+    })
+
+    assert result["ok"] is True
+    agents = [
+        row for db in RecordingDb.instances for row in db.rows
+        if row.__class__.__name__ == "Agent"
+    ]
+    assert len(agents) == 1
+    assert agents[0].model == "openai/gpt-6-luna"
+
+
+@pytest.mark.asyncio
 async def test_arthur_graph_reads_roster_then_dispatches_durable_task(monkeypatch):
     RecordingDb.instances.clear()
     owner_id = uuid.uuid4()

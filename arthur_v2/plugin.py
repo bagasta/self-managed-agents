@@ -42,7 +42,7 @@ ARTHUR_V2_ASSISTANT_MODEL = "deepseek/deepseek-v4-flash"
 # A computer agent must inspect the VNC framebuffer. DeepSeek V4 Flash is a
 # text-only routing model in this runtime, so using it would leave browser
 # actions blind and unverifiable.
-ARTHUR_V2_COMPUTER_ASSISTANT_MODEL = "openai/gpt-4.1-mini"
+ARTHUR_V2_COMPUTER_ASSISTANT_MODEL = "openai/gpt-6-luna"
 ARTHUR_V2_CODING_DEPLOY_MAX_TOKENS = 8192
 
 _BUSINESS_ASSISTANT_KINDS = {"business", "internal", "sales", "registration", "customer"}
@@ -299,6 +299,11 @@ def _without_google_workspace_mcp(tools_config: dict[str, Any] | None) -> dict[s
     return config
 
 
+def _google_integration_state(status: dict[str, Any] | None) -> str:
+    """Map the OAuth connector response to the persisted assistant state."""
+    return "connected" if bool((status or {}).get("connected")) else "auth_pending"
+
+
 def _cloud_assistant_whatsapp_status(agent: Agent) -> dict[str, Any] | None:
     """Return the Cloud API status shape used by the public agent status API.
 
@@ -527,15 +532,22 @@ customer-facing), required information/tools, and escalation or approval
 boundaries. Wait for the owner to explicitly approve that proposal before
 calling create_assistant; a general request to explore, plan, or recommend a
 team is not approval to create it. For a simple personal assistant, keep
-discovery lighter and ask only what is needed for the request.
+discovery lighter and ask only what is needed for the request. Once the Owner
+has named the personal tasks and explicitly says to create it, create it in
+that same turn. Do not turn optional preferences such as email cadence, file
+format, delivery channel, or future automation into prerequisites. Use safe
+defaults for unspecified preferences and let the Owner refine the assistant
+after it exists.
 
 When a workflow mentions periodic monitoring, recurring checks, or work that
 must happen without a new chat message, explicitly distinguish the two modes:
 (1) a reminder only sends a scheduled message, while (2) an autonomous agent
 run executes a written SOP with the target assistant's enabled tools and only
 reports meaningful findings. Ask which mode the Owner wants and obtain the
-SOP, reporting condition, and cadence. Never promise that a background run is
-enabled merely because the assistant was created. After the target assistant
+SOP, reporting condition, and cadence. Autonomous runs are supported by the
+`configure_assistant_autonomous_run` tool after the assistant exists; do not
+say this capability is unavailable merely because no run is configured yet.
+Never promise that a background run is enabled merely because the assistant was created. After the target assistant
 exists, use `configure_assistant_autonomous_run` after explicit Owner
 confirmation to create the real backend job. Before claiming it is active,
 the tool result must say ok=true and include an active job. Use
@@ -777,6 +789,81 @@ def apply_arthur_first_turn_staffing_contract(
     )
 
 
+_ARTHUR_PERSONAL_ASSISTANT_TERMS = re.compile(
+    r"\b(?:personal\s+(?:ai\s+)?(?:assistant|asisten|agent)|(?:assistant|asisten|agent)\s+personal|asisten\s+pribadi)\b",
+    re.IGNORECASE,
+)
+_ARTHUR_PERSONAL_ASSISTANT_CREATE_REQUEST = re.compile(
+    r"\b(?:tolong\s+)?(?:buatkan|buat|bikin|bangun|create|siapkan)\b.{0,100}"
+    r"\b(?:personal\s+(?:ai\s+)?(?:assistant|asisten|agent)|(?:assistant|asisten|agent)\s+personal|asisten\s+pribadi)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_ARTHUR_PERSONAL_ASSISTANT_APPROVAL = re.compile(
+    r"^\s*(?:oke|ok|ya|iya|setuju|lanjut|silakan)\b[\s,!.-]*(?:"
+    r"(?:tolong\s+)?(?:buatkan|buat|bikin|bangun|create|siapkan)\b",
+    re.IGNORECASE,
+)
+_ARTHUR_ASSISTANT_ALREADY_CREATED = re.compile(
+    r"\b(?:assistant|asisten|agent|bot)\s+(?:sudah|telah)\s+(?:dibuat|jadi)\b",
+    re.IGNORECASE,
+)
+
+
+def arthur_personal_assistant_creation_ready(history_rows: list[Any], current_message: str) -> bool:
+    """Recognize an approved, sufficiently scoped personal-assistant build."""
+    current = str(current_message or "").strip()
+    owner_history = "\n".join(
+        str(getattr(row, "content", "") or "")
+        for row in history_rows
+        if str(getattr(row, "role", "") or "") == "user"
+    )
+    agent_history = "\n".join(
+        str(getattr(row, "content", "") or "")
+        for row in history_rows
+        if str(getattr(row, "role", "") or "") == "agent"
+    )
+    conversation = f"{owner_history}\n{current}"
+    if _ARTHUR_ASSISTANT_ALREADY_CREATED.search(agent_history):
+        return False
+    if _ARTHUR_PERSONAL_ASSISTANT_CREATE_REQUEST.search(current):
+        return True
+    return bool(
+        _ARTHUR_PERSONAL_ASSISTANT_TERMS.search(conversation)
+        and _ARTHUR_PERSONAL_ASSISTANT_APPROVAL.search(current)
+    )
+
+
+def apply_arthur_personal_assistant_create_contract(
+    prompt: str,
+    *,
+    history_rows: list[Any],
+    message: str,
+) -> str:
+    """Append the execution contract after canonical Arthur instructions."""
+    if not arthur_personal_assistant_creation_ready(history_rows, message):
+        return prompt
+    return prompt + """
+
+## Required Personal Assistant Creation Turn
+The Owner has already approved creation of a personal assistant and supplied
+its purpose in this conversation. Call `create_assistant` in this turn with
+`confirmed=true`; do not ask another setup question first. A personal
+assistant needs no business workflow. Use only the tasks, systems, and
+integrations the Owner explicitly named. For unspecified details, encode safe
+defaults: work on demand, read information only when asked, draft rather than
+send external messages, ask confirmation before calendar changes or other
+external actions, and make generated files downloadable unless the Owner
+explicitly chose a connected workspace. Keep `enable_computer` and
+`enable_deploy` false unless the Owner explicitly requested either one.
+
+If no name was supplied, use "Personal Assistant". Do not postpone creation
+for optional choices such as email cadence, file format, notification channel,
+or future automation. If an explicitly requested Google integration cannot
+start OAuth after creation, report that connector failure clearly, but never
+let it undo or delay the successfully created assistant.
+"""
+
+
 _ARTHUR_STAFFING_ACTION_REQUEST = re.compile(
     # Accept an explicit imperative at a sentence boundary or after a direct
     # request marker anywhere in a multi-sentence turn. Requiring one of those
@@ -884,7 +971,10 @@ def arthur_staffing_onboarding_active(history_rows: list[Any], current_message: 
         return False
     # Let an explicit request to build a named agent continue through the
     # existing builder confirmation flow instead of trapping the owner in intake.
-    if _ARTHUR_STAFFING_ACTION_REQUEST.search(current_message or ""):
+    if (
+        _ARTHUR_STAFFING_ACTION_REQUEST.search(current_message or "")
+        or arthur_personal_assistant_creation_ready(history_rows, current_message)
+    ):
         return False
     return bool(_ARTHUR_STAFFING_DISCOVERY_MESSAGE.search(current_message or ""))
 
@@ -1004,7 +1094,24 @@ def build_arthur_v2_tools(
     async def _owner_roster(db) -> list[Agent]:
         if tenant_user_id is None:
             return []
-        return await list_owner_workforce_agents(db, tenant_user_id, exclude_agent_id=self_agent_id)
+        agents = await list_owner_workforce_agents(db, tenant_user_id, exclude_agent_id=self_agent_id)
+        if not session_id:
+            return agents
+        try:
+            session = await db.get(Session, uuid.UUID(str(session_id)))
+        except (TypeError, ValueError, AttributeError):
+            session = None
+        metadata = (session.metadata_ or {}) if session else {}
+        if metadata.get("kind") != "group" or not metadata.get("team_chat_room_id"):
+            return agents
+        try:
+            room_id = uuid.UUID(str(metadata["team_chat_room_id"]))
+        except (TypeError, ValueError, AttributeError):
+            return []
+        member_ids = set((await db.execute(select(TeamChatMember.agent_id).where(
+            TeamChatMember.room_id == room_id,
+        ))).scalars().all())
+        return [agent for agent in agents if agent.id in member_ids]
 
     async def _owned(agent_id: str) -> Agent | None:
         if tenant_user_id is None:
@@ -1126,6 +1233,7 @@ def build_arthur_v2_tools(
                 objective=objective,
                 assignments=[assignment.model_dump() for assignment in assignments],
                 worker_agents=by_id,
+                allowed_peer_agent_ids={agent.id for agent in roster},
                 db_factory=db_factory,
                 background=True,
             )

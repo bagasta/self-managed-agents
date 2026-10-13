@@ -43,6 +43,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.deps import verify_api_key
 from app.core.engine.session_lock import session_run_lock
 from app.core.domain.agent_quota_service import check_agent_quota, record_agent_token_usage
 from app.core.infra.channel_service import send_message
@@ -1392,6 +1393,7 @@ async def _resume_customer_workflow_after_operator_approval(
 async def wa_dev_operator_route(
     phone: str,
     db: AsyncSession = Depends(get_db),
+    _: str = Depends(verify_api_key),
 ):
     """
     Used by wa-dev-service: given a phone number, find which agent this phone is an operator for.

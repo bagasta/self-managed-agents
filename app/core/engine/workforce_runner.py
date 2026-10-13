@@ -78,11 +78,16 @@ def _register_workforce_harness_profile() -> None:
     )
 
 
-def _workforce_max_completion_tokens(settings: Any, agent: Agent, *, requires_deployment: bool = False) -> int:
+def _workforce_max_completion_tokens(
+    settings: Any, agent: Agent, *, requires_deployment: bool = False,
+    assignment_text: str = "",
+) -> int:
     configured = int(getattr(settings, "workforce_llm_max_tokens", 2048))
     if requires_deployment:
         # A deploy assignment often writes complete source files. The worker
         # must not inherit a conversational agent's small output limit.
+        return max(8192, min(configured, 16384))
+    if re.search(r"\b(?:html|website|landing page|copy per section|copy landing page)\b", assignment_text, re.IGNORECASE):
         return max(8192, min(configured, 16384))
     bounded = max(1, min(configured, 3072))
     agent_limit = getattr(agent, "max_tokens", None)
@@ -232,7 +237,8 @@ async def run_workforce_deep_agent(
     settings = get_settings()
     deployment_requested = role == "specialist" and requires_deployment is True
     workforce_max_tokens = _workforce_max_completion_tokens(
-        settings, agent, requires_deployment=deployment_requested
+        settings, agent, requires_deployment=deployment_requested,
+        assignment_text=assignment_text if role == "specialist" else "",
     )
     now = datetime.now(timezone.utc)
     internal_session = Session(
@@ -305,7 +311,8 @@ async def run_workforce_deep_agent(
     )
     db.add(run)
     await db.flush()
-    db.add(Message(session_id=internal_session.id, run_id=run.id, role="user", content=prompt, step_index=0))
+    user_message_record = Message(session_id=internal_session.id, run_id=run.id, role="user", content=prompt, step_index=0)
+    db.add(user_message_record)
     await db.flush()
     # Progress callbacks use their own sessions. Make the run/session visible
     # before those sessions insert events with a foreign key to this run.
@@ -324,6 +331,18 @@ async def run_workforce_deep_agent(
 
     await report_progress("worker_started", {"phase": "execution_started"})
 
+    if blocker and not deployment_requested:
+        prompt = (
+            "Sandbox execution is unavailable for this assignment. Produce a text-only draft "
+            "from the supplied brief. Do not claim that a file was written, a browser test ran, "
+            "or a website was published. State that the draft needs execution and QA.\n\n"
+            + prompt
+        )
+        blocker = None
+        blocker_code = None
+        user_message_record.content = prompt
+        run.runtime_metadata = {**(run.runtime_metadata or {}), "sandbox_text_fallback": True}
+        await db.flush()
     if blocker:
         if sandbox is not None:
             await sandbox.aclose()

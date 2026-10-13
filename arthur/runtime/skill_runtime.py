@@ -156,6 +156,11 @@ def scope_arthur_builder_tools(
     removed: list[str] = []
     for tool in tools:
         name = str(getattr(tool, "name", "") or "")
+        if name in {"computer_get_status", "computer_screenshot", "computer_open_url", "computer_click", "computer_type_text", "computer_press_key", "computer_request_human_takeover", "computer_release_turn"}:
+            # These tools have already passed the per-agent computer opt-in.
+            # Staffing skill selection must not hide an enabled computer.
+            kept.append(tool)
+            continue
         if (
             primary_skill == "arthur-whatsapp-demo-channel"
             and whatsapp_action == "trial_link"

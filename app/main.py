@@ -18,10 +18,12 @@ from slowapi.util import get_remote_address
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api import agents, auth, channels, computer, custom_tools, documents, history, memory, messages, meta_signup, meta_webhooks, models, runs, sessions, skills, stream, subscriptions, users, workforce, team_chat
+from app.api import agents, auth, channels, computer, custom_tools, documents, history, marketplace, memory, messages, meta_signup, meta_webhooks, models, runs, sessions, skills, stream, subscriptions, users, workforce, team_chat
 from app.config import get_settings
 from app.database import engine, get_db
 from app.middleware.request_id import RequestIDMiddleware
+from app.middleware.security_headers import SecurityHeadersMiddleware
+from app.deps import verify_api_key
 from app.models.agent import Agent
 from app.models.skill import Skill
 
@@ -188,8 +190,9 @@ app = FastAPI(
     title="Managed Agent Platform",
     description="Self-hosted multi-model agent platform powered by LangChain + OpenRouter",
     version="0.2.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
+    docs_url="/docs" if settings.public_api_docs_enabled else None,
+    redoc_url="/redoc" if settings.public_api_docs_enabled else None,
+    openapi_url="/openapi.json" if settings.public_api_docs_enabled else None,
     lifespan=lifespan,
 )
 
@@ -197,10 +200,13 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(RequestIDMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.allowed_origins,
-    allow_credentials=True,
+    # Credentialed CORS must never use a wildcard origin.  Same-origin UI
+    # requests do not need CORS at all, so an empty list is the safe default.
+    allow_origins=[origin for origin in settings.allowed_origins if origin != "*"],
+    allow_credentials=bool([origin for origin in settings.allowed_origins if origin != "*"]),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -224,13 +230,15 @@ app.include_router(meta_webhooks.router)
 app.include_router(meta_signup.router)
 app.include_router(workforce.router)
 app.include_router(team_chat.router)
+app.include_router(marketplace.router)
 app.include_router(computer.router)
 from app.api import integrations
 app.include_router(integrations.router)
 
 app.mount("/ui", StaticFiles(directory="UI-DEV", html=True), name="ui")
 
-Instrumentator().instrument(app).expose(app, endpoint="/metrics", tags=["meta"])
+if settings.public_metrics_enabled:
+    Instrumentator().instrument(app).expose(app, endpoint="/metrics", tags=["meta"])
 
 
 @app.get("/health", tags=["meta"])
@@ -238,19 +246,13 @@ async def health() -> dict:
     return {
         "status": "ok",
         "version": "0.2.0",
-        "commit": settings.app_commit_sha,
-        "arthur_runtime": {
-            "engine_version": settings.arthur_engine_version,
-            "prompt_version": settings.arthur_prompt_version,
-            "primary_model": settings.arthur_primary_model,
-            "document_model": settings.arthur_document_model,
-            "image_model": settings.arthur_image_model,
-        },
     }
 
 
 @app.get("/health/detailed", tags=["meta"])
-async def health_detailed(db: AsyncSession = Depends(get_db)) -> dict:
+async def health_detailed(
+    db: AsyncSession = Depends(get_db), _: str = Depends(verify_api_key),
+) -> dict:
     checks: dict[str, str] = {}
     arthur_runtime: dict[str, object] = {
         "engine_version": settings.arthur_engine_version,

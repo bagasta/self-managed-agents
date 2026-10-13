@@ -10,7 +10,7 @@ from app.core.engine.subagent_builder import _bind_usage_callbacks
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 class _FakeLog:

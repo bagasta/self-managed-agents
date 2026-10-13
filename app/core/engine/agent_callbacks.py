@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -32,6 +33,7 @@ class AgentStepLogger(AsyncCallbackHandler):
         self.cached_tokens_from_callbacks: int = 0
         self.openrouter_cost_usd_from_callbacks: float = 0.0
         self.usage_details: list[dict[str, Any]] = []
+        self.tool_trace: list[dict[str, Any]] = []
 
     @staticmethod
     def _usage_from_mapping(mapping: dict[str, Any]) -> dict[str, Any]:
@@ -190,6 +192,30 @@ class AgentStepLogger(AsyncCallbackHandler):
             return "error"
         return "ok"
 
+    @staticmethod
+    def _tool_diagnostics(output: Any) -> dict[str, Any]:
+        """Keep failure/progress metadata, never screenshots, input text or credentials."""
+        content = getattr(output, "content", output)
+        if isinstance(content, list):
+            content = next((part.get("text", "") for part in content
+                            if isinstance(part, dict) and part.get("type") == "text"), "")
+        if isinstance(content, str):
+            try:
+                content = json.loads(content)
+            except (ValueError, TypeError):
+                return {}
+        if not isinstance(content, dict):
+            return {}
+        result = {key: content[key] for key in ("ok", "code", "status")
+                  if key in content and isinstance(content[key], (str, bool))}
+        verification = content.get("verification")
+        if isinstance(verification, dict):
+            result["verification"] = {
+                key: verification[key] for key in ("screen_digest", "screen_changed", "unchanged_screen_streak")
+                if key in verification
+            }
+        return result
+
     async def on_tool_end(self, output, **kwargs):
         tool_call_id = str(kwargs.get("tool_call_id") or kwargs.get("run_id") or "?")
         tool_input = self._tool_inputs.get(tool_call_id)
@@ -198,6 +224,14 @@ class AgentStepLogger(AsyncCallbackHandler):
         started_at = self._tool_started_at.get(tool_call_id)
         duration_ms = int((time.monotonic() - started_at) * 1000) if started_at else None
         status = self._tool_status(output)
+        diagnostics = self._tool_diagnostics(output)
+        if diagnostics.get("ok") is False:
+            status = "error"
+        self.tool_trace.append({
+            "step": step, "tool": tool_name, "status": status,
+            "duration_ms": duration_ms, "result": diagnostics,
+        })
+        self.tool_trace = self.tool_trace[-96:]
         # INFO: tidy result line — tool name + status + duration + short output.
         self.log.info(
             "agent_step.tool_end",
@@ -231,6 +265,10 @@ class AgentStepLogger(AsyncCallbackHandler):
         tool_call_id = str(kwargs.get("tool_call_id") or kwargs.get("run_id") or "?")
         tool_name = self._tool_names.get(tool_call_id, "?")
         step = self._tool_steps.get(tool_call_id, self._step)
+        self.tool_trace.append({
+            "step": step, "tool": tool_name, "status": "error", "error_type": type(error).__name__,
+        })
+        self.tool_trace = self.tool_trace[-96:]
         self.log.warning(
             "agent_step.tool_error",
             step=step,

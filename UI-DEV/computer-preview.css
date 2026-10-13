@@ -1,0 +1,51 @@
+.computer-panel { padding: 14px; background: #1c1e1d; border-color: #393e3b; }
+.computer-panel-head { align-items: flex-start; }
+.computer-panel-head > div { min-width: 0; }
+.computer-panel-head strong { display: block; }
+.computer-copy { line-height: 1.6; margin: 10px 0 12px; }
+.computer-live { margin-top: 0; }
+.computer-preview-button { display: block; width: 100%; padding: 0; overflow: hidden; background: #0c0c0c; border: 1px solid #414741; border-radius: 10px; text-align: left; }
+.computer-live img { display: block; width: 100%; height: auto; aspect-ratio: auto; border: 0; border-radius: 0; }
+.computer-preview-caption { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; color: #b5c1bb; font-size: 11px; background: #222724; }
+.computer-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 10px; }
+.computer-actions button { min-width: 0; font-size: 11px; padding: 8px 6px; }
+.computer-private-shortcut { grid-column: 1 / -1; }
+.chat-head #computer-launch { position: absolute; right: 66px; }
+.chat-head #computer-launch:disabled { opacity: .35; }
+.computer-dialog { width: min(1240px, calc(100vw - 36px)); max-height: calc(100dvh - 36px); padding: 20px; }
+.computer-dialog .dialog-head { margin-bottom: 12px; gap: 16px; }
+.computer-dialog .dialog-head p { margin: 4px 0 0; }
+.computer-dialog .dialog-head button { flex: none; }
+.computer-dialog-layout { display: grid; gap: 20px; }
+.computer-dialog.has-private-input .computer-dialog-layout { grid-template-columns: minmax(0, 1fr) 280px; }
+.computer-screen-column { min-width: 0; }
+.computer-stage { position: relative; width: fit-content; max-width: 100%; margin: 0 auto; background: #080808; border: 1px solid #424242; border-radius: 8px; overflow: hidden; min-height: 100px; }
+#computer-large-preview { display: block; max-width: 100%; max-height: 65dvh; width: auto; height: auto; }
+.computer-dialog.has-private-input #computer-large-preview { cursor: crosshair; }
+.computer-target { position: absolute; width: 22px; height: 22px; transform: translate(-50%, -50%); border-radius: 50%; border: 2px solid #fff; outline: 2px solid #171717; background: #51be9966; pointer-events: none; }
+.computer-target::before, .computer-target::after { content: ''; position: absolute; background: #fff; }
+.computer-target::before { width: 30px; height: 2px; left: -6px; top: 8px; }
+.computer-target::after { width: 2px; height: 30px; top: -6px; left: 8px; }
+.computer-dialog-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+.computer-dialog-status { font-size: 12px; color: var(--muted); margin-bottom: 12px; overflow-wrap: anywhere; }
+.computer-private-form { border-left: 1px solid var(--line); padding-left: 20px; min-width: 0; }
+.computer-private-form h3 { margin: 0 0 8px; font-size: 16px; font-weight: 550; }
+.computer-private-form > p { line-height: 1.6; }
+.computer-private-form > button { width: 100%; margin-top: 10px; }
+.computer-private-form input[type=password] { width: 100%; font-size: 16px; }
+.private-target-label { color: var(--accent); font-size: 12px; }
+.computer-private-form .config-check { margin: 14px 0; line-height: 1.5; }
+.computer-private-form .config-check input { margin: 0; width: 17px; height: 17px; flex: none; }
+.computer-private-form [role=status] { margin: 10px 0 0; }
+@media (max-width: 900px) {
+  .computer-dialog.has-private-input .computer-dialog-layout { grid-template-columns: 1fr; }
+  .computer-private-form { border-left: 0; border-top: 1px solid var(--line); padding: 16px 0 0; }
+}
+@media (max-width: 760px) {
+  .chat-head { padding-right: 100px; }
+  .chat-head #computer-launch { right: 54px; }
+  .computer-dialog { padding: 16px; width: calc(100vw - 16px); max-height: calc(100dvh - 16px); }
+  .computer-dialog-actions { display: grid; grid-template-columns: 1fr 1fr; }
+  #computer-private-open { grid-column: 1 / -1; }
+  .computer-dialog-actions button { font-size: 11px; }
+}

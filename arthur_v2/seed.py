@@ -10,7 +10,10 @@ from app.models.agent import Agent
 
 from .plugin import ARTHUR_V2_PLUGIN, build_arthur_v2_system_prompt
 
-ARTHUR_V2_MODEL = "deepseek/deepseek-v4-flash"
+# Arthur coordinates long-running owner context, builder tools and computer
+# work.  Use the same multimodal reasoning model as computer-capable staff;
+# the separate Decisions model remains a lightweight routing advisor.
+ARTHUR_V2_MODEL = "openai/gpt-6-luna"
 
 
 async def seed() -> Agent:

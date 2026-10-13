@@ -3,31 +3,104 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101010">
   <title>Team Chat · Managed Agents</title>
-  <link rel="stylesheet" href="team.css?v=7">
+  <link rel="stylesheet" href="team.css?v=13">
+  <link rel="stylesheet" href="computer-preview.css?v=2">
 </head>
 <body>
   <div class="app">
-    <aside class="rail">
-      <div class="rail-head"><div class="brand">◆ <span>Team Chat</span></div><div class="rail-actions"><button id="search-open" aria-label="Cari percakapan" title="Cari percakapan">⌕</button><button id="new-open" aria-label="Percakapan baru" title="Percakapan baru">＋</button></div></div>
-      <div id="search-wrap" hidden><input id="search" placeholder="Cari bot atau grup…" aria-label="Cari percakapan"></div>
-      <div id="rooms" class="room-list"></div>
-      <div class="rail-foot"><span class="account-mark">B</span><button id="settings-open">Pengaturan koneksi</button><a href="./">Dashboard ↗</a></div>
+    <button id="rail-backdrop" class="rail-backdrop" aria-label="Tutup daftar percakapan" hidden></button>
+    <aside id="rail" class="rail" aria-label="Daftar percakapan">
+      <div class="rail-head">
+        <a class="brand" href="team.html">Team Chat<span>Workspace</span></a>
+        <div class="rail-actions">
+          <button id="search-open" aria-label="Cari percakapan" title="Cari percakapan" aria-expanded="false" aria-controls="search-wrap"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg></button>
+          <button id="new-open" aria-label="Percakapan baru" title="Percakapan baru" aria-expanded="false" aria-controls="create-menu"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+          <button id="rail-close" class="rail-close" aria-label="Tutup daftar percakapan">×</button>
+        </div>
+      </div>
+      <div id="create-menu" class="create-menu" hidden>
+        <button id="create-direct" type="button"><span>Chat dengan bot</span><small>Pilih anggota tim</small></button>
+        <button id="create-group" type="button"><span>Buat grup</span><small>Kerjakan bersama tim</small></button>
+      </div>
+      <div id="search-wrap" hidden><input id="search" type="search" placeholder="Cari bot atau grup…" aria-label="Cari percakapan" autocomplete="off"></div>
+      <nav id="rooms" class="room-list" aria-label="Bot dan grup"></nav>
+      <div class="rail-foot">
+        <button id="settings-open" class="account-button" title="Pengaturan koneksi"><span class="account-mark" aria-hidden="true">W</span><span>Workspace<small>Pengaturan koneksi</small></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></button>
+        <a class="dashboard-link" href="./">Dashboard <span aria-hidden="true">↗</span></a>
+      </div>
     </aside>
 
     <main class="conversation">
-      <header class="chat-head"><button class="mobile-rooms" id="mobile-rooms" aria-label="Lihat daftar chat">☰</button><div id="chat-title" class="chat-title">Pilih bot atau buat grup</div><button id="details-open" title="Detail percakapan" aria-label="Detail percakapan">☷</button></header>
+      <header class="chat-head">
+        <button class="mobile-rooms" id="mobile-rooms" aria-label="Lihat daftar chat" aria-expanded="false" aria-controls="rail"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+        <button id="chat-title" class="chat-title" aria-label="Buka detail percakapan" disabled>Pilih percakapan</button>
+        <button id="computer-launch" title="Buka komputer" aria-label="Buka komputer" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="13" rx="2"/><path d="M8 21h8m-4-5v5"/></svg></button>
+        <button id="details-open" class="icon-button" title="Detail percakapan" aria-label="Detail percakapan" aria-expanded="false" aria-controls="details" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M15 4v16"/></svg></button>
+      </header>
       <div id="connection-status" class="connection-status" role="status" hidden></div>
-      <div id="timeline" class="timeline"><div class="welcome"><div class="welcome-icon">◆</div><h1>Tim agent kamu, satu tempat.</h1><p>Chat langsung dengan bot, atau buat grup untuk kerja bersama.</p><button id="welcome-new">Buat grup</button></div></div>
-      <div class="composer-wrap"><div id="mention-menu" class="mention-menu" hidden></div><form id="composer" class="composer"><button id="mention-open" type="button" title="Mention bot" aria-label="Mention bot" hidden>@</button><div id="draft" class="composer-editor" contenteditable="false" role="textbox" aria-label="Pesan" aria-multiline="true" data-placeholder="Pilih percakapan untuk mulai chat…"></div><button id="send" type="submit" aria-label="Kirim pesan" disabled>↑</button></form><div id="composer-hint" class="composer-hint" hidden>Di grup, ketik @ untuk memilih bot. Tanpa mention, pesan masuk ke Arthur untuk didelegasikan.</div></div>
+      <div id="timeline" class="timeline" aria-label="Pesan percakapan" tabindex="0">
+        <div class="welcome"><span class="welcome-eyebrow">Team Chat</span><h1>Mulai dari percakapan.</h1><p>Pilih bot untuk bekerja bersama, atau kumpulkan tim dalam satu grup.</p><button id="welcome-new" type="button">Percakapan baru <span aria-hidden="true">＋</span></button></div>
+      </div>
+      <div class="composer-wrap">
+        <button id="latest-message" class="latest-message" type="button" hidden>Pesan terbaru <span aria-hidden="true">↓</span></button>
+        <div id="mention-menu" class="mention-menu" role="listbox" aria-label="Pilih bot untuk disebut" hidden></div>
+        <div id="attachment-draft" class="attachment-draft" aria-live="polite"></div>
+        <form id="composer" class="composer">
+          <input id="attachment-input" type="file" multiple hidden accept="image/png,image/jpeg,image/webp,image/gif,.pdf,.txt,.md,.csv,.docx,.pptx,.xlsx">
+          <div id="draft" class="composer-editor" contenteditable="false" role="textbox" aria-label="Pesan" aria-multiline="true" aria-autocomplete="list" aria-controls="mention-menu" data-placeholder="Pilih percakapan untuk mulai chat…"></div>
+          <div class="composer-tools">
+            <button id="attachment-open" type="button" title="Tambahkan file atau gambar" aria-label="Tambahkan file atau gambar" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+            <button id="mention-open" type="button" title="Mention bot" aria-label="Mention bot" hidden>@</button>
+            <span id="composer-context" class="composer-context">Percakapan dengan tim</span>
+            <button id="send" type="submit" aria-label="Kirim pesan" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></button>
+          </div>
+        </form>
+        <div id="composer-hint" class="composer-hint">Enter untuk mengirim <span aria-hidden="true">·</span> Shift + Enter untuk baris baru</div>
+      </div>
     </main>
 
-    <aside id="details" class="details" hidden><div class="details-head"><h2>Detail</h2><button id="details-close" aria-label="Tutup detail">×</button></div><div id="details-body"></div></aside>
+    <aside id="details" class="details" aria-label="Detail percakapan" hidden><div class="details-head"><h2>Detail percakapan</h2><button id="details-close" aria-label="Tutup detail">×</button></div><div id="details-body"></div></aside>
   </div>
 
-  <dialog id="new-dialog"><form method="dialog" id="new-form"><div class="dialog-head"><h2>Percakapan baru</h2><button type="button" id="new-close" aria-label="Tutup">×</button></div><div class="tabs"><button type="button" class="active" data-kind="direct">Chat personal</button><button type="button" data-kind="group">Buat grup</button></div><div id="new-direct" class="choice-list"></div><div id="new-group" hidden><label>Nama grup<input id="group-name" maxlength="255" placeholder="Misalnya: Tim Website"></label><label>Manager<select id="group-manager"></select></label><span class="field-label">Anggota grup</span><div id="group-members" class="choice-list"></div><p class="muted">Manager menerima pesan biasa. Mention mengirim tugas langsung ke bot pilihan.</p></div><div id="new-error" class="error" role="alert"></div><div class="dialog-foot"><button type="button" id="new-cancel">Batal</button><button id="new-submit" type="submit" hidden>Buat grup</button></div></form></dialog>
+  <dialog id="new-dialog" aria-labelledby="new-dialog-title"><form method="dialog" id="new-form">
+    <div class="dialog-head"><h2 id="new-dialog-title">Percakapan baru</h2><button type="button" id="new-close" aria-label="Tutup">×</button></div>
+    <div class="tabs"><button type="button" class="active" data-kind="direct" aria-pressed="true">Chat personal</button><button type="button" data-kind="group" aria-pressed="false">Buat grup</button></div>
+    <div id="new-direct" class="choice-list"></div>
+    <div id="new-group" hidden><label>Nama grup<input id="group-name" maxlength="255" placeholder="Misalnya: Tim Website"></label><label>Manager<select id="group-manager"></select></label><span class="field-label">Anggota grup</span><div id="group-members" class="choice-list"></div><p class="muted">Pesan biasa diterima manager. Gunakan @ untuk memilih bot yang dituju.</p></div>
+    <div id="new-error" class="error" role="alert"></div><div class="dialog-foot"><button type="button" id="new-cancel">Batal</button><button id="new-submit" type="submit" hidden>Buat grup</button></div>
+  </form></dialog>
 
-  <dialog id="settings-dialog"><form method="dialog" id="settings-form"><div class="dialog-head"><h2>Koneksi</h2><button type="button" id="settings-close" aria-label="Tutup">×</button></div><p class="muted">Masukkan API key admin untuk menguji Arthur dan timnya.</p><label>Mode<select id="auth-mode"><option value="owner">Owner · QA Arthur</option><option value="admin">Admin · QA Arthur</option></select></label><label>API key<input id="admin-key" type="password" autocomplete="off"></label><div id="settings-error" class="error" role="alert"></div><div class="dialog-foot"><button type="button" id="settings-cancel">Batal</button><button type="submit">Simpan & muat</button></div></form></dialog>
-  <script src="team.js?v=13"></script>
+  <dialog id="settings-dialog" aria-labelledby="settings-title"><form method="dialog" id="settings-form">
+    <div class="dialog-head"><h2 id="settings-title">Koneksi workspace</h2><button type="button" id="settings-close" aria-label="Tutup">×</button></div>
+    <p class="muted">Hubungkan workspace untuk membuka percakapan dengan tim.</p>
+    <label>Mode<select id="auth-mode"><option value="owner">Owner · QA Arthur</option><option value="admin">Admin · QA Arthur</option></select></label>
+    <label>API key<input id="admin-key" type="password" autocomplete="off"></label>
+    <div id="settings-error" class="error" role="alert"></div><div class="dialog-foot"><button type="button" id="settings-cancel">Batal</button><button type="submit">Hubungkan</button></div>
+  </form></dialog>
+  <dialog id="computer-dialog" class="computer-dialog" aria-labelledby="computer-dialog-title">
+    <div class="dialog-head"><div><h2 id="computer-dialog-title">Komputer bersama</h2><p id="computer-dialog-caption" class="muted">Tampilan langsung dari komputer tim.</p></div><button id="computer-dialog-close" type="button" aria-label="Tutup komputer">×</button></div>
+    <div id="computer-dialog-status" class="computer-dialog-status" role="status"></div>
+    <div class="computer-dialog-layout">
+      <div class="computer-screen-column">
+        <div id="computer-stage" class="computer-stage"><img id="computer-large-preview" alt="Tampilan komputer bersama" tabindex="0" aria-describedby="computer-target-help"><span id="computer-target" class="computer-target" aria-hidden="true" hidden></span></div>
+        <p id="computer-target-help" class="muted">Perbesar tampilan ini atau buka kendali langsung untuk mengoperasikan komputer.</p>
+        <div class="computer-dialog-actions"><button id="computer-dialog-refresh" type="button" class="quiet-action">Perbarui tampilan</button><button id="computer-dialog-control" type="button" class="quiet-action" disabled>Kendali langsung ↗</button><button id="computer-private-open" type="button" class="primary-action">Isi data pribadi</button></div>
+      </div>
+      <form id="computer-private-form" class="computer-private-form" autocomplete="off" hidden>
+        <h3>Input pribadi</h3><p class="muted">Nilai dikirim langsung ke kolom yang kamu pilih, bukan ke chat. Akses komputer bot dijeda selama formulir ini terbuka, maksimal 5 menit.</p>
+        <p id="private-target-label" class="private-target-label">1. Klik kolom tujuan pada gambar komputer.</p>
+        <label for="computer-private-value">2. Isi password, kode, atau data pribadi</label><input id="computer-private-value" type="password" maxlength="1000" autocomplete="new-password" spellcheck="false" autocapitalize="off" required>
+        <label class="config-check"><input id="computer-private-replace" type="checkbox" checked>Ganti isi kolom yang dipilih</label>
+        <p class="field-help">Tombol ini hanya mengisi kolom. Login atau submit tetap kamu lakukan lewat kendali langsung.</p>
+        <button id="computer-private-submit" type="submit" class="primary-action" disabled>Isi kolom pilihan</button>
+        <p id="computer-private-status" class="config-feedback" role="status"></p>
+        <button id="computer-private-done" type="button" class="quiet-action">Selesai · lanjutkan akses bot</button>
+      </form>
+    </div>
+  </dialog>
+  <script src="bot-avatar.js?v=3"></script>
+  <script src="team.js?v=22"></script>
 </body>
 </html>

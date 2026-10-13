@@ -59,7 +59,7 @@ def team_tools(db, task_id, agent_id, *, step_id=None, db_factory=None):
         ))).scalars().all())
         return ([{"agent_id": str(row.actor_agent_id) if row.actor_agent_id else "owner",
                   "message": row.metadata_.get("message", "")} for row in reversed(rows)]
-                + [{"agent_id": str(row.assigned_agent_id), "result": (row.output_summary or "")[:4000]}
+                + [{"agent_id": str(row.assigned_agent_id), "result": (row.output_summary or "")[:12000]}
                    for row in steps])
 
     @tool

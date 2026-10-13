@@ -18,7 +18,9 @@ from app.models.workforce_task import WorkforceTask, WorkforceTaskEvent, Workfor
 
 MAX_OWNER_WORKERS = 5
 MAX_SUMMARY_CHARS = 8_000
-MAX_HANDOFF_CONTEXT_CHARS = 2_000
+MAX_WORKER_OUTPUT_CHARS = 40_000
+MAX_PRIOR_RESULT_CHARS = 30_000
+MAX_HANDOFF_CONTEXT_CHARS = 16_000
 MAX_PEER_QUESTION_CHARS = 1_000
 MAX_PEER_RESULT_CHARS = 2_000
 
@@ -121,6 +123,7 @@ async def execute_owner_workforce_task(
     db_factory: Any | None = None,
     background: bool = False,
     existing_task: WorkforceTask | None = None,
+    allowed_peer_agent_ids: set[uuid.UUID] | None = None,
 ) -> dict[str, Any]:
     """Persist and execute a bounded owner-only specialist plan.
 
@@ -180,6 +183,8 @@ async def execute_owner_workforce_task(
         context={"orchestrator": "arthur_v2", "worker_count": len(selected),
                  "durable_dispatch": background,
                  "deployment_requested": deployment_requested,
+                 **({"allowed_peer_agent_ids": sorted(str(agent_id) for agent_id in allowed_peer_agent_ids)}
+                    if allowed_peer_agent_ids is not None else {}),
                  **recovery_context},
         parent_task_id=recovery_parent[0] if recovery_parent else None,
         started_at=datetime.now(timezone.utc),
@@ -188,6 +193,10 @@ async def execute_owner_workforce_task(
         db.add(task)
         await db.flush()
         db.add(_event(task.id, "task_created", metadata={"status": task.status, "worker_count": len(selected)}))
+
+    persisted_peer_ids = (task.context or {}).get("allowed_peer_agent_ids")
+    if allowed_peer_agent_ids is None and isinstance(persisted_peer_ids, list):
+        allowed_peer_agent_ids = {uuid.UUID(value) for value in persisted_peer_ids}
 
     step_rows: list[tuple[Agent, str, str, bool, bool, WorkforceTaskStep]] = []
     existing_steps = list((await db.execute(select(WorkforceTaskStep).where(
@@ -269,6 +278,7 @@ async def execute_owner_workforce_task(
                 candidate for candidate in roster
                 if candidate.id not in selected_ids and candidate.id != agent.id
                 and candidate.id not in reserved_peer_ids
+                and (allowed_peer_agent_ids is None or candidate.id in allowed_peer_agent_ids)
             ]
             peer_roster = [
                 {"id": str(candidate.id), "name": candidate.name,
@@ -385,7 +395,7 @@ async def execute_owner_workforce_task(
                 f"TASK: {clean_title}\nOWNER OBJECTIVE: {clean_objective}\n"
                 f"YOUR ASSIGNMENT: {instructions}\n"
                 f"SHARED TASK BRIEF: {clean_objective[:MAX_HANDOFF_CONTEXT_CHARS]}\n"
-                + (f"VERIFIED PRIOR SPECIALIST RESULT ({prior_result['agent_name']}):\n{prior_result['summary'][:MAX_SUMMARY_CHARS]}\n"
+                + (f"VERIFIED PRIOR SPECIALIST RESULT ({prior_result['agent_name']}):\n{prior_result['summary'][:MAX_PRIOR_RESULT_CHARS]}\n"
                    if (worker_step.input_context or {}).get("depends_on_previous") and prior_result else "")
                 + f"ALLOWED PEER HELPERS: {json.dumps(peer_roster, ensure_ascii=False)}"
             )
@@ -407,7 +417,7 @@ async def execute_owner_workforce_task(
                     worker_db, task.id, step.id, agent.id, own_db_factory
                 ),
             )
-            summary = str(output or "").strip()[:MAX_SUMMARY_CHARS]
+            summary = str(output or "").strip()[:MAX_WORKER_OUTPUT_CHARS]
             worker_succeeded = bool(ok and summary and not looks_truncated(summary)
                                     and not _INCOMPLETE_WORKER_RESULT.search(summary)
                                     and (not requires_peer_help or peer_help_used["completed"]))
