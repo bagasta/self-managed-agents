@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -81,8 +81,32 @@ class UserSubscription(Base):
 
     @property
     def is_usable(self) -> bool:
-        """True jika masih bisa dipakai (trial/active/grace_period)."""
-        return self.status in ("trial", "active", "grace_period")
+        """Enforce expiry only for explicitly reviewed rollout cohorts."""
+        usable_status = self.status in ("trial", "active", "grace_period")
+        return usable_status and (not self.expiry_enforced or self.term_is_valid())
+
+    @property
+    def expiry_enforced(self) -> bool:
+        from app.config import get_settings
+
+        settings = get_settings()
+        return getattr(settings, "subscription_expiry_enforcement_enabled", False) or str(self.user_id) in getattr(settings, "subscription_expiry_enforcement_user_ids", [])
+
+    def term_is_valid(self, now: datetime | None = None) -> bool:
+        """Date-aware eligibility, also available in observation-only rollout."""
+        if self.status not in ("trial", "active", "grace_period"):
+            return False
+        deadline = self.grace_until if self.status == "grace_period" else self.expires_at
+        if deadline is None:
+            deadline = self.expires_at
+        if deadline is None:
+            return True
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=timezone.utc)
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        return current < deadline
 
 
 class TokenTopup(Base):

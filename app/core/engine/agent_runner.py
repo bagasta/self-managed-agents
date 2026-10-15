@@ -1017,7 +1017,7 @@ async def run_agent(
         if _agent_state.persistent and _agent_state.session is getattr(db, "sync_session", None):
             # A media download or queued inbound request may hold an older ORM
             # snapshot while the Owner pauses service or changes admission.
-            await db.refresh(agent_model, attribute_names=["tools_config", "allowed_senders", "operator_ids", "owner_external_id", "escalation_config"])
+            await db.refresh(agent_model, attribute_names=["tools_config", "allowed_senders", "operator_ids", "owner_external_id", "escalation_config", "instructions", "description", "name", "model", "max_tokens", "version"])
     from app.core.domain.agent_service_controls import service_block_reason
     _service_block = service_block_reason(
         agent_model, getattr(session, "external_user_id", None),
@@ -2024,11 +2024,6 @@ async def run_agent(
                 usage=_usage_summary(),
             )
 
-        direct_wa_confirmation_payload = (
-            _extract_direct_whatsapp_confirmation_payload(user_message, history_rows)
-            if direct_wa_text_send_context
-            else None
-        )
         direct_current_image_delivery = (
             _current_image_attachment_delivery_request(
                 session=session,
@@ -2056,125 +2051,6 @@ async def run_agent(
         # file the agent promised but forgot to actually send. Intent is never guessed
         # from keywords in the user's message.
 
-        if direct_wa_confirmation_payload:
-            target_phone, draft_message = direct_wa_confirmation_payload
-            steps = [
-                {
-                    "step": 1,
-                    "tool": "send_to_number",
-                    "args": {"phone_or_target": target_phone, "message": draft_message},
-                    "result": "",
-                }
-            ]
-            _wa_send_failed = False
-            _raw_cfg = session.channel_config
-            _channel_cfg = _raw_cfg if isinstance(_raw_cfg, dict) else {}
-            _should_send_direct_wa = False
-            try:
-                from app.core.engine.wa_outbound_guard import (
-                    check_wa_outbound_direct_window,
-                    looks_like_outbound_wa_spam_request,
-                    wa_outbound_block_reply,
-                )
-
-                # Previous delivery-error copy can itself contain the word
-                # "spam". Classify the current instruction only so a failed
-                # Kamil send never blocks a legitimate reply to Gusti.
-                if looks_like_outbound_wa_spam_request(execution_user_message):
-                    _wa_send_failed = True
-                    tool_result = f"[send_to_number blocked] {wa_outbound_block_reply('spam_request')}"
-                    steps[0]["result"] = tool_result
-                    final_reply = wa_outbound_block_reply("spam_request")
-                    log.warning("agent_run.direct_wa_confirmation_blocked_spam_request", target=target_phone)
-                else:
-                    allowed, count = await check_wa_outbound_direct_window(
-                        device_id=str(_channel_cfg.get("device_id", "") or ""),
-                        target=target_phone,
-                    )
-                    if not allowed:
-                        from app.core.domain.outbound_queue_service import enqueue_outbound_message
-
-                        queued = await enqueue_outbound_message(
-                            db,
-                            agent_id=agent_id,
-                            session_id=session.id,
-                            target=target_phone,
-                            text=draft_message,
-                            source_device_id=str(_channel_cfg.get("device_id", "") or ""),
-                        )
-                        tool_result = f"[QUEUED_TO_NUMBER:{target_phone}] id={queued.id}"
-                        steps[0]["result"] = tool_result
-                        final_reply = "Pesan masuk antrean dan akan dikirim otomatis saat slot pengiriman tersedia."
-                        log.warning(
-                            "agent_run.direct_wa_confirmation_queued_rate_limit",
-                            target=target_phone,
-                            count=count,
-                        )
-                    else:
-                        _should_send_direct_wa = True
-                if _should_send_direct_wa:
-                    from app.core.infra.channel_service import send_message as _channel_send_message
-                    _send_result = await _channel_send_message(
-                        channel_type=session.channel_type,
-                        channel_config=_channel_cfg,
-                        text=draft_message,
-                        to_override=target_phone,
-                    )
-                    if session.channel_type == "whatsapp" and not (
-                        isinstance(_send_result, dict) and _send_result.get("message_id")
-                    ):
-                        raise RuntimeError("Meta belum mengonfirmasi penerimaan pesan WhatsApp")
-                    tool_result = f"[SENT_TO_NUMBER:{target_phone}] {draft_message}"
-                    steps[0]["result"] = tool_result
-                    final_reply = f"Pesan WhatsApp ke {target_phone} sudah saya kirim."
-                    log.info("agent_run.direct_wa_confirmation_sent", target=target_phone)
-            except Exception as exc:
-                _wa_send_failed = True
-                tool_result = f"[error] Gagal kirim WhatsApp ke {target_phone}: {exc}"
-                steps[0]["result"] = tool_result
-                final_reply = f"Gagal mengirim pesan WhatsApp ke {target_phone}: {exc}"
-                log.warning("agent_run.direct_wa_confirmation_send_failed", target=target_phone, error=str(exc)[:300])
-
-            db.add(Message(
-                session_id=session.id,
-                role="tool",
-                tool_name="send_to_number",
-                tool_args={"phone_or_target": target_phone, "message": draft_message},
-                tool_result=tool_result[:2000],
-                step_index=step_counter,
-                run_id=run_id,
-            ))
-            db.add(Message(
-                session_id=session.id,
-                role="agent",
-                content=final_reply,
-                step_index=step_counter + 1,
-                run_id=run_id,
-                # Tag a failed send so it is not replayed as history next turn.
-                tool_name=DELIVERY_STATUS_TAG if _wa_send_failed else None,
-            ))
-            run_record.status = "completed"
-            run_record.completed_at = datetime.now(timezone.utc)
-            _apply_run_usage(0)
-            if _is_enabled(tools_config, "memory", default=True):
-                await record_runtime_memory(
-                    agent_id=agent_id,
-                    db=db,
-                    scope=_memory_scope,
-                    user_message=execution_user_message,
-                    final_reply=final_reply,
-                    current_attachment_name=current_attachment_name,
-                    log=log,
-                )
-            await db.flush()
-            await _cleanup_sandboxes()
-            return AgentRunResult(
-                reply=final_reply,
-                steps=steps,
-                run_id=run_id,
-                tokens_used=0,
-                usage=_usage_summary(),
-            )
 
         # Initialize so UnboundLocalError can't happen if an exception bypasses parse_agent_result
         final_reply: str = ""
@@ -3721,6 +3597,7 @@ async def run_agent(
             "reply_guard_reason": "pass_through",
         }
 
+    from app.core.engine.agent_google_routing import guard_customer_auth_links
     _reply_before_google_auth_guard = final_reply
     final_reply = await _append_builder_google_auth_link_if_needed(
         final_reply,
@@ -3729,13 +3606,17 @@ async def run_agent(
         settings_obj=settings,
         log=log,
     )
+    final_reply = guard_customer_auth_links(final_reply, session, agent_model)
+    for _record in reversed(parsed["db_messages"]):
+        if getattr(_record, "role", "") == "agent":
+            # Persist the response after every account-link appender/guard.
+            _record.content = final_reply
+            break
     if final_reply != _reply_before_google_auth_guard:
         log.warning(
             "agent_run.final_reply_appended_google_auth_link",
             before_len=len(_reply_before_google_auth_guard or ""),
             after_len=len(final_reply or ""),
-            before_preview=(_reply_before_google_auth_guard or "")[:220],
-            after_preview=(final_reply or "")[:220],
         )
 
     if _arthur_skill_context is not None and _arthur_skill_context.draft is not None:

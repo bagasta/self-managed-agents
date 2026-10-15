@@ -14,6 +14,13 @@ def is_agent_paused(agent):
     return controls(agent).get("paused") is True
 
 
+def service_snapshot(agent):
+    """Keep record existence distinct from the service's current run state."""
+    deleted = bool(getattr(agent, "is_deleted", False))
+    paused = is_agent_paused(agent)
+    return {"paused": paused, "service_status": "deleted" if deleted else "paused" if paused else "active"}
+
+
 def service_block_reason(agent, sender=None, *, whatsapp=False):
     if is_agent_paused(agent):
         return "agent_paused"

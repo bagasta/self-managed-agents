@@ -419,16 +419,16 @@ func (r *Router) forwardToAgent(agentID string, msg IncomingMessage) {
 		Status string `json:"status"`
 		Reply  string `json:"reply"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err == nil && result.Status == "send_failed" && strings.TrimSpace(result.Reply) != "" {
+	if err := json.NewDecoder(resp.Body).Decode(&result); err == nil && (result.Status == "send_failed" || result.Status == "agent_paused") && strings.TrimSpace(result.Reply) != "" {
 		if _, sendErr := r.wa.SendText(msg.ChatID, result.Reply); sendErr != nil {
 			log.Printf("[dev-router] fallback send failed for %s: %v", msg.From, sendErr)
 		} else {
-			log.Printf("[dev-router] fallback sent python reply to %s after send_failed", msg.From)
+			log.Printf("[dev-router] fallback sent python reply to %s after %s", msg.From, result.Status)
 		}
 	}
 
 	// Python normally sends the reply back via wa-dev-service's /send/text endpoint.
-	// The fallback above only fires when Python explicitly reports that final delivery failed.
+	// A paused agent also returns a service notice without invoking its model.
 	log.Printf("[dev-router] forwarded msg from %s to agent %s", msg.From, agentID)
 }
 

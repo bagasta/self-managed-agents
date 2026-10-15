@@ -57,9 +57,23 @@ def _session_sender_phone(session: Session) -> str:
     return ""
 
 
+def is_demo_customer_preview(session: Any, agent_model: Any) -> bool:
+    """A server-controlled preview changes the simulated role, never ownership."""
+    cfg = getattr(session, "channel_config", None) or {}
+    if getattr(session, "channel_type", None) != "whatsapp" or not str(cfg.get("device_id") or "").startswith("wadev_"):
+        return False
+    if (getattr(agent_model, "tools_config", None) or {}).get("builder") or "builder" in (getattr(agent_model, "capabilities", None) or []):
+        return False
+    from app.config import get_settings
+
+    return (getattr(agent_model, "tools_config", None) or {}).get("demo_customer_preview") is True or str(getattr(agent_model, "id", "")) in getattr(get_settings(), "demo_customer_preview_agent_ids", [])
+
+
 def _is_customer_whatsapp_session(session: Session, agent_model: Any) -> bool:
     if getattr(session, "channel_type", None) != "whatsapp":
         return False
+    if is_demo_customer_preview(session, agent_model):
+        return True
     sender = _session_sender_phone(session)
     if not sender:
         return False

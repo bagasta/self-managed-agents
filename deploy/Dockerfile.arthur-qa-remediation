@@ -1,0 +1,7 @@
+ARG BASE_IMAGE=managed-agents-app:arthur-knowledge-contract-20261015
+FROM ${BASE_IMAGE}
+WORKDIR /app
+COPY app /app/app
+COPY arthur /app/arthur
+COPY arthur_v2 /app/arthur_v2
+COPY scripts/audit_subscription_expiry_readonly.py /app/scripts/audit_subscription_expiry_readonly.py

@@ -10,6 +10,7 @@ from langchain_core.tools import tool
 from sqlalchemy import select
 
 from app.core.domain.whatsapp_binding import clear_cloud_api_binding
+from app.core.domain.agent_service_controls import service_snapshot
 from app.models.outbound_message import OutboundMessage
 from app.models.run import Run
 from app.models.scheduled_job import ScheduledJob
@@ -182,6 +183,7 @@ def build_operations_tools(*, db_factory, owner_phone, self_agent_id):
                 except Exception:
                     whatsapp["status"] = "unverified_service_unavailable"
             return {"ok": True, "agent_id": str(agent.id), "version": agent.version,
+                    **service_snapshot(agent),
                     "google": {**google, "allowed_services": google_config(agent).get("allowed_services", []),
                                "allowed_operations": google_config(agent).get("allowed_operations", {}),
                                "spreadsheet_configured": bool((agent.tools_config or {}).get("google_workspace_resources", {}).get("default_spreadsheet_id"))},

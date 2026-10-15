@@ -97,6 +97,19 @@ def _parse_schedule(schedule: str) -> tuple[str | None, datetime | None]:
     )
 
 
+def validate_autonomous_cadence(cron_expr: str) -> None:
+    """Validate minute spacing, including equivalent one-minute cron forms."""
+    from croniter import croniter
+    expanded, _ = croniter.expand(cron_expr)
+    minutes = list(range(60)) if expanded[0] == ["*"] else expanded[0]
+    if any(b - a < 2 for a, b in zip(minutes, minutes[1:])):
+        raise ValueError("Interval minimum autonomous run adalah setiap 2 menit.")
+    hours = list(range(24)) if expanded[1] == ["*"] else expanded[1]
+    consecutive_hours = any((h + 1) % 24 in hours for h in hours)
+    if consecutive_hours and 60 - minutes[-1] + minutes[0] < 2:
+        raise ValueError("Interval minimum autonomous run adalah setiap 2 menit.")
+
+
 def _compute_next_run(cron_expr: str) -> datetime:
     """Hitung next_run_at dari cron expression (WIB) dan konversi ke UTC."""
     try:
@@ -326,8 +339,10 @@ def build_scheduler_tools(session_id: uuid.UUID, agent_id: uuid.UUID, db_factory
             return f"[error] {exc}"
         if not cron_expr or run_once_at is not None:
             return "[error] autonomous_agent_run wajib memakai jadwal berulang (cron atau 'every ...'), bukan jadwal sekali jalan."
-        if cron_expr == "* * * * *":
-            return "[error] interval minimum autonomous_agent_run adalah setiap 2 menit; gunakan 'every 2m' atau lebih lambat."
+        try:
+            validate_autonomous_cadence(cron_expr)
+        except (ValueError, KeyError) as exc:
+            return f"[error] {exc}"
 
         async with db_factory() as own_db:
             existing = await own_db.execute(

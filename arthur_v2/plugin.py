@@ -616,7 +616,63 @@ short, practical, and in the user's language.
 """
 
 
+def build_arthur_operations_contract() -> str:
+    """Runtime rules also applied to an Arthur whose stored seed is older."""
+    return """## Current Arthur management contract
+Use paused/service_status as the authoritative service state. active only means
+the record is not deleted. To resume after the Owner requests it, call
+set_assistant_paused(paused=false, confirmed=true); never infer a resume from
+active=true, an instruction edit or a channel being connected. Schedules remain
+paused unless the Owner explicitly asks to resume them.
+
+Use list_assistant_knowledge and read_assistant_knowledge to verify stored
+references before saying knowledge is missing. RAG storage, retrieval and the
+original file's availability for delivery are separate facts. When documents
+and saved business instructions disagree, show the specific conflict to the
+Owner and ask which source is authoritative; importing a document alone never
+authorizes rewriting the assistant's rules. Never say a file was never uploaded
+merely because it cannot be sent back now. Ask which file if several are possible.
+
+Use inspect_assistant_history with the exact agent ID or name to recover a
+deleted project's last saved brief and recorded deployment URLs. Recreate from
+that verified brief, preserving its order restrictions, prices and handoff.
+If essential requirements are missing, ask instead of inventing them. A missing
+artifact receipt means unknown, never 'this agent never produced a URL'.
+
+A customer-facing order/sales workflow needs a business workflow even if the
+user calls it personal. Ask for the missing operational details and pass the
+complete workflow before creating it. A preview-only request never authorizes
+creation. If you promise to show a draft for approval, honor that pending step.
+For model changes, access changes, Google service expansion and write probes,
+show the concrete change and obtain explicit approval before mutation. A plain
+'yes' belongs only to the immediately reviewed action, not another old draft.
+
+The typed Google diagnostic/resource/recovery tools are the only administrative
+exceptions to the general prohibition on browsing a user's external account.
+Use exactly their configured target, confirmation and bounded-write rules.
+For autonomous work, configure a real recurring job on the target, not Arthur's
+own scheduler. A one-minute cadence is unsupported; explain the two-minute
+minimum. Connecting Google does not enable a background job.
+
+Write concise Indonesian (or the user's language) without UUIDs, configuration
+keys/versions, model IDs, tool names, scope strings, internal token budgets or
+provider stack/errors. Use IDs in tool arguments, not ordinary replies. If the
+Owner requests technical diagnostics, provide only necessary non-secret details.
+An open customer admission policy is normal for a public CS agent; do not add
+repeated warnings about 'all' or recommend operators-only for public customers.
+Mention upgrades only for a relevant verified limit or a purchase request.
+When get_current_plan reports term_valid=false, say the recorded term expired
+even if temporary legacy access remains allowed. Never call that term valid.
+Present dates in WIB (UTC+7).
+Call Meta links 'link penyiapan WhatsApp di platform, lalu dilanjutkan ke Meta'.
+Do not claim notifications succeeded after an error/uncertain receipt. Keep the
+customer-facing response free of the owner case card and account login links.
+"""
+
+
 def _summary(agent: Agent) -> dict[str, Any]:
+    from app.core.domain.agent_service_controls import service_snapshot
+
     return {
         "id": str(agent.id),
         "name": agent.name,
@@ -625,6 +681,7 @@ def _summary(agent: Agent) -> dict[str, Any]:
         "version": agent.version,
         "model_level": _assistant_model_level(agent.model),
         "active": not agent.is_deleted,
+        **service_snapshot(agent),
     }
 
 
@@ -692,6 +749,8 @@ def build_arthur_v2_tools(
                 "plan_label": plan.label,
                 "subscription_status": subscription.status,
                 "subscription_active": bool(subscription.is_usable),
+                "term_valid": subscription.term_is_valid() if hasattr(subscription, "term_is_valid") else bool(subscription.is_usable),
+                "expiry_enforced": getattr(subscription, "expiry_enforced", False),
                 "agents_used": used,
                 "agents_limit": limit,
                 "agents_remaining": remaining,
@@ -774,6 +833,8 @@ def build_arthur_v2_tools(
         if not name.strip() or not purpose.strip() or not instructions.strip():
             return {"ok": False, "error": "Nama, tujuan, dan instruksi assistant wajib diisi."}
         normalized_kind = assistant_kind.strip().lower()
+        if normalized_kind not in {"personal", *_BUSINESS_ASSISTANT_KINDS}:
+            return {"ok": False, "error": "Jenis assistant tidak dikenal. Pilih personal, business, internal, sales, registration, atau customer."}
         workflow_data = _workflow_data(workflow)
         try:
             google_services = _normalize_google_workspace_services(google_workspace_services)
@@ -785,7 +846,12 @@ def build_arthur_v2_tools(
                 "ok": False,
                 "error": "Link spreadsheet hanya boleh dipasang bila workflow mengaktifkan Google Sheets.",
             }
-        if normalized_kind in _BUSINESS_ASSISTANT_KINDS:
+        customer_work = re.search(
+            r"(?:mencatat|menerima|memproses)\b[^.\n]{0,60}\b(?:pesanan|order)"
+            r"|(?:melayani|membalas|menjawab)\b[^.\n]{0,60}\b(?:customer|pelanggan)"
+            r"|\bcustomer[ -]service\b", purpose, re.I,
+        )
+        if normalized_kind in _BUSINESS_ASSISTANT_KINDS or customer_work:
             missing = _missing_workflow_fields(workflow_data)
             if missing:
                 return {
@@ -855,6 +921,7 @@ def build_arthur_v2_tools(
                 }
             tools_config["mcp"]["servers"]["google_workspace"]["allowed_services"] = google_services
             tools_config["mcp"]["servers"]["google_workspace"]["allowed_operations"] = google_permissions
+            tools_config["mcp"]["servers"]["google_workspace"]["operation_policy_explicit"] = True
             tools_config["mcp"]["servers"]["google_workspace"]["oauth_scopes"] = google_scopes
         if configured_spreadsheet_id:
             tools_config["google_workspace_resources"] = {
@@ -948,7 +1015,7 @@ def build_arthur_v2_tools(
                 "sandbox": bool(enable_deploy),
                 "deploy": bool(enable_deploy),
                 "scheduler": scheduler_enabled,
-                "max_tokens": ARTHUR_V2_CODING_DEPLOY_MAX_TOKENS if enable_deploy else None,
+                "max_tokens": agent.max_tokens,
             },
             "configured_tools": {
                 "google_workspace": {
@@ -1034,8 +1101,11 @@ def build_arthur_v2_tools(
             return {"ok": False, "error": str(exc)}
         if not cron_expr or run_once_at is not None:
             return {"ok": False, "error": "Autonomous run wajib memakai jadwal berulang."}
-        if cron_expr == "* * * * *":
-            return {"ok": False, "error": "Interval minimum autonomous run adalah setiap 2 menit."}
+        from app.core.tools.scheduler_tool import validate_autonomous_cadence
+        try:
+            validate_autonomous_cadence(cron_expr)
+        except (ValueError, KeyError) as exc:
+            return {"ok": False, "error": str(exc)}
 
         async with db_factory() as db:
             session_query = select(Session).where(Session.agent_id == agent.id)
@@ -1233,6 +1303,10 @@ def build_arthur_v2_tools(
                     "Kirim ulang file PDF, DOCX, PPTX, TXT, MD, atau CSV."
                 ),
             }
+        if not requested_name and len(candidates) > 1:
+            return {"ok": False, "needs_file_selection": True,
+                    "filenames": sorted({path.name for path in candidates}),
+                    "error": "Ada beberapa file. Minta pengguna memilih nama file yang akan diimpor."}
         target_file = max(candidates, key=lambda path: path.stat().st_mtime)
         try:
             target_file.resolve().relative_to(workspace)
@@ -1343,6 +1417,9 @@ def build_arthur_v2_tools(
         google_workspace_services: list[str] | None = None,
         mcp_servers: dict[str, str] | None = None,
         confirmed: bool = False,
+        enable_scheduler: bool | None = None,
+        demo_customer_preview: bool | None = None,
+        google_workspace_operations: dict[str, list[str]] | None = None,
     ) -> dict[str, Any]:
         """Configure an owned assistant's model level and runtime capabilities after confirmation.
 
@@ -1350,12 +1427,18 @@ def build_arthur_v2_tools(
         connectors use typed setup. Pass ``google_workspace_services`` with
         the exact products needed (for example ``['calendar']``); pass ``[]``
         to remove Google Workspace from an existing assistant.
+        Omitted fields stay unchanged. Enable scheduler only for an approved
+        timed workflow. demo_customer_preview affects shared-demo sessions only.
+        google_workspace_operations specifies reviewed read/write/send rights;
+        adding a service does not authorize broadening existing permissions.
         """
         if not confirmed:
             return {"ok": False, "needs_confirmation": True, "error": "Minta konfirmasi eksplisit sebelum mengganti kepintaran model atau mengubah runtime assistant."}
         agent = await _owned(agent_id)
         if agent is None:
             return {"ok": False, "error": "Assistant tidak ditemukan atau bukan milik pengguna ini."}
+        if google_workspace_operations is not None and google_workspace_services is None:
+            return {"ok": False, "error": "Sertakan daftar layanan Google saat menentukan operasi yang disetujui."}
         if mcp_servers:
             return {
                 "ok": False,
@@ -1396,20 +1479,32 @@ def build_arthur_v2_tools(
                             mcp_url=google_mcp_url(),
                             integration_status="auth_pending",
                         )
-                        permission_context = _assistant_google_permission_context(managed)
-                        permissions = infer_google_service_operations(
-                            permission_context,
-                            requested_google_services,
-                        )
+                        from .permission_policy import setup_google_permissions
+                        permissions = setup_google_permissions(managed, requested_google_services, google_workspace_operations)
                         google_config = config["mcp"]["servers"]["google_workspace"]
                         google_config["allowed_services"] = requested_google_services
                         google_config["allowed_operations"] = permissions
+                        google_config["operation_policy_explicit"] = True
                         google_config["oauth_scopes"] = oauth_scopes_for_google_permissions(permissions)
-                    except RuntimeError as exc:
+                    except (RuntimeError, ValueError) as exc:
                         return {"ok": False, "error": str(exc)}
                 else:
                     config = _without_google_workspace_mcp(config)
+            if enable_scheduler is False:
+                active_job = (await db.execute(select(ScheduledJob.id).where(
+                    ScheduledJob.agent_id == managed.id, ScheduledJob.status.in_(["active", "running"]),
+                ).limit(1))).scalar_one_or_none()
+                if active_job is not None:
+                    return {"ok": False, "error": "Hentikan jadwal aktif terlebih dahulu sebelum menonaktifkan scheduler."}
+            if enable_scheduler is not None:
+                config["scheduler"] = enable_scheduler
+            if demo_customer_preview is not None:
+                config["demo_customer_preview"] = demo_customer_preview
             managed.tools_config = config
+            if deploy_enabled:
+                managed.max_tokens = max(managed.max_tokens or 0, ARTHUR_V2_CODING_DEPLOY_MAX_TOKENS)
+            elif requested_google_services:
+                managed.max_tokens = max(managed.max_tokens or 0, ARTHUR_V2_TOOL_AGENT_MAX_TOKENS)
             if model_level is not None:
                 managed.model = ASSISTANT_MODELS[model_level]
             managed.version += 1
@@ -1424,6 +1519,8 @@ def build_arthur_v2_tools(
                 "sandbox": sandbox_enabled,
                 "deploy": deploy_enabled,
                 "subagent_count": len(requested_subagents),
+                "scheduler": bool(config.get("scheduler")),
+                "demo_customer_preview": bool(config.get("demo_customer_preview")),
                 "mcp_servers": sorted(((config.get("mcp") or {}).get("servers") or {})),
                 "google_workspace_services": requested_google_services,
                 "google_workspace_status": (
@@ -1674,8 +1771,9 @@ def build_arthur_v2_tools(
     from .operations import build_operations_tools
     from .service_management import build_service_management_tools
     from .memory_revision_tools import build_memory_revision_tools
+    from .inspection_tools import build_inspection_tools
 
-    return [
+    tools = [
         list_managed_assistants,
         get_current_plan,
         inspect_managed_assistant,
@@ -1692,4 +1790,7 @@ def build_arthur_v2_tools(
         connect_assistant_whatsapp_cloud,
         get_assistant_whatsapp_status,
         create_demo_whatsapp_trial,
-    ] + build_operations_tools(db_factory=db_factory, owner_phone=owner_phone, self_agent_id=self_agent_id) + build_service_management_tools(db_factory=db_factory, owner_phone=owner_phone, self_agent_id=self_agent_id) + build_memory_revision_tools(db_factory=db_factory, owner_phone=owner_phone, self_agent_id=self_agent_id)
+    ] + build_operations_tools(db_factory=db_factory, owner_phone=owner_phone, self_agent_id=self_agent_id) + build_service_management_tools(db_factory=db_factory, owner_phone=owner_phone, self_agent_id=self_agent_id) + build_memory_revision_tools(db_factory=db_factory, owner_phone=owner_phone, self_agent_id=self_agent_id) + build_inspection_tools(db_factory=db_factory, owner_phone=owner_phone, self_agent_id=self_agent_id)
+    from .confirmation_gate import apply_confirmation_gate
+    return apply_confirmation_gate(tools, db_factory=db_factory, session_id=session_id,
+                                   owner_phone=owner_phone, self_agent_id=self_agent_id)

@@ -53,7 +53,6 @@ from app.core.domain.agent_sop_service import (
     summarize_operating_manual,
     upsert_agent_operating_manual,
 )
-from app.core.engine.google_mcp_support import _is_plain_google_form_link_reference
 from app.core.engine.google_mcp_support import _candidate_external_user_ids
 from app.core.utils.phone_utils import normalize_phone
 from app.core.utils.wa_identity import is_probable_whatsapp_lid

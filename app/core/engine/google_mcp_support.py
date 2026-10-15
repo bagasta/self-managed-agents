@@ -126,6 +126,10 @@ def reconcile_google_mcp_tools_config(
     services = list(google.get("allowed_services") or [])
     if not services:
         return config
+    if google.get("operation_policy_explicit") is True:
+        # Typed setup owns these permissions. Runtime prose must never widen them.
+        google["oauth_scopes"] = oauth_scopes_for_google_permissions(google.get("allowed_operations") or {})
+        return config
     permissions = reconcile_google_service_operations(
         requirement_text,
         services,
@@ -2054,7 +2058,7 @@ def _oauth_scopes_for_google_mcp_config(google_config: dict[str, Any] | None) ->
     configured_operations = config.get("allowed_operations")
     operations_by_service = configured_operations if isinstance(configured_operations, dict) else {}
     permissions = {
-        service: list(operations_by_service.get(service) or ["write"])
+        service: list(operations_by_service.get(service) or ([] if config.get("operation_policy_explicit") else ["write"]))
         for service in services
     }
     return oauth_scopes_for_google_permissions(permissions)
@@ -2273,7 +2277,20 @@ def filter_google_mcp_tools_by_services(
             and set(allowed_operations.get("gmail") or []) <= {"read"}
         )
         gmail_write_markers = ("send", "draft", "create", "modify", "delete", "trash", "archive", "label")
-        if gmail_read_only and any(marker in name for marker in gmail_write_markers):
+        explicit_policy = google_cfg.get("operation_policy_explicit") is True
+        read_name = name.startswith(("get_", "read_", "list_", "search_", "find_", "fetch_", "export_", "download_"))
+        allowed_for_tool = not explicit_policy
+        if explicit_policy and isinstance(allowed_operations, dict):
+            for service in matched_services & allowed:
+                operations = set(allowed_operations.get(service) or [])
+                if read_name:
+                    permitted = bool(operations & {"read", "write"})
+                else:
+                    permitted = ("send" if service == "gmail" else "write") in operations
+                allowed_for_tool = allowed_for_tool or permitted
+        if explicit_policy and not allowed_for_tool:
+            removed.append(name)
+        elif gmail_read_only and any(marker in name for marker in gmail_write_markers):
             removed.append(name)
         elif matched_services & allowed or explicitly_allowed:
             kept.append(mcp_tool)

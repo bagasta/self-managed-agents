@@ -434,7 +434,7 @@ def test_whatsapp_prompt_allows_user_direct_send_without_unlocking_reply_to_user
     )
 
     assert "Tool `send_to_number` BOLEH dipakai" in prompt
-    assert "langsung panggil `send_to_number` memakai nomor dan draft terakhir dari history" in prompt
+    assert "bukan izin kirim WA" in prompt
     assert "Tool `reply_to_user` HANYA dipakai untuk sesi operator/eskalasi" in prompt
     assert "Tool `reply_to_user` dan `send_to_number` HANYA dipakai saat menerima perintah dari OPERATOR" not in prompt
 
@@ -1294,7 +1294,7 @@ def test_disabled_sandbox_prevents_code_execution_claim():
 
 
 def test_direct_text_send_context_detects_followup_confirmation_from_history():
-    assert _is_direct_whatsapp_text_send_context(
+    assert not _is_direct_whatsapp_text_send_context(
         "yes kirim",
         [
             _msg("user", "tolong kirim pesan ke 6289516247011 tanya besok jadi meeting kah?"),
@@ -1309,7 +1309,7 @@ def test_direct_text_send_context_uses_operator_payload_not_operator_header_phon
         "<OPERATOR>\nNo Telepon/WA/Id: +151414827434073\nPesan: halo",
         [],
     )
-    assert _is_direct_whatsapp_text_send_context(
+    assert not _is_direct_whatsapp_text_send_context(
         "<OPERATOR>\nNo Telepon/WA/Id: +151414827434073\nPesan: yes kirim",
         [
             _msg("user", "<OPERATOR>\nNo Telepon/WA/Id: +151414827434073\nPesan: tolong kirim pesan ke 6289516247011 tanya besok meeting kah?"),
@@ -1348,7 +1348,7 @@ def test_extract_direct_confirmation_payload_from_quoted_draft_history():
         ],
     )
 
-    assert payload == ("6289516247011", "Halo Julia, apakah besok jadi meeting? Mohon konfirmasinya.")
+    assert payload is None
 
 
 def test_extract_direct_confirmation_payload_from_unquoted_draft_history():
@@ -1360,10 +1360,7 @@ def test_extract_direct_confirmation_payload_from_unquoted_draft_history():
         ],
     )
 
-    assert payload == (
-        "6289516247011",
-        "Halo Julia, apakah besok jadi meeting seperti yang direncanakan? Mohon konfirmasinya.",
-    )
+    assert payload is None
 
 
 def test_extract_direct_confirmation_payload_ignores_non_confirmation():
@@ -1470,7 +1467,7 @@ def test_operator_prompt_routes_explicit_other_number_to_send_to_number():
     assert "### KIRIM KE NOMOR LAIN" in prompt
     assert "gunakan `send_to_number(phone_or_target, message)`" in prompt
     assert "Jangan gunakan `reply_to_user` untuk nomor lain" in prompt
-    assert "langsung panggil `send_to_number` memakai nomor dan draft terakhir dari history" in prompt
+    assert "persetujuan konfigurasi bukan izin kirim WA" in prompt
 
 
 def test_escalation_operator_prompt_keeps_reply_to_user_but_allows_other_number_send():

@@ -213,10 +213,29 @@ def _google_workspace_customer_blocker_reply(*, notified_owner: bool) -> str:
     )
 
 
+def contains_owner_account_link(text: str) -> bool:
+    """Recognize account authorization links, leaving public resource URLs alone."""
+    account_link = re.compile(
+        r"https?://[^\s<>\"']*(?:/integrations/google/(?:start|auth)|/v1/integrations/google/(?:start|auth)|accounts\.google\.com/o/oauth|/meta/signup/)[^\s<>\"']*",
+        re.I,
+    )
+    return bool(account_link.search(text or ""))
+
+
+def guard_customer_auth_links(reply: str, session: Session, agent_model: Any) -> str:
+    """Never pass account setup links into an operational customer reply."""
+    if _is_customer_whatsapp_session(session, agent_model) and contains_owner_account_link(reply):
+        return "Maaf, permintaan ini belum bisa diproses karena koneksi internal perlu diperiksa pemilik. Pelanggan tidak perlu melakukan login akun."
+    return reply
+
+
 def _is_google_workspace_owner_or_operator(session: Session, agent_model: Any) -> bool:
     """Identify who manages the connection, not who can use configured tools."""
     if getattr(session, "channel_type", None) != "whatsapp":
         return True
+    from app.core.engine.agent_identity import is_demo_customer_preview
+    if is_demo_customer_preview(session, agent_model):
+        return False
     sender = _session_sender_phone(session)
     if not sender:
         return False
@@ -333,7 +352,7 @@ async def _route_google_workspace_blocker_to_owner_if_customer(
                 f"Koneksi Google untuk {agent_name} aktif, tetapi Sheet/resource yang dibutuhkan "
                 "belum ditemukan. Percobaan membuat resource pengganti otomatis juga belum berhasil. "
                 f"Buka chat Arthur dan kirim: “siapkan Google Sheet utama untuk {agent_name} sesuai tugasnya”. "
-                "Arthur akan membuat atau memilih Sheet, menyimpan ID yang valid ke agent, lalu menguji penulisannya."
+                "Arthur dapat membantu mengatur spreadsheet yang sudah ada dan memverifikasi targetnya. Pembuatan file baru memerlukan tool pembuatan yang aktif pada assistant terkait."
             )
         if (
             sender in _normalized_agent_operator_ids(agent_model)

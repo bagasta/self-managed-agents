@@ -232,7 +232,7 @@ def build_escalation_tools(
                 f"ESKALASI PESAN DARI CUSTOMER\n"
                 f"ID Kasus: {case_id}\n"
                 f"Nomor customer/user: {user_phone_display}\n"
-                + (f"Nama customer: {customer_name}\n" if customer_name else "")
+                + (f"Nama WhatsApp pengirim: {customer_name}\n" if customer_name else "")
                 + f"Alasan eskalasi: {clean_reason}\n"
                 + f"Pesan: {pesan_customer}\n\n"
                 f"Cara balas customer:\n"
@@ -255,14 +255,26 @@ def build_escalation_tools(
 
             await db.commit()
 
+        notification_accepted = False
         try:
             from app.core.infra.channel_service import send_message
+            # Shared demo traffic must notify the Owner through the verified
+            # Arthur conversation where available, rather than echoing a case
+            # card into the same demo chat used to preview the customer flow.
+            if str(operator_config.get("device_id") or "").startswith("wadev_"):
+                from app.core.engine.agent_google_routing import _arthur_owner_notification_channel_config
+                owner_channel = await _arthur_owner_notification_channel_config(agent, operator_phone)
+                if owner_channel is None or str(owner_channel.get("device_id") or "").startswith("wadev_"):
+                    return "[error] Jalur notifikasi Owner terpisah dari nomor demo belum tersedia. Eskalasi belum terkirim; minta Owner menyiapkan koneksi Arthur."
+                operator_config = owner_channel
             send_result = await send_message(
                 channel_type=operator_channel,
                 channel_config=operator_config,
                 text=notif_text,
             )
-            if operator_channel == "whatsapp" and not isinstance(send_result, dict):
+            if operator_channel == "whatsapp" and not (
+                isinstance(send_result, dict) and send_result.get("message_id")
+            ):
                 logger.error(
                     "escalation_tool.operator_notification_failed",
                     reason=reason,
@@ -272,6 +284,7 @@ def build_escalation_tools(
                     "[error] Notifikasi Owner gagal dikirim via WhatsApp. "
                     "Periksa koneksi channel dan konfigurasi Meta/WhatsApp."
                 )
+            notification_accepted = True
             logger.info("escalation_tool.notified_operator", reason=reason, operator=operator_phone)
 
             sent_message_ids: list[str] = []
@@ -317,7 +330,10 @@ def build_escalation_tools(
                         operator=operator_phone,
                     )
         except Exception as exc:
-            logger.warning("escalation_tool.channel_send_skipped", error=str(exc))
+            logger.warning("escalation_tool.channel_send_skipped", error_type=type(exc).__name__)
+            if notification_accepted:
+                return "[error] Notifikasi Owner sudah diterima transport, tetapi lampiran atau pencatatan case belum lengkap. Jangan kirim ulang notifikasi; minta Owner memeriksa kasusnya."
+            return "[error] Notifikasi Owner belum berhasil dikirim. Jangan mengklaim sudah diteruskan; sampaikan bahwa perlu bantuan Owner melalui jalur lain."
 
         return (
             "Eskalasi berhasil. Notifikasi ke operator SUDAH terkirim otomatis oleh tool ini — "
@@ -357,6 +373,11 @@ def build_escalation_tools(
         """
         from app.models.message import Message as Msg
 
+        from app.core.engine.agent_google_routing import contains_owner_account_link
+        if contains_owner_account_link(message):
+            return "[error] Link otorisasi akun hanya boleh diberikan langsung ke Owner melalui alur koneksi resmi."
+        if not user_jid:
+            return "[error] Tujuan balasan customer belum tersedia; pesan belum dikirim."
         channel_type_val: str = "whatsapp"
         ch_cfg: dict = {}
 
@@ -381,14 +402,17 @@ def build_escalation_tools(
         if user_jid:
             try:
                 from app.core.infra.channel_service import send_message
-                await send_message(
+                send_result = await send_message(
                     channel_type=channel_type_val,
                     channel_config=ch_cfg,
                     text=message,
                 )
+                if channel_type_val == "whatsapp" and not (isinstance(send_result, dict) and send_result.get("message_id")):
+                    return "[error] Pengiriman WhatsApp belum terverifikasi; periksa status sebelum mencoba ulang."
                 logger.info("escalation_tool.reply_to_user.sent", target=user_jid)
             except Exception as exc:
-                logger.warning("escalation_tool.reply_channel_failed", error=str(exc))
+                logger.warning("escalation_tool.reply_channel_failed", error_type=type(exc).__name__)
+                return "[error] Pengiriman balasan belum terverifikasi; periksa status sebelum mencoba ulang."
         else:
             logger.info("escalation_tool.reply_to_user.no_user_jid", message_preview=message[:80])
 
@@ -408,6 +432,9 @@ def build_escalation_tools(
         """
         from app.models.message import Message as Msg
 
+        from app.core.engine.agent_google_routing import contains_owner_account_link
+        if contains_owner_account_link(message):
+            return "[error] Link otorisasi akun tidak dapat diteruskan ke nomor lain. Gunakan alur koneksi langsung bersama Owner."
         message = _clean_jid_from_text(message)
         async with db_factory() as guard_db:
             agent_result = await guard_db.execute(select(Agent).where(Agent.id == agent_id))
@@ -515,9 +542,10 @@ def build_escalation_tools(
                     )
                 logger.info("escalation_tool.send_to_number", target=phone_or_target)
             except Exception as exc:
-                logger.warning("escalation_tool.send_to_number_channel_failed", error=str(exc))
+                logger.warning("escalation_tool.send_to_number_channel_failed", error_type=type(exc).__name__)
+                return "[error] Pengiriman pesan belum terverifikasi; periksa status sebelum mencoba ulang."
         else:
-            logger.info("escalation_tool.send_to_number.dev_mode", target=phone_or_target, message_preview=message[:80])
+            return "[error] Channel pengiriman belum tersedia; pesan belum dikirim."
 
         return f"[SENT_TO_NUMBER:{phone_or_target}] {message}"
 

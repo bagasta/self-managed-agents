@@ -82,7 +82,8 @@ async def test_old_sixteen_tools_preserved_and_six_added():
     names = [t.name for t in plugin.build_arthur_v2_tools(db_factory=None, owner_phone=OWNER, self_agent_id=None)]
     assert names[:16] == ["list_managed_assistants", "get_current_plan", "inspect_managed_assistant", "get_assistant_automation_status", "create_assistant", "configure_assistant_autonomous_run", "stop_assistant_automation", "update_assistant", "add_assistant_knowledge", "delete_assistant", "configure_assistant_runtime", "get_payment_link", "start_assistant_google_oauth", "connect_assistant_whatsapp_cloud", "get_assistant_whatsapp_status", "create_demo_whatsapp_trial"]
     assert names[16:22] == ["disconnect_assistant_whatsapp", "transfer_assistant_whatsapp", "diagnose_assistant", "test_assistant_google_tools", "prepare_assistant_run_recovery", "recover_assistant_run"]
-    assert len(names) == len(set(names)) == 32
+    assert len(names) == len(set(names)) == 35
+    assert names[-3:] == ["list_assistant_knowledge", "read_assistant_knowledge", "inspect_assistant_history"]
 
 
 @pytest.mark.asyncio

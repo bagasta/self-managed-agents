@@ -21,10 +21,15 @@ from .service_management import phone_number
 
 
 def scope_value(scope):
+    scope = str(scope or "").strip()
     if scope == "global":
         return None
     if not scope or scope.startswith("__"):
         raise OperationRejected("Pilih scope nomor pelanggan atau 'global'; ruang administrasi tidak boleh diedit sebagai memori percakapan.")
+    if scope.startswith("phone:"):
+        scope = scope.removeprefix("phone:").strip()
+    # A phone JID is not an opaque @lid. Normalize only the known phone suffix.
+    scope = scope.removesuffix("@s.whatsapp.net")
     return phone_number(scope)
 
 

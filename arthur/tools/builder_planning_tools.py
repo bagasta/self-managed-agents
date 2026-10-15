@@ -6,7 +6,6 @@ from typing import Any, Awaitable, Callable
 
 from langchain_core.tools import tool
 
-from app.core.engine.google_mcp_support import _is_plain_google_form_link_reference
 from app.core.domain.agent_build_state_service import (
     load_build_discovery_facts,
     merge_discovery_answers,
@@ -193,6 +192,24 @@ def _discovery_clarification_payload(discovery: dict[str, Any]) -> dict[str, Any
             "secara eksplisit `sudah`, `sesuai`, atau `sudah sesuai` sebagai konfirmasi akhir."
         ),
     }
+
+
+def _is_plain_google_form_link_reference(message: str) -> bool:
+    """Legacy planning validation only; never overrides runtime tool routing."""
+    import re
+    text = str(message or "").casefold()
+    has_link = bool(re.search(r"https?://(?:forms\.gle|docs\.google\.com/forms)/\S+", text))
+    reference = "google form" in text and any(word in text for word in (
+        "cara order", "order via", "order lewat", "isi google form", "pelanggan isi",
+        "customer isi", "link yang pelanggan", "link order", "sumber data order",
+        "form yang udah aku buat", "form yang sudah aku buat",
+    ))
+    return (has_link or reference) and not any(word in text for word in (
+        "buatkan", "bikinin", "tolong buat", "minta buat", "bikin google form", "buat google form",
+        "create", "generate", "edit", "ubah", "update", "hapus", "delete", "isi form", "submit",
+        "jawab form", "ambil response", "lihat response", "cek response", "pantau response",
+        "sinkron", "integrasi", "connect", "login", "auth",
+    ))
 
 
 def build_builder_planning_tools(

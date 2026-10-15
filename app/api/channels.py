@@ -1781,7 +1781,15 @@ async def wa_incoming(
     _is_arthur_system = _is_arthur_system_agent(agent)
     from app.core.domain.agent_service_controls import is_agent_paused
     if is_agent_paused(agent):
-        return {"status": "agent_paused"}
+        notice = "Layanan assistant ini sedang dijeda oleh pemilik. Hubungi pemilik untuk melanjutkan layanan."
+        if str(body.device_id or "").startswith("wadev_"):
+            try:
+                receipt = await send_wa_message(body.device_id, body.chat_id or body.from_, notice)
+                if isinstance(receipt, dict) and receipt.get("message_id"):
+                    return {"status": "agent_paused", "reply": "", "notice_sent": True}
+            except Exception as exc:
+                log.warning("wa_incoming.paused_notice_failed", error_type=type(exc).__name__)
+        return {"status": "agent_paused", "reply": notice}
 
     # phone_from: phone number yang sudah di-resolve dari LID oleh Go wa-service.
     # Untuk akun LID: body.from_ bisa berisi LID/JID, body.phone_from berisi phone number asli.
@@ -1861,7 +1869,13 @@ async def wa_incoming(
     # Identitas admin/operator saja tidak cukup: admin sering mengetes agent
     # dari nomor yang sama. Operator mode hanya aktif saat reply ke pesan
     # eskalasi, atau saat mengonfirmasi draft pending dari reply eskalasi itu.
-    _operator_identity = is_operator_message(from_phone, reply_target, agent)
+    from types import SimpleNamespace
+    from app.core.engine.agent_identity import is_demo_customer_preview
+    _demo_preview = is_demo_customer_preview(SimpleNamespace(
+        channel_type="whatsapp", channel_config={"device_id": body.device_id}), agent)
+    if _demo_preview:
+        _is_owner_sender = False
+    _operator_identity = not _demo_preview and is_operator_message(from_phone, reply_target, agent)
     _is_operator = False
     if _operator_identity:
         _is_operator = await _should_treat_as_operator_turn(

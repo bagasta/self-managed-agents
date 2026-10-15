@@ -119,96 +119,25 @@ def _is_direct_whatsapp_meta_request(user_message: str) -> bool:
 
 
 def _is_direct_whatsapp_text_send_context(user_message: str, history_rows: list[Any] | None = None) -> bool:
-    """Detect text-message-to-number turns so WhatsApp routing can prefer send_to_number."""
-    text = _operator_message_payload(user_message).strip().lower()
+    """Prioritize the normal send tool only for an explicit current send request.
+
+    A generic confirmation belongs to the current conversation, not an inferred
+    draft/phone pair from history. The model must call the guarded tool normally.
+    """
     if _is_direct_whatsapp_meta_request(user_message):
         return False
+    text = _operator_message_payload(user_message).strip().lower()
     if any(marker in text for marker in _WA_MEDIA_REQUEST_MARKERS):
         return False
-    if _is_direct_whatsapp_send_request(user_message):
-        return True
-    if text not in _DIRECT_WA_CONFIRM_WORDS:
-        return False
-
-    recent_contents = []
-    for row in (history_rows or [])[-10:]:
-        content = _operator_message_payload(getattr(row, "content", "") or "")
-        if content:
-            recent_contents.append(str(content).lower())
-    recent_text = "\n".join(recent_contents)
-    if _is_direct_whatsapp_meta_request(recent_text):
-        return False
-    if any(marker in recent_text for marker in _WA_MEDIA_REQUEST_MARKERS):
-        return False
-    has_recent_phone = bool(re.search(r"(?:\+?62|08)\d{7,15}", recent_text))
-    has_recent_direct_send = any(
-        marker in recent_text
-        for marker in (
-            "kirim pesan",
-            "kirim wa",
-            "whatsapp ke",
-            "pesan whatsapp ke",
-            "pesan wa ke",
-            "nomor",
-            "draft",
-        )
-    )
-    return has_recent_phone and has_recent_direct_send
+    return _is_direct_whatsapp_send_request(user_message)
 
 
 def _extract_direct_whatsapp_confirmation_payload(
     user_message: str,
     history_rows: list[Any] | None,
 ) -> tuple[str, str] | None:
-    """Extract target phone and last confirmed text draft for deterministic WA send."""
-    if not _is_direct_whatsapp_send_confirmation(user_message):
-        return None
-
-    rows = list(history_rows or [])[-12:]
-    target_phone = ""
-    for row in reversed(rows):
-        content = _operator_message_payload(getattr(row, "content", "") or "")
-        phones = re.findall(r"(?:\+?62|08)\d{7,15}", content)
-        if phones:
-            target_phone = phones[-1]
-            break
-    if not target_phone:
-        return None
-
-    draft = ""
-    for row in reversed(rows):
-        if getattr(row, "role", "") not in {"agent", "assistant"}:
-            continue
-        content = str(getattr(row, "content", "") or "").strip()
-        if not content or content.lower().startswith("belum saya kirim"):
-            continue
-
-        quoted = re.findall(r'"([^"\n]{6,1000})"|"([^"\n]{6,1000})"', content)
-        quote_candidates = [a or b for a, b in quoted if (a or b)]
-        if quote_candidates:
-            draft = quote_candidates[-1].strip()
-            break
-
-        marker_match = re.search(
-            r"(?:draft(?:\s+untuk\s+[^:]+)?|pesan(?:\s+sopan)?(?:\s+untuk\s+[^:]+)?|isi pesan)\s*:\s*(.+)",
-            content,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        if marker_match:
-            candidate = marker_match.group(1).strip()
-            candidate = re.split(
-                r"\b(?:ketik|balas|sudah ok|sudah oke|konfirmasi)\b",
-                candidate,
-                maxsplit=1,
-                flags=re.IGNORECASE,
-            )[0].strip(" \n\t\"'")
-            if len(candidate) >= 6:
-                draft = candidate
-                break
-
-    if not draft:
-        return None
-    return target_phone, draft
+    """Compatibility shim: history is never authorization for a direct send."""
+    return None
 
 
 def _filter_whatsapp_unsafe_mcp_tools(mcp_tools: list[Any], *, user_message: str, log: Any) -> list[Any]:
@@ -259,7 +188,13 @@ def _prioritize_direct_whatsapp_text_send_tools(tools: list[Any], log: Any) -> l
 
 
 def _has_send_to_number_step(steps: list[dict[str, Any]]) -> bool:
-    return any((step or {}).get("tool") == "send_to_number" for step in steps or [])
+    for step in steps or []:
+        if (step or {}).get("tool") != "send_to_number":
+            continue
+        result = step.get("result", "")
+        if str(result).startswith("[SENT_TO_NUMBER:") or isinstance(result, dict) and result.get("message_id"):
+            return True
+    return False
 
 
 def _looks_like_direct_send_success_claim(final_reply: str) -> bool:
@@ -270,6 +205,8 @@ def _looks_like_direct_send_success_claim(final_reply: str) -> bool:
         "whatsapp" in text
         or " wa " in f" {text} "
         or "nomor" in text
+        or ("pesan" in text and "email" not in text and "gmail" not in text
+            and re.search(r"\bkirim\b.*\bke\b", text))
         or re.search(r"(?:\+?62|08)\d{7,15}", text)
     )
     if not has_whatsapp_or_phone_context:
@@ -288,36 +225,21 @@ def _looks_like_direct_send_success_claim(final_reply: str) -> bool:
 
 
 def _has_prior_send_to_number_evidence(messages: list[BaseMessage] | None) -> bool:
-    for msg in messages or []:
-        name = getattr(msg, "name", None)
-        if name == "send_to_number":
-            return True
-        content = getattr(msg, "content", "")
-        if "[SENT_TO_NUMBER" in str(content or ""):
-            return True
-        tool_calls = getattr(msg, "tool_calls", None) or []
-        if any((tc or {}).get("name") == "send_to_number" for tc in tool_calls):
-            return True
-    return False
+    return any(getattr(msg, "type", "") == "tool"
+               and str(getattr(msg, "content", "") or "").startswith("[SENT_TO_NUMBER:")
+               for msg in messages or [])
 
 
 def _has_reply_to_user_step(steps: list[dict[str, Any]]) -> bool:
-    return any((step or {}).get("tool") == "reply_to_user" for step in steps or [])
+    return any((step or {}).get("tool") == "reply_to_user"
+               and str(step.get("result") or "").startswith("[SENT_TO_USER]")
+               for step in steps or [])
 
 
 def _has_prior_reply_to_user_evidence(messages: list[BaseMessage] | None) -> bool:
-    for msg in messages or []:
-        name = getattr(msg, "name", None)
-        if name == "reply_to_user":
-            return True
-        content = getattr(msg, "content", "")
-        text = str(content or "")
-        if "[SENT_TO_USER]" in text or "[TO_USER_MEDIA]" in text:
-            return True
-        tool_calls = getattr(msg, "tool_calls", None) or []
-        if any((tc or {}).get("name") == "reply_to_user" for tc in tool_calls):
-            return True
-    return False
+    return any(getattr(msg, "type", "") == "tool"
+               and str(getattr(msg, "content", "") or "").startswith("[SENT_TO_USER]")
+               for msg in messages or [])
 
 
 def _direct_whatsapp_send_guard_reply(
@@ -329,9 +251,7 @@ def _direct_whatsapp_send_guard_reply(
     """Prevent false WhatsApp-send success claims when send_to_number did not run."""
     if not _looks_like_direct_send_success_claim(final_reply):
         return final_reply
-    if _is_operator_envelope(user_message):
-        return final_reply
-    if _has_reply_to_user_step(steps) or _has_prior_reply_to_user_evidence(history_messages):
+    if _has_reply_to_user_step(steps):
         return final_reply
     if _has_send_to_number_step(steps):
         return final_reply
@@ -341,9 +261,9 @@ def _direct_whatsapp_send_guard_reply(
     # sudah terkirim?". It must not let the model claim that a new recipient
     # was contacted when this run did not execute send_to_number.
     status_question = bool(re.search(r"\b(apakah|udah|sudah|status|tadi)\b", _operator_message_payload(user_message).lower()))
-    if _has_prior_send_to_number_evidence(history_messages) and status_question:
+    if (_has_prior_send_to_number_evidence(history_messages) or _has_prior_reply_to_user_evidence(history_messages)) and status_question:
         return final_reply
     return (
-        "Belum saya kirim. Saya tidak menemukan eksekusi tool kirim WhatsApp ke nomor tujuan, "
-        "jadi saya tidak akan mengklaim pesan sudah terkirim. Ketik `kirim` jika draftnya sudah benar."
+        "Belum saya kirim. Pengiriman ke nomor tujuan belum terverifikasi. "
+        "Periksa status sebelum mencoba mengirim ulang."
     )

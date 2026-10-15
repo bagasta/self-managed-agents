@@ -191,15 +191,20 @@ async def search_documents_keyword(
     Keyword fallback: ILIKE search across title + content.
     Used when pgvector is not available or no embeddings exist.
     """
-    words = [w.strip() for w in query.split() if w.strip()]
+    import re
+    from sqlalchemy import or_
+
+    # Transport metadata is not part of the user's knowledge query.
+    text = query.rsplit("Pesan:", 1)[-1]
+    stop = {"yang", "dan", "ini", "itu", "saya", "aku", "kak", "berapa", "apakah", "tolong", "untuk", "dari", "dengan"}
+    words = list(dict.fromkeys(w for w in re.findall(r"[^\W\d_]{3,}", text.casefold()) if w not in stop))[:20]
     if not words:
         return []
     stmt = select(Document).where(Document.agent_id == agent_id)
-    for word in words:
-        pattern = f"%{word}%"
-        stmt = stmt.where(
-            Document.title.ilike(pattern) | Document.content.ilike(pattern)
-        )
+    stmt = stmt.where(or_(*[
+        Document.title.ilike(f"%{word}%") | Document.content.ilike(f"%{word}%")
+        for word in words
+    ]))
     stmt = stmt.order_by(Document.updated_at.desc()).limit(max_results)
     result = await db.execute(stmt)
     return list(result.scalars().all())

@@ -42,6 +42,9 @@ def _owner_identity_reply_guard(
     should guess from chat history.  This guard only runs when the sender's
     normalized phone exactly matches ``owner_external_id``.
     """
+    from app.core.engine.agent_identity import is_demo_customer_preview
+    if is_demo_customer_preview(session, agent_model):
+        return final_reply
     owner_phone = normalize_phone(str(getattr(agent_model, "owner_external_id", "") or ""))
     if not owner_phone or _session_sender_phone(session) != owner_phone:
         return final_reply

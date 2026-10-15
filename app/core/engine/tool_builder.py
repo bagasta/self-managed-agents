@@ -181,6 +181,18 @@ def build_heartbeat_tools(
         from app.models.scheduled_job import ScheduledJob
         from sqlalchemy import select as _select
 
+        # Cron intervals must divide their clock unit; never silently turn a
+        # 90-minute request into an hourly schedule.
+        if not 1 <= interval_minutes <= 1440 or (
+            interval_minutes < 60 and 60 % interval_minutes
+        ) or (
+            interval_minutes >= 60 and (interval_minutes % 60 or 24 % (interval_minutes // 60))
+        ):
+            return "[error] Interval tidak didukung. Gunakan pembagi 60 menit (misalnya 10/15/30), atau 1/2/3/4/6/8/12/24 jam."
+        import re as _re
+        if any(not _re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value) for value in (quiet_start, quiet_end)):
+            return "[error] Jam tenang harus memakai HH:MM yang valid, misalnya 22:00 dan 06:00 WIB."
+
         # Simpan config ke memory
         config = {
             "enabled": True,
@@ -214,7 +226,7 @@ def build_heartbeat_tools(
 
             # Compute next_run
             from croniter import croniter as _croniter
-            _local_tz = _tz(timedelta(hours=7))
+            _local_tz = _tz(_td(hours=7))
             from datetime import datetime as _dt
             now_local = _dt.now(_local_tz)
             try:

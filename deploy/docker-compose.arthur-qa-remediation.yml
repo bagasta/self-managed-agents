@@ -1,0 +1,11 @@
+# Preparation only: this file is not loaded by the existing deployment.
+# Use a reviewed immutable image ID for both services at rollout time.
+services:
+  api:
+    image: ${ARTHUR_QA_IMAGE:?Set ARTHUR_QA_IMAGE to the reviewed immutable candidate image ID}
+    build: !reset null
+    pull_policy: never
+  scheduler:
+    image: ${ARTHUR_QA_IMAGE:?Set ARTHUR_QA_IMAGE to the reviewed immutable candidate image ID}
+    build: !reset null
+    pull_policy: never

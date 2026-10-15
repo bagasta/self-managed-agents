@@ -158,6 +158,11 @@ async def build_agent_tool_setup(
             active_groups.append("deploy")
 
     memory_scope = getattr(session, "external_user_id", None)
+    if (not operator_turn) and _is_enabled(tools_config, "rag", default=False):
+        from app.core.tools.rag_tool import build_rag_tools
+
+        tools.extend(build_rag_tools(agent_id, AsyncSessionLocal, tools_config))
+        active_groups.append("rag")
     if _is_enabled(tools_config, "memory", default=True):
         tools.extend(build_memory_tools(agent_id, AsyncSessionLocal, scope=memory_scope))
         tools.extend(build_heartbeat_tools(agent_id, session.id, AsyncSessionLocal, scope=memory_scope))
@@ -340,6 +345,11 @@ async def build_agent_tool_setup(
             maturity=_maturity,
             agent_id=str(agent_id),
         )
+
+    if builder_agent and not operator_turn:
+        from arthur_v2.confirmation_gate import apply_confirmation_gate
+        tools = apply_confirmation_gate(tools, db_factory=AsyncSessionLocal, session_id=str(session.id),
+            owner_phone=_resolve_builder_owner_phone(session), self_agent_id=str(agent_id), only={"send_to_number"})
 
     return AgentToolSetup(
         tools=tools,

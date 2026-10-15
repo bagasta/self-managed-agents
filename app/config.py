@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     # Allows the legacy Arthur plugin to be retired without disabling generic
     # agent CRUD, dashboard management, scheduler, or WhatsApp services.
     arthur_legacy_enabled: bool = False
+    # Opt-in rollout: review existing subscriptions before enforcing dates.
+    subscription_expiry_enforcement_enabled: bool = False
+    subscription_expiry_enforcement_user_ids: list[str] = []
+    demo_customer_preview_agent_ids: list[str] = []
+    arthur_confirmation_owner_ids: list[str] = []
     llm_request_timeout_seconds: float = 120.0
     llm_max_retries: int = 1
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import copy
 import re
 import uuid
@@ -157,6 +158,28 @@ def canonical_values(values, h, w):
 
 
 def read_values(result, range_name):
+    # Accept explicit structured API values as well as the existing MCP text
+    # contract; never treat an error or a truncated response as a blank range.
+    structured = result
+    if isinstance(structured, dict) and structured.get("isError"):
+        raise OperationRejected("Tool Google mengembalikan kegagalan.")
+    if isinstance(structured, dict) and isinstance(structured.get("structuredContent"), dict):
+        structured = structured["structuredContent"]
+    if not isinstance(structured, dict) or "values" not in structured:
+        try:
+            structured = json.loads(result if isinstance(result, str) else result_text(result))
+        except (ValueError, TypeError):
+            structured = None
+    if isinstance(structured, dict) and "values" in structured:
+        if structured.get("error") or structured.get("ok") is False or structured.get("success") is False:
+            raise OperationRejected("Tool Google mengembalikan kegagalan.")
+        values = structured["values"]
+        if not isinstance(values, list) or any(not isinstance(row, list) for row in values):
+            raise OperationRejected("Hasil baca Google tidak valid.")
+        if structured.get("range") and str(structured["range"]).replace("'", "") != range_name.replace("'", ""):
+            raise OperationRejected("Range hasil baca berbeda dari permintaan.")
+        _, _, _, h, w = range_shape(range_name)
+        return canonical_values(values, h, w)
     text = result_text(result)
     if not re.search(r"Successfully read\s+\d+\s+rows?", text, re.I) and "No data found" not in text:
         raise OperationRejected("Hasil baca Google tidak dapat diverifikasi.")

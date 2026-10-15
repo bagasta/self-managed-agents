@@ -10,7 +10,7 @@ from typing import Literal
 from langchain_core.tools import tool
 from sqlalchemy import select
 
-from app.core.domain.agent_service_controls import CONTROL_KEY, controls, is_agent_paused
+from app.core.domain.agent_service_controls import CONTROL_KEY, controls, is_agent_paused, service_snapshot
 from app.core.domain.agent_revision_service import ADMIN_SCOPE, encode_archive, decode_archive
 from app.models.memory import Memory
 from app.models.outbound_message import OutboundMessage
@@ -81,6 +81,7 @@ def build_service_management_tools(*, db_factory, owner_phone, self_agent_id):
         async with db_factory() as db:
             agent = await owned_agent(db, agent_id, owner_phone, self_agent_id)
             return {"ok": True, "owner": agent.owner_external_id, "operators": agent.operator_ids or [],
+                    **service_snapshot(agent),
                     "escalation_operator": (agent.escalation_config or {}).get("operator_phone"),
                     "customer_access": "all" if agent.allowed_senders is None else "allowlist" if agent.allowed_senders else "operators_only",
                     "allowed_customers": agent.allowed_senders, "version": agent.version,
