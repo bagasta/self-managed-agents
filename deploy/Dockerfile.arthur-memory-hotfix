@@ -1,0 +1,12 @@
+ARG BASE_IMAGE=managed-agents-app:rollback-arthur-memory-20261014
+FROM ${BASE_IMAGE}
+WORKDIR /app
+COPY app/core/engine/arthur_context.py app/core/engine/arthur_context.py
+COPY app/core/engine/agent_runner.py app/core/engine/agent_runner.py
+COPY app/core/engine/agent_llm.py app/core/engine/agent_llm.py
+COPY app/core/engine/context_service.py app/core/engine/context_service.py
+COPY app/core/engine/prompt_builder.py app/core/engine/prompt_builder.py
+COPY app/core/engine/reply_guard.py app/core/engine/reply_guard.py
+COPY app/core/domain/memory_service.py app/core/domain/memory_service.py
+COPY arthur_v2/plugin.py arthur_v2/plugin.py
+COPY arthur_v2/seed.py arthur_v2/seed.py

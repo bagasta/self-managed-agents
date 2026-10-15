@@ -1,0 +1,6 @@
+ARG BASE_IMAGE=managed-agents-app:tool-workflow-recovery-20261014
+FROM ${BASE_IMAGE}
+COPY arthur_v2/plugin.py /app/arthur_v2/plugin.py
+COPY arthur_v2/operations_common.py /app/arthur_v2/operations_common.py
+COPY arthur_v2/operations.py /app/arthur_v2/operations.py
+COPY arthur_v2/run_recovery.py /app/arthur_v2/run_recovery.py

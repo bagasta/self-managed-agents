@@ -7,6 +7,7 @@ so this module must never reinterpret a non-empty response.
 from __future__ import annotations
 
 import re
+import json
 from enum import Enum
 from typing import Any
 
@@ -18,6 +19,7 @@ class ReplyGuardReason(str, Enum):
     UNVERIFIED_GOOGLE_DELIVERABLE = "unverified_google_deliverable"
     FALLBACK_VERIFIED_ARTIFACT = "fallback_verified_artifact"
     FALLBACK_EMPTY_REPLY = "fallback_empty_reply"
+    FALLBACK_VERIFIED_ASSISTANT = "fallback_verified_assistant"
 
 
 def _record_guard_reason(
@@ -185,6 +187,24 @@ def ensure_non_empty_reply(
     if text:
         _record_guard_reason(decision_trace, ReplyGuardReason.PASS_THROUGH)
         return text
+
+    if system_plugin == "arthur_v2":
+        for step in reversed(steps or []):
+            if step.get("tool") not in {"create_assistant", "update_assistant", "delete_assistant"}:
+                continue
+            try:
+                outcome = json.loads(step.get("result") or "{}")
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(outcome, dict) or outcome.get("ok") is not True:
+                continue
+            if step.get("tool") != "create_assistant":
+                break
+            assistant = outcome.get("assistant") or {}
+            if isinstance(assistant, dict) and assistant.get("name") and (assistant.get("id") or outcome.get("agent_id")):
+                _record_guard_reason(decision_trace, ReplyGuardReason.FALLBACK_VERIFIED_ASSISTANT)
+                return f"Assistant {assistant['name']} berhasil dibuat. Koneksi Google dan WhatsApp perlu dicek terpisah sebelum digunakan."
+            break
 
     artifact_url = _verified_artifact_url_from_steps(steps)
     if artifact_url:

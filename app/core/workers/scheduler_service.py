@@ -248,6 +248,14 @@ async def _run_outbound_message(message_id: Any) -> None:
             await db.commit()
             return
 
+        from app.core.domain.agent_service_controls import service_block_reason
+        _blocked = service_block_reason(agent, item.target, whatsapp=True)
+        if _blocked:
+            item.status = "cancelled"
+            item.last_error = _blocked
+            await db.commit()
+            return
+
         channel_config = _scheduled_channel_config(session, agent)
         allowed, count = await check_wa_outbound_direct_window(
             device_id=item.source_device_id,
@@ -513,6 +521,19 @@ async def _run_job(job_id) -> None:
             return
 
         # Heartbeat jobs ditangani terpisah
+        from app.core.domain.agent_service_controls import is_agent_paused
+        if is_agent_paused(agent_model):
+            job.status = "paused"
+            await db.commit()
+            return
+        from app.core.domain.agent_service_controls import controls, service_block_reason
+        if controls(agent_model).get("managed_access"):
+            policy_session = await db.get(Session, job.session_id)
+            if policy_session and service_block_reason(agent_model, policy_session.external_user_id, whatsapp=policy_session.channel_type == "whatsapp"):
+                job.status = "paused"
+                await db.commit()
+                return
+
         if job.payload == "[HEARTBEAT]":
             try:
                 await _run_heartbeat_job(job, agent_model, db)

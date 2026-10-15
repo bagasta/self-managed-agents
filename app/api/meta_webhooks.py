@@ -197,6 +197,9 @@ async def _process_n8n(agent_id: str, phone_number_id: str, message: dict, sende
             return
 
         sender = str(message.get("from") or "")
+        from app.core.domain.agent_service_controls import service_block_reason
+        if service_block_reason(agent, sender, whatsapp=True):
+            return
         if not sender:
             return
         token = decrypt_value(encrypted_token)
@@ -268,6 +271,9 @@ async def _process(agent_id: str, phone_number_id: str, message: dict, sender_na
         if agent is None or not agent.wa_access_token_encrypted:
             return
         sender = str(message.get("from") or "")
+        from app.core.domain.agent_service_controls import service_block_reason
+        if service_block_reason(agent, sender, whatsapp=True):
+            return
         message_type = str(message.get("type") or "")
         text = str((message.get("text") or {}).get("body") or "").strip()
         media = message.get(message_type) or {}

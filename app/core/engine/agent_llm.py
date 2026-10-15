@@ -7,7 +7,7 @@ from langchain_openai import ChatOpenAI
 
 
 def build_agent_llms(agent_model: Any, settings: Any, temperature: float) -> tuple[ChatOpenAI, Any]:
-    model_name = agent_model.model or ""
+    model_name = (agent_model.model or "").strip()
     if model_name.startswith("mistral/") or model_name.startswith("mistral-"):
         api_key = settings.mistral_api_key
         base_url = "https://api.mistral.ai/v1"
@@ -38,8 +38,15 @@ def build_agent_llms(agent_model: Any, settings: Any, temperature: float) -> tup
     else:
         default_max_tokens = settings.llm_max_tokens
     max_tokens = int(configured_max_tokens or default_max_tokens)
+    if isinstance(tools_config, dict) and tools_config.get("system_plugin") == "arthur_v2":
+        # Creating an assistant serialises a complete workflow as tool JSON.
+        max_tokens = max(max_tokens, 16384)
     if is_google_agent:
         max_tokens = max(max_tokens, int(getattr(settings, "google_agent_max_tokens", 4096)))
+        if model_name.startswith("deepseek/"):
+            # Reasoning consumes the same output allowance as tool arguments.
+            # A 4096-token reasoning-only response cannot execute the sheet write.
+            max_tokens = max(max_tokens, 16384)
     llm_raw = ChatOpenAI(
         model=bare_model,
         api_key=api_key,

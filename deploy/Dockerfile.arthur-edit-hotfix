@@ -1,0 +1,7 @@
+# Layer only the verified Arthur edit/model fix over the current production image.
+ARG BASE_IMAGE=managed-agents-app:rollback-arthur-edit-20261014
+FROM ${BASE_IMAGE}
+WORKDIR /app
+COPY app/core/engine/agent_llm.py app/core/engine/agent_llm.py
+COPY app/schemas/agent.py app/schemas/agent.py
+COPY arthur_v2/plugin.py arthur_v2/plugin.py

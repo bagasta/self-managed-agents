@@ -25,6 +25,14 @@ from app.models.run import Run
 # as conversation history or the model treats its own past failure as a live fact.
 DELIVERY_STATUS_TAG = "__delivery_status__"
 
+
+def is_transient_reply(content: str) -> bool:
+    """Runtime fallbacks are delivery notices, not evidence about a task."""
+    return str(content or "").strip().startswith((
+        "Proses belum menghasilkan jawaban akhir yang terverifikasi.",
+        "Maaf, respons belum tersedia. Coba kirim ulang pesanmu ya.",
+    ))
+
 # Runs in these terminal-failure states contributed no valid turn; both their
 # user and agent rows are dropped from re-injected history.
 DEAD_RUN_STATUSES = {"abandoned", "cancelled", "timed_out", "failed"}
@@ -48,6 +56,8 @@ def filter_dead_run_messages(
     """
     result = []
     for row in rows:
+        if row.role == "agent" and (getattr(row, "tool_name", None) == DELIVERY_STATUS_TAG or is_transient_reply(row.content)):
+            continue
         if row.role not in ("user", "agent") or not row.run_id:
             result.append(row)
             continue
@@ -81,6 +91,7 @@ async def load_history(
     session_id: uuid.UUID,
     db: AsyncSession,
     max_turns: int | None = None,
+    after=None,
 ) -> list[Message]:
     """
     Load pesan dari DB untuk session_id.
@@ -89,11 +100,14 @@ async def load_history(
         max_turns: Jika di-set, hanya load N turn terakhir (1 turn = 1 user + 1 agent).
                    None = load semua pesan.
     """
+    conditions = [Message.session_id == session_id]
+    if after is not None:
+        conditions.append(Message.timestamp >= after)
     if max_turns is not None:
         sub = (
             select(Message.id)
             .where(
-                Message.session_id == session_id,
+                *conditions,
                 Message.role.in_(["user", "agent"]),
             )
             .order_by(Message.step_index.desc(), Message.timestamp.desc())
@@ -108,7 +122,7 @@ async def load_history(
     else:
         stmt = (
             select(Message)
-            .where(Message.session_id == session_id)
+            .where(*conditions)
             .order_by(Message.step_index, Message.timestamp)
         )
     result = await db.execute(stmt)
@@ -155,7 +169,7 @@ def db_messages_to_lc(db_messages: list[Message]) -> list[BaseMessage]:
         elif msg.role == "agent" and msg.content:
             # Transient delivery/status notices are not dialogue — never replay them
             # as history (prevents stale "Gagal mengirim ..." from re-surfacing).
-            if getattr(msg, "tool_name", None) == DELIVERY_STATUS_TAG:
+            if getattr(msg, "tool_name", None) == DELIVERY_STATUS_TAG or is_transient_reply(msg.content):
                 continue
             result.append(AIMessage(content=msg.content))
     return result

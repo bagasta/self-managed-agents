@@ -1577,6 +1577,11 @@ async def incoming_message(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent tidak ditemukan")
 
+    from app.core.domain.agent_service_controls import service_block_reason
+    _blocked = service_block_reason(agent, body.from_phone, whatsapp=session.channel_type == "whatsapp")
+    if _blocked:
+        return {"status": _blocked, "reply": "", "run_id": "", "steps": [], "messages_to_user": []}
+
     from_phone = body.from_phone or ""
     raw_message = body.message
     escalation_cfg: dict = agent.escalation_config or {}
@@ -1774,6 +1779,9 @@ async def wa_incoming(
         log.warning("wa_incoming.agent_not_found")
         raise HTTPException(status_code=404, detail="No agent found for this WhatsApp device")
     _is_arthur_system = _is_arthur_system_agent(agent)
+    from app.core.domain.agent_service_controls import is_agent_paused
+    if is_agent_paused(agent):
+        return {"status": "agent_paused"}
 
     # phone_from: phone number yang sudah di-resolve dari LID oleh Go wa-service.
     # Untuk akun LID: body.from_ bisa berisi LID/JID, body.phone_from berisi phone number asli.
@@ -1805,6 +1813,10 @@ async def wa_incoming(
                 pass
     from_phone = real_from_phone or body.from_
     reply_target = body.chat_id or body.from_
+    from app.core.domain.agent_service_controls import service_block_reason
+    _access_block = service_block_reason(agent, real_from_phone, whatsapp=True)
+    if _access_block:
+        return {"status": _access_block}
     _is_owner_sender = _is_wa_owner_sender(
         agent,
         from_phone,

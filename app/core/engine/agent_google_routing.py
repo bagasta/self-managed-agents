@@ -1,8 +1,7 @@
 """Google Workspace routing helpers.
 
-Extracted from agent_runner — pure refactor, zero behaviour change.
-Handles auth-URL extraction, MCP server filtering, and customer/owner routing
-for Google Workspace blockers.
+Handles agent-owned connections, auth-URL extraction, MCP server filtering,
+and customer/owner routing for Google Workspace blockers.
 """
 from __future__ import annotations
 
@@ -30,6 +29,7 @@ from app.core.engine.google_mcp_support import (
     _fetch_google_auth_link,
     _is_google_auth_or_scope_error,
     _is_google_resource_not_found_error,
+    prepare_google_mcp_runtime,
 )
 from app.core.utils.phone_utils import normalize_phone
 from app.models.session import Session
@@ -213,8 +213,8 @@ def _google_workspace_customer_blocker_reply(*, notified_owner: bool) -> str:
     )
 
 
-def _is_google_workspace_mcp_authorized_for_session(session: Session, agent_model: Any) -> bool:
-    """Only owner/admin/operator WhatsApp senders may access Google MCP tools."""
+def _is_google_workspace_owner_or_operator(session: Session, agent_model: Any) -> bool:
+    """Identify who manages the connection, not who can use configured tools."""
     if getattr(session, "channel_type", None) != "whatsapp":
         return True
     sender = _session_sender_phone(session)
@@ -223,26 +223,27 @@ def _is_google_workspace_mcp_authorized_for_session(session: Session, agent_mode
     return sender in _normalized_agent_operator_ids(agent_model)
 
 
-def allows_delegated_google_workspace_runtime(agent_model: Any) -> bool:
-    """Whether a business agent may use its Owner-delegated Google tools for customers.
+async def prepare_agent_google_workspace_runtime(
+    *, agent_model: Any, session: Any, tools_config: dict,
+    tools: list, **runtime_kwargs: Any,
+):
+    """Expose configured tools to any admitted user, using the Owner's connection.
 
-    The customer's WhatsApp identity is never used to authenticate to Google.
-    This opt-in only permits the *agent* to execute its already-configured
-    workflow with the Owner's delegated credential.
+    Sender roles determine who manages OAuth, never whether the agent can
+    execute its configured workflow. Legacy delegation flags are irrelevant.
     """
-    config = getattr(agent_model, "tools_config", None)
-    config = config if isinstance(config, dict) else {}
-    mcp = config.get("mcp") if isinstance(config.get("mcp"), dict) else {}
-    servers = mcp.get("servers") if isinstance(mcp.get("servers"), dict) else mcp
-    google = servers.get("google_workspace") if isinstance(servers, dict) else None
-    return bool(isinstance(google, dict) and google.get("delegated_runtime_access") is True)
-
-
-def _google_workspace_mcp_unauthorized_reply() -> str:
-    return (
-        "Maaf, aksi yang terhubung ke Google Workspace hanya bisa dijalankan "
-        "oleh Admin/operator agent ini."
+    subject = getattr(agent_model, "owner_external_id", None)
+    if not subject:
+        operators = getattr(agent_model, "operator_ids", None)
+        if isinstance(operators, list) and operators:
+            subject = str(operators[0])
+    runtime = await prepare_google_mcp_runtime(
+        tools_config=tools_config, tools=tools, session=session,
+        fallback_external_user_id=subject, **runtime_kwargs,
     )
+    if runtime.enabled and not _is_google_workspace_owner_or_operator(session, agent_model):
+        tools[:] = [t for t in tools if getattr(t, "name", "") != "get_google_workspace_auth_link"]
+    return runtime
 
 
 async def _arthur_owner_notification_channel_config(

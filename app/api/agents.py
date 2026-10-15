@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config_schema import ToolsConfig
 from app.core.domain.agent_ownership import owner_filter
+from app.core.domain.whatsapp_binding import clear_cloud_api_binding
 from app.core.infra.channel_service import decrypt_value, encrypt_value
 from app.database import get_db
 from app.deps import verify_api_key
@@ -270,6 +271,7 @@ async def delete_agent(
     # Deletion is intentionally a soft-delete so the agent's audit trail stays
     # available.  Database ON DELETE CASCADE therefore does not apply: cancel
     # every executable background artifact explicitly in this same transaction.
+    clear_cloud_api_binding(agent)
     agent.is_deleted = True
     await db.execute(
         update(ScheduledJob)
@@ -341,7 +343,7 @@ async def get_whatsapp_status(
 ) -> AgentWhatsAppStatusResponse:
     """Get WhatsApp connection status for an agent."""
     agent = await _get_active_agent(agent_id, db)
-    if agent.wa_connection_type == "cloud_api":
+    if agent.wa_connection_type == "cloud_api" or (agent.wa_phone_number_id and not agent.wa_device_id):
         if not _has_cloud_api_credentials(agent):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -387,14 +389,7 @@ async def disconnect_whatsapp(
     """
     agent = await _get_active_agent(agent_id, db)
     if agent.wa_connection_type == "cloud_api":
-        agent.wa_phone_number_id = None
-        agent.wa_waba_id = None
-        agent.wa_access_token_encrypted = None
-        agent.wa_display_phone = None
-        agent.wa_business_name = None
-        agent.wa_connection_type = "legacy_qr" if agent.wa_device_id else None
-        agent.wa_cloud_api_mode = None
-        agent.channel_type = "whatsapp" if agent.wa_device_id else None
+        clear_cloud_api_binding(agent)
         agent.version += 1
         await db.flush()
         return
@@ -410,8 +405,7 @@ async def disconnect_whatsapp(
         logger.warning("disconnect_whatsapp.wa_service_error", error=str(exc))
 
     agent.wa_device_id = None
-    agent.channel_type = None
-    agent.wa_connection_type = None
+    clear_cloud_api_binding(agent)
     agent.version += 1
     await db.flush()
 

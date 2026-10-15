@@ -727,7 +727,11 @@ async def process_wa_media(
                     media_context = (
                         f"\n[ATTACHMENT_PROCESSING_FAILED: Dokumen {filename} diterima tetapi ekstraksi gagal. "
                         "Jangan mengklaim sudah membaca isinya atau menebak dari nama file. "
-                        "Sampaikan blocker dan minta kirim ulang hanya jika isi dokumen diperlukan.]"
+                        + ("Jika user meminta menambahkan knowledge, panggil add_assistant_knowledge "
+                           "dengan nama file asli: tool dapat mencoba ekstraksi ulang dari file yang tersimpan. "
+                           "Sampaikan blocker hanya jika tool tersebut juga gagal.]"
+                           if arthur_model_routing else
+                           "Sampaikan blocker dan minta kirim ulang hanya jika isi dokumen diperlukan.]")
                     )
             else:
                 media_context = f"\n[Dokumen diterima: {filename}, {workspace_hint}]"

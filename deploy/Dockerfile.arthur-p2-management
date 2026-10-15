@@ -1,0 +1,13 @@
+ARG BASE_IMAGE=managed-agents-app:arthur-p1-20261014
+FROM ${BASE_IMAGE}
+COPY arthur_v2/plugin.py /app/arthur_v2/plugin.py
+COPY arthur_v2/service_management.py /app/arthur_v2/service_management.py
+COPY arthur_v2/memory_revision_tools.py /app/arthur_v2/memory_revision_tools.py
+COPY app/core/domain/agent_service_controls.py /app/app/core/domain/agent_service_controls.py
+COPY app/core/domain/agent_revision_service.py /app/app/core/domain/agent_revision_service.py
+COPY app/models/__init__.py /app/app/models/__init__.py
+COPY app/core/engine/agent_runner.py /app/app/core/engine/agent_runner.py
+COPY app/core/engine/context_service.py /app/app/core/engine/context_service.py
+COPY app/api/channels.py /app/app/api/channels.py
+COPY app/api/meta_webhooks.py /app/app/api/meta_webhooks.py
+COPY app/core/workers/scheduler_service.py /app/app/core/workers/scheduler_service.py

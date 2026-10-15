@@ -11,6 +11,9 @@ from app.models.scheduled_job import ScheduledJob
 from app.models.session import Session
 from app.models.skill import Skill
 
+from app.core.domain.agent_revision_service import register_revision_tracking
+register_revision_tracking()
+
 __all__ = [
     "Agent",
     "AgentBuildDraft",

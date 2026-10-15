@@ -18,6 +18,7 @@ CHUNK_OVERLAP  150 chars   — sliding window so sentences don't get cut
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import re
 from typing import TYPE_CHECKING
@@ -70,22 +71,29 @@ async def extract_text(
         return _extract_txt(content)
 
     if ext == ".pdf":
-        if not mistral_api_key:
-            raise ValueError(
-                "MISTRAL_API_KEY is not configured — cannot process PDF files."
-            )
         if len(content) > MISTRAL_MAX_BYTES:
             raise ValueError(
                 f"PDF is too large for Mistral OCR ({len(content) // 1024 // 1024} MB). "
                 f"Maximum is {MISTRAL_MAX_BYTES // 1024 // 1024} MB."
             )
-        return await _extract_document_mistral(
-            content,
-            filename,
-            mistral_api_key,
-            model=mistral_model,
-            content_type="application/pdf",
-        )
+        try:
+            if not mistral_api_key:
+                raise ValueError("MISTRAL_API_KEY is not configured.")
+            text = await _extract_document_mistral(
+                content, filename, mistral_api_key,
+                model=mistral_model, content_type="application/pdf",
+            )
+            if text.strip():
+                return text
+            raise ValueError("OCR returned no text.")
+        except (httpx.HTTPError, ValueError, RuntimeError) as exc:
+            # Digital PDFs can still be read when the OCR provider is unavailable.
+            # Reject partial extraction: a scanned page must not silently disappear.
+            text = await asyncio.to_thread(_extract_pdf_local, content)
+            if text:
+                logger.info("document.pdf_local_fallback", reason=type(exc).__name__)
+                return text
+            raise
 
     if ext == ".docx":
         if use_mistral_for_office:
@@ -179,6 +187,41 @@ def _extract_txt(content: bytes) -> str:
 # PDF via Mistral OCR
 # ---------------------------------------------------------------------------
 
+def _extract_pdf_local(content: bytes) -> str:
+    from io import BytesIO
+    from pypdf import PdfReader
+
+    try:
+        reader = PdfReader(BytesIO(content))
+        pages = [(page.extract_text() or "").strip() for page in reader.pages]
+        if not pages or any(len(re.sub(r"\s", "", page)) < 30 for page in pages):
+            return ""
+        return "\n\n".join(f"<!-- page {i} -->\n{text}" for i, text in enumerate(pages, 1))
+    except Exception:
+        return ""
+
+
+async def _ocr_request(client: httpx.AsyncClient, method: str, url: str, **kwargs) -> httpx.Response:
+    """Bounded retries for transient provider failures; never retry invalid requests."""
+    for attempt in range(3):
+        try:
+            response = await client.request(method, url, **kwargs)
+            response.raise_for_status()
+            return response
+        except (httpx.HTTPStatusError, httpx.TransportError) as exc:
+            retryable = not isinstance(exc, httpx.HTTPStatusError) or exc.response.status_code in {429, 502, 503, 504}
+            if not retryable or attempt == 2:
+                raise
+            delay = float(2 ** attempt)
+            if isinstance(exc, httpx.HTTPStatusError):
+                try:
+                    delay = max(delay, float(exc.response.headers.get("Retry-After", delay)))
+                except ValueError:
+                    pass
+            logger.warning("mistral_ocr.retry", attempt=attempt + 1, error_type=type(exc).__name__)
+            await asyncio.sleep(min(delay, 5.0))
+
+
 async def _extract_document_mistral(
     document_bytes: bytes,
     filename: str,
@@ -200,7 +243,7 @@ async def _extract_document_mistral(
 
     async with httpx.AsyncClient(timeout=180) as client:
         # 1. Upload the file
-        upload_resp = await client.post(
+        upload_resp = await _ocr_request(client, "POST",
             "https://api.mistral.ai/v1/files",
             headers=headers_auth,
             files={"file": (filename, document_bytes, content_type)},
@@ -210,39 +253,38 @@ async def _extract_document_mistral(
         file_id = upload_resp.json()["id"]
         logger.debug("mistral_ocr.uploaded", file_id=file_id, filename=filename)
 
-        # 2. Get signed URL (expiry=1 hour is the minimum)
-        url_resp = await client.get(
-            f"https://api.mistral.ai/v1/files/{file_id}/url",
-            headers=headers_auth,
-            params={"expiry": 1},
-        )
-        url_resp.raise_for_status()
-        signed_url: str = url_resp.json()["url"]
-
-        # 3. Run OCR
-        ocr_resp = await client.post(
-            "https://api.mistral.ai/v1/ocr",
-            headers={**headers_auth, "Content-Type": "application/json"},
-            json={
-                "model": model,
-                "document": {
-                    "type": "document_url",
-                    "document_url": signed_url,
-                },
-            },
-        )
-        ocr_resp.raise_for_status()
-        pages: list[dict] = ocr_resp.json().get("pages", [])
-        logger.debug("mistral_ocr.done", pages=len(pages))
-
-        # 4. Cleanup — delete the uploaded file (best-effort)
         try:
-            await client.delete(
-                f"https://api.mistral.ai/v1/files/{file_id}",
+            # 2. Get signed URL (expiry=1 hour is the minimum)
+            url_resp = await _ocr_request(client, "GET",
+                f"https://api.mistral.ai/v1/files/{file_id}/url",
                 headers=headers_auth,
+                params={"expiry": 1},
             )
-        except Exception:
-            pass
+            signed_url: str = url_resp.json()["url"]
+
+            # 3. Retry OCR against the same upload, rather than uploading again.
+            ocr_resp = await _ocr_request(client, "POST",
+                "https://api.mistral.ai/v1/ocr",
+                headers={**headers_auth, "Content-Type": "application/json"},
+                json={
+                    "model": model,
+                    "document": {
+                        "type": "document_url",
+                        "document_url": signed_url,
+                    },
+                },
+            )
+            pages: list[dict] = ocr_resp.json().get("pages", [])
+            logger.debug("mistral_ocr.done", pages=len(pages))
+        finally:
+            # Cleanup also runs after an OCR failure.
+            try:
+                await client.delete(
+                    f"https://api.mistral.ai/v1/files/{file_id}",
+                    headers=headers_auth,
+                )
+            except Exception:
+                pass
 
     # Combine page markdown, separated by clear page breaks
     page_texts: list[str] = []

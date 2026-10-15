@@ -201,6 +201,8 @@ def build_runtime_tool_contract_text(
     lines = [
         "## Runtime Tool Contract",
         "- Sumber kebenaran tools adalah runtime platform, bukan instructions/soul yang dibuat LLM.",
+        "- Tools yang dikonfigurasi Owner dapat dipakai agent untuk melayani user non-Owner/non-operator sesuai workflow dan izin tools. Jangan menolak hanya karena peran pengirim atau label personal/business agent.",
+        "- Koneksi/kredensial integrasi tetap milik Owner; penggunaan tools oleh agent tidak memberi user hak mengubah konfigurasi, mengelola koneksi, atau mengakses data di luar workflow yang diizinkan.",
         "- Kalau capability tidak aktif di daftar ini, jangan mengaku bisa menjalankannya dan minta Owner mengaktifkan/setup dulu jika diperlukan.",
         "- Tools aktif:",
     ]

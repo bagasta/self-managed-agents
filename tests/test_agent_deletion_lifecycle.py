@@ -9,7 +9,12 @@ from app.api.agents import delete_agent
 @pytest.mark.asyncio
 async def test_delete_agent_cancels_background_jobs(monkeypatch) -> None:
     """Soft delete must cancel jobs because FK cascades only cover hard deletes."""
-    agent = SimpleNamespace(id=uuid.uuid4(), is_deleted=False, wa_device_id=None)
+    agent = SimpleNamespace(
+        id=uuid.uuid4(), is_deleted=False, wa_device_id=None,
+        wa_phone_number_id="previous-phone", wa_waba_id="previous-waba",
+        wa_access_token_encrypted="enc:previous-token",
+        wa_connection_type="cloud_api", wa_cloud_api_mode="coexistence",
+    )
 
     class FakeResult:
         def scalar_one_or_none(self):
@@ -40,6 +45,11 @@ async def test_delete_agent_cancels_background_jobs(monkeypatch) -> None:
 
     rendered = "\n".join(str(statement) for statement in db.statements)
     assert agent.is_deleted is True
+    assert agent.wa_phone_number_id is None
+    assert agent.wa_waba_id is None
+    assert agent.wa_access_token_encrypted is None
+    assert agent.wa_connection_type is None
+    assert agent.wa_cloud_api_mode is None
     assert db.flushed is True
     assert "scheduled_jobs" in rendered
-    assert "cancelled" in rendered
+    assert db.statements[0].compile().params["status"] == "cancelled"

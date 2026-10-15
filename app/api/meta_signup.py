@@ -14,7 +14,9 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
 
+from app.core.domain.whatsapp_binding import clear_cloud_api_binding
 from app.core.infra.channel_service import decrypt_value, encrypt_value
 from app.core.infra.meta_embedded_signup import (
     build_signup_state,
@@ -32,6 +34,30 @@ from app.models.agent import Agent
 
 router = APIRouter(prefix="/v1/meta/signup", tags=["meta-signup"])
 logger = structlog.get_logger(__name__)
+
+
+async def _release_deleted_phone_binding(db: AsyncSession, agent: Agent, phone_number_id: str) -> None:
+    existing = (await db.execute(
+        select(Agent).where(Agent.wa_phone_number_id == phone_number_id, Agent.id != agent.id).with_for_update()
+    )).scalar_one_or_none()
+    if existing is None:
+        return
+    if not existing.is_deleted:
+        raise HTTPException(status_code=409, detail="Nomor WhatsApp masih terhubung ke agent lain. Putuskan koneksi di agent tersebut terlebih dahulu.")
+    clear_cloud_api_binding(existing)
+    existing.version += 1
+    # Release the unique key before assigning it to the new agent.
+    await db.flush()
+
+
+async def _commit_phone_binding(db: AsyncSession) -> None:
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        if "ix_agents_wa_phone_number_id" not in str(exc.orig):
+            raise
+        raise HTTPException(status_code=409, detail="Nomor WhatsApp baru saja terhubung ke agent lain. Muat ulang halaman dan coba lagi.") from None
 
 
 def _callback_url() -> str:
@@ -410,14 +436,15 @@ function read(){{try{{const x=JSON.parse(sessionStorage.getItem(key)||'{{}}');re
 function save(){{fragments.expires_at=Date.now()+ttlMs;sessionStorage.setItem(key,JSON.stringify(fragments));}}
 function clear(){{sessionStorage.removeItem(key)}}
 function status(message,type=''){{statusEl.textContent=message;statusEl.dataset.state=type}}
+async function responseJson(response){{let data;try{{data=await response.json()}}catch(_e){{throw Error('Server gagal memproses koneksi WhatsApp (HTTP '+response.status+'). Muat ulang halaman dan coba lagi.')}}if(!response.ok)throw Error(typeof data.detail==='string'?data.detail:'Koneksi belum berhasil (HTTP '+response.status+').');return data}}
 function setButtons(disabled){{coexist.disabled=disabled;newNumber.disabled=disabled}}
 function telemetry(event){{fetch('/v1/meta/signup/telemetry',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{state,event,mobile:matchMedia('(max-width:768px)').matches}}),keepalive:true}}).catch(()=>{{}})}}
 function isMetaOrigin(origin){{return origin==='https://www.facebook.com'||origin==='https://web.facebook.com'||origin==='https://business.facebook.com'}}
 function applySession(value){{let data=value;try{{if(typeof value==='string')data=JSON.parse(value)}}catch(_e){{return}}if(!data||data.type!=='WA_EMBEDDED_SIGNUP')return;const d=data.data||{{}};if(d.waba_id)fragments.waba_id=String(d.waba_id);if(d.phone_number_id)fragments.phone_number_id=String(d.phone_number_id);if(String(data.event||'').toUpperCase()==='FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING')fragments.connection_mode='coexistence';save();telemetry('session_event_received');finish();}}
 window.addEventListener('message',event=>{{if(isMetaOrigin(event.origin))applySession(event.data)}});
-async function selectNumber(candidate){{setButtons(true);status('Menyimpan nomor WhatsApp…');try{{const r=await fetch('/v1/meta/signup/handoff/complete',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{state,waba_id:candidate.waba_id,phone_number_id:candidate.phone_number_id}})}});const d=await r.json();if(!r.ok)throw Error(d.detail||'Koneksi belum berhasil.');selection.style.display='none';clear();status('Terhubung via Meta Cloud API dan WhatsApp Business App.','success')}}catch(e){{setButtons(false);status(e.message,'error')}}}}
+async function selectNumber(candidate){{setButtons(true);status('Menyimpan nomor WhatsApp…');try{{const r=await fetch('/v1/meta/signup/handoff/complete',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{state,waba_id:candidate.waba_id,phone_number_id:candidate.phone_number_id}})}});const d=await responseJson(r);selection.style.display='none';clear();status('Terhubung via Meta Cloud API dan WhatsApp Business App.','success')}}catch(e){{setButtons(false);status(e.message,'error')}}}}
 function chooseNumber(candidates){{selectionOptions.replaceChildren();candidates.forEach(candidate=>{{const button=document.createElement('button');button.type='button';button.textContent=candidate.display_phone||candidate.business_name||'Nomor WhatsApp';button.onclick=()=>selectNumber(candidate);selectionOptions.appendChild(button)}});selection.style.display='block';status('Meta selesai. Pilih nomor WhatsApp untuk dilanjutkan.')}}
-function finish(allowServerDiscovery=false){{if(submitting||!fragments.code||(!fragments.waba_id&&!allowServerDiscovery)){{if(fragments.code||fragments.waba_id)status('Menunggu konfirmasi Meta melengkapi koneksi…');return}}submitting=true;setButtons(true);status('Menyimpan koneksi WhatsApp…');fetch('/v1/meta/signup/complete',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{state,code:fragments.code,waba_id:fragments.waba_id||null,phone_number_id:fragments.phone_number_id,connection_mode:fragments.connection_mode||'cloud_api_new'}})}}).then(async r=>{{const d=await r.json();if(!r.ok)throw Error(d.detail||'Koneksi belum berhasil.');if(d.selection_required){{submitting=false;chooseNumber(d.candidates||[]);return}}clear();status(d.activation_required?'Koneksi tersimpan. Selesaikan PIN enam digit untuk mengaktifkan nomor baru di Meta.':'Terhubung via Meta Cloud API dan WhatsApp Business App.','success')}}).catch(e=>{{submitting=false;setButtons(false);status(e.message,'error')}})}}
+function finish(allowServerDiscovery=false){{if(submitting||!fragments.code||(!fragments.waba_id&&!allowServerDiscovery)){{if(fragments.code||fragments.waba_id)status('Menunggu konfirmasi Meta melengkapi koneksi…');return}}submitting=true;setButtons(true);status('Menyimpan koneksi WhatsApp…');fetch('/v1/meta/signup/complete',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{state,code:fragments.code,waba_id:fragments.waba_id||null,phone_number_id:fragments.phone_number_id,connection_mode:fragments.connection_mode||'cloud_api_new'}})}}).then(async r=>{{const d=await responseJson(r);if(d.selection_required){{submitting=false;chooseNumber(d.candidates||[]);return}}clear();status(d.activation_required?'Koneksi tersimpan. Selesaikan PIN enam digit untuk mengaktifkan nomor baru di Meta.':'Terhubung via Meta Cloud API dan WhatsApp Business App.','success')}}).catch(e=>{{submitting=false;setButtons(false);status(e.message,'error')}})}}
 function login(mode){{if(!sdkReady){{status('Halaman Login for Business Meta belum siap. Coba lagi atau buka di Chrome / Safari.','error');return}}if(fallbackTimer)clearTimeout(fallbackTimer);fragments={{connection_mode:mode,expires_at:Date.now()+ttlMs}};save();telemetry('sdk_launch_requested');setButtons(true);status('Membuka Login for Business Meta…');const extras=mode==='coexistence'?{{setup:{{}},featureType:'whatsapp_business_app_onboarding',sessionInfoVersion:'3'}}:{{setup:{{}}}};FB.login(response=>{{setButtons(false);if(response&&response.authResponse&&response.authResponse.code){{fragments.code=response.authResponse.code;save();telemetry('sdk_callback_with_code');finish();fallbackTimer=window.setTimeout(()=>finish(true),1500)}}else{{telemetry('sdk_callback_without_code');status('Login Meta belum selesai atau diblokir. Buka tautan ini di Chrome / Safari lalu coba lagi.','error')}}}},{{config_id:configId,response_type:'code',override_default_response_type:true,extras}})}}
 function startMobileLogin(mode){{fragments={{connection_mode:mode,expires_at:Date.now()+ttlMs}};save();telemetry('sdk_launch_requested');setButtons(true);status('Membuka Login for Business Meta…');window.location.assign('/v1/meta/signup/identity/start?state='+encodeURIComponent(state)+'&mode='+encodeURIComponent(mode));}}
 function launch(mode){{const mobile=Boolean(window.matchMedia&&window.matchMedia('(max-width:768px)').matches)||/Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);if(mobile)startMobileLogin(mode);else login(mode)}}
@@ -606,9 +633,7 @@ async def complete(payload: EmbeddedSignupCompleteRequest, db: AsyncSession = De
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     phone_number_id = str(selected["id"])
-    existing = (await db.execute(select(Agent.id).where(Agent.wa_phone_number_id == phone_number_id, Agent.id != agent.id, Agent.is_deleted.is_(False)))).scalar_one_or_none()
-    if existing:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This WhatsApp number is already connected to another assistant")
+    await _release_deleted_phone_binding(db, agent, phone_number_id)
     agent.wa_phone_number_id = phone_number_id
     agent.wa_waba_id = payload.waba_id
     agent.wa_access_token_encrypted = encrypted
@@ -618,7 +643,7 @@ async def complete(payload: EmbeddedSignupCompleteRequest, db: AsyncSession = De
     agent.wa_cloud_api_mode = "coexistence" if payload.connection_mode == "coexistence" else "cloud_api_new"
     agent.channel_type = "whatsapp"
     agent.version += 1
-    await db.commit()
+    await _commit_phone_binding(db)
     return {
         "ok": True,
         "agent_id": str(agent.id),
@@ -651,9 +676,7 @@ async def complete_server_handoff(
     agent = (await db.execute(select(Agent).where(Agent.id == agent_id, Agent.is_deleted.is_(False)))).scalar_one_or_none()
     if agent is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assistant not found")
-    existing = (await db.execute(select(Agent.id).where(Agent.wa_phone_number_id == payload.phone_number_id, Agent.id != agent.id, Agent.is_deleted.is_(False)))).scalar_one_or_none()
-    if existing:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This WhatsApp number is already connected to another assistant")
+    await _release_deleted_phone_binding(db, agent, payload.phone_number_id)
     agent.wa_phone_number_id = payload.phone_number_id
     agent.wa_waba_id = payload.waba_id
     agent.wa_access_token_encrypted = handoff["token"]
@@ -664,7 +687,7 @@ async def complete_server_handoff(
     agent.channel_type = "whatsapp"
     agent.version += 1
     await subscribe_waba_to_webhooks(payload.waba_id, decrypt_value(handoff["token"]))
-    await db.commit()
+    await _commit_phone_binding(db)
     await _clear_handoff(payload.state)
     return {"ok": True, "connection_type": "cloud_api", "activation_required": agent.wa_cloud_api_mode != "coexistence"}
 

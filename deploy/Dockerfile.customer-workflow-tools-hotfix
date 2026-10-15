@@ -1,0 +1,7 @@
+ARG BASE_IMAGE=managed-agents-app:rollback-customer-workflow-tools-20261014
+FROM ${BASE_IMAGE}
+WORKDIR /app
+COPY app/core/engine/agent_runner.py app/core/engine/agent_runner.py
+COPY app/core/engine/agent_google_routing.py app/core/engine/agent_google_routing.py
+COPY app/core/engine/tool_capability_registry.py app/core/engine/tool_capability_registry.py
+COPY arthur_v2/plugin.py arthur_v2/plugin.py

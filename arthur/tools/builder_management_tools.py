@@ -140,6 +140,9 @@ def build_builder_management_tools(
                         error=wa_disconnect_error,
                     )
 
+            from app.core.domain.whatsapp_binding import clear_cloud_api_binding
+
+            clear_cloud_api_binding(agent)
             agent.is_deleted = True
             agent.version = (agent.version or 1) + 1
             await db.commit()

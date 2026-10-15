@@ -1,9 +1,7 @@
 import pytest
 
 from app.core.engine.agent_google_routing import (
-    _google_workspace_mcp_unauthorized_reply,
-    _is_google_workspace_mcp_authorized_for_session,
-    allows_delegated_google_workspace_runtime,
+    _is_google_workspace_owner_or_operator,
 )
 from app.core.engine.agent_runner import (
     _build_google_mcp_auth_failure_reply,
@@ -169,7 +167,7 @@ def test_customer_survey_tool_schema_never_exposes_google_resource_arguments() -
     assert tools[0].args["satisfaction_score"]["maximum"] == 10
 
 
-def test_google_workspace_mcp_authorization_restricts_whatsapp_to_owner_or_operator() -> None:
+def test_google_connection_manager_identity_is_separate_from_tool_usage() -> None:
     agent = type(
         "Agent",
         (),
@@ -208,32 +206,17 @@ def test_google_workspace_mcp_authorization_restricts_whatsapp_to_owner_or_opera
         },
     )()
 
-    assert _is_google_workspace_mcp_authorized_for_session(customer_session, agent) is False
-    assert _is_google_workspace_mcp_authorized_for_session(owner_session, agent) is True
-    assert _is_google_workspace_mcp_authorized_for_session(operator_session, agent) is True
-    assert "Admin/operator" in _google_workspace_mcp_unauthorized_reply()
+    assert _is_google_workspace_owner_or_operator(customer_session, agent) is False
+    assert _is_google_workspace_owner_or_operator(owner_session, agent) is True
+    assert _is_google_workspace_owner_or_operator(operator_session, agent) is True
 
 
-def test_business_agent_can_explicitly_delegate_google_runtime_to_customers() -> None:
-    agent = type(
-        "Agent",
-        (),
-        {
-            "tools_config": {
-                "mcp": {
-                    "enabled": True,
-                    "servers": {
-                        "google_workspace": {
-                            "url": "http://google-workspace-mcp:8000/mcp",
-                            "delegated_runtime_access": True,
-                        }
-                    },
-                }
-            }
-        },
-    )()
-
-    assert allows_delegated_google_workspace_runtime(agent) is True
+@pytest.mark.parametrize("kind", ["personal", "business", "customer"])
+def test_tool_contract_allows_non_owner_workflows_for_all_agent_kinds(kind) -> None:
+    from app.core.engine.tool_capability_registry import build_runtime_tool_contract_text
+    text = build_runtime_tool_contract_text(tools_config={"assistant_profile": {"kind": kind}, "mcp": {"enabled": True}}, active_groups=["mcp"])
+    assert "melayani user non-Owner/non-operator" in text
+    assert "Koneksi/kredensial integrasi tetap milik Owner" in text
 
 
 @pytest.mark.asyncio

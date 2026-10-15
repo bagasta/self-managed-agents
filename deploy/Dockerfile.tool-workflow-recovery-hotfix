@@ -1,0 +1,5 @@
+ARG BASE_IMAGE=managed-agents-app:whatsapp-binding-20261014
+FROM ${BASE_IMAGE}
+COPY app/core/engine/agent_llm.py /app/app/core/engine/agent_llm.py
+COPY app/core/engine/agent_runner.py /app/app/core/engine/agent_runner.py
+COPY app/core/engine/arthur_context.py /app/app/core/engine/arthur_context.py

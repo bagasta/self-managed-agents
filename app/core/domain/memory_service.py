@@ -358,6 +358,10 @@ async def record_runtime_memory(
     if str(user_message or "").lstrip().startswith("[HEARTBEAT]"):
         return
 
+    from app.core.engine.context_service import is_transient_reply
+    if not str(final_reply or "").strip() or is_transient_reply(final_reply):
+        return
+
     try:
         today = memory_today()
         user_summary = _compact_memory_text(user_message, max_chars=360)

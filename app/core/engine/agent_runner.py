@@ -40,7 +40,15 @@ from app.core.domain.memory_service import (
     build_memory_context,
     extract_long_term_memory,
     load_layered_memory,
+    list_memories,
     record_runtime_memory,
+)
+from app.core.engine.arthur_context import (
+    bound_arthur_history,
+    build_arthur_recall,
+    builder_recovery_messages,
+    terminal_generation_truncated,
+    starts_new_project,
 )
 from app.core.engine.prompt_builder import (
     build_mcp_tool_priority_notice,
@@ -70,11 +78,9 @@ from app.core.engine.agent_google_routing import (
     _builder_google_auth_agent_id,
     _extract_auth_url_from_builder_steps,
     _google_workspace_customer_blocker_reply,
-    _google_workspace_mcp_unauthorized_reply,
     _google_workspace_server_has_auth,
     _is_google_chat_intent,
-    _is_google_workspace_mcp_authorized_for_session,
-    allows_delegated_google_workspace_runtime,
+    prepare_agent_google_workspace_runtime,
     _repair_partial_builder_google_auth_link,
     _remove_google_workspace_mcp_server,
     _route_google_workspace_blocker_to_owner_if_customer,
@@ -218,8 +224,6 @@ from app.core.engine.google_mcp_support import (
     google_forms_request_kind_retry_directive,
     google_sheets_followup_directive,
     filter_google_mcp_tools_by_services,
-    is_google_workspace_mcp_configured,
-    prepare_google_mcp_runtime,
     reconcile_google_mcp_tools_config,
     sanitize_google_forms_tools,
     google_slides_dimension_retry_directive,
@@ -1007,6 +1011,20 @@ async def run_agent(
     """
     run_id = uuid.uuid4()
     agent_id: uuid.UUID = session.agent_id
+    if isinstance(agent_model, AgentModel):
+        from sqlalchemy import inspect as _sa_inspect
+        _agent_state = _sa_inspect(agent_model)
+        if _agent_state.persistent and _agent_state.session is getattr(db, "sync_session", None):
+            # A media download or queued inbound request may hold an older ORM
+            # snapshot while the Owner pauses service or changes admission.
+            await db.refresh(agent_model, attribute_names=["tools_config", "allowed_senders", "operator_ids", "owner_external_id", "escalation_config"])
+    from app.core.domain.agent_service_controls import service_block_reason
+    _service_block = service_block_reason(
+        agent_model, getattr(session, "external_user_id", None),
+        whatsapp=getattr(session, "channel_type", None) == "whatsapp",
+    )
+    if _service_block:
+        return {"reply": "", "steps": [], "run_id": None, "tokens_used": 0, "usage": {}, "status": _service_block}
     _raw_tools_cfg = agent_model.tools_config
     tools_config: dict[str, Any] = _raw_tools_cfg if isinstance(_raw_tools_cfg, dict) else {}
     tools_config = reconcile_google_mcp_tools_config(
@@ -1308,10 +1326,34 @@ async def run_agent(
     if _is_enabled(tools_config, "rag", default=False):
         rag_context = await build_rag_context(agent_id, user_message, db, tools_config, log)
 
-    context_summary = await maybe_summarize_context(session, db, llm, log)
+    _is_arthur_v2 = tools_config.get("system_plugin") == "arthur_v2"
+    _project_meta = dict(getattr(session, "metadata_", None) or {})
+    if _is_arthur_v2 and starts_new_project(user_message):
+        _project_meta["arthur_project_started_at"] = datetime.now(timezone.utc).isoformat()
+        session.metadata_ = _project_meta
+    _project_boundary = _project_meta.get("arthur_project_started_at") if _is_arthur_v2 else _project_meta.get("context_reset_at")
+    context_summary = "" if _project_boundary else await maybe_summarize_context(session, db, llm, log)
 
-    memory_block = await build_memory_context(agent_id, db, scope=_memory_scope)
-    layered_memory = await load_layered_memory(agent_id, db, scope=_memory_scope)
+    if _is_arthur_v2:
+        memory_block = build_arthur_recall(
+            await list_memories(agent_id, db, scope=_memory_scope), user_message,
+        )
+        from arthur_v2.knowledge_context import build_uploaded_knowledge_context
+        try:
+            # Live file hashes prevent old assistant replies becoming storage facts.
+            async with db.begin_nested():
+                upload_status = await build_uploaded_knowledge_context(str(session.id), _memory_scope, db)
+            if upload_status:
+                memory_block += "\n\n" + upload_status
+        except Exception as exc:
+            log.warning("agent_run.upload_knowledge_status_failed", error_type=type(exc).__name__)
+        # Daily logs, last_turn and longterm duplicate the same interactions
+        # and include stale state from unrelated/deleted assistants.
+        layered_memory = {}
+        context_summary = context_summary[:3500]
+    else:
+        memory_block = await build_memory_context(agent_id, db, scope=_memory_scope)
+        layered_memory = await load_layered_memory(agent_id, db, scope=_memory_scope)
     # Reuse the operating manual already fetched before tool setup (avoids duplicate DB query).
     operating_manual = _early_operating_manual
     setattr(agent_model, "_runtime_operating_manual", operating_manual)
@@ -1325,8 +1367,14 @@ async def run_agent(
         if context_summary
         else settings.short_term_memory_turns
     )
-    history_rows = await load_history(session.id, db, max_turns=_history_turns)
+    _reset_history_args = {"after": datetime.fromisoformat(_project_boundary)} if _project_meta.get("context_reset_at") else {}
+    history_rows = await load_history(session.id, db, max_turns=_history_turns, **_reset_history_args)
+    if _project_boundary:
+        _boundary_time = datetime.fromisoformat(_project_boundary)
+        history_rows = [row for row in history_rows if row.timestamp >= _boundary_time]
     prior_messages = db_messages_to_lc(history_rows)
+    if _is_arthur_v2:
+        prior_messages = bound_arthur_history(prior_messages)
     # Follow-up routing is intentionally not inferred from message wording.
     # A future auth continuation must arrive as explicit structured state.
     google_auth_recovery_followup = False
@@ -1556,26 +1604,11 @@ async def run_agent(
     await _start_wa_run_typing()
     google_mcp_tools_config = tools_config
     customer_survey_resource = customer_survey_google_resource(session, agent_model)
-    google_mcp_role_denied = (
-        is_google_workspace_mcp_configured(tools_config)
-        and not _is_google_workspace_mcp_authorized_for_session(session, agent_model)
-        and not allows_delegated_google_workspace_runtime(agent_model)
-        and customer_survey_resource is None
-    )
-    if google_mcp_role_denied:
-        google_mcp_tools_config = _remove_google_workspace_mcp_server(tools_config)
-        log.warning(
-            "agent_run.google_mcp_denied_for_non_operator",
-            sender=_session_sender_phone(session),
-            reason="google_workspace_mcp_requires_owner_or_operator",
-        )
-    _google_fallback_external_user_id = getattr(agent_model, "owner_external_id", None)
-    if not _google_fallback_external_user_id:
-        _operator_ids = getattr(agent_model, "operator_ids", None)
-        if isinstance(_operator_ids, list) and _operator_ids:
-            _google_fallback_external_user_id = str(_operator_ids[0])
-
-    google_mcp = await prepare_google_mcp_runtime(
+    # Tools belong to the configured agent workflow, regardless of the sender's
+    # owner/operator role or the assistant's personal/business label. Keep the
+    # configured service/operation restrictions and authenticate as the Owner.
+    google_mcp = await prepare_agent_google_workspace_runtime(
+        agent_model=agent_model,
         tools_config=google_mcp_tools_config,
         tools=tools,
         active_groups=active_groups,
@@ -1590,20 +1623,9 @@ async def run_agent(
         ),
         system_prompt=system_prompt,
         log=log,
-        fallback_external_user_id=_google_fallback_external_user_id,
     )
     system_prompt = google_mcp.system_prompt
     _google_mcp_auth_url = google_mcp.auth_url
-    delegated_customer_session = (
-        allows_delegated_google_workspace_runtime(agent_model)
-        and not _is_google_workspace_mcp_authorized_for_session(session, agent_model)
-    )
-    if customer_survey_resource is not None or delegated_customer_session:
-        tools = [
-            tool
-            for tool in tools
-            if getattr(tool, "name", "") != "get_google_workspace_auth_link"
-        ]
     mcp_tools_config = google_mcp_tools_config
     if (
         google_mcp.enabled
@@ -2692,24 +2714,28 @@ async def run_agent(
         # A provider can stop while serialising a tool call when the response
         # hits ``max_tokens``.  The graph then has neither an executable tool
         # call nor a final reply, so the old path sent the generic WhatsApp
-        # fallback.  Retry only this provably side-effect-free case: no tool
-        # ran, no final reply exists, and the model used its full allowance.
-        # A separate checkpoint prevents an incomplete first attempt from
-        # contaminating the retry's graph state.
+        # fallback. Continue from completed tool results when no final reply
+        # exists and the model used its allowance. Never restart successful
+        # mutations; dangling tool calls with unknown status block recovery.
+        # A separate checkpoint discards only the incomplete generation.
         _configured_max_tokens = int(
-            getattr(agent_model, "max_tokens", None) or settings.llm_max_tokens
+            getattr(llm_raw, "max_tokens", None)
+            or getattr(agent_model, "max_tokens", None) or settings.llm_max_tokens
         )
         _completion_tokens = _agent_logger.completion_tokens_from_callbacks
-        _retry_max_tokens = min(max(_configured_max_tokens * 2, 4096), 8192)
+        _retry_max_tokens = min(max(_configured_max_tokens * 2, 4096), 32768)
+        _recovery_messages = builder_recovery_messages(result, input_messages, is_builder=runtime_policy.is_builder)
         if (
-            runtime_policy.is_builder
-            and not final_reply
-            and not steps
-            and _completion_tokens >= _configured_max_tokens
+            not final_reply
+            # This lightweight continuation does not carry Deep Agents' human
+            # approval middleware. Never bypass configured approval gates.
+            and not (tools_config or {}).get("interrupt_on")
+            and _recovery_messages
+            and terminal_generation_truncated(result, _configured_max_tokens)
             and _retry_max_tokens > _configured_max_tokens
         ):
             log.warning(
-                "agent_run.retry_after_truncated_builder_response",
+                "agent_run.retry_after_truncated_response",
                 completion_tokens=_completion_tokens,
                 initial_max_tokens=_configured_max_tokens,
                 retry_max_tokens=_retry_max_tokens,
@@ -2719,8 +2745,10 @@ async def run_agent(
                 from langgraph.prebuilt import create_react_agent as _cra
 
                 _retry_graph = _cra(
-                    llm_raw.bind(
-                        max_tokens=_retry_max_tokens,
+                    # The graph binds tools again; a RunnableBinding's token
+                    # override can be lost during that bind. Copy the actual
+                    # model field so the larger allowance survives it.
+                    llm_raw.model_copy(update={"max_tokens": _retry_max_tokens}).bind(
                         parallel_tool_calls=False,
                     ),
                     tools=tools,
@@ -2733,12 +2761,13 @@ async def run_agent(
                         "thread_id": f"{_thread_id}:truncation-retry:{run_id}",
                     },
                 }
-                _retry_output = await _timed_graph_invoke(
-                    _retry_graph,
-                    "truncated_builder_retry",
-                    input_messages,
-                    _retry_config,
-                )
+                async with asyncio.timeout(settings.agent_timeout_seconds):
+                    _retry_output = await _timed_graph_invoke(
+                        _retry_graph,
+                        "truncated_response_retry",
+                        _recovery_messages,
+                        _retry_config,
+                    )
                 _retry_result = await _graph_result_from_output(
                     graph=_retry_graph,
                     graph_config=_retry_config,
@@ -2758,15 +2787,16 @@ async def run_agent(
                     final_reply = parsed["final_reply"]
                     steps = parsed["steps"]
                     log.info(
-                        "agent_run.retry_after_truncated_builder_response_complete",
+                        "agent_run.retry_after_truncated_response_complete" if final_reply
+                        else "agent_run.retry_after_truncated_response_partial",
                         steps=len(steps),
                         reply_len=len(final_reply),
                     )
                 else:
-                    log.warning("agent_run.retry_after_truncated_builder_response_incomplete")
+                    log.warning("agent_run.retry_after_truncated_response_incomplete")
             except Exception as _truncation_retry_exc:
                 log.warning(
-                    "agent_run.retry_after_truncated_builder_response_failed",
+                    "agent_run.retry_after_truncated_response_failed",
                     error_type=type(_truncation_retry_exc).__name__,
                 )
         _current_shared_artifact_path = _remember_latest_shared_artifact(
@@ -3484,7 +3514,6 @@ async def run_agent(
                 str(getattr(tool, "name", "") or "") == "create_spreadsheet"
                 for tool in mcp_tools
             )
-            and _is_google_workspace_mcp_authorized_for_session(session, agent_model)
             and should_retry_missing_spreadsheet_resource(
                 steps,
                 user_message=execution_user_message,
@@ -3555,11 +3584,11 @@ async def run_agent(
     # ------------------------------------------------------------------ #
     # 10. Long-term memory auto-extraction                                #
     # ------------------------------------------------------------------ #
-    if _is_enabled(tools_config, "memory", default=True):
+    if _is_enabled(tools_config, "memory", default=True) and not _is_arthur_v2:
         user_msg_count = await count_user_messages(session.id, db)
-        if user_msg_count > 0 and user_msg_count % settings.ltm_extraction_every == 0:
+        if final_reply and user_msg_count > 0 and user_msg_count % settings.ltm_extraction_every == 0:
             log.info("agent_run.ltm_trigger", user_messages=user_msg_count)
-            recent_for_ltm = await load_history(session.id, db, max_turns=settings.ltm_extraction_every)
+            recent_for_ltm = await load_history(session.id, db, max_turns=settings.ltm_extraction_every, **_reset_history_args)
             await extract_long_term_memory(
                 agent_id=agent_id,
                 recent_messages=recent_for_ltm,

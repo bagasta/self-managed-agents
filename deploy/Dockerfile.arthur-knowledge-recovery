@@ -1,0 +1,8 @@
+ARG BASE_IMAGE=managed-agents-app:arthur-p2-20261014
+FROM ${BASE_IMAGE}
+RUN pip install --no-cache-dir 'pypdf==6.20.1'
+COPY app/core/domain/file_processor.py /app/app/core/domain/file_processor.py
+COPY app/api/wa_helpers.py /app/app/api/wa_helpers.py
+COPY arthur_v2/plugin.py /app/arthur_v2/plugin.py
+COPY app/core/domain/document_service.py /app/app/core/domain/document_service.py
+COPY app/core/engine/prompt_builder.py /app/app/core/engine/prompt_builder.py

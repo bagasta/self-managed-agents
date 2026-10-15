@@ -2949,6 +2949,9 @@ class TestDeleteAgent:
         db = _make_mock_db()
 
         my_agent = _make_mock_agent(name="Agent Lama", operator_ids=["+62811xxx"])
+        my_agent.wa_phone_number_id = "previous-phone"
+        my_agent.wa_waba_id = "previous-waba"
+        my_agent.wa_access_token_encrypted = "enc:previous-token"
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = my_agent
         db.execute = AsyncMock(return_value=mock_result)
@@ -2962,6 +2965,9 @@ class TestDeleteAgent:
         data = json.loads(result)
         assert data["success"] is True
         assert my_agent.is_deleted is True
+        assert my_agent.wa_phone_number_id is None
+        assert my_agent.wa_waba_id is None
+        assert my_agent.wa_access_token_encrypted is None
         assert my_agent.version == 2
         db.commit.assert_awaited()
 

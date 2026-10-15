@@ -131,6 +131,29 @@ async def delete_document(
 # Search
 # ---------------------------------------------------------------------------
 
+async def search_documents(
+    agent_id: uuid.UUID,
+    query: str,
+    db: AsyncSession,
+    max_results: int = 3,
+) -> list[Document]:
+    """Shared retrieval for prompt context and the explicit RAG tool."""
+    if not query.strip():
+        return []
+    try:
+        from app.core.domain.embedding_service import embed_text
+
+        query_embedding = await embed_text(query)
+        # A missing vector extension must not leave the outer transaction aborted.
+        async with db.begin_nested():
+            docs = await search_documents_vector(agent_id, query_embedding, db, max_results)
+        if docs:
+            return docs
+    except Exception as exc:
+        logger.warning("document.semantic_search_unavailable", error_type=type(exc).__name__)
+    return await search_documents_keyword(agent_id, query, db, max_results)
+
+
 async def search_documents_vector(
     agent_id: uuid.UUID,
     query_embedding: list[float],

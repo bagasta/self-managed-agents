@@ -2,13 +2,25 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 _DEFAULT_TOKEN_QUOTA = 4_000_000
 _DEFAULT_PERIOD_DAYS = 30
 
 
-class AgentCreate(BaseModel):
+class _AgentModelInput(BaseModel):
+    @field_validator("model", check_fields=False)
+    @classmethod
+    def normalize_model(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("Model wajib diisi.")
+        return value
+
+
+class AgentCreate(_AgentModelInput):
     name: str = Field(..., min_length=1, max_length=255)
     description: str | None = None
     instructions: str = ""
@@ -73,7 +85,7 @@ class AgentCreate(BaseModel):
     )
 
 
-class AgentUpdate(BaseModel):
+class AgentUpdate(_AgentModelInput):
     name: str | None = Field(None, min_length=1, max_length=255)
     description: str | None = None
     instructions: str | None = None

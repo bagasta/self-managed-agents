@@ -1,0 +1,6 @@
+ARG BASE_IMAGE=managed-agents-app:arthur-knowledge-r2-20261015
+FROM ${BASE_IMAGE}
+COPY arthur_v2/plugin.py /app/arthur_v2/plugin.py
+COPY arthur_v2/knowledge_context.py /app/arthur_v2/knowledge_context.py
+COPY app/core/engine/prompt_builder.py /app/app/core/engine/prompt_builder.py
+COPY app/core/engine/agent_runner.py /app/app/core/engine/agent_runner.py

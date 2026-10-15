@@ -1,0 +1,4 @@
+FROM managed-agents-app:customer-workflow-tools-20261014
+COPY app/api/meta_signup.py /app/app/api/meta_signup.py
+COPY app/api/agents.py /app/app/api/agents.py
+COPY app/core/domain/whatsapp_binding.py /app/app/core/domain/whatsapp_binding.py
