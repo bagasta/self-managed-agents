@@ -3,7 +3,7 @@
 HOST ?= 0.0.0.0
 PORT ?= 8000
 
-PROD_COMPOSE := docker compose -f deploy/docker-compose.prod.yml
+PROD_COMPOSE := docker compose --env-file deploy/.env.prod -f deploy/docker-compose.prod.yml
 
 help:
 	@echo "Managed Agent Platform"

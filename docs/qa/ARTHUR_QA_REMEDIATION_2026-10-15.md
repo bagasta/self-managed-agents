@@ -1,6 +1,8 @@
 # Arthur QA Batch 1–10: perbaikan dan batas rilis
 
-Status: kandidat kode untuk staging/canary, **belum diterapkan ke produksi**. Perbaikan dibuat di branch `codex/meta-embedded-signup`, di atas baseline `e5468b4`. Tidak ada perubahan database produksi, reseed Arthur, reset percakapan, pengaktifan kembali agent, atau pengiriman pesan customer selama pengujian ini.
+Status saat penyusunan pada 15 Oktober: kandidat kode untuk staging/canary. Perbaikan dibuat di branch `codex/meta-embedded-signup`, di atas baseline `e5468b4`. Tidak ada perubahan database produksi, reseed Arthur, reset percakapan, pengaktifan kembali agent, atau pengiriman pesan customer selama pengujian implementasi tersebut.
+
+**Pembaruan 16 Oktober 2026:** aplikasi `c768a25` sudah menggantikan API dan scheduler produksi setelah backup, pemulihan database staging, dan uji rollback berhasil. Cakupan aktivasi, verifikasi produksi, serta prosedur kembali ke image lama dicatat dalam [laporan deployment](ARTHUR_DEPLOYMENT_2026-10-16.md). Matriks batas pembuktian di bawah tetap berlaku; QA percakapan nyata belum dinyatakan lulus ulang.
 
 Analisis awal tetap tersedia di [laporan akar masalah](ARTHUR_BATCH_1_10_ROOT_CAUSE_ANALYSIS_2026-10-15.md). Temuan QA adalah laporan gejala; perbaikan berikut membedakan bug yang terbukti, kontrol yang memerlukan aktivasi bertahap, dan perilaku percakapan yang masih perlu diuji.
 
