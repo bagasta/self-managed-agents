@@ -4,7 +4,7 @@ File text extractor for RAG document upload.
 Supported formats
 -----------------
 .txt / .md          UTF-8 decode
-.pdf                Mistral OCR API (mistral-ocr-latest)
+.pdf                local text first; Mistral OCR for scanned/mixed PDFs
 .docx / .pptx        local parser by default; Mistral Document AI for Arthur
 
 After extraction the text is chunked so each chunk fits the embedding
@@ -71,55 +71,54 @@ async def extract_text(
         return _extract_txt(content)
 
     if ext == ".pdf":
+        # Read complete digital PDFs without an external dependency or OCR quota.
+        # The local parser rejects partial/scanned pages, which still need OCR.
+        text = await asyncio.to_thread(_extract_pdf_local, content)
+        if text:
+            logger.info("document.pdf_local_completed")
+            return text
         if len(content) > MISTRAL_MAX_BYTES:
             raise ValueError(
                 f"PDF is too large for Mistral OCR ({len(content) // 1024 // 1024} MB). "
                 f"Maximum is {MISTRAL_MAX_BYTES // 1024 // 1024} MB."
             )
-        try:
-            if not mistral_api_key:
-                raise ValueError("MISTRAL_API_KEY is not configured.")
-            text = await _extract_document_mistral(
-                content, filename, mistral_api_key,
-                model=mistral_model, content_type="application/pdf",
-            )
-            if text.strip():
-                return text
-            raise ValueError("OCR returned no text.")
-        except (httpx.HTTPError, ValueError, RuntimeError) as exc:
-            # Digital PDFs can still be read when the OCR provider is unavailable.
-            # Reject partial extraction: a scanned page must not silently disappear.
-            text = await asyncio.to_thread(_extract_pdf_local, content)
-            if text:
-                logger.info("document.pdf_local_fallback", reason=type(exc).__name__)
-                return text
-            raise
+        if not mistral_api_key:
+            raise ValueError("MISTRAL_API_KEY is not configured.")
+        text = await _extract_document_mistral(
+            content, filename, mistral_api_key,
+            model=mistral_model, content_type="application/pdf",
+        )
+        if text.strip():
+            return text
+        raise ValueError("OCR returned no text.")
 
-    if ext == ".docx":
+    if ext in {".docx", ".pptx"}:
+        local_parser = _extract_docx if ext == ".docx" else _extract_pptx
         if use_mistral_for_office:
-            if not mistral_api_key:
-                raise ValueError("MISTRAL_API_KEY is not configured — cannot process DOCX files for Arthur.")
-            return await _extract_document_mistral(
-                content,
-                filename,
-                mistral_api_key,
-                model=mistral_model,
-                content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            )
-        return _extract_docx(content)
-
-    if ext == ".pptx":
-        if use_mistral_for_office:
-            if not mistral_api_key:
-                raise ValueError("MISTRAL_API_KEY is not configured — cannot process PPTX files for Arthur.")
-            return await _extract_document_mistral(
-                content,
-                filename,
-                mistral_api_key,
-                model=mistral_model,
-                content_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            )
-        return _extract_pptx(content)
+            try:
+                if not mistral_api_key:
+                    raise ValueError("MISTRAL_API_KEY is not configured.")
+                text = await _extract_document_mistral(
+                    content, filename, mistral_api_key, model=mistral_model,
+                    content_type=(
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                        if ext == ".docx" else
+                        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                    ),
+                )
+                if text.strip():
+                    return text
+                raise ValueError("OCR returned no text.")
+            except (httpx.HTTPError, ValueError, RuntimeError) as exc:
+                # Embedded images are not covered by the native Office parser.
+                # Refuse incomplete fallback rather than silently omit a scanned CV.
+                if not _office_has_embedded_images(content):
+                    text = await asyncio.to_thread(local_parser, content)
+                    if text.strip():
+                        logger.info("document.office_local_fallback", extension=ext, reason=type(exc).__name__)
+                        return text
+                raise
+        return await asyncio.to_thread(local_parser, content)
 
     if ext == ".csv":
         return _extract_csv(content)
@@ -414,7 +413,7 @@ def _get_extension(filename: str, content_type: str | None) -> str:
     """Derive a normalised file extension from filename or MIME type."""
     if filename:
         dot = filename.rfind(".")
-        if dot >= 0:
+        if dot >= 0 and filename[dot:].lower() not in {".bin", ".dat", ".octet-stream"}:
             return filename[dot:].lower()
 
     # Fallback: map MIME type to extension
@@ -426,4 +425,12 @@ def _get_extension(filename: str, content_type: str | None) -> str:
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
         "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
     }
-    return mime_map.get(content_type or "", "")
+    return mime_map.get((content_type or "").split(";", 1)[0].strip().lower(), "")
+
+
+def _office_has_embedded_images(content: bytes) -> bool:
+    from io import BytesIO
+    from zipfile import ZipFile
+
+    with ZipFile(BytesIO(content)) as archive:
+        return any(name.startswith(("word/media/", "ppt/media/")) for name in archive.namelist())

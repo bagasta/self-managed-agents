@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     arthur_primary_model: str = "deepseek/deepseek-v4-flash"
     arthur_document_model: str = "mistral-ocr-latest"
     arthur_image_model: str = "openai/gpt-4.1-mini"
+    # Used only to compile assistant instructions; never the conversational model.
+    arthur_instruction_writer_model: str = "anthropic/claude-sonnet-5.5"
+    arthur_instruction_writer_max_tokens: int = 16384
     arthur_engine_version: str = "arthur-progressive-v9"
     arthur_prompt_version: str = "arthur-kernel-v18"
     # Allows the legacy Arthur plugin to be retired without disabling generic

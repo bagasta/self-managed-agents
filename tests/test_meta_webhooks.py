@@ -348,4 +348,52 @@ async def test_ai_staff_voice_note_uses_existing_transcription_pipeline(monkeypa
     assert process_media.await_args.kwargs["media_filename"] == "incoming_audio.ogg"
     assert run_agent.await_args.kwargs["user_message"].endswith("Transkripsi: halo")
     send_reply.assert_awaited_once_with(session, "Halo juga")
-    db.commit.assert_awaited_once()
+    assert session.metadata_["last_incoming_media"]["filename"] == "incoming_audio.ogg"
+    assert session.metadata_["current_attachment"]["filename"] == "incoming_audio.ogg"
+    assert db.commit.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("download_fails", [False, True])
+async def test_cloud_document_is_registered_before_tools_run_and_cleared_on_text(monkeypatch, tmp_path, download_fails):
+    from app.api import wa_helpers
+    from app.core.infra import sandbox
+    from test_arthur_knowledge_recovery import pdf_bytes, TEXT
+
+    agent = SimpleNamespace(id="agent-id", wa_access_token_encrypted="enc:meta-token")
+    db = SimpleNamespace(get=AsyncMock(return_value=agent), commit=AsyncMock())
+    session = SimpleNamespace(id=uuid.uuid4(), channel_config={}, metadata_={
+        "current_turn_media": {"workspace_path": "old"}, "current_attachment": {"filename": "old.pdf"}})
+    class Context:
+        async def __aenter__(self):
+            return db
+        async def __aexit__(self, *args):
+            pass
+    monkeypatch.setattr(meta_webhooks, "AsyncSessionLocal", lambda: Context())
+    monkeypatch.setattr(wa_helpers, "find_or_create_wa_session", AsyncMock(return_value=(session, False)))
+    monkeypatch.setattr(sandbox, "get_workspace_dir", lambda _: tmp_path)
+    monkeypatch.setattr("app.core.infra.channel_service.decrypt_value", lambda _: "meta-token")
+    monkeypatch.setattr("app.core.infra.wa_cloud_client.send_typing_indicator", AsyncMock())
+    download = AsyncMock(return_value=(pdf_bytes(TEXT), "application/pdf"))
+    if download_fails:
+        download.side_effect = RuntimeError("download unavailable")
+    monkeypatch.setattr("app.core.infra.wa_cloud_client.download_media", download)
+    seen = []
+    async def execute(**kwargs):
+        assert db.commit.await_count >= 1
+        if len(seen) == 0 and not download_fails:
+            assert session.metadata_["last_incoming_media"]["mimetype"] == "application/pdf"
+            assert session.metadata_["current_attachment"]["filename"] == "incoming_document.pdf"
+            assert TEXT in kwargs["user_message"]
+        else:
+            assert "current_turn_media" not in session.metadata_
+            assert "current_attachment" not in session.metadata_
+        seen.append(kwargs)
+        return {"reply": "Terima kasih"}
+    monkeypatch.setattr("app.core.engine.agent_runner.run_agent", execute)
+    monkeypatch.setattr(meta_webhooks, "_send_cloud_reply", AsyncMock())
+    await meta_webhooks._process("agent-id", "phone-id", {"id": "wamid.pdf", "from": "628999", "type": "document",
+        "document": {"id": "media-id", "mime_type": "application/pdf"}}, "Participant")
+    await meta_webhooks._process("agent-id", "phone-id", {"id": "wamid.text", "from": "628999", "type": "text",
+        "text": {"body": "Terima kasih"}}, "Participant")
+    assert len(seen) == 2

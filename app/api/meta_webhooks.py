@@ -261,7 +261,7 @@ async def verify_meta_webhook(hub_mode: str | None = Query(None, alias="hub.mode
 
 
 async def _process(agent_id: str, phone_number_id: str, message: dict, sender_name: str) -> None:
-    from app.api.wa_helpers import find_or_create_wa_session
+    from app.api.wa_helpers import find_or_create_wa_session, register_session_media
     from app.core.engine.agent_runner import run_agent
     from app.core.infra.channel_service import decrypt_value
     from app.core.infra.wa_cloud_client import download_media, send_typing_indicator
@@ -297,6 +297,7 @@ async def _process(agent_id: str, phone_number_id: str, message: dict, sender_na
         media_image_b64: str | None = None
         media_image_mime: str | None = None
         current_attachment_name: str | None = None
+        media_meta = None
         if message_type in {"image", "document", "audio"}:
             media_id = str(media.get("id") or "")
             if not media_id:
@@ -325,7 +326,11 @@ async def _process(agent_id: str, phone_number_id: str, message: dict, sender_na
                     media_filename=filename,
                     session_id=session.id,
                     logger=logger,
-                    arthur_model_routing=bool(getattr(agent, "is_arthur", False)),
+                    arthur_model_routing=bool(
+                        getattr(agent, "is_arthur", False)
+                        or (getattr(agent, "tools_config", None) or {}).get("system_plugin") == "arthur_v2"
+                    ),
+                    media_mimetype=mime_type,
                 )
                 current_attachment_name = (media_meta or {}).get("filename") or filename
                 caption = str(media.get("caption") or "").strip()
@@ -336,6 +341,10 @@ async def _process(agent_id: str, phone_number_id: str, message: dict, sender_na
                     f"[Lampiran {message_type} diterima tetapi tidak dapat diunduh dari WhatsApp. "
                     "Minta pengguna mengirim ulang lampiran tersebut.]"
                 )
+        register_session_media(session, media_meta, source_message_id=str(message.get("id") or ""))
+        # Make source bytes discoverable to tools even if execution commits or
+        # recovers in a separate database session.
+        await db.commit()
         result = await run_agent(
             agent_model=agent,
             session=session,

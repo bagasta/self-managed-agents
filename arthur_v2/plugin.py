@@ -34,6 +34,7 @@ from app.core.utils.phone_utils import normalize_phone
 
 from .payments import PLAN_CAPACITY, PLAN_LABELS, PLAN_MONTHLY_PRICES_IDR, build_payment_link, resolve_payment_plan
 from .google_oauth import get_google_oauth_status, google_mcp_url, start_google_oauth
+from .instruction_writer import compose_assistant_instructions, writer_receipt, InstructionWriterError
 
 ARTHUR_V2_PLUGIN = "arthur_v2"
 ARTHUR_V2_ASSISTANT_MODEL = "anthropic/claude-haiku-5.5"
@@ -882,13 +883,11 @@ def build_arthur_v2_tools(
             name, purpose, instructions, workflow_data.get("trigger", ""),
             workflow_data.get("steps", ""), workflow_data.get("outputs", ""),
         )
-        target_instructions = instructions.strip()
+        approved_instructions = instructions.strip()
         tool_usage = _build_target_tool_usage(
             google_services=google_services,
             scheduler=scheduler_enabled,
         )
-        if "# ATURAN PENGGUNAAN TOOLS" not in target_instructions:
-            target_instructions = f"{target_instructions}\n\n{tool_usage}"
         workflow_data["tool_usage"] = tool_usage
 
         tools_config: dict[str, Any] = {
@@ -938,6 +937,19 @@ def build_arthur_v2_tools(
                 "verification": "runtime_read_required",
             }
 
+        try:
+            target_instructions = await compose_assistant_instructions(
+                name=name.strip(), purpose=purpose.strip(), instructions=approved_instructions,
+                workflow=workflow_data, capabilities={"google_services": google_services,
+                "scheduler": scheduler_enabled, "deploy": bool(enable_deploy),
+                "google_operations": google_permissions if google_services else {}}, tool_policy=tool_usage,
+            )
+        except InstructionWriterError:
+            return {"ok": False, "error": "Instruksi assistant belum berhasil disiapkan. Assistant belum dibuat; silakan coba lagi."}
+        if blocked_agent_policy_reason(target_instructions):
+            return {"ok": False, "error": "Instruksi hasil penyusunan perlu diperiksa ulang. Assistant belum dibuat."}
+        target_instructions = f"{target_instructions}\n\n{tool_usage}"
+        tools_config["assistant_profile"]["instruction_writer"] = writer_receipt(approved_instructions)
         async with db_factory() as db:
             agent = Agent(
                 name=name.strip(),
@@ -1189,24 +1201,43 @@ def build_arthur_v2_tools(
         blocked_reason = blocked_agent_policy_reason(combined)
         if blocked_reason:
             return {"ok": False, "error": blocked_reason}
+        target_instructions = None
+        original_version = agent.version
+        if instructions.strip():
+            config = agent.tools_config or {}
+            mcp = config.get("mcp") or {}
+            google_config = (mcp.get("servers") or mcp).get("google_workspace") or {}
+            services = google_config.get("allowed_services") or []
+            tool_usage = _build_target_tool_usage(google_services=services, scheduler=bool(config.get("scheduler")))
+            try:
+                target_instructions = await compose_assistant_instructions(
+                    name=name.strip() or agent.name, purpose=purpose.strip() or agent.description or "",
+                    instructions=instructions.strip(), workflow=(config.get("assistant_profile") or {}).get("workflow") or {},
+                    capabilities={"google_services": services, "scheduler": bool(config.get("scheduler")),
+                                  "deploy": bool(config.get("deploy")),
+                                  "google_operations": google_config.get("allowed_operations") or {}}, tool_policy=tool_usage,
+                )
+            except InstructionWriterError:
+                return {"ok": False, "error": "Instruksi baru belum berhasil disiapkan. Perubahan belum disimpan; silakan coba lagi."}
+            if blocked_agent_policy_reason(target_instructions):
+                return {"ok": False, "error": "Instruksi hasil penyusunan perlu diperiksa ulang. Perubahan belum disimpan."}
+            target_instructions = f"{target_instructions}\n\n{tool_usage}"
         async with db_factory() as db:
             managed = await db.get(Agent, agent.id)
+            if managed is None or managed.is_deleted:
+                return {"ok": False, "error": "Assistant sudah tidak tersedia. Perubahan belum disimpan."}
+            if target_instructions is not None and managed.version != original_version:
+                return {"ok": False, "error": "Konfigurasi assistant berubah. Baca ulang sebelum menerapkan instruksi baru."}
             if name.strip():
                 managed.name = name.strip()
             if purpose.strip():
                 managed.description = purpose.strip()
             if instructions.strip():
-                config = managed.tools_config or {}
-                mcp = config.get("mcp") or {}
-                google_config = (mcp.get("servers") or mcp).get("google_workspace") or {}
-                tool_usage = _build_target_tool_usage(
-                    google_services=google_config.get("allowed_services") or [],
-                    scheduler=bool(config.get("scheduler")),
-                )
-                target_instructions = instructions.strip()
-                if "# ATURAN PENGGUNAAN TOOLS" not in target_instructions:
-                    target_instructions = f"{target_instructions}\n\n{tool_usage}"
                 managed.instructions = target_instructions
+                managed.tools_config = {**(managed.tools_config or {}), "assistant_profile": {
+                    **((managed.tools_config or {}).get("assistant_profile") or {}),
+                    "instruction_writer": writer_receipt(instructions.strip()),
+                }}
             managed.version += 1
             await db.commit()
             await db.refresh(managed)

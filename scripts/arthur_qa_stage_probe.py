@@ -19,6 +19,12 @@ async def main():
     settings = get_settings()
     host = make_url(settings.database_url).host or ""
     assert settings.environment == "test" and host.startswith("arthur-qa-pg-"), "Staging only"
+    # Staging has no provider credentials or external network. Exercise the
+    # reviewed DB/approval path with a deterministic writer, never in production.
+    from arthur_v2 import plugin
+    async def staging_writer(**kwargs):
+        return kwargs["instructions"]
+    plugin.compose_assistant_instructions = staging_writer
     async with AsyncSessionLocal() as db:
         target = (await db.execute(select(Agent).where(
             Agent.name == "CS Toko Kue QA", Agent.is_deleted.is_(False),

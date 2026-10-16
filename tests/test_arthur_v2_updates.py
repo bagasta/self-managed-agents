@@ -26,6 +26,8 @@ async def test_update_saves_name_and_instructions_preserving_capabilities(monkey
         async def __aexit__(self, *args):
             pass
     monkeypatch.setattr(plugin, "agent_belongs_to_owner", lambda *args: True)
+    composer = AsyncMock(return_value="Revised SOP")
+    monkeypatch.setattr(plugin, "compose_assistant_instructions", composer)
     tool = next(t for t in plugin.build_arthur_v2_tools(db_factory=Context, owner_phone="6281234567890", self_agent_id=None) if t.name == "update_assistant")
     config = agent.tools_config.copy()
     reply = await tool.ainvoke({"agent_id": str(agent.id), "name": " After ", "instructions": "Revised SOP", "confirmed": True})
@@ -35,7 +37,11 @@ async def test_update_saves_name_and_instructions_preserving_capabilities(monkey
     assert agent.instructions.startswith("Revised SOP\n")
     assert "# GOOGLE WORKSPACE" in agent.instructions
     assert "# OTOMASI BACKGROUND" in agent.instructions
-    assert agent.tools_config == config
+    assert {key: value for key, value in agent.tools_config.items() if key != "assistant_profile"} == config
+    assert agent.tools_config["assistant_profile"]["instruction_writer"]["format"] == "markdown"
+    assert agent.tools_config["assistant_profile"]["instruction_writer"]["model"] == "anthropic/claude-sonnet-5.5"
+    assert agent.model == "deepseek/deepseek-v4-flash"
+    composer.assert_awaited_once()
     assert agent.version == 4
     db.commit.assert_awaited_once()
 

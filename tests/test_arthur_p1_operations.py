@@ -33,7 +33,12 @@ OWNER = "6281234567890"
 
 
 @pytest_asyncio.fixture
-async def database(tmp_path):
+async def database(tmp_path, monkeypatch):
+    # Existing business-operation tests are offline. Writer/provider behavior is
+    # exercised separately in test_arthur_instruction_writer.py.
+    async def offline_writer(**kwargs):
+        return kwargs["instructions"]
+    monkeypatch.setattr(plugin, "compose_assistant_instructions", offline_writer)
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/operations.db")
     async with engine.begin() as conn:
         await conn.run_sync(lambda c: Base.metadata.create_all(c, tables=[Agent.__table__, Session.__table__, Run.__table__, Message.__table__, Memory.__table__, ScheduledJob.__table__, OutboundMessage.__table__]))

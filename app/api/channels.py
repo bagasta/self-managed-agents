@@ -2198,51 +2198,15 @@ async def wa_incoming(
             session_id=session.id,
             logger=log,
             arthur_model_routing=_force_arthur_document_route,
+            media_mimetype=body.media_mimetype,
         )
-        if media_meta:
-            import time as _time
-            _saved_at = int(_time.time())
-            _source_message_id = str(body.message_id or "").strip()
-            sess_meta = dict(session.metadata_ or {})
-            sess_meta["last_incoming_media"] = {
-                **media_meta,
-                "saved_at": _saved_at,
-                "from_operator": _is_operator,
-                "source_message_id": _source_message_id,
-            }
-            sess_meta["current_turn_media"] = {
-                "workspace_path": media_meta.get("workspace_path"),
-                "source_message_id": _source_message_id,
-                "saved_at": _saved_at,
-            }
-            sess_meta["current_attachment"] = {
-                "media_type": media_meta.get("media_type"),
-                "filename": media_meta.get("filename"),
-                "input_path": media_meta.get("current_input_path") or media_meta.get("shared_alias"),
-                "subagent_input_path": (
-                    media_meta.get("subagent_current_input_path")
-                    or media_meta.get("incoming_alias")
-                ),
-                "shared_path": media_meta.get("current_input_path") or media_meta.get("shared_alias"),
-                "legacy_shared_path": media_meta.get("shared_alias"),
-                "extracted_text_path": media_meta.get("extracted_text_path"),
-                "extracted_text_subagent_path": media_meta.get("extracted_text_subagent_path"),
-                "saved_at": _saved_at,
-                "from_operator": _is_operator,
-            }
-            session.metadata_ = sess_meta
+        from app.api.wa_helpers import register_session_media
+        if register_session_media(session, media_meta, source_message_id=str(body.message_id or "").strip(), from_operator=_is_operator):
             db.add(session)
             await db.commit()
     elif not body.media_type:
-        sess_meta = dict(session.metadata_ or {})
-        # Attachments are scoped to the inbound turn that delivered them. Keeping
-        # this key for later text turns makes an old sticker/document override a
-        # newer request such as "lanjutkan website".
-        if (
-            sess_meta.pop("current_turn_media", None) is not None
-            or sess_meta.pop("current_attachment", None) is not None
-        ):
-            session.metadata_ = sess_meta
+        from app.api.wa_helpers import register_session_media
+        if register_session_media(session, None):
             db.add(session)
             await db.commit()
 

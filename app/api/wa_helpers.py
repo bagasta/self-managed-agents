@@ -547,6 +547,62 @@ async def find_escalation_context(
     return escalation_user_jid, escalation_context
 
 
+def register_session_media(session, media_meta: dict | None, *, source_message_id: str = "", from_operator: bool = False) -> bool:
+    """Use the same attachment lifecycle for the demo and Meta Cloud channels."""
+    import time
+
+    metadata = dict(getattr(session, "metadata_", None) or {})
+    # Clear both keys even if the first existed (no short-circuit pop).
+    had_current = "current_turn_media" in metadata or "current_attachment" in metadata
+    metadata.pop("current_turn_media", None)
+    metadata.pop("current_attachment", None)
+    if media_meta:
+        saved_at = int(time.time())
+        metadata["last_incoming_media"] = {
+            **media_meta, "saved_at": saved_at, "from_operator": from_operator,
+            "source_message_id": source_message_id,
+        }
+        metadata["current_turn_media"] = {
+            "workspace_path": media_meta.get("workspace_path"),
+            "source_message_id": source_message_id, "saved_at": saved_at,
+        }
+        metadata["current_attachment"] = {
+            "media_type": media_meta.get("media_type"), "filename": media_meta.get("filename"),
+            "input_path": media_meta.get("current_input_path") or media_meta.get("shared_alias"),
+            "subagent_input_path": media_meta.get("subagent_current_input_path") or media_meta.get("incoming_alias"),
+            "shared_path": media_meta.get("current_input_path") or media_meta.get("shared_alias"),
+            "legacy_shared_path": media_meta.get("shared_alias"),
+            "extracted_text_path": media_meta.get("extracted_text_path"),
+            "extracted_text_subagent_path": media_meta.get("extracted_text_subagent_path"),
+            "saved_at": saved_at, "from_operator": from_operator,
+        }
+    if had_current or media_meta:
+        session.metadata_ = metadata
+        return True
+    return False
+
+
+def _incoming_media_filename(media_type: str, filename: str | None, mimetype: str | None, content: bytes) -> str:
+    from app.core.domain.file_processor import _get_extension
+
+    name = Path(filename or f"incoming_{media_type}").name
+    if name in {"", ".", ".."}:
+        name = f"incoming_{media_type}"
+    suffix = Path(name).suffix.lower()
+    if not suffix or suffix in {".bin", ".dat", ".octet-stream"}:
+        mime = (mimetype or "").split(";", 1)[0].strip().lower()
+        extension = _get_extension("", mime) or {
+            "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp",
+            "audio/aac": ".aac", "audio/amr": ".amr", "audio/mpeg": ".mp3",
+            "audio/mp4": ".m4a", "audio/ogg": ".ogg",
+        }.get(mime)
+        if not extension and content.startswith(b"%PDF-"):
+            extension = ".pdf"
+        extension = extension or {"image": ".jpg", "sticker": ".webp"}.get(media_type, ".bin")
+        name = (name[:-len(suffix)] if suffix else name) + extension
+    return name
+
+
 async def process_wa_media(
     *,
     media_type: str,
@@ -555,6 +611,7 @@ async def process_wa_media(
     session_id: uuid.UUID,
     logger: structlog.BoundLogger,
     arthur_model_routing: bool = False,
+    media_mimetype: str | None = None,
 ) -> tuple[str, str | None, str | None, dict[str, Any] | None]:
     """
     Proses media (gambar/dokumen/stiker/audio) dari pesan WhatsApp.
@@ -583,12 +640,7 @@ async def process_wa_media(
     try:
         raw_bytes = base64.b64decode(media_data)
         workspace = get_workspace_dir(session_id)
-        filename = Path(media_filename or f"incoming_{media_type}").name
-        if not filename:
-            filename = f"incoming_{media_type}"
-        if "." not in filename:
-            ext_map = {"image": ".jpg", "document": ".bin", "sticker": ".webp"}
-            filename += ext_map.get(media_type, ".bin")
+        filename = _incoming_media_filename(media_type, media_filename, media_mimetype, raw_bytes)
         target_path = workspace / filename
         incoming_path = workspace / "data" / "incoming" / filename
         current_incoming_dir = workspace / "data" / "incoming" / "current_input"
@@ -640,7 +692,8 @@ async def process_wa_media(
             "Jangan memilih input dari hasil ls /workspace/shared karena folder itu bisa berisi file lama."
         )
 
-        if media_type == "image":
+        # WhatsApp can deliver CV photos as a document to preserve image quality.
+        if media_type == "image" or (media_type == "document" and Path(filename).suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}):
             ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "jpg"
             mime_map = {
                 "jpg": "image/jpeg",
@@ -663,7 +716,9 @@ async def process_wa_media(
 
         elif media_type == "document":
             ext = ("." + filename.rsplit(".", 1)[-1].lower()) if "." in filename else ""
-            media_meta["mimetype"] = "application/octet-stream"
+            import mimetypes
+            document_mime = (media_mimetype or mimetypes.guess_type(filename)[0] or "application/octet-stream").split(";", 1)[0].strip().lower()
+            media_meta["mimetype"] = document_mime
             doc_extractable = {".pdf", ".docx", ".pptx", ".txt", ".md", ".csv"}
             if ext in doc_extractable:
                 try:
@@ -671,7 +726,7 @@ async def process_wa_media(
                     extracted = await extract_text(
                         content=raw_bytes,
                         filename=filename,
-                        content_type=None,
+                        content_type=document_mime,
                         mistral_api_key=get_settings().mistral_api_key,
                         use_mistral_for_office=arthur_model_routing,
                         mistral_model=getattr(
@@ -680,6 +735,8 @@ async def process_wa_media(
                             "mistral-ocr-latest",
                         ),
                     )
+                    if not extracted.strip():
+                        raise ValueError("Document contains no readable text")
                     extract_stem = Path(filename).stem or "incoming_document"
                     extracted_filename = f"{extract_stem}.extracted.txt"
                     current_extracted_path = current_shared_dir / extracted_filename
@@ -694,11 +751,7 @@ async def process_wa_media(
                         "extracted_text_subagent_path": f"/workspace/data/incoming/current_input/{extracted_filename}",
                         "processing_route": "document",
                         "processing_status": "completed",
-                        "processor_model": (
-                            getattr(get_settings(), "arthur_document_model", "mistral-ocr-latest")
-                            if arthur_model_routing and ext in {".pdf", ".docx", ".pptx"}
-                            else "deterministic-parser"
-                        ),
+                        "processor_model": "local-or-ocr" if ext in {".pdf", ".docx", ".pptx"} else "deterministic-parser",
                     })
                     max_chars = min(
                         int(get_settings().media_doc_max_chars or _INLINE_DOCUMENT_PREVIEW_MAX_CHARS),
@@ -734,7 +787,13 @@ async def process_wa_media(
                            "Sampaikan blocker dan minta kirim ulang hanya jika isi dokumen diperlukan.]")
                     )
             else:
-                media_context = f"\n[Dokumen diterima: {filename}, {workspace_hint}]"
+                media_meta.update({"processing_route": "document", "processing_status": "unsupported"})
+                media_context = (
+                    f"\n[Dokumen diterima: {filename}, {workspace_hint}]\n"
+                    "[ATTACHMENT_PROCESSING_FAILED: Format ini belum dapat diekstrak otomatis. "
+                    "File asli tetap tersedia untuk diteruskan/diunggah sesuai permintaan. "
+                    "Jangan mengklaim sudah membaca isinya. Jika perlu membaca, minta PDF, DOCX, PPTX, TXT, MD, CSV, atau gambar.]"
+                )
 
         elif media_type == "sticker":
             media_meta["mimetype"] = "image/webp"
