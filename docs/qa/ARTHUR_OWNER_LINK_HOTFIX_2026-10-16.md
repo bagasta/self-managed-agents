@@ -14,6 +14,7 @@ Agent operasional tetap memblokir link login/penyiapan owner dari balasan custom
 - Setelah perbaikan: **17 passed** pada tes khusus link owner. Mencakup konfigurasi/capability builder, Cloud/demo, Meta/Google, akses lintas owner, persetujuan yang belum diberikan, customer operasional, serta customer preview demo.
 - Suite terkait: **134 passed** (20,15 detik), mencakup regresi QA Arthur, kontrak OAuth, routing Google, guard balasan, serta preservasi environment/rollback hotfix.
 - Helper rollout menerima image dan commit kandidat baru serta mode mempertahankan seluruh environment aktual API dan scheduler. Mode ini tidak memilih ulang cohort QA atau mengubah policy flags.
+- Image hotfix dibangun dengan `deploy/Dockerfile.owner-link-hotfix` di atas image produksi `d9ab842ad932…`, hanya mengganti dua modul aplikasi dan menambahkan/memperbarui helper serta tes terkait. Dependency Python/OS tetap berasal dari image produksi sebelumnya.
 - Probe `scripts/arthur_owner_link_probe.py` membaca sesi dan ownership aktual dengan transaksi read-only dan menggunakan URL placeholder. Probe tidak membuat token signup, mengirim WhatsApp, atau mengubah konfigurasi agent.
 
 ## Status rilis
