@@ -112,7 +112,7 @@ def prepare(candidate_image=CANDIDATE, candidate_commit="c768a25", preserve_runt
     private_json(folder / "state.private.json", state)
     print(json.dumps({"backup_directory": str(folder), "database_bytes": dump.stat().st_size,
                       "archive_entries": state["archive_entries"], "old_image": old,
-                      "candidate_image": CANDIDATE, "production_unchanged": True}), flush=True)
+                      "candidate_image": candidate_image, "production_unchanged": True}), flush=True)
 
 
 def save(state):

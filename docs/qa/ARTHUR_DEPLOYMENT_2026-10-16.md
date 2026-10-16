@@ -1,6 +1,6 @@
 # Deployment Arthur QA remediation — 16 Oktober 2026
 
-**Status: produksi sudah memakai kandidat aplikasi `c768a25`.** API dan scheduler diganti bersama pada 16 Oktober 2026, pukul **08:54:46 WIB**. Tidak ada migrasi schema, reseed Arthur, pemulihan database produksi, penghapusan memori, atau pengaktifan kembali agent yang dijeda/dihapus.
+**Catatan deployment awal; produksi kini memakai [hotfix link owner `c11190a`](ARTHUR_OWNER_LINK_HOTFIX_2026-10-16.md), aktif 16 Oktober 2026 pukul 13.37 WIB.** Rincian berikut mencatat deployment kandidat `c768a25`: API dan scheduler diganti bersama pada 16 Oktober 2026, pukul **08:54:46 WIB**. Tidak ada migrasi schema, reseed Arthur, pemulihan database produksi, penghapusan memori, atau pengaktifan kembali agent yang dijeda/dihapus.
 
 ## Versi yang disimpan
 
