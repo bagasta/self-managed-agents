@@ -3,4 +3,3 @@ ARG ARTHUR_BASE_IMAGE=managed-agents-app:arthur-qa-remediation-20261015-r1
 FROM ${ARTHUR_BASE_IMAGE}
 COPY app/core/engine/agent_google_routing.py app/core/engine/agent_runner.py /app/app/core/engine/
 COPY scripts/arthur_qa_release.py scripts/arthur_owner_link_probe.py /app/scripts/
-COPY tests/test_builder_owner_auth_links.py tests/test_arthur_release_hotfix.py /app/tests/
