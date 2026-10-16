@@ -38,3 +38,45 @@ Suite final setelah pemeriksaan konfigurasi asli: **300 passed, 1 deselected** d
 Staging pertama menangkap akses ke field `channel_secret_key` yang tidak ada pada model Settings aplikasi. Kandidat tersebut dibatalkan sebelum produksi dan receipt staging-nya dibuat tidak valid untuk rollout. Penandatanganan transfer diperbaiki menggunakan key turunan khusus dari API key aplikasi yang memang tersedia; pengujian endpoint kini memakai model `Settings` asli dan memastikan token tidak valid menghasilkan 404.
 
 Receipt staging, deployment, pemeriksaan produksi, serta rollback dicatat setelah validasi selesai. Permintaan hapus memori yang dikutip dalam laporan tidak dieksekusi pada data produksi; owner perlu memberi konfirmasi baru melalui alur yang telah diperbaiki.
+
+## Validasi salinan data produksi
+
+Kandidat final dipulihkan pada database terisolasi dengan **212 agent, 846 chunk knowledge, 503 sesi, dan 10.570 pesan**. Replay read-only run 14.10 membuktikan hasil inspect tidak lagi menghasilkan artifact/pengiriman file dan hasil kirim gagal tidak dianggap sukses. Tool reset tetap tersedia dan menuntut persetujuan.
+
+Reset kemudian benar-benar diuji **hanya pada salinan staging**: memori scoped Tokyo8 dibersihkan, metadata lampiran/artifact dihapus, memori Arthur dan instruksi Tokyo8 tetap utuh. Probe knowledge, brief, preview tanpa write, approval berikutnya, dan pencegahan approval duplikat juga lulus. Endpoint transfer pada server staging menolak token tidak valid dengan HTTP 404.
+
+## Deployment dan pemeriksaan produksi
+
+**Hotfix aktif di produksi sejak 16 Oktober 2026, 14.46.23 WIB.** API dan scheduler memakai commit aplikasi **`4cf0202`** (perbaikan utama `afd2f5a`) dan image immutable:
+
+`sha256:4ebe75e13f863d55264229a0037752704cd7ece6db5d559d3d27c390f6fd25bb`
+
+Tag aktif: `managed-agents-app:arthur-cv-memory-hotfix-20261016-r2`. Pointer deployment `.env.prod` disinkronkan ke tag dan commit tersebut.
+
+- Urutan **kandidat final → versi sebelumnya → kandidat final** pada staging lulus health, pembacaan API terautentikasi, dan startup worker.
+- Environment aktual API dan scheduler dibandingkan dengan snapshot: hanya `APP_COMMIT_SHA` berubah. Credential, cohort QA/preview, policy expiry, gateway serta koneksi WA dipertahankan. Tidak ada migrasi schema.
+- HTTPS publik `/health` berstatus `ok`, commit `4cf0202`. Database, scheduler, serta `wa_service` semuanya `ok`; kedua container memakai image yang sama.
+- Replay run reset yang bermasalah pada container **produksi** lulus tanpa write: hasil baca memori tidak memicu file, hasil kirim gagal tidak dianggap sukses, namespace agent berbeda, tool reset tersedia, dan persetujuan tetap diperlukan.
+- **Container Google MCP benar-benar mengambil gambar CV asli melalui endpoint produksi baru:** HTTP 200, `image/jpeg`, dan hash/ukuran byte sama dengan lampiran terdaftar. Signed URL serta isi gambar tidak dicetak. Ini pembuktian akses lintas container yang sebelumnya gagal karena path lokal tidak tersedia.
+- Tidak ada log JSON level warning/error/critical pada window pemeriksaan awal pasca-deploy. Resource staging final dibersihkan setelah validasi.
+
+**Batas hasil:** pengujian produksi terakhir hanya membaca file dan menjalankan pemeriksaan tanpa mutasi. Tidak melakukan upload ulang ke Google Drive, mengirim WhatsApp, atau menghapus memori nyata. Upload Drive end-to-end dan percakapan ulang reset perlu dijalankan melalui agent oleh owner; mekanisme transfer file dan alur resetnya sudah diuji seperti di atas. File TXT yang dibuat saat kejadian lama tidak dihapus otomatis.
+
+Untuk QA ulang: minta Arthur reset memori nomor yang dituju pada Tokyo8, periksa ringkasan dan beri persetujuan baru. Setelah reset berhasil, kirim CV gambar/PDF ke Tokyo8 dan periksa file asli di folder Drive tujuan. Tidak perlu mereset memori Arthur untuk memperbaiki kasus ini.
+
+## Backup dan rollback
+
+Backup final: `/home/clevio/backups/arthur-qa-20261016-074220`, direktori privat di luar Git.
+
+- Database: **11.739.133 byte**, 137 entry archive; restore staging berhasil.
+- Archive image: **301.554.166 byte**, dua image; integritas gzip CRC terverifikasi.
+- Image sebelumnya: `sha256:02977cec95b16abf813a3ba8e2b9177a13122ea71a430724b1ed326c75d63613` (commit aplikasi `c11190a`). Perbaikan link owner tetap tersedia pada versi ini.
+
+```bash
+python3 scripts/arthur_qa_release.py rollback-production \
+  --state /home/clevio/backups/arthur-qa-20261016-074220/state.private.json
+```
+
+Rollback mengganti API/scheduler dan environment tersimpan, tanpa menimpa database atau membatalkan aksi Google/WhatsApp. Setelah rollback, pointer `.env.prod` perlu dikembalikan ke `IMAGE_TAG=arthur-owner-link-hotfix-20261016-overlay` dan `APP_COMMIT_SHA=c11190a` sebelum deployment berikutnya. Snapshot credential, state privat, signed link, dan konten CV tidak masuk Git.
+
+Kandidat awal yang dibatalkan disimpan sebagai catatan validasi pada backup `073735`; receipt rollout-nya sudah dinonaktifkan dan resource staging-nya dibersihkan. Jangan memakai state tersebut untuk deploy.

@@ -1,5 +1,7 @@
 # Hotfix link koneksi owner Arthur — 16 Oktober 2026
 
+**Pembaruan:** produksi kini menggunakan [hotfix CV/reset memori `4cf0202`](ARTHUR_TOKYO8_CV_MEMORY_FIX_2026-10-16.md), aktif 14.46 WIB. Perbaikan link owner di bawah tetap dipertahankan; dokumen ini merekam rollout pukul 13.37 WIB.
+
 ## Penyebab dan perubahan
 
 Link Meta Embedded Signup Lapi Bot berhasil dibuat pada 13.13.45 WIB, tetapi guard balasan menganggap pemilik assistant sebagai customer agent operasional. Pemilik assistant tidak otomatis menjadi operator internal agent sistem Arthur. Guard lalu mengganti balasan yang mengandung link dengan pesan kendala internal. Kejadian ini juga terbukti pada owner di luar cohort konfirmasi QA.
