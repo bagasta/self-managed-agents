@@ -1,6 +1,6 @@
 # Deployment Arthur QA remediation — 16 Oktober 2026
 
-**Catatan deployment awal; produksi kini memakai [hotfix CV/reset memori `4cf0202`](ARTHUR_TOKYO8_CV_MEMORY_FIX_2026-10-16.md), aktif 16 Oktober 2026 pukul 14.46 WIB, yang mempertahankan [perbaikan link owner](ARTHUR_OWNER_LINK_HOTFIX_2026-10-16.md).** Rincian berikut mencatat deployment kandidat `c768a25`: API dan scheduler diganti bersama pada 16 Oktober 2026, pukul **08:54:46 WIB**. Tidak ada migrasi schema, reseed Arthur, pemulihan database produksi, penghapusan memori, atau pengaktifan kembali agent yang dijeda/dihapus.
+**Catatan deployment awal; produksi kini memakai [hotfix penulis Markdown/dokumen `20055cc`](ARTHUR_INSTRUCTION_DOCUMENT_FIX_2026-10-16.md), aktif 16 Oktober 2026 pukul 15.33 WIB.** Versi ini mempertahankan [hotfix CV/reset memori](ARTHUR_TOKYO8_CV_MEMORY_FIX_2026-10-16.md) dan [perbaikan link owner](ARTHUR_OWNER_LINK_HOTFIX_2026-10-16.md). Rincian berikut mencatat deployment kandidat `c768a25`: API dan scheduler diganti bersama pada 16 Oktober 2026, pukul **08:54:46 WIB**. Tidak ada migrasi schema, reseed Arthur, pemulihan database produksi, penghapusan memori, atau pengaktifan kembali agent yang dijeda/dihapus.
 
 ## Versi yang disimpan
 

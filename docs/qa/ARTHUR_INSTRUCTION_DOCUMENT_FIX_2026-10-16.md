@@ -26,9 +26,46 @@ Suite final: **453 passed, 1 deselected** dalam 34,96 detik. Percobaan awal pemb
 
 Smoke nyata ke OpenRouter pada 08.25.42 UTC berhasil menggunakan ID model persis `anthropic/claude-sonnet-5.5`: dokumen 3.900 karakter, sembilan bagian bernomor, 3.080 token total. Input hanya brief daftar belanja sintetis. Tidak membuat agent, mengubah database, atau mengirim WhatsApp.
 
-Status kandidat: pengujian kode selesai; bukti staging, deployment dan rollback dicatat setelah validasi rilis selesai.
+Seluruh 114 distribusi Python identik dengan image produksi sebelumnya. Hash sepuluh file aplikasi/helper pada image kandidat sama dengan checkout yang diuji.
 
 Percobaan staging pertama tertahan saat restore: `pg_isready` berhasil pada server inisialisasi sementara database clone belum dibuat. Produksi tidak berubah. Helper rilis diperketat agar menunggu query `SELECT 1` pada database tujuan; state staging yang gagal dibatalkan sebelum percobaan baru.
+
+Staging final berhasil memulihkan **212 agent, 846 chunk knowledge, 503 sesi dan 10.649 pesan**. Preview tanpa write, approval berikutnya, approval duplikat, pembacaan knowledge dan brief lulus. Penulis pada probe approval memakai stub eksplisit di proses staging yang terisolasi dan tanpa credential provider; implementasi composer diuji pada suite terpisah dan smoke OpenRouter nyata.
+
+Probe dokumen pada image staging membaca PDF sintetis lokal, memperbaiki ekstensi `.bin` dari MIME, mendaftarkan lampiran, dan memverifikasi byte asli melalui mekanisme transfer bertanda tangan. Kedua penanda current hilang pada turn teks berikutnya. URL publik sintetis diberikan hanya pada proses probe karena staging sengaja tidak mewarisi URL publik produksi. Tidak ada akses provider atau write ke database customer dari probe dokumen.
+
+Urutan **kandidat → image produksi sebelumnya → kandidat** lulus health, authenticated reads dan startup worker. Kedua role hanya mengubah environment `APP_COMMIT_SHA`; credential, cohort, policy expiry dan konfigurasi koneksi dipertahankan.
+
+## Deployment produksi
+
+**Aktif sejak 16 Oktober 2026 pukul 15.33.41 WIB**, commit aplikasi **`20055cc`** (perubahan fitur `a0eaa45`). API dan scheduler memakai image immutable yang sama:
+
+`sha256:3d5004369724d343ad897bceed0488e74049c53306fe1e8ad58c93d10e2c91ff`
+
+Tag: `managed-agents-app:arthur-instruction-document-hotfix-20261016`. Pointer `.env.prod` sudah disinkronkan. Git branch: `codex/meta-embedded-signup` pada `bagasta/self-managed-agents`.
+
+- `/health` HTTPS publik berstatus `ok`, commit `20055cc`; database, scheduler dan WA service semuanya `ok`.
+- Hash sepuluh file aplikasi/helper pada container produksi sesuai checkout yang diuji. Snapshot environment aktual kedua container hanya berbeda pada `APP_COMMIT_SHA`.
+- Probe PDF sintetis di container produksi lulus MIME/ekstensi, pembacaan lokal, registrasi dan transfer byte asli bertanda tangan, serta pembersihan penanda current. Probe hanya memakai direktori sementara dan sesi tiruan tanpa write database, tanpa HTTP/provider eksternal, dan tanpa pesan WhatsApp.
+- Tidak ada event log JSON level warning/error/critical pada window pemeriksaan awal kedua container.
+- Tidak ada run aktif atau antre pada preflight sebelum penggantian. API/scheduler diganti bersama; service lain tidak diganti.
+
+Untuk QA: buat agent baru atau revisi instruksi penuh setelah review/konfirmasi, lalu periksa system message Markdown. Kirim PDF digital, PDF scan, DOCX dan foto CV sebagai dokumen ke agent yang sama. Verifikasi isi jawaban dan file asli pada tujuan workflow. Upload ke Drive dan percakapan WhatsApp nyata tetap perlu QA ulang oleh owner; pemeriksaan ini tidak menjalankan aksi tersebut.
+
+## Backup dan rollback
+
+Backup final privat: `/home/clevio/backups/arthur-qa-20261016-082944` (di luar Git). Database **11.848.874 byte**, 137 entry; restore staging berhasil. Archive image **301.635.001 byte**, CRC gzip terverifikasi. Konfigurasi API/scheduler sebelum deployment tersimpan privat bersama kedua image.
+
+Versi rollback: commit `4cf0202`, image `sha256:4ebe75e13f863d55264229a0037752704cd7ece6db5d559d3d27c390f6fd25bb`, tag `managed-agents-app:arthur-cv-memory-hotfix-20261016-r2`.
+
+```bash
+python3 scripts/arthur_qa_release.py rollback-production \
+  --state /home/clevio/backups/arthur-qa-20261016-082944/state.private.json
+```
+
+Rollback memulihkan image dan environment API/scheduler. Database, pesan yang sudah terkirim dan aksi Google tidak diundur. Sesudah rollback, selaraskan `.env.prod` ke `IMAGE_TAG=arthur-cv-memory-hotfix-20261016-r2` dan `APP_COMMIT_SHA=4cf0202` sebelum deployment berikutnya.
+
+State percobaan `082746` dibatalkan sebelum produksi karena kesiapan database staging. Jangan memakai state tersebut untuk rollout; backupnya tetap disimpan untuk audit.
 
 ## Batas dan kompatibilitas
 
