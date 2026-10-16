@@ -48,7 +48,7 @@ def inspect(name):
     return json.loads(run(["docker", "inspect", name]))[0]
 
 
-def prepare():
+def prepare(candidate_image=CANDIDATE, candidate_commit="c768a25", preserve_runtime_settings=False):
     os.umask(0o077)
     stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
     folder = Path.home() / "backups" / ("arthur-qa-" + stamp)
@@ -59,7 +59,7 @@ def prepare():
     if containers[0]["Image"] != containers[1]["Image"]:
         raise RuntimeError("Production API and scheduler images differ; review first")
     old = containers[0]["Image"]
-    run(["docker", "image", "inspect", CANDIDATE])
+    candidate_image = json.loads(run(["docker", "image", "inspect", candidate_image]))[0]["Id"]
     private_json(folder / "production-containers.private.json", containers)
     config = folder / "configuration"
     config.mkdir(mode=0o700)
@@ -97,13 +97,14 @@ def prepare():
         raise RuntimeError("Backup archive listing failed")
     print("Saving both application images for rollback", flush=True)
     with (folder / "images.tar.gz").open("xb") as output:
-        process = subprocess.Popen(["docker", "image", "save", tag, CANDIDATE],
+        process = subprocess.Popen(["docker", "image", "save", tag, candidate_image],
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         with gzip.GzipFile(fileobj=output, mode="wb", compresslevel=1) as zipped:
             shutil.copyfileobj(process.stdout, zipped)
         if process.wait():
             raise RuntimeError("Image archive failed")
-    state = {"release": stamp, "folder": str(folder), "old_image": old, "candidate_image": CANDIDATE,
+    state = {"release": stamp, "folder": str(folder), "old_image": old, "candidate_image": candidate_image,
+             "candidate_commit": candidate_commit, "preserve_runtime_settings": preserve_runtime_settings,
              "rollback_tag": tag, "database_sha256": digest(dump),
              "images_sha256": digest(folder / "images.tar.gz"), "archive_entries": len(result.stdout.splitlines()),
              "production_unchanged": True, "staging_password": secrets.token_hex(24),
@@ -123,7 +124,7 @@ def stage_environment(state):
             "API_KEY": state["staging_api_key"], "ENVIRONMENT": "test", "REDIS_URL": "",
             "EMBEDDED_SCHEDULER_ENABLED": "false", "CHANNEL_SECRET_KEY": secrets.token_hex(32),
             "GOOGLE_INTEGRATION_SERVICE_URL": "http://blocked.invalid", "WA_SERVICE_URL": "http://blocked.invalid",
-            "WA_DEV_SERVICE_URL": "http://blocked.invalid", "APP_COMMIT_SHA": "c768a25",
+            "WA_DEV_SERVICE_URL": "http://blocked.invalid", "APP_COMMIT_SHA": state.get("candidate_commit", "c768a25"),
             "SUBSCRIPTION_EXPIRY_ENFORCEMENT_ENABLED": "false", "ARTHUR_CONFIRMATION_OWNER_IDS": "[]",
             "DEMO_CUSTOMER_PREVIEW_AGENT_IDS": "[]", "SUBSCRIPTION_EXPIRY_ENFORCEMENT_USER_IDS": "[]"}
 
@@ -247,6 +248,22 @@ def production_specs(state):
     rollback = Path(state["folder"]) / "production.rollback.private.json"
     candidate = Path(state["folder"]) / "production.candidate.private.json"
     private_json(rollback, base)
+    if state.get("preserve_runtime_settings"):
+        # A focused hotfix must retain the currently deployed rollout cohorts,
+        # credentials and policy flags, rather than reselecting QA accounts.
+        for service in ("api", "scheduler"):
+            base["services"][service]["image"] = state["candidate_image"]
+            base["services"][service]["environment"]["APP_COMMIT_SHA"] = state["candidate_commit"]
+        env = base["services"]["api"]["environment"]
+        private_json(candidate, base)
+        for path in (rollback, candidate):
+            run(["docker", "compose", "-p", "deploy", "-f", str(path), "config", "--quiet"])
+        state.update(rollback_compose=str(rollback), candidate_compose=str(candidate),
+                     confirmation_owner_count=len(json.loads(env.get("ARTHUR_CONFIRMATION_OWNER_IDS", "[]"))),
+                     demo_preview_agent_count=len(json.loads(env.get("DEMO_CUSTOMER_PREVIEW_AGENT_IDS", "[]"))),
+                     expiry_enforcement=env.get("SUBSCRIPTION_EXPIRY_ENFORCEMENT_ENABLED", "false").lower() == "true")
+        save(state)
+        return
     code = """import asyncio,json
 from sqlalchemy import select,text
 from app.database import AsyncSessionLocal
@@ -346,7 +363,7 @@ assert values.get('agent_runs_active')==0 and values.get('agent_runs_queued')==0
     print(json.dumps({"deployed_image": desired, **result, "rollback_ready": True,
                       "confirmation_owner_count": 0 if rollback else state["confirmation_owner_count"],
                       "demo_preview_agent_count": 0 if rollback else state["demo_preview_agent_count"],
-                      "expiry_enforcement": False}), flush=True)
+                      "expiry_enforcement": state.get("expiry_enforcement", False)}), flush=True)
 
 
 def cleanup_staging(state):
@@ -368,10 +385,13 @@ if __name__ == "__main__":
     parser.add_argument("action", choices=["prepare", "staging", "rollback-staging", "candidate-staging",
                                             "probe-staging", "production", "rollback-production", "cleanup-staging"])
     parser.add_argument("--state", type=Path)
+    parser.add_argument("--candidate-image", default=CANDIDATE, help="Candidate image/tag for prepare; stored as immutable ID")
+    parser.add_argument("--candidate-commit", default="c768a25", help="Application commit reported by the candidate")
+    parser.add_argument("--preserve-runtime-settings", action="store_true", help="Prepare a hotfix retaining all live runtime settings")
     args = parser.parse_args()
     try:
         if args.action == "prepare":
-            prepare()
+            prepare(args.candidate_image, args.candidate_commit, args.preserve_runtime_settings)
         else:
             if args.state is None or args.state.resolve().is_relative_to(ROOT):
                 raise RuntimeError("Provide the private state file outside the repository")

@@ -24,6 +24,7 @@ from app.core.engine.agent_step_utils import (
     _operator_message_payload,
     _parse_step_result_json,
 )
+from app.core.engine.agent_policy import build_agent_runtime_policy
 from app.core.engine.google_mcp_support import (
     _candidate_external_user_ids,
     _fetch_google_auth_link,
@@ -224,6 +225,12 @@ def contains_owner_account_link(text: str) -> bool:
 
 def guard_customer_auth_links(reply: str, session: Session, agent_model: Any) -> str:
     """Never pass account setup links into an operational customer reply."""
+    # Arthur's clients manage their own assistants without being operators of
+    # the shared system agent. Its tools enforce assistant ownership; applying
+    # the operational customer role here blocks their legitimate setup links.
+    policy = build_agent_runtime_policy(agent_model, getattr(agent_model, "tools_config", None) or {})
+    if policy.is_builder:
+        return reply
     if _is_customer_whatsapp_session(session, agent_model) and contains_owner_account_link(reply):
         return "Maaf, permintaan ini belum bisa diproses karena koneksi internal perlu diperiksa pemilik. Pelanggan tidak perlu melakukan login akun."
     return reply

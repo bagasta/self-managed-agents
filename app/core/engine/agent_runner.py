@@ -3606,16 +3606,23 @@ async def run_agent(
         settings_obj=settings,
         log=log,
     )
+    _reply_before_customer_auth_guard = final_reply
+    if final_reply != _reply_before_google_auth_guard:
+        log.info(
+            "agent_run.final_reply_appended_google_auth_link",
+            before_len=len(_reply_before_google_auth_guard or ""),
+            after_len=len(final_reply or ""),
+        )
     final_reply = guard_customer_auth_links(final_reply, session, agent_model)
     for _record in reversed(parsed["db_messages"]):
         if getattr(_record, "role", "") == "agent":
             # Persist the response after every account-link appender/guard.
             _record.content = final_reply
             break
-    if final_reply != _reply_before_google_auth_guard:
+    if final_reply != _reply_before_customer_auth_guard:
         log.warning(
-            "agent_run.final_reply_appended_google_auth_link",
-            before_len=len(_reply_before_google_auth_guard or ""),
+            "agent_run.final_reply_blocked_customer_auth_link",
+            before_len=len(_reply_before_customer_auth_guard or ""),
             after_len=len(final_reply or ""),
         )
 
