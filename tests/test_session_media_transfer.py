@@ -11,6 +11,7 @@ import pytest
 
 from app.api.session_media import router
 from app.database import get_db
+from app.config import Settings
 from app.core.infra import session_media_transfer as transfer
 from app.core.engine.google_mcp_support import sanitize_google_forms_tools
 from app.models.session import Session
@@ -19,8 +20,8 @@ from test_arthur_p1_operations import database, agent_row, OWNER
 
 @pytest.fixture
 def attachment(tmp_path, monkeypatch):
-    settings = SimpleNamespace(sandbox_base_dir=str(tmp_path), channel_secret_key="isolated-transfer-key",
-                               api_key="test", app_public_url="https://platform.example")
+    settings = Settings(_env_file=None, sandbox_base_dir=str(tmp_path),
+                        api_key="isolated-transfer-key", app_public_url="https://platform.example")
     monkeypatch.setattr(transfer, "get_settings", lambda: settings)
     session = Session(id=uuid.uuid4(), agent_id=uuid.uuid4(), channel_type="whatsapp", external_user_id=OWNER)
     folder = tmp_path / str(session.id) / "shared" / "current_input"
@@ -116,3 +117,15 @@ async def test_local_path_is_not_forwarded_to_remote_drive_without_registered_se
     tool = sanitize_google_forms_tools([DriveTool()], MagicMock())[0]
     result = await tool.ainvoke({"file_name": "CV.jpg", "fileUrl": "file:///app/private.json"})
     assert result.startswith("[error] DRIVE_ATTACHMENT_UNAVAILABLE") and not called
+
+
+@pytest.mark.asyncio
+async def test_invalid_transfer_token_returns_404_with_real_settings(attachment):
+    app = FastAPI()
+    app.include_router(router)
+    async def unused_db():
+        yield None
+    app.dependency_overrides[get_db] = unused_db
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
+        response = await client.get("https://platform.example/v1/session-media/not-a-valid-token")
+    assert response.status_code == 404

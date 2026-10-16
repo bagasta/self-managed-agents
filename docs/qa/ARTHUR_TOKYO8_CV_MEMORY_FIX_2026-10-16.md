@@ -33,4 +33,8 @@ Tes baru mencakup reset pada agent yang benar, memori Arthur/pelamar lain tetap 
 
 Satu assertion prompt legacy `test_builder_prompt_blocks_repeated_continue_questions` juga gagal pada image produksi sebelum perubahan. Assertion itu dikeluarkan dari suite terkait dan tidak diperbaiki dalam pekerjaan ini. Pengujian Google disconnect memerlukan URL integrasi test; konfigurasi tersebut diberikan pada suite final.
 
-Receipt suite final, staging, deployment, pemeriksaan produksi, serta rollback dicatat setelah validasi selesai. Permintaan hapus memori yang dikutip dalam laporan tidak dieksekusi pada data produksi; owner perlu memberi konfirmasi baru melalui alur yang telah diperbaiki.
+Suite final setelah pemeriksaan konfigurasi asli: **300 passed, 1 deselected** dalam 23,84 detik. Semua 114 distribusi Python sama dengan image produksi sebelumnya, layer dasarnya dipertahankan, dan hash 11 file aplikasi/helper diverifikasi terhadap checkout yang diuji.
+
+Staging pertama menangkap akses ke field `channel_secret_key` yang tidak ada pada model Settings aplikasi. Kandidat tersebut dibatalkan sebelum produksi dan receipt staging-nya dibuat tidak valid untuk rollout. Penandatanganan transfer diperbaiki menggunakan key turunan khusus dari API key aplikasi yang memang tersedia; pengujian endpoint kini memakai model `Settings` asli dan memastikan token tidak valid menghasilkan 404.
+
+Receipt staging, deployment, pemeriksaan produksi, serta rollback dicatat setelah validasi selesai. Permintaan hapus memori yang dikutip dalam laporan tidak dieksekusi pada data produksi; owner perlu memberi konfirmasi baru melalui alur yang telah diperbaiki.

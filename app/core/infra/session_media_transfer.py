@@ -6,6 +6,7 @@ fetch this signed URL instead; no public directory or shared tenant mount exists
 from __future__ import annotations
 
 import hashlib
+import hmac
 from pathlib import Path
 import time
 from urllib.parse import unquote, urlsplit
@@ -22,10 +23,10 @@ MAX_BYTES = 20 * 1024 * 1024
 
 def _key():
     settings = get_settings()
-    secret = settings.channel_secret_key or settings.api_key
-    if not secret:
+    secret = settings.api_key
+    if not secret or secret == "change-me":
         raise ValueError("Attachment transfer signing is not configured")
-    return hashlib.sha256((AUDIENCE + ":" + secret).encode()).digest()
+    return hmac.new(secret.encode(), AUDIENCE.encode(), hashlib.sha256).digest()
 
 
 def _read_registered(session, entry):
