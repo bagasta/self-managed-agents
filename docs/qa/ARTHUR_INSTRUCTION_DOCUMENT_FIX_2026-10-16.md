@@ -28,6 +28,8 @@ Smoke nyata ke OpenRouter pada 08.25.42 UTC berhasil menggunakan ID model persis
 
 Status kandidat: pengujian kode selesai; bukti staging, deployment dan rollback dicatat setelah validasi rilis selesai.
 
+Percobaan staging pertama tertahan saat restore: `pg_isready` berhasil pada server inisialisasi sementara database clone belum dibuat. Produksi tidak berubah. Helper rilis diperketat agar menunggu query `SELECT 1` pada database tujuan; state staging yang gagal dibatalkan sebelum percobaan baru.
+
 ## Batas dan kompatibilitas
 
 Tidak ada migrasi schema, reset memori pelanggan, penulisan ke Google, atau pengiriman WhatsApp selama pemeriksaan ini. Format Markdown disimpan sebagai teks instruksi seperti sebelumnya. Field receipt baru ada di JSON config dan aman diabaikan oleh versi lama. Rollback aplikasi tidak otomatis mengembalikan instruksi yang kelak telah diedit owner.

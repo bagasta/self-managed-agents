@@ -185,7 +185,10 @@ def staging(state):
          "-e", "POSTGRES_USER=qa", "-e", "POSTGRES_DB=arthur_qa_clone", "pgvector/pgvector:pg16"], env=env)
     save(state)
     for attempt in range(30):
-        result = subprocess.run(["docker", "exec", state["pg_name"], "pg_isready", "-U", "qa"], capture_output=True)
+        # pg_isready can succeed against the temporary init server before the
+        # requested POSTGRES_DB exists. Require a real query in the restore DB.
+        result = subprocess.run(["docker", "exec", state["pg_name"], "psql", "-U", "qa", "-d", "arthur_qa_clone",
+                                 "-v", "ON_ERROR_STOP=1", "-Atc", "SELECT 1"], capture_output=True)
         if not result.returncode:
             break
         time.sleep(1)

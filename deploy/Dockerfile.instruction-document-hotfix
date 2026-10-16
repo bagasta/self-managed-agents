@@ -4,4 +4,4 @@ COPY app/config.py /app/app/config.py
 COPY arthur_v2/plugin.py arthur_v2/instruction_writer.py /app/arthur_v2/
 COPY app/api/wa_helpers.py app/api/channels.py app/api/meta_webhooks.py /app/app/api/
 COPY app/core/domain/file_processor.py /app/app/core/domain/
-COPY scripts/arthur_qa_stage_probe.py scripts/arthur_instruction_document_probe.py /app/scripts/
+COPY scripts/arthur_qa_release.py scripts/arthur_qa_stage_probe.py scripts/arthur_instruction_document_probe.py /app/scripts/
