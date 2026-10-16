@@ -646,7 +646,7 @@ async def _deliver_shared_whatsapp_file_via_tool(
         )
     )
 
-    sent = _has_whatsapp_media_send_step(parsed["steps"])
+    sent = _has_whatsapp_media_send_step([parsed["steps"][-1]])
     if not sent:
         log.warning(
             "agent_run.whatsapp_file_direct_delivery_failed",
@@ -1654,7 +1654,7 @@ async def run_agent(
                 ),
                 log=log,
             )
-            mcp_tools = sanitize_google_forms_tools(mcp_tools, log)
+            mcp_tools = sanitize_google_forms_tools(mcp_tools, log, session=session)
             if google_pdf_report_intent:
                 mcp_tools = scope_google_pdf_report_tools(mcp_tools, log=log)
                 system_prompt = (

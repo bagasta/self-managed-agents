@@ -53,9 +53,23 @@ def _extract_shared_workspace_file_from_steps(
     steps: list[dict[str, Any]],
     final_reply: str = "",
 ) -> str | None:
-    values: list[Any] = [final_reply]
-    values.extend(_step_text(step) for step in reversed(steps or []))
-    return _extract_shared_workspace_file_path(*values)
+    # Memory/knowledge previews and upload arguments describe existing data;
+    # they are never evidence that this run generated a deliverable. Inbound
+    # attachments likewise must not be echoed by the automatic followup.
+    producer_tools = {"task", "execute", "write_file", "edit_file"}
+    for step in reversed(steps or []):
+        if step.get("tool") not in producer_tools:
+            continue
+        result = step.get("result")
+        data = _parse_step_result_json(result)
+        if data and (data.get("isError") or data.get("ok") is False or data.get("success") is False or data.get("exit_code", 0) != 0):
+            continue
+        if re.search(r"(?i)(?:^|\n)\s*(?:\[error\]|error\b|traceback\b)", str(result or "")):
+            continue
+        path = _extract_shared_workspace_file_path(result)
+        if path and "/current_input/" not in path and "/data/incoming/" not in path:
+            return path
+    return None
 
 
 def _user_requested_inline_text_output(user_message: str) -> bool:

@@ -356,10 +356,9 @@ async def _route_google_workspace_blocker_to_owner_if_customer(
         if resource_missing and sender in _normalized_agent_operator_ids(agent_model):
             agent_name = str(getattr(agent_model, "name", "") or "agent ini").strip()
             return (
-                f"Koneksi Google untuk {agent_name} aktif, tetapi Sheet/resource yang dibutuhkan "
-                "belum ditemukan. Percobaan membuat resource pengganti otomatis juga belum berhasil. "
-                f"Buka chat Arthur dan kirim: “siapkan Google Sheet utama untuk {agent_name} sesuai tugasnya”. "
-                "Arthur dapat membantu mengatur spreadsheet yang sudah ada dan memverifikasi targetnya. Pembuatan file baru memerlukan tool pembuatan yang aktif pada assistant terkait."
+                f"Sebagian proses Google untuk {agent_name} belum selesai karena target file, folder, "
+                "atau dokumen belum berhasil diakses. Periksa target dan izin akses yang dipakai agent "
+                "sebelum mencoba ulang."
             )
         if (
             sender in _normalized_agent_operator_ids(agent_model)
@@ -427,13 +426,13 @@ async def _route_google_workspace_blocker_to_owner_if_customer(
         if resource_missing:
             owner_text = (
                 f"Perlu tindakan Owner untuk {agent_name}.\n\n"
-                "Koneksi Google aktif, tetapi Sheet/resource yang dibutuhkan agent belum dikonfigurasi "
-                "atau tidak ditemukan. Customer tidak diminta mengurus masalah ini.\n\n"
+                "Koneksi Google aktif, tetapi target file, folder, atau dokumen belum berhasil diakses. "
+                "Customer tidak diminta mengurus masalah ini.\n\n"
                 f"Customer: {sender or '-'}\n"
                 f"Pesan terakhir: {user_message.strip()[:500] or '-'}\n"
                 f"Error ringkas: {str(error_text or '').strip()[:500] or '-'}\n\n"
-                f"Buka chat Arthur dan kirim: “siapkan Google Sheet utama untuk {agent_name} sesuai tugasnya”. "
-                "Arthur harus membuat/memilih Sheet, menyimpan ID valid ke agent, dan menjalankan tes tulis."
+                "Periksa target resource dan izin aksesnya sesuai layanan Google yang dipakai agent "
+                "sebelum mencoba ulang."
             )
         else:
             owner_text = (

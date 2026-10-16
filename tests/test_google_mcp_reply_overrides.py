@@ -454,8 +454,9 @@ async def test_owner_google_resource_blocker_routes_to_arthur_without_oauth(monk
         log=log,
     )
 
-    assert "Koneksi Google untuk Minsel aktif" in reply
-    assert "siapkan Google Sheet utama untuk Minsel sesuai tugasnya" in reply
+    assert "Sebagian proses Google untuk Minsel belum selesai" in reply
+    assert "target file, folder" in reply
+    assert "Sheet utama" not in reply
     assert "login" not in reply.casefold()
 
 
@@ -505,7 +506,8 @@ async def test_customer_google_resource_blocker_notifies_owner_without_oauth_lin
 
     assert sent
     assert "Koneksi Google aktif" in sent[0]
-    assert "siapkan Google Sheet utama untuk Minsel sesuai tugasnya" in sent[0]
+    assert "target resource dan izin aksesnya" in sent[0]
+    assert "Sheet utama" not in sent[0]
     assert "reconnect" not in sent[0].casefold()
     assert "Owner" in reply
     assert "konfigurasi teknis" in reply

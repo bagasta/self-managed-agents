@@ -1,0 +1,8 @@
+# Retain the exact deployed dependencies and the previous owner-link fix.
+FROM managed-agents-app:arthur-owner-link-hotfix-20261016-overlay
+COPY app/core/engine/agent_followups.py app/core/engine/agent_google_routing.py app/core/engine/agent_runner.py app/core/engine/agent_step_utils.py app/core/engine/google_mcp_support.py /app/app/core/engine/
+COPY app/core/infra/session_media_transfer.py /app/app/core/infra/
+COPY app/api/session_media.py /app/app/api/
+COPY app/main.py /app/app/main.py
+COPY arthur_v2/memory_revision_tools.py /app/arthur_v2/
+COPY scripts/arthur_qa_release.py scripts/arthur_cv_memory_probe.py /app/scripts/

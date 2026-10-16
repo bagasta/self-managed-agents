@@ -49,9 +49,9 @@ def _has_whatsapp_media_send_step(steps: list[dict[str, Any]]) -> bool:
         if tool_name not in {"send_whatsapp_document", "send_whatsapp_image"}:
             continue
         result = str((step or {}).get("result") or "")
-        lower = result.lower()
-        if "[error]" in lower or "gagal" in lower:
-            continue
-        if "[document_sent]" in lower or "[image_sent]" in lower or "terkirim" in lower or " dikirim " in lower:
+        # Only the media tool's success receipt proves delivery. Negative
+        # responses can also contain "dikirim" or "terkirim".
+        marker = "[DOCUMENT_SENT]" if tool_name == "send_whatsapp_document" else "[IMAGE_SENT]"
+        if result.lstrip().startswith(marker):
             return True
     return False

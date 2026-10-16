@@ -18,7 +18,7 @@ from slowapi.util import get_remote_address
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api import agents, auth, channels, custom_tools, documents, history, memory, messages, meta_signup, meta_webhooks, models, runs, sessions, skills, stream, subscriptions, users
+from app.api import agents, auth, channels, custom_tools, documents, history, memory, messages, meta_signup, meta_webhooks, models, runs, session_media, sessions, skills, stream, subscriptions, users
 from app.config import get_settings
 from app.database import engine, get_db
 from app.middleware.request_id import RequestIDMiddleware
@@ -210,6 +210,7 @@ app.include_router(memory.router)
 app.include_router(skills.router)
 app.include_router(custom_tools.router)
 app.include_router(documents.router)
+app.include_router(session_media.router)
 app.include_router(models.router)
 app.include_router(runs.router)
 app.include_router(stream.router)

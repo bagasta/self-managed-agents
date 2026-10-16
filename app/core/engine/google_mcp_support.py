@@ -2120,6 +2120,14 @@ def _has_google_mcp_step(steps: list[dict[str, Any]]) -> bool:
 def _has_google_workspace_artifact_step(steps: list[dict[str, Any]]) -> bool:
     for step in steps:
         result = str((step or {}).get("result", "") or "")
+        if step.get("tool") == "create_drive_file":
+            # Drive returns its own upload receipt, not a docs.google.com URL.
+            # A recovered upload must not be replaced by an earlier missing-ID
+            # fallback. Merely mentioning a Drive URL in an error proves nothing.
+            if ("Successfully created file '" in result
+                    and "Error calling tool" not in result
+                    and re.search(r"https://drive\.google\.com/file/d/[\w-]+", result)):
+                return True
         if _contains_google_workspace_artifact(result):
             return True
     return False
@@ -2306,7 +2314,7 @@ def filter_google_mcp_tools_by_services(
     return kept
 
 
-def sanitize_google_forms_tools(mcp_tools: list, log: Any) -> list:
+def sanitize_google_forms_tools(mcp_tools: list, log: Any, *, session: Any = None) -> list:
     """Wrap Google Workspace tools to repair weak LLM payloads before MCP execution."""
     wrapped_tools: list = []
     sanitized_tool_names: list[str] = []
@@ -2436,6 +2444,19 @@ def sanitize_google_forms_tools(mcp_tools: list, log: Any) -> list:
                     if not kwargs.get("fileUrl") and file_url_alias:
                         kwargs["fileUrl"] = file_url_alias
 
+                    source = str(kwargs.get("fileUrl") or "").strip()
+                    from urllib.parse import urlsplit
+                    if source.startswith("/") or urlsplit(source).scheme.casefold() == "file":
+                        from app.core.infra.session_media_transfer import build_session_media_url
+                        if session is None:
+                            return "[error] DRIVE_ATTACHMENT_UNAVAILABLE: lampiran harus berasal dari percakapan ini."
+                        try:
+                            import asyncio
+                            kwargs["fileUrl"] = await asyncio.to_thread(build_session_media_url, session, source)
+                            kwargs["content"] = None
+                        except (ValueError, OSError):
+                            return "[error] DRIVE_ATTACHMENT_UNAVAILABLE: lampiran percakapan tidak tersedia; minta pengguna mengirim ulang."
+
                     content = kwargs.get("content")
                     file_url = kwargs.get("fileUrl")
                     mime_type = str(kwargs.get("mime_type") or "text/plain")
@@ -2472,7 +2493,7 @@ def sanitize_google_forms_tools(mcp_tools: list, log: Any) -> list:
                 StructuredTool.from_function(
                     coroutine=_build_create_drive_file_guarded(mcp_tool),
                     name=mcp_tool.name,
-                    description=getattr(mcp_tool, "description", None),
+                    description=(getattr(mcp_tool, "description", "") or "") + " For an original image/PDF/document received in this conversation, pass its /workspace attachment path as fileUrl; the runtime securely transfers its original bytes. Never replace an original CV image with a text file or echo it to WhatsApp unless requested.",
                     args_schema=CreateDriveFileArgs,
                 )
             )
