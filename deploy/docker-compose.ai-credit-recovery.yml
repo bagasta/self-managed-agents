@@ -1,0 +1,5 @@
+services:
+  api:
+    image: managed-agents-app:ai-credit-recovery-20261017
+  scheduler:
+    image: managed-agents-app:ai-credit-recovery-20261017

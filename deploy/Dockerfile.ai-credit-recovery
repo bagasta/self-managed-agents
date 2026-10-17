@@ -1,0 +1,10 @@
+ARG BASE_IMAGE=managed-agents-app:latest
+FROM ${BASE_IMAGE}
+COPY app/models/pending_ai_reply.py /app/app/models/pending_ai_reply.py
+COPY app/models/__init__.py /app/app/models/__init__.py
+COPY app/core/domain/ai_credit_recovery.py /app/app/core/domain/ai_credit_recovery.py
+COPY app/core/workers/ai_credit_recovery.py /app/app/core/workers/ai_credit_recovery.py
+COPY app/core/workers/scheduler_service.py /app/app/core/workers/scheduler_service.py
+COPY app/core/engine/agent_runner.py /app/app/core/engine/agent_runner.py
+COPY alembic/versions/031_pending_ai_replies.py /app/alembic/versions/031_pending_ai_replies.py
+COPY scripts/recover_ai_credit_replies.py /app/scripts/recover_ai_credit_replies.py

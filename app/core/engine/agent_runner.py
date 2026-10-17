@@ -998,6 +998,8 @@ async def run_agent(
     current_attachment_name: str | None = None,
     sender_name: str | None = None,
     prior_run_was_interrupted: bool = False,
+    retry_run_id: uuid.UUID | None = None,
+    retry_message_id: uuid.UUID | None = None,
 ) -> AgentRunResult:
     """
     Jalankan agent end-to-end:
@@ -1009,7 +1011,7 @@ async def run_agent(
     6. Persist messages ke DB
     7. Auto-extract long-term memory (jika triggered)
     """
-    run_id = uuid.uuid4()
+    run_id = retry_run_id or uuid.uuid4()
     agent_id: uuid.UUID = session.agent_id
     if isinstance(agent_model, AgentModel):
         from sqlalchemy import inspect as _sa_inspect
@@ -1104,6 +1106,7 @@ async def run_agent(
             "prompt_version": "legacy",
             "skill_versions": {},
             "attachment_route": None,
+            "retry_message_id": str(retry_message_id) if retry_message_id else None,
         },
     )
     db.add(run_record)
@@ -1552,13 +1555,18 @@ async def run_agent(
     step_base = max((m.step_index for m in history_rows), default=-1) + 1
     # Commit the inbound message before running the graph so a later rollback
     # (cancel/timeout/error in the caller) cannot silently drop the user's request.
-    await _persist_inbound_user_message(
-        db,
-        session_id=session.id,
-        run_id=run_id,
-        content=user_message,
-        step_index=step_base,
-    )
+    if retry_message_id is None:
+        await _persist_inbound_user_message(
+            db,
+            session_id=session.id,
+            run_id=run_id,
+            content=user_message,
+            step_index=step_base,
+        )
+    else:
+        # Keep the original inbound row. The recovery worker associates it
+        # with the successful retry only after generation finishes.
+        await db.commit()
 
     # ------------------------------------------------------------------ #
     # 8. Run agent graph (with MCP tools)                                 #
@@ -2137,6 +2145,34 @@ async def run_agent(
             raise
         except Exception as exc:
             err_str = str(exc)
+            from app.core.domain.ai_credit_recovery import (
+                enqueue_credit_recovery,
+                is_credit_exhaustion_error,
+            )
+            if (
+                is_credit_exhaustion_error(exc)
+                and _agent_logger.total_tokens_from_callbacks == 0
+                and not _agent_logger._tool_inputs
+            ):
+                await _persist_run_failure(
+                    db, run_record=run_record, status="failed", error_message=err_str,
+                )
+                if retry_message_id is None:
+                    await enqueue_credit_recovery(db, run=run_record, payload={
+                        "sender_name": sender_name,
+                        "media_image_b64": media_image_b64,
+                        "media_image_mime": media_image_mime,
+                        "current_attachment_name": current_attachment_name,
+                        "escalation_user_jid": escalation_user_jid,
+                        "escalation_context": escalation_context,
+                    })
+                    await db.commit()
+                await _cleanup_sandboxes()
+                log.warning("agent_run.waiting_for_credits")
+                return {
+                    "reply": "", "steps": [], "run_id": run_id,
+                    "tokens_used": 0, "usage": _usage_summary(), "status": "waiting_credit",
+                }
             # Log sub-exceptions from ExceptionGroup for debugging
             if hasattr(exc, "exceptions"):
                 for _sub in exc.exceptions:

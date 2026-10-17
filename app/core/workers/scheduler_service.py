@@ -144,6 +144,7 @@ async def _tick() -> None:
     from app.models.scheduled_job import ScheduledJob
 
     await _tick_outbound_queue()
+    await _tick_pending_ai_replies()
 
     now = datetime.now(timezone.utc)
     stale_before = now - _RUNNING_JOB_STALE_AFTER
@@ -187,6 +188,20 @@ async def _tick() -> None:
 
     for task in tasks:
         _track_task(task)
+
+
+async def _tick_pending_ai_replies() -> None:
+    from app.core.workers.ai_credit_recovery import claim_due_replies
+
+    for item_id in await claim_due_replies(_MAX_CONCURRENT_JOBS):
+        _track_task(asyncio.create_task(_run_pending_ai_reply_guarded(item_id)))
+
+
+async def _run_pending_ai_reply_guarded(item_id) -> None:
+    from app.core.workers.ai_credit_recovery import run_pending_reply
+
+    async with _job_semaphore:
+        await run_pending_reply(item_id)
 
 
 async def _tick_outbound_queue() -> None:
@@ -236,7 +251,7 @@ async def _run_outbound_message(message_id: Any) -> None:
             return
         session = (await db.execute(select(Session).where(Session.id == item.session_id))).scalar_one_or_none()
         agent = (await db.execute(select(Agent).where(Agent.id == item.agent_id))).scalar_one_or_none()
-        if session is None or agent is None:
+        if session is None or agent is None or agent.is_deleted:
             item.status = "cancelled"
             item.last_error = "session_or_agent_missing"
             await db.commit()
@@ -247,6 +262,25 @@ async def _run_outbound_message(message_id: Any) -> None:
             item.last_error = "outbound_queue_requires_whatsapp"
             await db.commit()
             return
+
+        if item.kind == "ai_credit_recovery":
+            from app.core.domain.ai_credit_recovery import is_current_request, utc
+            from app.models.message import Message
+            from app.models.pending_ai_reply import PendingAIReply
+
+            recovery = (await db.execute(select(PendingAIReply).where(
+                PendingAIReply.outbound_message_id == item.id,
+            ))).scalar_one_or_none()
+            original = await db.get(Message, recovery.message_id) if recovery else None
+            if (
+                recovery is None or original is None or session.ai_disabled
+                or utc(recovery.expires_at) <= datetime.now(timezone.utc)
+                or not await is_current_request(db, original, ignore_run_id=recovery.retry_run_id)
+            ):
+                item.status = "cancelled"
+                item.last_error = "recovery_expired_or_superseded"
+                await db.commit()
+                return
 
         from app.core.domain.agent_service_controls import service_block_reason
         _blocked = service_block_reason(agent, item.target, whatsapp=True)
@@ -270,12 +304,14 @@ async def _run_outbound_message(message_id: Any) -> None:
             return
 
         try:
-            await send_message(
+            sent = await send_message(
                 channel_type="whatsapp",
                 channel_config=channel_config,
                 text=item.text,
                 to_override=item.target,
             )
+            if sent is None:
+                raise RuntimeError("WhatsApp queue send returned no result")
         except Exception as exc:
             item.status = "queued"
             item.available_at = datetime.now(timezone.utc) + timedelta(seconds=_OUTBOUND_QUEUE_RETRY_SECONDS)
